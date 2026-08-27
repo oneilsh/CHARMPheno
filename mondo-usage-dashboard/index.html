@@ -871,7 +871,11 @@ function graphRadius(id){
   const maxV=state.rollup?ROLL_EST_MAX:OWN_MAX;   // ROLL_EST_MAX = max subtree central estimate
   return 11+44*Math.sqrt(Math.max(gval(id),0)/(maxV||1));
 }
-function layoutGraph(vis){
+// dir = growth direction of the layer axis: +1 grows rightward (today's default,
+// Mondo view), -1 mirrors leftward for a second axis stacked on the other side.
+// It only scales each layer's horizontal offset from the origin column — the
+// per-layer vertical stacking (y) is unaffected.
+function layoutGraph(vis,dir=1){
   const layers={}; let maxD=0;
   for(const [id,n] of vis){const d=n.depth||0;(layers[d]=layers[d]||[]).push(id);maxD=Math.max(maxD,d);}
   const rad=id=>vis.get(id)._more?8:graphRadius(id);
@@ -887,13 +891,15 @@ function layoutGraph(vis){
     const maxR=Math.max(14,...arr.map(rad));
     let H=0; for(const id of arr) H+=2*rad(id)+gap; H=Math.max(0,H-gap);
     let y=-H/2;                               // center each column around y=0
-    for(const id of arr){const r=rad(id); coord.set(id,{x:x+maxR,y:y+r,r}); y+=2*r+gap;}
+    for(const id of arr){const r=rad(id); coord.set(id,{x:dir*(x+maxR),y:y+r,r,dir}); y+=2*r+gap;}
     x+=maxR*2+210;
   }
-  return {coord};
+  return {coord,dir};
 }
-function edgePath(a,b){const mx=(a.x+b.x)/2;
-  return `M${a.x+a.r},${a.y} C${mx},${a.y} ${mx},${b.y} ${b.x-b.r},${b.y}`;}
+function edgePath(a,b){const mx=(a.x+b.x)/2; const dir=a.dir||b.dir||1;
+  // exit the parent on the side facing the child, enter the child on the side
+  // facing the parent; for dir=1 this is right-of-a -> left-of-b (unchanged).
+  return `M${a.x+dir*a.r},${a.y} C${mx},${a.y} ${mx},${b.y} ${b.x-dir*b.r},${b.y}`;}
 // Keyed enter/update/exit reconciler so nodes glide (CSS transitions) instead of
 // the whole SVG being torn down and rebuilt on every expand/collapse.
 let gLayer=null, gEdgeG=null, gNodeG=null, gEdgeEls=new Map(), gNodeEls=new Map();
@@ -903,9 +909,9 @@ function graphInit(){
   gLayer.appendChild(gEdgeG); gLayer.appendChild(gNodeG); svg.appendChild(gLayer);
   gEdgeEls=new Map(); gNodeEls=new Map(); applyGT(gLayer);
 }
-function renderGraph(){
+function renderGraph(dir=1){
   if(!gLayer||!gLayer.isConnected) graphInit();
-  const vis=graphVisible(), {coord}=layoutGraph(vis); gCoord=coord;
+  const vis=graphVisible(), {coord}=layoutGraph(vis,dir); gCoord=coord;
   // highlight = union of every selected node's ancestors (hl) and visible descendants (hld)
   gHL=new Set(); gHLD=new Set();
   for(const s of gSel){ if(!byId.has(s))continue;
@@ -1148,10 +1154,11 @@ function updateNode(g,id,n,c){
   const circ=g.querySelector(".gcirc"); circ.setAttribute("r",c.r); circ.style.r=c.r+"px";
   circ.setAttribute("fill",nodeFill(id,n));
   circ.setAttribute("fill-opacity",nodeOpac(n));
-  const lx=c.r+9;
-  const lbl=g.querySelector(".glbl"); lbl.setAttribute("x",lx); lbl.setAttribute("y",c.r>14?-2:4); lbl.textContent=clip(n.label,36);
+  const dir=c.dir||1, lx=dir*(c.r+9), anchor=dir<0?"end":"start";
+  const lbl=g.querySelector(".glbl"); lbl.setAttribute("x",lx); lbl.setAttribute("y",c.r>14?-2:4);
+  lbl.setAttribute("text-anchor",anchor); lbl.textContent=clip(n.label,36);
   const sub=g.querySelector(".gsub");
-  sub.setAttribute("x",lx); sub.setAttribute("y",13); renderCountInto(sub,id);
+  sub.setAttribute("x",lx); sub.setAttribute("y",13); sub.setAttribute("text-anchor",anchor); renderCountInto(sub,id);
   const bx=c.r*0.72, by=c.r*0.72;
   // "+" when the node has ≥1 can-show child not currently on screen (incl. behind "＋N more");
   // fades out when terminal or fully expanded. gCoord holds the current visible set.
