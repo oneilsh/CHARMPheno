@@ -14,6 +14,7 @@
   --border:#d8dee2; --border-strong:#c2cbd1;
   --ink:#171e24; --ink-2:#51606c; --muted:#8592a0;
   --accent:#00867e; --accent-ink:#ffffff;
+  --axis-mondo:#0b8f83; --axis-hpo:#7048c4;   /* two-ontology node scheme (light) */
   --cat-reported:#009e93; --cat-used-small:#c9760a; --cat-used-branch:#6a55d6; --cat-other:#9aa4b0;
   --cat-reported-soft:#009e9322; --cat-used-small-soft:#c9760a22; --cat-used-branch-soft:#6a55d622; --cat-other-soft:#9aa4b01f;
   --collision:#e67e22;
@@ -27,6 +28,7 @@
   --border:#2c343c; --border-strong:#3a444d;
   --ink:#e7ecef; --ink-2:#a6b1bc; --muted:#6d7883;
   --accent:#2bb5aa; --accent-ink:#06201e;
+  --axis-mondo:#2bb5aa; --axis-hpo:#9c86f0;   /* two-ontology node scheme (dark) */
   --cat-reported:#1fb0a4; --cat-used-small:#d59234; --cat-used-branch:#9483ea; --cat-other:#5c6672;
   --cat-reported-soft:#1fb0a422; --cat-used-small-soft:#d5923422; --cat-used-branch-soft:#9483ea24; --cat-other-soft:#5c66721f;
   --collision:#f0883e;
@@ -37,6 +39,7 @@
   --border:#2c343c; --border-strong:#3a444d;
   --ink:#e7ecef; --ink-2:#a6b1bc; --muted:#6d7883;
   --accent:#2bb5aa; --accent-ink:#06201e;
+  --axis-mondo:#2bb5aa; --axis-hpo:#9c86f0;   /* two-ontology node scheme (dark) */
   --cat-reported:#1fb0a4; --cat-used-small:#d59234; --cat-used-branch:#9483ea; --cat-other:#5c6672;
   --cat-reported-soft:#1fb0a422; --cat-used-small-soft:#d5923422; --cat-used-branch-soft:#9483ea24; --cat-other-soft:#5c66721f;
   --collision:#f0883e;
@@ -347,7 +350,7 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
           </div>
           <label class="search">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>
-            <input id="search" type="search" placeholder="Search term or MONDO id…" autocomplete="off">
+            <input id="search" type="search" placeholder="Search term or ID…" autocomplete="off">
           </label>
           <div class="dim-ctl" id="dim-ctl" title="Transparency of non-highlighted nodes when a selection or hover is active">
             <span>dim</span>
@@ -434,14 +437,28 @@ const axisOf=id=>{ if(id&&id.startsWith("more:")) id=id.slice(5);
 // use id "root") to "HP:root" and remap parents, apply per-axis root labels.
 function combine(mondo, hpo){
   const nodes=[];
-  for(const n of mondo.nodes){ n.axis="mondo"; if(n.kind==="root") n.label=_ROOT_LABEL.mondo; nodes.push(n); }
+  for(const n of mondo.nodes){ n.axis="mondo"; nodes.push(n); }
   for(const n of hpo.nodes){
     n.axis="hpo";
-    if(n.kind==="root"){ n.id="HP:root"; n.label=_ROOT_LABEL.hpo; }
+    if(n.kind==="root") n.id="HP:root";
     n.parents=(n.parents||[]).map(p=>p==="root"?"HP:root":p);
     nodes.push(n);
   }
+  // drop the synthetic payload root(s): each has a single child that is the real ontology
+  // root (Mondo 'human disease', HPO 'All'), so promote that child to be the axis root.
+  promoteSpineRoot(nodes,"root"); promoteSpineRoot(nodes,"HP:root");
   return {meta:mondo.meta, stats:mondo.stats, nodes};
+}
+function promoteSpineRoot(nodes, rid){
+  while(true){
+    const kids=nodes.filter(n=>(n.parents||[]).includes(rid));
+    if(kids.length!==1) break;                 // only collapse a single-child spine
+    const c=kids[0], i=nodes.findIndex(n=>n.id===rid);
+    if(i>=0) nodes.splice(i,1);                 // remove the synthetic/spine root
+    c.parents=(c.parents||[]).filter(p=>p!==rid);
+    c.kind="root";                              // the promoted node becomes the axis root
+    rid=c.id;
+  }
 }
 
 /* ---------- load: dual (mondo+hpo in one canvas) > embedded block > fetched real > sample ---------- */
@@ -736,12 +753,16 @@ function topAncestor(id){                // depth-1 ancestor (body system) of a 
 /* ---- graph (DAG node-link, horizontal layered, progressive disclosure) ---- */
 // Node coloring: rare-disease designation (Mondo GARD/Orphanet/NORD subsets) — rare terms
 // in magenta, everything else neutral, so rare diagnoses pop as you drill in.
-const rarityFill=n=>(n&&n.rare)?"var(--rare)":"var(--cat-other)";
+// Two-ontology scheme: hue by AXIS (Mondo teal, HPO violet), so the two DAGs read apart
+// at a glance; rare-disease terms keep their pink; usage is shown by OPACITY (below).
+const AXIS_COLOR={mondo:"var(--axis-mondo)", hpo:"var(--axis-hpo)"};
 function nodeFill(id,n){
-  return gColorMode==="rarity" ? rarityFill(n)
-    : (CATMAP[n.category]?CATMAP[n.category].color:"var(--muted)");
+  if(n && n.rare) return "var(--rare)";                 // rare-disease designation (Mondo)
+  return AXIS_COLOR[(n&&n.axis)||"mondo"];
 }
-const nodeOpac=n=>n.state==="reported"?0.92:n.state==="used_small"?0.62:0.34;
+// usage shade WITHIN the axis hue: reported (solid) > used-small > unused/structural (faint);
+// roots stay solid so the two anchors read clearly.
+const nodeOpac=n=>n.kind==="root"?0.95:n.state==="reported"?0.92:n.state==="used_small"?0.6:0.32;
 
 const gval=id=>{const n=byId.get(id); if(!n)return 0;
   if(state.rollup){const r=DATA._roll.get(id);return r?r.est:0;}   // roll-up central estimate
@@ -1013,12 +1034,11 @@ function renderLegend(){
   const add=(sw,txt)=>{const s=el("span","lg-item");const d=el("span","lg-sw");
     if(sw.startsWith("--"))d.style.background=`var(${sw})`; else d.style.background=sw;
     s.appendChild(d);s.appendChild(el("span",null,txt));box.appendChild(s);};
-  if(gColorMode==="rarity"){
-    add("var(--rare)","rare disease (GARD/Orphanet/NORD)");
-    add("var(--cat-other)","not rare-designated");
-  } else {
-    for(const c of CATS) add(c.color,c.label);
-  }
+  add("--axis-mondo", DUAL?"Mondo · disease":"disease");
+  if(DUAL) add("--axis-hpo","HPO · phenotype");
+  add("--rare","rare disease (GARD/Orphanet/NORD)");
+  const note=el("span","lg-item"); note.style.opacity=".7";
+  note.appendChild(el("span",null,"paler = less used")); box.appendChild(note);
 }
 function updateFocusChip(){
   const chip=$("#g-focus-chip"); if(!chip)return;
