@@ -994,10 +994,16 @@ function renderGraph(){
     for(const dd of descendantSet(s)) if(vis.has(dd)) gHLD.add(dd);
   }
   if(gLayer) gLayer.classList.toggle("sel-active",gSel.size>0);
-  // bounds for Fit
+  // bounds for Fit — include each node's label extent on the side it renders (dir): Mondo
+  // (dir>0) labels grow rightward, HPO (dir<0) leftward, so both sides must be padded or
+  // Fit clips them. Label sits at c.r+9 from center; clip(label,36) at ~7px/char.
   let minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
-  for(const [,c] of coord){minX=Math.min(minX,c.x-c.r);minY=Math.min(minY,c.y-c.r);
-    maxX=Math.max(maxX,c.x+c.r+150);maxY=Math.max(maxY,c.y+c.r);}
+  for(const [id,c] of coord){
+    const nn=vis.get(id)||{}, lbl=nn.label||"";
+    const labW=Math.min(lbl.length,36)*7+20;      // rough label pixel run past the node edge
+    const farX=c.x+(c.dir||1)*(c.r+9+labW);       // outer edge of the label on its side
+    minX=Math.min(minX,c.x-c.r,farX); maxX=Math.max(maxX,c.x+c.r,farX);
+    minY=Math.min(minY,c.y-c.r); maxY=Math.max(maxY,c.y+c.r);}
   gBounds={minX,minY,maxX,maxY};
   // ---- edges (enter/update/exit): reachability, transitively reduced over shown ----
   const shown=new Set(); for(const [k,nn] of vis) if(!nn._more) shown.add(k);
@@ -1037,7 +1043,6 @@ function renderGraph(){
   if(state.q) bits.push(gSearchTotal>GRAPH_SEARCH_CAP
     ? `${gSearchTotal} match “${state.q}” — showing ${GRAPH_SEARCH_CAP} most-prevalent; keep typing to narrow`
     : `${gSearchTotal} match “${state.q}”`);
-  if(graphFolded.size) bits.push(`${graphFolded.size} folded`);
   $("#graph-hint").textContent=bits.join(" · ");
   renderLegend(); updateFocusChip(); updateSelChip();
 }
@@ -1574,7 +1579,7 @@ function sourceCatalogRow(n){
   // code that is NOT is standardised in via OMOP Maps to (→); "climbed" rolled up (↑).
   const sameAs=new Set((n.codes||[]).filter(c=>c&&c.id!=null).map(c=>c.id));
   const kindOf=c=>c.via==="climbed"?"up":(c.id!=null&&sameAs.has(c.id))?"same":"in";
-  const MARK={same:" ≡",in:"",up:" ↑"};
+  const MARK={same:" ≡",in:" =",up:" ↑"};
   const WORD={same:"Mondo same-as (direct cross-reference)",in:"standardised in via OMOP Maps to",up:"climbed to the nearest mapped ancestor"};
   const link=c=>{const kd=kindOf(c);
     const t=`${c.vocab} ${esc(String(c.code))}${MARK[kd]}`;
@@ -1607,8 +1612,8 @@ function sourceCatalogRow(n){
       +`Show ${fmt(moreN)} more code${moreN===1?"":"s"}</summary>`
       +`<div style="margin-top:6px">${restBody}</div></details>`
     : "";
-  const anySame=sc.some(c=>kindOf(c)==="same"), anyUp=sc.some(c=>kindOf(c)==="up");
-  const legend=[anySame?"<b>≡</b> = Mondo same-as (direct)":"",anyUp?"<b>↑</b> = climbed to nearest mapped ancestor":""]
+  const anySame=sc.some(c=>kindOf(c)==="same"), anyIn=sc.some(c=>kindOf(c)==="in"), anyUp=sc.some(c=>kindOf(c)==="up");
+  const legend=[anySame?"<b>≡</b> = Mondo same-as (direct)":"",anyIn?"<b>=</b> = exact via OMOP Maps&nbsp;to":"",anyUp?"<b>↑</b> = climbed to nearest mapped ancestor":""]
     .filter(Boolean).join("; ");
   return `<dt>Source codes (${total})</dt><dd>${histRow}<div>${preview}</div>${drawer}`+
     `<div style="color:var(--muted);margin-top:4px">codes coded in the EHR that map here${legend?"; "+legend:""}. `+
