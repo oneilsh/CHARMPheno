@@ -459,3 +459,12 @@ def test_summary_renders_and_suppresses_nothing_exact():
     assert "WHOLE-MONDO EHR USAGE" in out and "no roll-up" in out
     assert "40000" not in out                 # exact patient counts never in the summary
     assert "3" in out                          # term counts (exact) do appear
+
+
+def test_dag_structures():
+    parents = {"A": [], "B": ["A"], "C": ["A", "B"], "D": ["Z"]}   # Z unknown
+    parent_adj, has_child = m.dag_structures(parents)
+    assert parent_adj["C"] == ["A", "B"]
+    assert parent_adj["D"] == []            # unknown parent Z dropped
+    assert has_child == {"A", "B"}          # A parents B,C; B parents C; D has no children
+    assert "C" not in has_child

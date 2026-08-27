@@ -549,6 +549,16 @@ def parse_hpo_dag(obo_text: str) -> "tuple[dict, dict]":
     return labels, parents
 
 
+def dag_structures(parents: dict) -> "tuple[dict, set]":
+    """From a child->[parents] map, return ``(parent_adj, has_child)`` restricted to known
+    ids: ``parent_adj`` drops parents not in the map; ``has_child`` is every id that is a
+    parent of a known id. Pure. Shared by the Mondo and HPO axes for the DAG browse/roll-up."""
+    known = set(parents)
+    parent_adj = {c: [p for p in ps if p in known] for c, ps in parents.items()}
+    has_child = {p for ps in parent_adj.values() for p in ps}
+    return parent_adj, has_child
+
+
 def build_safe_summary(results: list[dict]) -> str:
     """A copy-pasteable, disclosure-SAFE summary of one or more count-space runs.
 
