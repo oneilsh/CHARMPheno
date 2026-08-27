@@ -965,6 +965,11 @@ function layoutGraph(vis){
   };
   doSide(sides.mondo, 1);
   doSide(sides.hpo, DUAL?-1:1);      // dual: HPO grows leftward; HPO-only payload grows rightward
+  // In dual view, pin the two axis roots to a fixed small gap across the centerline so their
+  // spacing is set here, not by their (large) radius. ROOT_GAP = clear space between the circles.
+  if(DUAL){ const ROOT_GAP=8;
+    for(const rid of gRootIds){ const c=coord.get(rid); if(!c) continue;
+      c.x=(c.dir||1)*(c.r+ROOT_GAP/2); } }
   return {coord};
 }
 function edgePath(a,b){const mx=(a.x+b.x)/2; const dir=a.dir||b.dir||1;
