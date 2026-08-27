@@ -628,7 +628,7 @@ function rowEl(n,depth,hasKids,isOpen){
     const base=n.collision_kind==="climb_tie"?"climb tie: a code rolled up to sibling terms too"
               :n.collision_kind==="mixed"?"multi-mapped: shares codes with sibling terms (shared concept + climb tie)"
               :"shares a standard concept with sibling terms";
-    cd.title=base+(HAS_FRAC?" — patients overlap with those terms; the Addable count splits them 1/m so roll-ups stay honest":" — counts overlap, don't sum across these");
+    cd.title=base+(HAS_FRAC?" — patients overlap with those terms; roll-ups split each shared diagnosis 1/m so subtree totals stay honest":" — counts overlap, don't sum across these");
     r.appendChild(cd);}
   if(n.kind==="internal"){const kt=el("span","kindtag","node");r.appendChild(kt);}
   if(n.rare){const rt=el("span","rare-tag","rare");rt.title="rare disease: "+((n.rare_src||[]).join(", ")||"Mondo");r.appendChild(rt);}
@@ -1352,13 +1352,11 @@ function select(id,quiet){
       ? `<b>Multi-mapping (mixed).</b> This term shares a code with ${n.collision_siblings.length} sibling term(s) both via a shared standard concept and via climb ties`
       : `<b>Multi-mapping (shared concept).</b> This term shares a standard concept with ${n.collision_siblings.length} sibling term(s) via OMOP <span class="mono">Maps&nbsp;to</span>`;
     const collNote=HAS_FRAC
-      ? `${lead}. The <b>Patients</b> figure counts everyone who touches this term; the <b>Addable</b> figure splits each shared diagnosis 1/m across its terms, so subtree roll-ups add up without double-counting.`
+      ? `${lead}. The <b>Patients</b> count includes everyone who touches this term. When related terms are rolled up together, each shared diagnosis is split 1/m across its terms, so the subtree total below doesn't double-count them — no need to avoid the roll-up.`
       : `${lead}. Its count includes those shared patients — do not sum across the flagged terms.`;
     html+=`<div class="warn" style="margin-top:12px">${collNote}</div>`;}
-  const showFrac=HAS_FRAC && n.collision && n.frac_display && n.frac_display!=="";
   html+=`<dl class="kv" style="margin-top:14px">
     <dt>Patients</dt><dd style="font-size:15px;color:${n.state==="reported"?cat.color:"var(--ink)"}">${disp}</dd>
-    ${showFrac?`<dt title="Each diagnosis that maps to m Mondo terms is credited 1/m to each, so these numbers sum honestly across terms. Smaller than Patients when a term mostly appears co-mapped.">Addable</dt><dd style="font-size:15px;color:var(--muted)">${n.frac_display}</dd>`:""}
     <dt>MONDO id</dt><dd>${purl?`<a href="${purl}" target="_blank" rel="noopener">${n.id}</a>`:n.id}</dd>
     ${codesRow(n)}
     ${sourceCatalogRow(n)}
