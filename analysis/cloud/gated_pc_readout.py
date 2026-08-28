@@ -66,6 +66,34 @@ from gated_pc_cloud import (
     readout_ab_report, readout_from_proba, resolve_readout_mode, score_arm,
 )
 
+# What the batched solve got before fits recorded their own cap. Runs older than
+# `readout_max_iter` in the manifest were, in practice, record runs at the driver's
+# own default of 200 — a DEV smoke from that era has to be recovered with an
+# explicit --readout-max-iter 60, which is exactly the retyping the manifest field
+# removes for every fit written since.
+_LEGACY_READOUT_MAX_ITER = 200
+
+
+def resolve_readout_max_iter(cli_value, manifest):
+    """Pick the batched-L-BFGS iteration cap for a re-readout, and say who won.
+
+    Precedence: explicit CLI > the fit's own recorded ``readout_max_iter`` >
+    the legacy default. Same doctrine as ``readout_theta_topm``: a recovery should
+    REPRODUCE the run it is rescuing (the fit's cap is what its lost readout would
+    have used, CHARM_DEV capping already folded in), while the CLI stays available
+    for deliberately re-solving a run harder or cheaper than it was.
+
+    Returns ``(max_iter, source)``; `source` is a human label for the log line, so
+    a recovery's output states on its face which budget it ran under — the number
+    alone cannot be read back as "the fit's" or "mine".
+    """
+    if cli_value is not None:
+        return int(cli_value), "CLI"
+    recorded = manifest.get("readout_max_iter")
+    if recorded:
+        return int(recorded), "manifest"
+    return _LEGACY_READOUT_MAX_ITER, "legacy default"
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -152,12 +180,15 @@ def build_parser() -> argparse.ArgumentParser:
                         "on and compare per-node AUC against its recorded numbers, so "
                         "the whole-Mondo enablement decision rests on a measured "
                         "delta, not the mass-coverage heuristic alone.")
-    p.add_argument("--readout-max-iter", type=int, default=200,
-                   help="batched L-BFGS iteration cap for the distributed re-readout "
-                        "(default 200 = the record-run budget). Recovery runs of a "
-                        "DEV smoke should pass 60 — the CHARM_DEV cap the original "
-                        "run would have used; there is no dev profile here to apply "
-                        "it for you.")
+    p.add_argument("--readout-max-iter", type=int, default=None,
+                   help="OVERRIDE the batched L-BFGS iteration cap for the "
+                        "distributed re-readout. Default: the manifest's recorded "
+                        "readout_max_iter — the cap the fit itself used, CHARM_DEV "
+                        "capping included, so a recovery reproduces the run it is "
+                        "rescuing without being told. Manifests written before that "
+                        f"field fall back to {_LEGACY_READOUT_MAX_ITER} (the "
+                        "record-run budget); recovering a DEV smoke from one of "
+                        "those still needs an explicit 60.")
     return p
 
 
@@ -414,7 +445,7 @@ def reconstruct_model(run_dir: Path, manifest: dict):
 
 def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targets,
                 min_count, readout_mode="auto", ab_check=False, out_dir=None,
-                theta_topm=None, readout_max_iter=200):
+                theta_topm=None, readout_max_iter=None):
     """Score both gated_pc arms off two already-TRANSFORMED splits. No argparse.
 
     The whole body of this tool that is worth testing: given the frames a finished
@@ -428,7 +459,10 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
 
     K comes from the manifest (`lay.K` at fit time) and is only needed by the
     distributed solver; runs old enough to lack it fall back to the width of the
-    transform's own theta, which is the same number by construction.
+    transform's own theta, which is the same number by construction. `theta_topm`
+    and `readout_max_iter` are both None-means-"ask the manifest" for the same
+    reason (see `resolve_readout_max_iter`): a recovery reproduces the fit's own
+    readout unless explicitly told otherwise.
 
     `out_dir` gets a `results_readout.json` after EACH arm lands — a re-readout is
     a recovery action (exp 0103 lost a 4h fit's readout to an empty summary), so
@@ -477,6 +511,12 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
             theta_topm = int(theta_topm)
             print(f"[readout]   theta top-m={theta_topm} (CLI OVERRIDE — deltas vs "
                   "the recorded run price the truncation)", flush=True)
+        # Only the batched solver has an iteration cap, so this is the only place
+        # the resolution matters — and the log line lands right where the number is
+        # about to be spent, next to top-m's.
+        readout_max_iter, _mi_src = resolve_readout_max_iter(readout_max_iter, manifest)
+        print(f"[readout]   readout max_iter={readout_max_iter} (from {_mi_src})",
+              flush=True)
         dist = distributed_score_arm(
             train_scored, test_scored, C, K, recall_targets=recall_targets,
             fdr_targets=fdr_targets, min_count=min_count, label="gated_pc",

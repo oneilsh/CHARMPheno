@@ -1892,3 +1892,141 @@ def test_extra_spark_confs_ignores_malformed(monkeypatch):
     cmd = rx.build_spark_submit_cmd("s.py", [], Path("."))
     assert "notapair" not in cmd
     assert cmd[cmd.index("spark.ok=1") - 1] == "--conf"
+
+
+class TestExperimentSparkConf:
+    """`spark_conf:` front matter — the exp doc as the RECORD of a run's Spark
+    tuning, replacing a CHARM_SPARK_CONF string retyped (and mistyped) per launch.
+
+    Two properties are load-bearing and neither is visible from a passing run:
+    the LAYERING (fixed flags, then the doc, then the env var — spark-submit takes
+    the last value of a repeated --conf key, so order IS precedence), and the
+    key-prefix VALIDATION (spark-submit ignores an unrecognized conf name in
+    silence, so a typo'd key is otherwise indistinguishable from a working one
+    until the run dies of the thing the conf was meant to prevent)."""
+
+    def test_doc_confs_land_after_fixed_flags_and_before_env(self, monkeypatch):
+        monkeypatch.setenv("CHARM_SPARK_CONF", "spark.executor.memoryOverhead=9g")
+        cmd = rx.build_spark_submit_cmd(
+            "s.py", [], Path("."),
+            spark_conf={"spark.executor.memoryOverhead": "4g",
+                        "spark.dynamicAllocation.minExecutors": 8},
+        )
+        # The fixed 2g is still first (it is the house default being overruled),
+        # the doc's 4g next, the env's 9g last => 9g is what spark-submit uses.
+        fixed = cmd.index("spark.executor.memoryOverhead=2g")
+        doc = cmd.index("spark.executor.memoryOverhead=4g")
+        env = cmd.index("spark.executor.memoryOverhead=9g")
+        assert fixed < doc < env < cmd.index("s.py")
+        for i in (doc, env):
+            assert cmd[i - 1] == "--conf"
+
+    def test_doc_confs_beat_fixed_and_are_beaten_by_nothing_when_env_unset(
+            self, monkeypatch):
+        monkeypatch.delenv("CHARM_SPARK_CONF", raising=False)
+        cmd = rx.build_spark_submit_cmd(
+            "s.py", [], Path("."),
+            spark_conf={"spark.executor.memoryOverhead": "4g"},
+        )
+        assert cmd.index("spark.executor.memoryOverhead=2g") < \
+            cmd.index("spark.executor.memoryOverhead=4g")
+        assert not any(c.endswith("=9g") for c in cmd)
+
+    def test_absent_spark_conf_changes_nothing(self, monkeypatch):
+        monkeypatch.delenv("CHARM_SPARK_CONF", raising=False)
+        base = rx.build_spark_submit_cmd("s.py", [], Path("."))
+        assert rx.build_spark_submit_cmd(
+            "s.py", [], Path("."), spark_conf=None) == base
+        assert rx.build_spark_submit_cmd(
+            "s.py", [], Path("."), spark_conf={}) == base
+
+    def test_int_values_are_coerced_to_str(self):
+        # YAML spells `minExecutors: 8` as an int; spark-submit needs text.
+        assert rx._spark_conf_pairs({"spark.dynamicAllocation.minExecutors": 8}) == \
+            ["spark.dynamicAllocation.minExecutors=8"]
+
+    def test_key_without_spark_prefix_is_rejected(self):
+        with pytest.raises(ValueError, match="does not start with 'spark.'"):
+            rx._spark_conf_pairs({"executor.memoryOverhead": "4g"})
+
+    def test_typo_in_the_spark_prefix_is_rejected(self):
+        with pytest.raises(ValueError, match="does not start with 'spark.'"):
+            rx._spark_conf_pairs({"sparkexecutor.memoryOverhead": "4g"})
+
+    def test_non_mapping_is_rejected(self):
+        with pytest.raises(ValueError, match="must be a YAML mapping"):
+            rx._spark_conf_pairs(["spark.executor.memoryOverhead=4g"])
+
+    def test_validate_frontmatter_exits_on_bad_key(self, capsys):
+        fm = {"id": 1, "slug": "s", "cohort": "dementia", "model_class": "lda",
+              "spark_conf": {"executor.memoryOverhead": "4g"}}
+        with pytest.raises(SystemExit) as exc:
+            rx.validate_frontmatter(fm)
+        assert exc.value.code == 2
+        assert "does not start with 'spark.'" in capsys.readouterr().out
+
+    def test_validate_frontmatter_accepts_good_key(self):
+        rx.validate_frontmatter(
+            {"id": 1, "slug": "s", "cohort": "dementia", "model_class": "lda",
+             "spark_conf": {"spark.executor.memoryOverhead": "4g"}})
+
+
+def _write_exp_doc(experiments_dir, name, body):
+    experiments_dir.mkdir(parents=True, exist_ok=True)
+    (experiments_dir / name).write_text(body)
+
+
+class TestPrintSparkConfMode:
+    """--print-spark-conf: the Makefile's readout target reuses the SAME doc the
+    fit was launched from, so the recovery path cannot drift from the fit path.
+    Contract with the shell that captures it: only the pairs on stdout."""
+
+    DOC = ("---\nid: 104\nslug: whole-mondo\ncohort: population_mondo_all\n"
+           "model_class: gated_pc\nspark_conf:\n"
+           "  spark.executor.memoryOverhead: 4g\n"
+           "  spark.dynamicAllocation.minExecutors: 8\n---\n\n# body\n")
+    DOC_NO_CONF = ("---\nid: 105\nslug: plain\ncohort: dementia\n"
+                   "model_class: lda\n---\n\n# body\n")
+
+    def test_prints_pairs_and_nothing_else(self, tmp_path, capsys):
+        _write_exp_doc(tmp_path, "0104-whole-mondo.md", self.DOC)
+        rc = rx.main(["--print-spark-conf", "--id", "104",
+                      "--experiments-dir", str(tmp_path)])
+        assert rc == 0
+        out = capsys.readouterr()
+        assert out.out == ("spark.executor.memoryOverhead=4g "
+                           "spark.dynamicAllocation.minExecutors=8\n")
+
+    def test_doc_without_spark_conf_prints_nothing(self, tmp_path, capsys):
+        _write_exp_doc(tmp_path, "0105-plain.md", self.DOC_NO_CONF)
+        rc = rx.main(["--print-spark-conf", "--id", "105",
+                      "--experiments-dir", str(tmp_path)])
+        assert rc == 0
+        assert capsys.readouterr().out.strip() == ""
+
+    def test_missing_doc_fails_loudly_on_stderr(self, tmp_path, capsys):
+        # The Makefile aborts on a non-zero rc rather than launching without the
+        # confs; the message must not pollute the captured stdout.
+        rc = rx.main(["--print-spark-conf", "--id", "999",
+                      "--experiments-dir", str(tmp_path)])
+        assert rc == 2
+        out = capsys.readouterr()
+        assert out.out == ""
+        assert "no experiment with id 0999" in out.err
+
+    def test_bad_key_fails_rather_than_printing_it(self, tmp_path, capsys):
+        _write_exp_doc(tmp_path, "0106-bad.md",
+                       "---\nid: 106\nslug: bad\ncohort: dementia\n"
+                       "model_class: lda\nspark_conf:\n"
+                       "  executor.memoryOverhead: 4g\n---\n\n# body\n")
+        rc = rx.main(["--print-spark-conf", "--id", "106",
+                      "--experiments-dir", str(tmp_path)])
+        assert rc == 2
+        out = capsys.readouterr()
+        assert out.out == ""
+        assert "does not start with 'spark.'" in out.err
+
+    def test_requires_an_id(self, tmp_path, capsys):
+        rc = rx.main(["--print-spark-conf", "--experiments-dir", str(tmp_path)])
+        assert rc == 2
+        assert capsys.readouterr().out == ""

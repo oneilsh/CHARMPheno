@@ -77,6 +77,25 @@ eval_every: 0
 num_partitions: 96
 seed: 42
 cache_uri: hdfs:///user/dataproc/charm/case_finding_cache
+# Per-run Spark tuning, RECORDED HERE rather than retyped into CHARM_SPARK_CONF on
+# every launch (run log 08-26/08-27/08-28: this run's operational settings were
+# rediscovered three times, and the recovery relaunch that dropped one of them ran
+# at a third of the cores). Layered after the fixed submit flags and before
+# CHARM_SPARK_CONF, which stays the last-wins per-invocation escape hatch; the same
+# block is injected into `make gated-pc-readout ID=104` so a recovery re-readout
+# runs under the same settings as the fit it is rescuing.
+spark_conf:
+  # Spot-VM kill waves under memory pressure: at K≈3,827 the fit broadcasts ~355 MB
+  # per iteration and the readout's (C,K) partials are ~117 MB, so the 2g default
+  # overhead is what the container gets killed for exceeding, not the heap.
+  spark.executor.memoryOverhead: 4g
+  # Dynamic allocation is CONFIRMED enabled on the cluster (08-28: checked in the
+  # Spark config directly). Separately, `yarn node -list` showed all nodes RUNNING
+  # while containers were "killed on request", ruling preemption OUT for those
+  # waves; DA idle-release is the remaining suspect, not a proven cause. The floor
+  # is cheap insurance either way: it stops the app shrinking below the
+  # non-preemptible primaries during the driver-side L-BFGS gaps.
+  spark.dynamicAllocation.minExecutors: 8
 ---
 
 # 0104 — Whole-Mondo unsupervised mainline: the first all-body-system gate + readout
@@ -127,7 +146,20 @@ cd ~/repos/CHARMPheno && git pull origin claude/gated-conditional-voi && \
   CHARM_DEV=1 CHARM_SPARK_CONF='spark.locality.wait=0s' make -C analysis/cloud exp ID=104  # smoke first
 CHARM_SPARK_CONF='spark.locality.wait=0s' make -C analysis/cloud exp ID=104
 make -C analysis/cloud report ID=104
+
+# Recovery re-readout on a SAVED fit (the early save lands npz + fit-only manifest
+# before the readout, so a readout death never costs the fit):
+make -C analysis/cloud gated-pc-readout ID=104 GPR_ARGS="--readout-max-iter 60"
 ```
+
+The front matter's `spark_conf:` (memoryOverhead 4g + a minExecutors floor) is
+injected into BOTH commands automatically — do not retype it into
+`CHARM_SPARK_CONF` / `GPR_SPARK_CONF`; those remain for genuinely one-off probes
+(`spark.locality.wait=0s` after a mid-run scale-up) and win over the doc if passed.
+The explicit `--readout-max-iter 60` above is needed for THIS run only: its manifest
+was written before fits recorded `readout_max_iter`, so the tool cannot tell a
+60-iter `CHARM_DEV` smoke from a 200-iter record run and falls back to 200. Fits
+written from now on record it, and the flag can be dropped.
 
 ## Run log
 
@@ -264,6 +296,28 @@ path WORKS in production, and the "kill swarms" get a better explanation.**
   pin `spark.dynamicAllocation.enabled=false` (or a floor via minExecutors) in the
   readout/fit submits so executors stop flapping across the driver-side L-BFGS gaps.
   Disk-health theory: not supported by this listing (no UNHEALTHY nodes).
+
+**2026-08-28 — the operational settings move INTO this doc (they were being
+rediscovered every launch).** Three of this week's launches differed only in which
+`CHARM_SPARK_CONF` / `GPR_SPARK_CONF` string got retyped, and the cost was real: the
+recovery attempt above ran at **16 active cores instead of ~48** because a `cores=2`
+override was carried over while the settings that mattered were not. Fix (same
+commit): a `spark_conf:` front-matter key on the experiment doc, layered
+fixed-flags → doc → `CHARM_SPARK_CONF` (spark-submit last-wins), validated at parse
+time — a key not starting with `spark.` now fails the launch instead of being
+silently dropped by spark-submit, which is how a typo'd conf would otherwise
+"apply" for hours and then not have. This doc now records the two settings the
+run's own history argues for: `spark.executor.memoryOverhead=4g` (the kill waves of
+08-26/08-27 are container-overhead kills at ~355 MB broadcasts, not heap) and
+`spark.dynamicAllocation.minExecutors=8` (DA confirmed on above; the floor spans the
+non-preemptible primaries so idle-release cannot shrink the app across the
+driver-side L-BFGS gaps). `make gated-pc-readout ID=104` reads the same block via
+`run_experiment.py --print-spark-conf`, so the recovery path and the fit path can no
+longer drift apart. Companion fix for the OTHER thing that had to be remembered: the
+fit manifest now records `readout_max_iter` (the post-`CHARM_DEV` effective value)
+and the readout tool defaults to it, so the relaunch is just
+`make -C analysis/cloud gated-pc-readout ID=104 GPR_ARGS="--readout-max-iter 60"` —
+and the explicit 60 is needed for THIS run only, whose manifest predates the field.
 
 **2026-08-21 — UNBLOCKED: the 0103 A/B gate PASSED** (macro |Δ| ≤ 1.1e-4 both arms; see
 0103's run log). Reference bar from 0103's full-row readout: unsup cardiovascular
