@@ -1,8 +1,12 @@
 """Tests for the gated_pc cloud driver: the pure pc_topics_lr scorer, the
-DAG-closure-parents densifier, and the arg surface. The end-to-end BQ+fit run is
-the cluster smoke (main() reads the CDR via the spark-bigquery connector)."""
+DAG-closure-parents densifier, the arg surface, and the distributed readout's
+solver CHECKPOINT (which is driver-side numpy + a file, so it is unit-testable
+with the Spark seam swapped for `batched_lr`'s in-memory reference). The
+end-to-end BQ+fit run is the cluster smoke (main() reads the CDR via the
+spark-bigquery connector)."""
 
 import numpy as np
+import pytest
 
 
 def test_pc_topics_lr_bundle_separable_theta_scores_high():
@@ -200,3 +204,242 @@ def test_head_l2_ridge_round_trips_through_estimator_and_engine():
     model, _ = _build_model_and_config(est, vocab_size=8)
     assert model.head_l2 == 0.01               # the shim built a ridge-only engine
     assert model.head_optimizer == "newton"
+
+
+# --------------------------------------------------------------------------- #
+# Readout solver checkpoint + fingerprinted warm resume (exp 0104, 08-28).     #
+#                                                                             #
+# The failure this answers: a whole-Mondo readout solve is hours of distributed #
+# L-BFGS, and on 2026-08-28 a spot-preemption wave starved the scheduler until  #
+# Spark aborted the job 9,112s in, taking every computed iterate with it. The   #
+# checkpoint makes that cost `checkpoint_every` iterations instead. These tests #
+# drive the REAL `_fit_readout_heads` with the Spark seam swapped for the       #
+# in-memory reference (`batched_lr.make_inmemory_stats_fn`) — the solver, the   #
+# degenerate masking, the progress hook and the fold are all the production     #
+# ones, only the treeAggregate is replaced.                                    #
+# --------------------------------------------------------------------------- #
+def _ckpt_problem(seed=0, C=6, K=4, D=80):
+    """A tiny readout problem with one DEGENERATE (all-negative) node."""
+    rng = np.random.default_rng(seed)
+    Pi = rng.dirichlet(np.full(K, 0.5), size=D)
+    W = rng.normal(size=(C, K)) * 3.0
+    p = 1.0 / (1.0 + np.exp(-(Pi @ W.T)))
+    y = (rng.random((D, C)) < p).astype(float)
+    obs = (rng.random((D, C)) < 0.8).astype(float)
+    y[:, C - 1] = 0.0                            # never positive => degenerate
+    return Pi, y, obs
+
+
+class _FakeDR:
+    """Stand-in for `distributed_readout`: the same call surface, numpy behind it.
+
+    `fail_at` raises on the n-th stats call, which is what a preemption-wave job
+    abort looks like from `_fit_readout_heads`'s point of view (a Py4JJavaError
+    escaping the treeAggregate after the retries are exhausted).
+    """
+
+    def __init__(self, Pi, y, obs, fail_at=None):
+        self.Pi, self.y, self.obs = Pi, y, obs
+        self.fail_at = fail_at
+        self.n_calls = 0
+
+    def masked_moments(self, train_scored, C, K, **kw):
+        from analysis.pc.batched_lr import standardization_moments
+        mu, sd, n_obs = standardization_moments(self.Pi, self.obs.astype(bool))
+        return mu, sd, n_obs, (self.y * self.obs).sum(axis=0)
+
+    def make_spark_stats_fn(self, train_scored, C, K, mu, sd, **kw):
+        from contextlib import nullcontext
+
+        from analysis.pc.batched_lr import make_inmemory_stats_fn
+        inner = make_inmemory_stats_fn(self.Pi, self.y, self.obs.astype(bool),
+                                       mu, sd)
+
+        def _stats(W_std, b_std, node_mask=None):
+            self.n_calls += 1
+            if self.fail_at is not None and self.n_calls >= self.fail_at:
+                raise RuntimeError("job aborted: excludeOnFailure")
+            return inner(W_std, b_std, node_mask=node_mask)
+
+        return nullcontext(_stats)
+
+
+def test_readout_ckpt_fingerprint_pins_the_problem_not_just_the_shapes():
+    """The fingerprint's job is to refuse a checkpoint from a DIFFERENT arm or
+    corpus, which would otherwise deserialize cleanly (right shapes, wrong
+    meaning) and warm-start a solve from a meaningless point. Every input that
+    changes the standardized basis or the degenerate mask must change it."""
+    from gated_pc_cloud import _readout_ckpt_fingerprint
+    C, K = 3, 4
+    mu = np.arange(C * K, dtype=float).reshape(C, K)
+    sd = np.ones((C, K))
+    n_obs, n_pos = np.array([10.0, 20.0, 30.0]), np.array([1.0, 2.0, 3.0])
+    base = _readout_ckpt_fingerprint(C, K, mu, sd, n_obs, n_pos)
+    assert base == _readout_ckpt_fingerprint(C, K, mu.copy(), sd, n_obs, n_pos)
+    assert len(base) == 64                        # sha256 hex
+    for kw in ("mu", "sd", "n_obs", "n_pos"):
+        arrs = {"mu": mu.copy(), "sd": sd.copy(),
+                "n_obs": n_obs.copy(), "n_pos": n_pos.copy()}
+        arrs[kw].flat[0] += 1e-9                  # a moments pass is deterministic
+        assert _readout_ckpt_fingerprint(C, K, **arrs) != base, kw
+    assert _readout_ckpt_fingerprint(C + 1, K, mu, sd, n_obs, n_pos) != base
+    assert _readout_ckpt_fingerprint(C, K + 1, mu, sd, n_obs, n_pos) != base
+
+
+def test_readout_ckpt_write_read_round_trip_and_rejections(tmp_path, capsys):
+    """Round trip, plus the three ways a read must decline: absent, torn, and
+    fingerprint mismatch. A mismatch is LOUD (it means a stale file from another
+    run is sitting in the run dir) and does NOT delete the file — the fresh
+    solve's own first checkpoint overwrites it."""
+    from gated_pc_cloud import _read_readout_ckpt, _write_readout_ckpt
+    path = tmp_path / "readout_ckpt_gated_pc.npz"
+    W = np.arange(12.0).reshape(3, 4)
+    b = np.array([0.5, -1.5, 2.0])
+
+    assert _read_readout_ckpt(path, "fp") is None          # nothing there yet
+    assert _write_readout_ckpt(path, W, b, 40, "fp") is True
+    assert not (tmp_path / (path.name + ".tmp")).exists()   # tmp renamed away
+    got = _read_readout_ckpt(path, "fp")
+    assert got is not None
+    W2, b2, it = got
+    assert np.array_equal(W2, W) and np.array_equal(b2, b) and it == 40
+
+    assert _read_readout_ckpt(path, "other-fingerprint") is None
+    out = capsys.readouterr().out
+    assert "IGNORED" in out and "Starting cold" in out
+    assert path.exists()                                    # not deleted
+
+    path.write_bytes(b"not an npz")                         # torn / truncated
+    assert _read_readout_ckpt(path, "fp") is None
+    assert "UNREADABLE" in capsys.readouterr().out
+
+
+def test_fit_readout_heads_checkpoint_survives_a_mid_solve_death(tmp_path, capsys,
+                                                                monkeypatch):
+    """The end-to-end claim: a solve that dies mid-flight leaves a checkpoint the
+    next run resumes from, and the resumed run finishes at the same answer an
+    uninterrupted one does (the per-node objective is convex, so `x0` moves the
+    path and not the optimum). And once the solve lands, the checkpoint is gone —
+    the fit is the record, and a checkpoint outliving its solve can only mislead
+    a later run."""
+    import gated_pc_cloud as gpc
+    Pi, y, obs = _ckpt_problem()
+    C, K = 6, 4
+    path = tmp_path / "readout_ckpt_gated_pc.npz"
+
+    # 1. Uninterrupted reference run, no checkpointing at all.
+    monkeypatch.setattr(gpc, "_dr", _FakeDR(Pi, y, obs))
+    V_ref, b_ref, _, degen, _ = gpc._fit_readout_heads(
+        None, C, K, gtol=1e-6, max_iter=200, label="gated_pc")
+
+    # 2. The same solve, killed partway through.
+    monkeypatch.setattr(gpc, "_dr", _FakeDR(Pi, y, obs, fail_at=12))
+    with pytest.raises(RuntimeError, match="excludeOnFailure"):
+        gpc._fit_readout_heads(None, C, K, gtol=1e-6, max_iter=200,
+                               label="gated_pc", checkpoint_path=path,
+                               checkpoint_every=1)
+    assert path.exists(), "the death left nothing to resume from"
+    with np.load(path) as z:
+        assert z["W_std"].shape == (C, K) and z["b_std"].shape == (C,)
+        assert int(z["iter"]) >= 1
+        recorded_fp = str(z["fingerprint"].item())
+
+    # The stored fingerprint is the one THIS problem's moments produce.
+    from analysis.pc.batched_lr import standardization_moments
+    mu, sd, n_obs = standardization_moments(Pi, obs.astype(bool))
+    assert recorded_fp == gpc._readout_ckpt_fingerprint(
+        C, K, mu, sd, n_obs, (y * obs).sum(axis=0))
+
+    # 3. Resume: same answer, and it says so in the log (curvature is NOT carried,
+    #    so the first iterations re-learn it — expected, not a regression).
+    capsys.readouterr()
+    monkeypatch.setattr(gpc, "_dr", _FakeDR(Pi, y, obs))
+    V, b_raw, _, _, info = gpc._fit_readout_heads(
+        None, C, K, gtol=1e-6, max_iter=200, label="gated_pc",
+        checkpoint_path=path, checkpoint_every=1)
+    out = capsys.readouterr().out
+    assert "resuming batched solve from checkpoint" in out
+    assert "curvature history is not carried" in out
+    assert info["warm_started"] is True
+    assert np.abs(V - V_ref).max() < 1e-4
+    assert np.abs(b_raw - b_ref).max() < 1e-4
+    assert not path.exists(), "a completed solve must not leave a checkpoint"
+    assert np.all(V[degen] == 0.0)
+
+
+def test_fit_readout_heads_resume_zeroes_degenerate_rows(tmp_path, monkeypatch):
+    """A degenerate node's data term is zeroed, so its objective is the bare ridge
+    — stationary only at 0. A resumed `x0` row for such a node would therefore be
+    walked back to zero over REAL distributed passes, for a node whose probability
+    is overwritten by the constant fallback anyway. Same rule the `warm_start`
+    path has, restated for the checkpoint path."""
+    import gated_pc_cloud as gpc
+    from analysis.pc import batched_lr
+    Pi, y, obs = _ckpt_problem(seed=3)
+    C, K = 6, 4
+    path = tmp_path / "readout_ckpt_gated_pc.npz"
+    mu, sd, n_obs = batched_lr.standardization_moments(Pi, obs.astype(bool))
+    fp = gpc._readout_ckpt_fingerprint(C, K, mu, sd, n_obs, (y * obs).sum(axis=0))
+    # A checkpoint whose rows are ALL nonzero, including the degenerate node's.
+    gpc._write_readout_ckpt(path, np.ones((C, K)), np.ones(C), 17, fp)
+
+    seen = {}
+
+    def _spy(stats_fn, C_, K_, **kw):
+        seen["x0"] = kw.get("x0")
+        seen["existed_during_solve"] = path.exists()
+        return (np.zeros((C_, K_)), np.zeros(C_), _fake_info(C_, K_))
+
+    monkeypatch.setattr(gpc, "_dr", _FakeDR(Pi, y, obs))
+    monkeypatch.setattr(batched_lr, "solve_batched_lr", _spy)
+    _, _, _, degen, _ = gpc._fit_readout_heads(
+        None, C, K, label="gated_pc", checkpoint_path=path, checkpoint_every=1)
+    W0, b0 = seen["x0"]
+    assert np.all(W0[degen] == 0.0) and np.all(b0[degen] == 0.0)
+    assert np.all(W0[~degen] == 1.0) and np.all(b0[~degen] == 1.0)
+
+
+def test_fit_readout_heads_mismatched_fingerprint_starts_cold(tmp_path, capsys,
+                                                              monkeypatch):
+    """A checkpoint from another arm/corpus deserializes fine and means nothing.
+    It must WARN and be ignored — never silently used, and never deleted on the
+    spot: until the fresh solve writes its own, the stale file on disk is the
+    evidence for what went wrong."""
+    import gated_pc_cloud as gpc
+    from analysis.pc import batched_lr
+    Pi, y, obs = _ckpt_problem(seed=5)
+    C, K = 6, 4
+    path = tmp_path / "readout_ckpt_gated_pc.npz"
+    gpc._write_readout_ckpt(path, np.ones((C, K)), np.ones(C), 17, "a-different-run")
+
+    seen = {}
+
+    def _spy(stats_fn, C_, K_, **kw):
+        seen["x0"] = kw.get("x0")
+        seen["existed_during_solve"] = path.exists()
+        return (np.zeros((C_, K_)), np.zeros(C_), _fake_info(C_, K_))
+
+    monkeypatch.setattr(gpc, "_dr", _FakeDR(Pi, y, obs))
+    monkeypatch.setattr(batched_lr, "solve_batched_lr", _spy)
+    gpc._fit_readout_heads(None, C, K, label="gated_pc", checkpoint_path=path,
+                           checkpoint_every=1)
+    out = capsys.readouterr().out
+    assert "IGNORED" in out and "different arm/corpus/basis" in out
+    assert seen["x0"] is None                     # cold start, not the stale point
+    assert seen["existed_during_solve"] is True   # not deleted on mismatch
+
+
+def _fake_info(C, K):
+    """The `info` dict `_fit_readout_heads`'s summary print reads."""
+    return {
+        "n_iter": np.zeros(C, dtype=int),
+        "converged": np.ones(C, dtype=bool),
+        "converged_gtol": np.ones(C, dtype=bool),
+        "stalled": np.zeros(C, dtype=bool),
+        "grad_inf_norm": np.zeros(C),
+        "n_stats_calls": 1,
+        "n_node_evals": C,
+        "line_search_failures": 0,
+        "loss": np.zeros(C),
+        "warm_started": False,
+    }

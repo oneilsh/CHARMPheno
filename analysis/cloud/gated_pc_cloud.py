@@ -40,6 +40,7 @@ workspace. Unit tests cover parse_args + the pure pc_topics_lr scorer.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -792,25 +793,36 @@ def _collect_lean_proba(scored_df, C, V=None, b_raw=None, *, degenerate=None,
     theta_topm = int(theta_topm)
     cols = (id_col, score_col, label_col, mask_col)
     sc = scored_df.sparkSession.sparkContext
-    if V is None:
-        bcast = None
 
-        def _block(rows, _C=C, _cols=cols):
-            return [_dr._lean_eval_kernel(_dr._row_quads(rows, *_cols), _C)]
-    else:
-        bcast = sc.broadcast((np.ascontiguousarray(V, dtype=np.float64),
-                              np.ascontiguousarray(b_raw, dtype=np.float64)))
+    def _collect():
+        # Broadcast + collect inside ONE retried closure: this is a driver-blocking
+        # action on the readout path, and it runs right after the multi-hour solve,
+        # so a preemption wave landing here would throw away the fit's whole
+        # readout. The kernel is a pure function of the test split, so re-running
+        # the collect returns the same blocks (`_retry_spark_action`); the
+        # broadcast is rebuilt per attempt and unpersisted per attempt, exactly as
+        # in `SparkStatsFn.__call__`.
+        if V is None:
+            bcast = None
 
-        def _block(rows, _b=bcast, _C=C, _cols=cols, _m=theta_topm):
-            V_, b_ = _b.value
-            return [_dr._lean_eval_kernel(
-                _dr._row_quads(rows, *_cols, topm=_m), _C, V_, b_)]
+            def _block(rows, _C=C, _cols=cols):
+                return [_dr._lean_eval_kernel(_dr._row_quads(rows, *_cols), _C)]
+        else:
+            bcast = sc.broadcast((np.ascontiguousarray(V, dtype=np.float64),
+                                  np.ascontiguousarray(b_raw, dtype=np.float64)))
 
-    try:
-        blocks = scored_df.select(*cols).rdd.mapPartitions(_block).collect()
-    finally:
-        if bcast is not None:
-            bcast.unpersist(blocking=True)
+            def _block(rows, _b=bcast, _C=C, _cols=cols, _m=theta_topm):
+                V_, b_ = _b.value
+                return [_dr._lean_eval_kernel(
+                    _dr._row_quads(rows, *_cols, topm=_m), _C, V_, b_)]
+
+        try:
+            return scored_df.select(*cols).rdd.mapPartitions(_block).collect()
+        finally:
+            if bcast is not None:
+                bcast.unpersist(blocking=True)
+
+    blocks = _dr._retry_spark_action(_collect, label="lean eval collect")
     proba, y, mask, ids = _densify_lean_blocks(blocks, C)
     if degenerate is not None and bool(np.any(degenerate)):
         deg = np.asarray(degenerate, dtype=bool)
@@ -818,9 +830,108 @@ def _collect_lean_proba(scored_df, C, V=None, b_raw=None, *, degenerate=None,
     return proba, y, mask, ids
 
 
+_CKPT_VERSION = "readout-ckpt-v1"
+
+
+def _readout_ckpt_fingerprint(C, K, mu, sd, n_obs, n_pos):
+    """Digest identifying the PROBLEM a solver checkpoint belongs to.
+
+    A checkpoint is a point in a STANDARDIZED coordinate system, and those
+    coordinates are `(mu, sd)` — a deterministic function of this arm's train
+    rows, its label mask and its `theta_topm`. So the moments ARE the identity of
+    the problem: two runs whose `(C, K, mu, sd, n_obs, n_pos)` agree bit for bit
+    are fitting the same design matrix in the same basis, and a checkpoint from
+    one is a valid warm start for the other; if any of it differs, the stored
+    numbers are the right SHAPE and the wrong MEANING (a different arm, a
+    different cohort, a re-readout at a different top-m), which under an
+    iteration cap ends somewhere meaningless rather than failing loudly.
+
+    `n_obs`/`n_pos` ride along because they determine the degenerate mask, i.e.
+    which rows the solve zeroes — same moments with a different mask is still a
+    different problem.
+
+    Byte-level (`tobytes()` on the float64 arrays), not tolerance-based: the
+    moments pass is deterministic given the same rows, so exactness costs nothing
+    and a near-match is not a thing we want to reason about.
+    """
+    h = hashlib.sha256()
+    h.update(f"{_CKPT_VERSION}|C={int(C)}|K={int(K)}|".encode())
+    for arr in (mu, sd, n_obs, n_pos):
+        a = np.ascontiguousarray(arr, dtype=np.float64)
+        h.update(f"|{a.shape}|".encode())
+        h.update(a.tobytes())
+    return h.hexdigest()
+
+
+def _write_readout_ckpt(path, W_std, b_std, it, fingerprint):
+    """Atomically write the solver checkpoint to `path` (tmp + replace).
+
+    Same discipline as `_dump_partial_results`, and for a sharper reason: the run
+    dir is gcsfuse, where a write is an object mutation and a process death
+    mid-write leaves a TORN file — which here would be worse than no checkpoint
+    at all, since the thing that reads it is a recovery run. Write to a sibling
+    tmp then rename, so the visible file is always a complete one.
+
+    Failures are swallowed and reported: a checkpoint is insurance, and a full
+    disk or a gcsfuse hiccup must not kill a solve that is otherwise healthy.
+    Returns True on success.
+    """
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(tmp, "wb") as fh:
+            # File OBJECT, not a name: np.savez appends `.npz` to a str path,
+            # which would make the tmp name (and thus the rename) a guess.
+            np.savez(fh, W_std=np.ascontiguousarray(W_std, dtype=np.float64),
+                     b_std=np.ascontiguousarray(b_std, dtype=np.float64),
+                     iter=np.int64(it), fingerprint=np.str_(fingerprint))
+        tmp.replace(path)
+        return True
+    except Exception as exc:                     # pragma: no cover - I/O failure
+        print(f"[driver]   readout checkpoint write FAILED ({exc}); the solve "
+              "continues uncheckpointed", flush=True)
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+
+
+def _read_readout_ckpt(path, fingerprint):
+    """Load `(W_std, b_std, iter)` from `path` if it matches `fingerprint`.
+
+    Returns `None` when there is nothing usable — no file, an unreadable/torn
+    file, or a fingerprint mismatch — and PRINTS why in the mismatch case, which
+    is the one that means something (a checkpoint left by a different arm or a
+    different corpus). A mismatch does not delete the file: the fresh solve's
+    own first checkpoint overwrites it, and until then a stale-but-explainable
+    file on disk is more useful for diagnosis than a silent deletion.
+    """
+    path = Path(path)
+    if not path.exists():
+        return None
+    try:
+        with np.load(path, allow_pickle=False) as z:
+            got = str(z["fingerprint"].item())
+            if got != fingerprint:
+                print(f"[driver]   readout checkpoint {path.name} IGNORED: "
+                      f"fingerprint {got[:12]} != {fingerprint[:12]} — it belongs "
+                      "to a different arm/corpus/basis. Starting cold.", flush=True)
+                return None
+            return (np.asarray(z["W_std"], dtype=np.float64),
+                    np.asarray(z["b_std"], dtype=np.float64),
+                    int(z["iter"]))
+    except Exception as exc:
+        print(f"[driver]   readout checkpoint {path.name} UNREADABLE ({exc}); "
+              "starting cold", flush=True)
+        return None
+
+
 def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
                        max_iter=_READOUT_MAX_ITER, history=6, label="", depth=None,
-                       warm_start=None, theta_topm=0,
+                       warm_start=None, theta_topm=0, checkpoint_path=None,
+                       checkpoint_every=10,
                        topic_col="topicDistribution",
                        label_col="label", mask_col="labelMask"):
     """Fit all C per-node readout heads with ONE batched distributed L-BFGS.
@@ -869,6 +980,29 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
     narrower model rather than an approximation of the wide one. The mass that
     truncation drops is measured and logged BEFORE the fit (`theta_topm_coverage`),
     because the whole premise is an empirical claim about θ's concentration.
+
+    `checkpoint_path` turns the solve into a RESUMABLE one, which at whole-Mondo
+    scale is the difference between losing 15 minutes and losing an afternoon:
+    exp 0104's 2026-08-28 recovery died 9,112s into the solve (a spot-preemption
+    wave starved the scheduler and Spark aborted the job) with nothing saved.
+    Every `checkpoint_every` iterations the progress hook writes the current
+    standardized iterate — the solver's entire resumable state, since `x0` takes
+    a POINT — atomically, next to a FINGERPRINT of `(C, K, mu, sd, n_obs, n_pos)`
+    that a resume must match. On the next run a matching fingerprint is fed back
+    as `x0` (with the degenerate rows re-zeroed, exactly as the `warm_start` path
+    does, or the bare ridge would spend real distributed passes walking them back
+    to zero); a mismatch warns and starts cold. What a resume does NOT carry is
+    the L-BFGS curvature history, so its first iterations re-learn the scaling
+    and are slower than the ones that preceded the crash — expected, logged, and
+    still overwhelmingly cheaper than restarting at iteration 0 (insight 0074: a
+    warm start supplies a point, not curvature). The file is deleted once the
+    solve returns: the fit results are the record, and a checkpoint that outlives
+    its solve is only a way to confuse a later run (which the fingerprint would
+    catch, but a deleted file cannot even raise the question).
+
+    When BOTH `warm_start` and a matching checkpoint are present the checkpoint
+    wins: it is a point on THIS problem's own optimization path, strictly further
+    along than another fit's answer mapped in.
     """
     from analysis.pc.batched_lr import (fold_standardization, solve_batched_lr,
                                         standardized_grad_from_raw,
@@ -911,6 +1045,25 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
     if warm_start is not None:
         W0, b0 = unfold_standardization(warm_start[0], warm_start[1], mu, sd)
         x0 = (np.where(keep[:, None], W0, 0.0), np.where(keep, b0, 0.0))
+    ckpt_path = Path(checkpoint_path) if checkpoint_path is not None else None
+    fingerprint = None
+    if ckpt_path is not None:
+        # Derived AFTER the moments pass because the moments are what it is a
+        # fingerprint OF — the standardized basis this solve's iterate lives in.
+        fingerprint = _readout_ckpt_fingerprint(C, K, mu, sd, n_obs, n_pos)
+        resumed = _read_readout_ckpt(ckpt_path, fingerprint)
+        if resumed is not None:
+            W_ck, b_ck, ck_iter = resumed
+            # Same zeroing rule as the warm-start path above, for the same reason:
+            # a degenerate node's data term is zeroed, so its objective is the bare
+            # ridge and any nonzero row would be walked back to 0 over real
+            # distributed passes. (A checkpoint written by THIS problem already has
+            # them at zero — the fingerprint pins the degenerate mask — so this is
+            # a belt-and-braces restatement of the contract, not a fixup.)
+            x0 = (np.where(keep[:, None], W_ck, 0.0), np.where(keep, b_ck, 0.0))
+            print(f"[driver]   {tag}resuming batched solve from checkpoint "
+                  f"(iter {ck_iter} recorded); curvature history is not carried, "
+                  "early iterations re-learn it", flush=True)
     print(f"[driver]   {tag}distributed readout fit: C={C} K={K}, "
           f"{int(keep.sum())} fittable nodes, {int(degenerate.sum())} degenerate "
           f"(constant fallback), observed train cells={int(n_obs.sum())}"
@@ -943,8 +1096,19 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
         # line from the summary print below.
         t0 = time.time()
 
+        every = max(1, int(checkpoint_every))
+
         def _progress(p, _t0=t0, _tag=tag, _ndeg=int(degenerate.sum()),
-                      _nfit=int(keep.sum())):
+                      _nfit=int(keep.sum()), _path=ckpt_path, _fp=fingerprint,
+                      _every=every):
+            if _path is not None and p["iter"] % _every == 0:
+                # BEFORE the logging gate, not after it: the two cadences are
+                # independent (log every 5th iteration, checkpoint every 10th by
+                # default), and hanging the checkpoint off the log's early return
+                # would silently tie them together. `W_std`/`b_std` are live views
+                # into the solver's iterate — `_write_readout_ckpt` copies them
+                # into the npz, which is the copy the contract requires.
+                _write_readout_ckpt(_path, p["W_std"], p["b_std"], p["iter"], _fp)
             if p["iter"] > 3 and p["iter"] % 5:
                 return
             # Degenerate nodes converge (grad exactly 0) at iteration 0; report
@@ -964,6 +1128,19 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
         W_std, b_std, info = solve_batched_lr(
             _fittable_stats, C, K, l2=l2, max_iter=max_iter, history=history,
             gtol=gtol, x0=x0, progress_fn=_progress)
+    if ckpt_path is not None:
+        # The solve landed, so `(V, b_raw)` — and the results computed from them —
+        # are the record; the checkpoint's only remaining effect would be to warm
+        # a LATER run from a point it did not earn. (The fingerprint would refuse a
+        # genuinely different problem, but an identical re-run resumed from a
+        # finished solve would silently report "resuming from iter N" for a fit
+        # that is already done.) Best-effort: a failed unlink is not worth failing
+        # a completed fit over.
+        try:
+            ckpt_path.unlink(missing_ok=True)
+        except OSError as exc:                   # pragma: no cover - I/O failure
+            print(f"[driver]   {tag}could not remove readout checkpoint "
+                  f"{ckpt_path.name} ({exc})", flush=True)
     V, b_raw = fold_standardization(W_std, b_std, mu, sd)
     gmax = float(info["grad_inf_norm"][keep].max()) if keep.any() else 0.0
     # `converged` = gtol OR the principled numerical stall; at gtol=1e-4 (sklearn's
@@ -984,6 +1161,7 @@ def distributed_score_arm(train_scored, test_scored, C, K, *, recall_targets,
                           fdr_targets, min_count=0, label="", l2=1.0,
                           gtol=_READOUT_GTOL, max_iter=_READOUT_MAX_ITER,
                           history=6, depth=None, warm_start=None, theta_topm=0,
+                          checkpoint_dir=None, checkpoint_every=10,
                           topic_col="topicDistribution", label_col="label",
                           mask_col="labelMask", id_col="person_id"):
     """`score_arm` without the driver-side θ collect — the distributed twin.
@@ -1009,11 +1187,25 @@ def distributed_score_arm(train_scored, test_scored, C, K, *, recall_targets,
     because a mismatch between them is silent (the numbers come out plausible and
     wrong), and this function is the one place that owns both halves of the arm.
 
+    `checkpoint_dir` (normally the RUN dir, alongside `results_partial.json`) makes
+    the solve resumable across a driver death — see `_fit_readout_heads`. The file
+    name is keyed by `label` (`readout_ckpt_gated_pc.npz`, `..._unsup_gated.npz`,
+    `..._dag_head.npz`) because a run fits several arms one after another into the
+    same dir and each is a different problem; the fingerprint would refuse a
+    cross-arm resume anyway, but sharing one path would make each arm's first
+    checkpoint clobber the previous arm's — turning three recoverable solves into
+    one. Left None by the A/B gate's internal fit, which is a row-SAMPLED
+    perturbation carrying the same label and has no business owning that path.
+
     Callable with a plain SparkSession + two DataFrames (no argparse), which is what
     makes it testable against `score_arm` on a local Spark fixture."""
+    ckpt_path = None
+    if checkpoint_dir is not None:
+        ckpt_path = Path(checkpoint_dir) / f"readout_ckpt_{label or 'arm'}.npz"
     V, b_raw, const, degenerate, _info = _fit_readout_heads(
         train_scored, C, K, l2=l2, gtol=gtol, max_iter=max_iter, history=history,
         depth=depth, label=label, warm_start=warm_start, theta_topm=theta_topm,
+        checkpoint_path=ckpt_path, checkpoint_every=checkpoint_every,
         topic_col=topic_col, label_col=label_col, mask_col=mask_col)
     proba, y_te, m_te, persons = _collect_lean_proba(
         test_scored, C, V, b_raw, degenerate=degenerate, const=const,
@@ -2080,7 +2272,8 @@ def main() -> int:
                 _dist_gp = distributed_score_arm(
                     train_scored, test_scored, C, lay.K, recall_targets=rt,
                     fdr_targets=ft, min_count=args.min_label_count, label="gated_pc",
-                    max_iter=args.readout_max_iter, theta_topm=theta_topm)
+                    max_iter=args.readout_max_iter, theta_topm=theta_topm,
+                    checkpoint_dir=out)
                 results["gated_pc"], proba_gp, y_te, m_te, _ = _dist_gp[:5]
                 _gp_fit = _dist_gp[5]         # raw-θ params: the calibration warm start
             else:
@@ -2319,7 +2512,7 @@ def main() -> int:
                         us_train_scored, us_test_scored, C, lay.K, recall_targets=rt,
                         fdr_targets=ft, min_count=args.min_label_count,
                         label="unsup_gated", max_iter=args.readout_max_iter,
-                        theta_topm=theta_topm)
+                        theta_topm=theta_topm, checkpoint_dir=out)
                     results["unsup_gated"], proba_us, y_te, m_te, _ = _dist_us[:5]
                 else:
                     Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(
@@ -2375,7 +2568,7 @@ def main() -> int:
                         dh_train, dh_test, C, int(args.k), recall_targets=rt,
                         fdr_targets=ft, min_count=args.min_label_count,
                         label="dag_head", max_iter=args.readout_max_iter,
-                        theta_topm=theta_topm)[0]
+                        theta_topm=theta_topm, checkpoint_dir=out)[0]
                     dh_train.unpersist(); dh_test.unpersist()
                 else:
                     Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(

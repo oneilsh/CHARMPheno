@@ -534,6 +534,48 @@ def test_progress_fn_fires_once_per_iteration_and_tracks_the_run():
     assert all(e["n_converged"] >= int(degen.sum()) for e in events)
 
 
+def test_progress_fn_carries_the_current_iterate_for_checkpointing():
+    """The hook also hands out the CURRENT standardized iterate, which is what
+    lets a driver checkpoint a multi-hour distributed solve (`_fit_readout_heads`
+    writes it every N iterations and feeds it back as `x0` after a crash). Three
+    properties are load-bearing: the shapes are the solver's own `(C,K)`/`(C,)`,
+    the LAST event equals the returned answer (so a checkpoint written at the
+    final iteration is the fit), and the arrays are LIVE VIEWS — documented as
+    such, because a caller that retains them without copying would silently
+    checkpoint whatever the solver did next."""
+    p = _readout_problem()
+    C, K = p["C"], p["K"]
+    events = []
+    seen = []
+
+    def _hook(ev):
+        assert ev["W_std"].shape == (C, K)
+        assert ev["b_std"].shape == (C,)
+        events.append(ev)
+        seen.append((ev["W_std"].copy(), ev["b_std"].copy()))   # the copy contract
+
+    _, _, info, _, _, (W, b, _mu, _sd) = _batched_fit(
+        p["Pi"], p["y"], p["obs"], C, K, gtol=1e-4, progress_fn=_hook)
+    assert events, "progress_fn never fired"
+    # The final iterate the hook saw IS the solve's answer.
+    assert np.allclose(seen[-1][0], W, atol=0, rtol=0)
+    assert np.allclose(seen[-1][1], b, atol=0, rtol=0)
+    # Views into the solver's own state, not copies — zero cost for the existing
+    # callers that ignore them, and the reason the payload is documented as
+    # copy-on-retain rather than as owned arrays.
+    assert all(e["W_std"].base is not None and e["b_std"].base is not None
+               for e in events)
+    assert all(e["W_std"].base is e["b_std"].base for e in events)
+    # ...and the copies are genuinely different points (the solve moved).
+    assert not np.allclose(seen[0][0], seen[-1][0])
+    # A checkpoint of the last iterate is a valid `x0`: restarting from it stops
+    # immediately rather than re-walking the path.
+    _, _, info2, _, _, _ = _batched_fit(
+        p["Pi"], p["y"], p["obs"], C, K, gtol=1e-4, max_iter=50,
+        progress_fn=None, x0=(seen[-1][0], seen[-1][1]))
+    assert int(info2["n_stats_calls"]) < int(info["n_stats_calls"])
+
+
 # --------------------------------------------------------------------------- #
 # 7. warm starts                                                               #
 # --------------------------------------------------------------------------- #

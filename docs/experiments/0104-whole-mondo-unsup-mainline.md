@@ -96,6 +96,15 @@ spark_conf:
   # is cheap insurance either way: it stops the app shrinking below the
   # non-preemptible primaries during the driver-side L-BFGS gaps.
   spark.dynamicAllocation.minExecutors: 8
+  # Preemption-wave exclusion starvation (08-28 evening: the solve died 9,112s in
+  # when a retry of task 0 "cannot run anywhere due to node and executor
+  # excludeOnFailure" aborted the TaskSet). At the 1h default, every spot kill wave
+  # adds hosts to the app-level exclude list and none age out inside a multi-hour
+  # solve, so the schedulable set only shrinks. Dataproc secondary workers come back
+  # under the SAME hostnames, so an aged-out entry is a REUSABLE node, not a stale
+  # one — 10m is long enough to route around a genuinely bad host and short enough
+  # that a preemption wave's collateral is forgiven before the next wave lands.
+  spark.excludeOnFailure.timeout: 10m
 ---
 
 # 0104 — Whole-Mondo unsupervised mainline: the first all-body-system gate + readout
@@ -342,6 +351,47 @@ corpus identity; a rebuild whose manifest lacks them now takes
 `GOOGLE_CLOUD_PROJECT` / `WORKSPACE_CDR` from the sourced `.workspace_env` (the
 fit's own source) instead of handing spark-bigquery a null parentProject, and
 exits 2 with the flag to pass when even the env lacks them.
+
+**2026-08-28 (evening) — the recovery solve died 9,112s in because the SCHEDULER ran
+out of places to put task 0; three layers added so this class of death costs minutes,
+not hours.** The re-readout was 2.5h into a healthy solve when it stopped — not on an
+OOM, not on a bad number, but on `Aborting TaskSet 3258.0 because task 0 (partition 0)
+cannot run anywhere due to node and executor excludeOnFailure`. Mechanism: the evening's
+spot-preemption waves (containers exiting 143, "Killed by external signal") each fed
+Spark's `excludeOnFailure` bookkeeping, and the app-level node exclusions last **1h by
+default** — longer than the gap between waves — so the excluded set only grew until a
+task retry had no schedulable executor left. Spark then aborted the whole job, the
+`Py4JJavaError` propagated `SparkStatsFn.__call__` → `solve_batched_lr` → `run_readout`,
+and the process died carrying every iterate it had computed. Both halves of that were
+avoidable: **the cluster was fine minutes later** (YARN replaces the containers), and the
+solve's entire resumable state is one (C,K) array. Fix, three independent layers:
+
+1. **Retry with backoff on every driver-blocking action** (`distributed_readout.
+   _retry_spark_action`, wrapping the stats-pass `treeAggregate`, the moments pass, the
+   top-m coverage pass and the lean-eval collect). 4 attempts, 60/120/240s sleeps. This
+   is sound rather than hopeful: each kernel is a pure function over a persisted RDD
+   whose lost partitions recompute from lineage, so a retried action returns the same
+   number by construction — and a NEW job starts with clean per-taskset exclude lists,
+   which is what makes a post-wave retry schedulable at all. The per-call parameter
+   broadcast moved INSIDE the retried closure (rebuilt and unpersisted per attempt),
+   since the executors holding its blocks are exactly the ones that just died.
+2. **Per-arm solver checkpoint + fingerprinted warm resume.** Every 10 iterations the
+   progress hook writes `readout_ckpt_{arm}.npz` (W_std, b_std, iter) into the run dir,
+   tmp+rename like `results_partial.json`; a resume replays it as the solver's `x0` only
+   if a sha256 of `(C, K, mu, sd, n_obs, n_pos)` matches — the moments ARE the identity
+   of the problem, since they define the standardized basis the iterate lives in and the
+   degenerate mask it zeroes. Mismatch warns and starts cold. Curvature history is NOT
+   carried (a warm start supplies a point, not a Hessian estimate — insight 0074), so
+   the first resumed iterations re-learn the scaling and are logged as expected; the
+   file is deleted once the solve returns, because the fit is then the record.
+3. **`spark.excludeOnFailure.timeout: 10m`** in this doc's `spark_conf:` block — the
+   root cause of the abort rather than its blast radius. Dataproc brings secondary
+   workers back under the same hostnames, so an aged-out exclusion names a node that is
+   usable again; at 1h it stays excluded for the rest of the solve.
+
+Layer 1 is what should stop this happening; layers 2 and 3 are what make it cheap when
+something else in the same family does. Cost of the whole thing when nothing goes wrong:
+one npz write per 10 iterations.
 
 **2026-08-21 — UNBLOCKED: the 0103 A/B gate PASSED** (macro |Δ| ≤ 1.1e-4 both arms; see
 0103's run log). Reference bar from 0103's full-row readout: unsup cardiovascular

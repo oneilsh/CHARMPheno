@@ -486,7 +486,10 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
     `out_dir` gets a `results_readout.json` after EACH arm lands — a re-readout is
     a recovery action (exp 0103 lost a 4h fit's readout to an empty summary), so
     its output has to survive the terminal it was printed to. Deliberately NOT
-    results_partial.json: that file belongs to the fit's own record."""
+    results_partial.json: that file belongs to the fit's own record. It is also
+    where the SOLVER checkpoint goes (`readout_ckpt_gated_pc.npz`), so a recovery
+    that dies mid-solve resumes rather than restarting; it is removed when the
+    solve completes."""
     C = int(manifest["C"])
     mode = resolve_readout_mode(readout_mode, C)
     K = int(manifest.get("K") or 0)
@@ -539,7 +542,15 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
         dist = distributed_score_arm(
             train_scored, test_scored, C, K, recall_targets=recall_targets,
             fdr_targets=fdr_targets, min_count=min_count, label="gated_pc",
-            theta_topm=theta_topm, max_iter=readout_max_iter)
+            theta_topm=theta_topm, max_iter=readout_max_iter,
+            # Same dir as `results_readout.json`, and for the same reason one step
+            # earlier in the pipeline: this tool IS the recovery path, and its solve
+            # is the multi-hour part. A death mid-solve (the 08-28 preemption-wave
+            # job abort cost 9,112s) now costs at most `checkpoint_every`
+            # iterations, because the next invocation finds the checkpoint next to
+            # the manifest it already reads. `None` when no out_dir was given —
+            # nowhere durable to put it.
+            checkpoint_dir=out_dir)
         results["gated_pc"] = dist[0]
     else:
         Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(train_scored, C)
