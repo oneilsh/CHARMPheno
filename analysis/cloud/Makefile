@@ -438,8 +438,21 @@ lr-readout: zip cluster-overlay $(WORKSPACE_ENV)
 # ships it (scripts/run_experiment.py:build_spark_submit_cmd): GPR_ARGS="--readout-mode
 # distributed" sends its mapPartitions kernels to the executors pickled BY MODULE
 # REFERENCE, so the executors must be able to `import distributed_readout` too.
+#
+# The EXPERIMENT DOC's `spark_conf:` front matter is injected too (resolved by
+# scripts/run_experiment.py --print-spark-conf, the same doc the fit was launched
+# from). A recovery re-readout runs on the same cluster, at the same scale, against
+# the same spot VMs as the fit it is rescuing, so it needs the same survival
+# settings — and the whole point of moving them into the doc was to stop retyping
+# them per launch. Layering matches the fit path exactly: fixed confs above, then
+# the doc's, then GPR_SPARK_CONF (spark-submit takes the last value of a repeated
+# key), so the env-style hook remains the one-off override.
 # Example (re-read a lost readout WITH the A/B equality gate):
 #   make gated-pc-readout ID=103 GPR_ARGS="--readout-mode distributed --readout-ab-check"
+# Example (recover exp 0104's readout; its doc's spark_conf rides automatically,
+# and --readout-max-iter is only needed for a fit whose manifest predates the
+# recorded readout_max_iter):
+#   make gated-pc-readout ID=104 GPR_ARGS="--readout-max-iter 60"
 GPR_SPARK_CONF     ?=
 GPR_CACHE_URI      ?= hdfs:///user/dataproc/charm/case_finding_cache
 GPR_DOC_MIN_LENGTH ?=
@@ -450,6 +463,13 @@ GPR_DOC_MIN_LENGTH ?=
 GPR_RUN_DIR        ?= $(RUNS_DIR)/$(shell printf '%04d' $(ID))-*
 gated-pc-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
+	EXP_SPARK_CONF="$$(python3 $(REPO_ROOT)/scripts/run_experiment.py \
+	    --print-spark-conf --id $(ID))" || \
+	  { echo "ERROR: could not read spark_conf from the exp doc for ID=$(ID)"; \
+	    echo "  (bad/missing docs/experiments/NNNN-*.md, or an invalid spark_conf key)"; \
+	    exit 1; }; \
+	EXP_CONF_FLAGS=""; \
+	for kv in $$EXP_SPARK_CONF; do EXP_CONF_FLAGS="$$EXP_CONF_FLAGS --conf $$kv"; done; \
 	. ./$(WORKSPACE_ENV) && \
 	PYTHONPATH=$(REPO_ROOT):$$PYTHONPATH spark-submit \
 	    --master yarn \
@@ -461,6 +481,7 @@ gated-pc-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	    --conf spark.python.worker.memory=2g \
 	    --conf spark.task.maxFailures=8 \
 	    --conf spark.excludeOnFailure.enabled=true \
+	    $$EXP_CONF_FLAGS \
 	    $(foreach kv,$(GPR_SPARK_CONF),--conf $(kv)) \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/distributed_readout.py \
 	    $(REPO_ROOT)/analysis/cloud/gated_pc_readout.py \

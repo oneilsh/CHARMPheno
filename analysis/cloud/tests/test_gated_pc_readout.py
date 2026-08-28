@@ -90,3 +90,55 @@ def test_reconstruct_model_from_npz(tmp_path):
     assert model.headWeights().shape == (C, K)
     assert float(model.getOrDefault("weightY")) == 50.0   # >0 -> transform emits proba
     assert int(model.getOrDefault("numLabels")) == C
+
+
+class TestResolveReadoutMaxIter:
+    """The solver budget a recovery re-readout runs under.
+
+    A re-readout has to REPRODUCE the run it is rescuing, and the iteration cap is
+    the one input the tool used to have no way to learn: a lost 60-iter CHARM_DEV
+    smoke and a lost 200-iter record run look identical from the run dir, so the
+    tool defaulted to 200 and the operator had to remember the difference. The fit
+    manifest now records `readout_max_iter` (post-dev-capping, i.e. what the lost
+    readout would actually have used), and this is the precedence that consumes it."""
+
+    def test_cli_wins_over_manifest(self):
+        from gated_pc_readout import resolve_readout_max_iter
+        assert resolve_readout_max_iter(30, _manifest(readout_max_iter=60)) == \
+            (30, "CLI")
+
+    def test_manifest_wins_when_no_cli_value(self):
+        from gated_pc_readout import resolve_readout_max_iter
+        assert resolve_readout_max_iter(None, _manifest(readout_max_iter=60)) == \
+            (60, "manifest")
+
+    def test_legacy_default_when_manifest_predates_the_field(self):
+        from gated_pc_readout import (_LEGACY_READOUT_MAX_ITER,
+                                      resolve_readout_max_iter)
+        # `_manifest()` has no readout_max_iter — exactly the exp 0104 fit whose
+        # recovery still needs an explicit --readout-max-iter 60.
+        assert resolve_readout_max_iter(None, _manifest()) == \
+            (_LEGACY_READOUT_MAX_ITER, "legacy default")
+        assert _LEGACY_READOUT_MAX_ITER == 200
+
+    def test_cli_wins_even_against_a_legacy_manifest(self):
+        from gated_pc_readout import resolve_readout_max_iter
+        assert resolve_readout_max_iter(60, _manifest()) == (60, "CLI")
+
+    def test_zero_or_null_recorded_value_falls_back(self):
+        from gated_pc_readout import resolve_readout_max_iter
+        # A 0/None cap is not a budget; treat it as "not recorded" rather than
+        # letting the solver take zero passes on a rescue run.
+        assert resolve_readout_max_iter(None, _manifest(readout_max_iter=0))[1] == \
+            "legacy default"
+        assert resolve_readout_max_iter(None,
+                                        _manifest(readout_max_iter=None))[1] == \
+            "legacy default"
+
+    def test_parser_default_is_none_so_the_manifest_can_speak(self):
+        from gated_pc_readout import build_parser
+        a = build_parser().parse_args(["--run-dir", "/runs/0104-x"])
+        assert a.readout_max_iter is None
+        b = build_parser().parse_args(["--run-dir", "/runs/0104-x",
+                                       "--readout-max-iter", "60"])
+        assert b.readout_max_iter == 60

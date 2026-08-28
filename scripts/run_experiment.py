@@ -285,6 +285,17 @@ def validate_frontmatter(fm: dict) -> None:
                       f"frontmatter field {key!r}", flush=True)
                 sys.exit(2)
 
+    # `spark_conf` is validated HERE, before anything is dispatched, rather than at
+    # the spark-submit build: a typo'd conf key is silently ignored by spark-submit,
+    # so a run would burn hours and only afterwards reveal that the memoryOverhead
+    # bump the doc records never actually applied. Fail while it is still cheap.
+    if "spark_conf" in fm:
+        try:
+            _spark_conf_pairs(fm["spark_conf"])
+        except ValueError as e:
+            print(f"[run-exp] ERROR: {e}", flush=True)
+            sys.exit(2)
+
 
 def build_fit_driver_path(effective: dict) -> str:
     """Return path (relative to repo root) to the fit driver for this model_class."""
@@ -1077,6 +1088,11 @@ def _apply_dev_profile(effective: dict) -> dict:
     signal — is skipped outright (``readout_calibration``). Only affects pc / gated_pc; the
     iteration knobs use min() so they only ever SHRINK.
     Calibrate once (one config at dev vs full) to confirm the ranking holds before trusting it.
+
+    Deliberately does NOT touch ``spark_conf``: those are CLUSTER-survival settings
+    (memory headroom, an executor floor), not iteration budgets. A dev smoke runs on
+    the same spot VMs as the record run and dies the same way without them, so the
+    doc's confs ride unchanged through the dev profile.
     """
     if os.environ.get("CHARM_DEV", "").strip().lower() not in ("1", "true", "yes", "on"):
         return effective
@@ -1147,6 +1163,51 @@ def cluster_overlay_path(repo_root: Path) -> Path:
     return repo_root / "analysis" / "cloud" / "dist" / "formulaic_overlay.zip"
 
 
+def _spark_conf_pairs(spark_conf) -> list[str]:
+    """Validate an experiment doc's ``spark_conf`` mapping into ``["k=v", ...]``.
+
+    The experiment doc is the RECORD: a run that only works with
+    ``spark.executor.memoryOverhead=4g`` (exp 0104's spot-VM kill waves) or a
+    ``spark.dynamicAllocation.minExecutors`` floor is not reproducible if that
+    knowledge lives in whatever env var the operator happened to retype. So the
+    front matter carries it, right beside ``max_iter`` and ``num_partitions``,
+    and it lands in the summary.md effective-config dump like every other key.
+
+    Values are coerced with ``str()`` so the natural YAML spellings all work:
+    ``4g`` parses as a string, ``8`` as an int, and both must reach spark-submit
+    as text.
+
+    Keys MUST start with ``spark.`` — spark-submit silently ignores a conf name it
+    does not recognize, so ``spark.executor.memoryOverhad=4g`` would vanish without
+    a whisper and the run would fail exactly the way the conf was meant to prevent.
+    A ValueError here is the only place that mistake is catchable.
+    """
+    if not spark_conf:
+        return []
+    if not isinstance(spark_conf, dict):
+        raise ValueError(
+            f"spark_conf must be a YAML mapping of conf key -> value, got "
+            f"{type(spark_conf).__name__}: {spark_conf!r}")
+    pairs = []
+    for key, value in spark_conf.items():
+        key = str(key)
+        if not key.startswith("spark."):
+            raise ValueError(
+                f"spark_conf key {key!r} does not start with 'spark.' — "
+                "spark-submit ignores unknown conf names silently, so this would "
+                "have had no effect at all. Fix the key or drop it.")
+        pairs.append(f"{key}={str(value)}")
+    return pairs
+
+
+def _experiment_spark_confs(spark_conf) -> list[str]:
+    """The experiment doc's ``spark_conf`` as flattened ``--conf k=v`` flags."""
+    flags: list[str] = []
+    for pair in _spark_conf_pairs(spark_conf):
+        flags += ["--conf", pair]
+    return flags
+
+
 def _extra_spark_confs() -> list[str]:
     """Optional extra ``--conf k=v`` pairs from ``CHARM_SPARK_CONF`` (space-separated).
 
@@ -1175,9 +1236,18 @@ def _extra_spark_confs() -> list[str]:
 
 def build_spark_submit_cmd(
     script: str, script_args: list[str], repo_root: Path,
-    driver_memory: str = "4g",
+    driver_memory: str = "4g", spark_conf: dict | None = None,
 ) -> list[str]:
     """Build the full spark-submit command line.
+
+    Conf layering, last-wins (spark-submit takes the LAST value of a repeated
+    ``--conf key``): the fixed SPARK_SUBMIT_FLAGS, then the experiment doc's
+    ``spark_conf`` front matter, then ``CHARM_SPARK_CONF``. That order encodes
+    who is allowed to overrule whom — the fixed flags are the house defaults, the
+    exp doc is the durable RECORD of what this experiment needs (so it never has
+    to be retyped and never goes missing), and the env var stays the
+    per-invocation escape hatch for a one-off probe that must not be written down
+    as the experiment's own configuration.
 
     All Python travels via --py-files on the image's own interpreter -- no
     interpreter override, no --files. Two zips of our own source (spark_vi,
@@ -1211,6 +1281,7 @@ def build_spark_submit_cmd(
     return (
         ["spark-submit"]
         + SPARK_SUBMIT_FLAGS
+        + _experiment_spark_confs(spark_conf)
         + _extra_spark_confs()
         + ["--driver-memory", driver_memory]
         + ["--py-files", py_files_val, script]
@@ -1422,6 +1493,13 @@ def main(argv: list[str] | None = None) -> int:
                              "if the build reports a covariate-cache miss, then "
                              "retry once (default: on). --no-auto-covariates "
                              "restores fail-fast.")
+    parser.add_argument("--print-spark-conf", action="store_true",
+                        help="Print the experiment's spark_conf front matter as "
+                             "space-separated k=v pairs on stdout and exit (empty "
+                             "if the doc has none). Requires --id N. Launches "
+                             "nothing: it exists so other launchers (the Makefile's "
+                             "gated-pc-readout target) can reuse the doc's recorded "
+                             "Spark tuning instead of duplicating it.")
     parser.add_argument("--runs-dir", default=DEFAULT_RUNS_DIR,
                         help="Base directory for run output. Default: %(default)s")
     parser.add_argument("--experiments-dir", type=Path, default=EXPERIMENTS_DIR,
@@ -1429,6 +1507,30 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--defaults-dir", type=Path, default=DEFAULTS_DIR,
                         help="Where experiments/defaults/*.yaml files live.")
     args = parser.parse_args(argv)
+
+    # --print-spark-conf: a QUERY, not a run. Handled before every other branch so
+    # nothing but the pairs reaches stdout (the Makefile captures it with `$(...)`
+    # and splits on whitespace, so a stray "[run-exp] experiment: ..." line would
+    # be spliced into the spark-submit command line). Diagnostics go to stderr,
+    # which the caller still sees and which `$(...)` does not swallow.
+    #
+    # Reads the doc's own front matter — NOT the defaults-merged effective config:
+    # the defaults YAMLs carry corpus/model knobs, never Spark ones, and staying
+    # off the defaults chain keeps this mode dependency-free (no cohort file, no
+    # workspace env) so a Makefile recipe can call it unconditionally.
+    if args.print_spark_conf:
+        if args.id is None:
+            print("[run-exp] ERROR: --print-spark-conf requires --id N",
+                  file=sys.stderr, flush=True)
+            return 2
+        try:
+            exp_path = find_by_id(args.experiments_dir, args.id)
+            pairs = _spark_conf_pairs(read_frontmatter(exp_path).get("spark_conf"))
+        except (FileNotFoundError, ValueError) as e:
+            print(f"[run-exp] ERROR: {e}", file=sys.stderr, flush=True)
+            return 2
+        print(" ".join(pairs))
+        return 0
 
     if args.no_eval and args.eval_only:
         print("[run-exp] ERROR: --no-eval and --eval-only are contradictory", flush=True)
@@ -1577,6 +1679,7 @@ def main(argv: list[str] | None = None) -> int:
         fit_cmd = build_spark_submit_cmd(
             str(fit_script), fit_args, REPO_ROOT,
             driver_memory=_driver_memory_for(model_class),
+            spark_conf=effective.get("spark_conf"),
         )
         # The pc / gated_pc drivers import analysis.pc (the in-memory eval /
         # pc_topics_lr scorer), which is NOT in any --py-files zip. In client mode
@@ -1632,7 +1735,12 @@ def main(argv: list[str] | None = None) -> int:
         # 6. Dispatch eval (capture stdout into a string for sanitized append)
         eval_script = REPO_ROOT / "analysis" / "cloud" / "eval_coherence_cloud.py"
         eval_args = build_eval_args(save_dir, effective)
-        eval_cmd = build_spark_submit_cmd(str(eval_script), eval_args, REPO_ROOT)
+        # Same spark_conf as the fit: the doc's tuning describes THIS experiment's
+        # data at THIS cluster's shape, and eval/build read the same corpus.
+        eval_cmd = build_spark_submit_cmd(
+            str(eval_script), eval_args, REPO_ROOT,
+            spark_conf=effective.get("spark_conf"),
+        )
         # Display-only join; cmd is passed as list to Popen/run, not via shell.
         print(f"[run-exp] eval spark-submit: {' '.join(eval_cmd)}", flush=True)
         eval_proc = subprocess.run(
@@ -1652,7 +1760,10 @@ def main(argv: list[str] | None = None) -> int:
         build_script = REPO_ROOT / "analysis" / "cloud" / "build_dashboard_cloud.py"
         zip_name = f"{fm['id']:04d}-{fm['slug']}-dashboard.zip"
         b_args = build_dashboard_args(effective, save_dir, zip_name)
-        build_cmd = build_spark_submit_cmd(str(build_script), b_args, REPO_ROOT)
+        build_cmd = build_spark_submit_cmd(
+            str(build_script), b_args, REPO_ROOT,
+            spark_conf=effective.get("spark_conf"),
+        )
         # Display-only join; cmd is passed as list to Popen, not via shell.
         print(f"[run-exp] build spark-submit: {' '.join(build_cmd)}", flush=True)
         write_build_section_header(summary_path)

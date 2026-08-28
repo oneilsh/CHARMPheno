@@ -1988,6 +1988,13 @@ def main() -> int:
             # a calibration-skipped run has no ECE record at all.
             "readout_theta_topm": theta_topm,
             "readout_calibration": "on" if run_calibration else "off",
+            # The solver iteration cap the fit ACTUALLY used — i.e. post-CHARM_DEV
+            # capping, since the dev profile rewrites args before we get here. A
+            # recovery re-readout (gated_pc_readout) must reproduce the run it is
+            # rescuing, and without this field it cannot know whether the lost
+            # readout was a 60-iter dev smoke or a 200-iter record run; it defaulted
+            # to 200 and the operator had to remember to pass --readout-max-iter 60.
+            "readout_max_iter": int(args.readout_max_iter),
             "recall_targets": args._recall_targets,
             "fdr_targets": args._fdr_targets,
             "with_dag_head": args.with_dag_head,
