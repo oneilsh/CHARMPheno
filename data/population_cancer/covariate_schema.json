@@ -1,0 +1,51 @@
+{
+  "k": 20,
+  "controls": [
+    {
+      "name": "age",
+      "type": "continuous",
+      "range": [
+        29,
+        81
+      ],
+      "default": 60
+    },
+    {
+      "name": "sex",
+      "type": "categorical",
+      "reference": "F",
+      "levels": [
+        "F",
+        "M"
+      ],
+      "proportions": {
+        "F": 0.6260843153930263,
+        "M": 0.37391568460697366
+      }
+    }
+  ],
+  "design_columns": [
+    {
+      "name": "Intercept",
+      "recipe": {
+        "kind": "intercept"
+      }
+    },
+    {
+      "name": "C(sex)[T.M]",
+      "recipe": {
+        "kind": "dummy",
+        "var": "sex",
+        "level": "M"
+      }
+    },
+    {
+      "name": "age",
+      "recipe": {
+        "kind": "main",
+        "var": "age"
+      }
+    }
+  ],
+  "unsupported": []
+}

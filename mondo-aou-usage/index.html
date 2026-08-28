@@ -1,0 +1,1755 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Counting Diagnoses: AllOfUs on Mondo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Serif:wght@500;600&display=swap">
+<style>
+/* ---- tokens: light is the bare :root; dark redefines tokens only ---------- */
+:root{
+  --bg:#f4f6f7; --surface:#ffffff; --surface-2:#eef1f3; --surface-3:#e6eaed;
+  --border:#d8dee2; --border-strong:#c2cbd1;
+  --ink:#171e24; --ink-2:#51606c; --muted:#8592a0;
+  --accent:#00867e; --accent-ink:#ffffff;
+  --axis-mondo:#cb5d88; --axis-hpo:#3a9880;   /* two-ontology node scheme (light, muted) */
+  --cat-reported:#009e93; --cat-used-small:#c9760a; --cat-used-branch:#6a55d6; --cat-other:#9aa4b0;
+  --cat-reported-soft:#009e9322; --cat-used-small-soft:#c9760a22; --cat-used-branch-soft:#6a55d622; --cat-other-soft:#9aa4b01f;
+  --collision:#e67e22;
+  --shadow:0 1px 2px rgba(20,30,40,.06),0 8px 24px rgba(20,30,40,.06);
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+  --serif:"IBM Plex Serif",Georgia,"Times New Roman",serif;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#111417; --surface:#191d22; --surface-2:#20262c; --surface-3:#272e35;
+  --border:#2c343c; --border-strong:#3a444d;
+  --ink:#e7ecef; --ink-2:#a6b1bc; --muted:#6d7883;
+  --accent:#2bb5aa; --accent-ink:#06201e;
+  --axis-mondo:#d873a0; --axis-hpo:#48b394;   /* two-ontology node scheme (dark, muted) */
+  --cat-reported:#1fb0a4; --cat-used-small:#d59234; --cat-used-branch:#9483ea; --cat-other:#5c6672;
+  --cat-reported-soft:#1fb0a422; --cat-used-small-soft:#d5923422; --cat-used-branch-soft:#9483ea24; --cat-other-soft:#5c66721f;
+  --collision:#f0883e;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 10px 30px rgba(0,0,0,.35);
+}}
+:root[data-theme="dark"]{
+  --bg:#111417; --surface:#191d22; --surface-2:#20262c; --surface-3:#272e35;
+  --border:#2c343c; --border-strong:#3a444d;
+  --ink:#e7ecef; --ink-2:#a6b1bc; --muted:#6d7883;
+  --accent:#2bb5aa; --accent-ink:#06201e;
+  --axis-mondo:#d873a0; --axis-hpo:#48b394;   /* two-ontology node scheme (dark, muted) */
+  --cat-reported:#1fb0a4; --cat-used-small:#d59234; --cat-used-branch:#9483ea; --cat-other:#5c6672;
+  --cat-reported-soft:#1fb0a422; --cat-used-small-soft:#d5923422; --cat-used-branch-soft:#9483ea24; --cat-other-soft:#5c66721f;
+  --collision:#f0883e;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 10px 30px rgba(0,0,0,.35);
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);
+  font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+h1,h2,h3{margin:0;text-wrap:balance}
+a{color:var(--accent)}
+button{font-family:inherit;cursor:pointer}
+.tnum{font-variant-numeric:tabular-nums}
+.mono{font-family:var(--mono)}
+mark{background:color-mix(in srgb,var(--accent) 30%,transparent);color:inherit;font-weight:700;border-radius:2px;padding:0 1px}
+.gnode.match .glbl{fill:var(--accent);font-weight:800}
+
+/* ---- shell --------------------------------------------------------------- */
+.wrap{max-width:none;margin:0;padding:14px 18px 16px;min-height:100vh;display:flex;flex-direction:column}
+header.top{position:relative;padding:2px 0 12px;border-bottom:1px solid var(--border)}
+.brand{min-width:0;padding-right:44px}   /* room for the pinned theme toggle */
+.brand .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--accent);font-weight:600}
+.brand h1{font-family:var(--serif);font-weight:600;font-size:29px;letter-spacing:-.01em;
+  margin-top:3px;line-height:1.1}
+.brand p{margin:6px 0 0;color:var(--ink-2);max-width:none}
+.mtip{position:relative;color:var(--accent);cursor:help;text-decoration:underline;
+  text-decoration-style:dotted;text-underline-offset:2px;outline:none}
+.mtip .tip{position:absolute;right:0;left:auto;top:calc(100% + 8px);z-index:40;width:min(60ch,88vw);max-width:min(60ch,88vw);
+  display:flex;flex-direction:column;gap:8px;padding:14px 16px;border-radius:10px;
+  background:var(--surface);border:1px solid var(--border);color:var(--ink-2);
+  box-shadow:0 12px 34px rgba(0,0,0,.28);font-family:var(--sans);font-size:13px;line-height:1.5;
+  font-weight:400;text-decoration:none;opacity:0;visibility:hidden;
+  transform:translateY(-4px);transition:opacity .14s,transform .14s,visibility .14s}
+.mtip .tip::before{content:"";position:absolute;right:14px;top:-6px;width:11px;height:11px;
+  background:var(--surface);border-left:1px solid var(--border);border-top:1px solid var(--border);
+  transform:rotate(45deg)}
+.mtip:hover .tip,.mtip:focus-visible .tip{opacity:1;visibility:visible;transform:translateY(0)}
+.mtip .tip em{color:var(--ink);font-style:italic}
+.toolbar{display:flex;gap:8px;align-items:center;position:absolute;top:2px;right:0}
+.btn{background:var(--surface);border:1px solid var(--border);color:var(--ink-2);
+  border-radius:8px;padding:7px 11px;font-size:12.5px;font-weight:500;display:inline-flex;
+  gap:7px;align-items:center;white-space:nowrap}
+.btn:hover{border-color:var(--border-strong);color:var(--ink)}
+.btn svg{width:15px;height:15px}
+.btn.ic{padding:6px;border-radius:7px}
+.btn.ic svg{width:16px;height:16px}
+
+/* ---- data-source strip --------------------------------------------------- */
+.source{display:flex;flex-wrap:wrap;gap:6px 18px;align-items:center;margin:14px 0 4px;
+  font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+.source b{color:var(--ink-2);font-weight:500}
+.badge-sample{color:var(--cat-used-small);border:1px solid var(--cat-used-small);
+  border-radius:5px;padding:1px 6px;font-weight:600;letter-spacing:.04em}
+
+/* ---- KPI row ------------------------------------------------------------- */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:18px 0 8px}
+.kpi{background:var(--surface);border:1px solid var(--border);border-radius:12px;
+  padding:14px 15px;box-shadow:var(--shadow)}
+.kpi .k-label{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);
+  font-weight:600;display:flex;align-items:center;gap:6px}
+.kpi .k-value{font-family:var(--mono);font-weight:600;font-size:27px;margin-top:6px;letter-spacing:-.02em}
+.kpi .k-sub{font-size:11.5px;color:var(--ink-2);margin-top:2px}
+.dot{width:9px;height:9px;border-radius:2px;flex:0 0 auto}
+.kpi.span2{grid-column:span 2}
+@media(max-width:620px){.kpi.span2{grid-column:span 1}}
+
+/* coverage bar */
+.cover{display:flex;height:16px;border-radius:5px;overflow:hidden;gap:2px;margin-top:12px;background:transparent}
+.cover span{display:block;height:100%;border-radius:2px}
+.cover-legend{display:flex;flex-wrap:wrap;gap:10px 16px;margin-top:10px;font-size:11.5px;color:var(--ink-2)}
+.cover-legend .li{display:flex;gap:6px;align-items:center}
+
+/* ---- controls ------------------------------------------------------------ */
+.controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:22px 0 12px;
+  position:sticky;top:0;z-index:5;background:var(--bg);padding:8px 0;border-bottom:1px solid var(--border)}
+.filters{display:flex;flex-wrap:wrap;gap:7px}
+.chip{display:inline-flex;gap:7px;align-items:center;border:1px solid var(--border);
+  background:var(--surface);border-radius:20px;padding:5px 11px 5px 9px;font-size:12.5px;
+  font-weight:500;color:var(--ink-2);user-select:none}
+.chip:hover{border-color:var(--border-strong)}
+.chip[aria-pressed="true"]{color:var(--ink);border-color:var(--border-strong)}
+.chip[aria-pressed="false"]{opacity:.5}
+.chip .sw{width:11px;height:11px;border-radius:3px}
+.chip .cnt{font-family:var(--mono);font-size:11px;color:var(--muted)}
+.grow{flex:1 1 180px}
+.search{display:flex;align-items:center;gap:7px;background:var(--surface);border:1px solid var(--border);
+  border-radius:8px;padding:5px 10px;width:220px;max-width:38vw}
+.search input{border:0;background:transparent;color:var(--ink);font-family:var(--sans);
+  font-size:13px;outline:none;width:100%}
+.search svg{width:15px;height:15px;color:var(--muted);flex:0 0 auto}
+.tabs{display:flex;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;padding:3px}
+.tabs button{border:0;background:transparent;color:var(--ink-2);border-radius:6px;
+  padding:6px 13px;font-size:12.5px;font-weight:500}
+.tabs button[aria-selected="true"]{background:var(--surface);color:var(--ink);box-shadow:var(--shadow)}
+
+/* ---- panels -------------------------------------------------------------- */
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:12px;
+  box-shadow:var(--shadow);overflow:hidden}
+.view{display:none}
+.view.on{display:block}
+.hint{color:var(--muted);font-size:12px;padding:10px 16px;border-top:1px solid var(--border);
+  font-family:var(--mono)}
+
+/* tree */
+#tree{max-height:70vh;overflow:auto}
+.row{display:flex;align-items:center;gap:8px;padding:4px 14px;border-bottom:1px solid var(--surface-2);
+  cursor:pointer;white-space:nowrap}
+.row:hover{background:var(--surface-2)}
+.row.sel{background:var(--cat-reported-soft)}
+.row .caret{width:16px;height:16px;flex:0 0 auto;color:var(--muted);display:inline-flex;
+  align-items:center;justify-content:center;border-radius:4px}
+.row .caret.leaf{visibility:hidden}
+.row .caret:hover{background:var(--surface-3);color:var(--ink)}
+.row .sw{width:10px;height:10px;border-radius:3px;flex:0 0 auto}
+.row .lbl{overflow:hidden;text-overflow:ellipsis;flex:1 1 auto}
+.row .lbl small{color:var(--muted);font-family:var(--mono);font-size:10.5px;margin-left:7px}
+.row .cnt{font-family:var(--mono);font-size:12px;font-weight:500;flex:0 0 auto}
+.row .cnt.reported{color:var(--cat-reported)}
+.row .cnt.used_small{color:var(--cat-used-small)}
+.row .cnt.zero{color:var(--muted)}
+.row .col{width:7px;height:7px;border-radius:50%;background:var(--collision);flex:0 0 auto}
+.kindtag{font-family:var(--mono);font-size:9.5px;color:var(--muted);border:1px solid var(--border);
+  border-radius:4px;padding:0 4px;flex:0 0 auto}
+
+/* prevalence bar (hierarchy rows) */
+.pbar{width:94px;height:11px;flex:0 0 auto;border-radius:3px;background:var(--surface-2);
+  position:relative;overflow:hidden;margin-left:2px;border:1px solid var(--border)}
+.pbar .fill,.pbar .unc{position:absolute;left:0;top:0;bottom:0;border-radius:3px}
+.pbar .unc{opacity:.30}
+.pbar.small .fill{background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.0),rgba(255,255,255,.0) 2px,rgba(255,255,255,.45) 2px,rgba(255,255,255,.45) 4px)}
+.mode-t{margin-right:2px}
+.mode-t button[aria-selected="true"]{color:var(--accent)}
+
+/* treemap + table */
+#treemap-wrap{padding:14px}
+#treemap{width:100%;display:block;border-radius:8px;overflow:visible}
+.tm-note{padding:0 16px 14px;color:var(--ink-2);font-size:12.5px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:8px 14px;border-bottom:1px solid var(--surface-2);white-space:nowrap}
+th{position:sticky;top:0;background:var(--surface);font-size:11px;letter-spacing:.04em;
+  text-transform:uppercase;color:var(--muted);font-weight:600;cursor:pointer;z-index:1}
+th:hover{color:var(--ink)}
+td.num{font-family:var(--mono);text-align:right}
+#table-scroll{max-height:70vh;overflow:auto}
+tr.trow:hover{background:var(--surface-2);cursor:pointer}
+
+/* graph body-system palette (Okabe-Ito, colorblind-safe) + descendant-highlight hue */
+:root{--sys0:#0072B2;--sys1:#E69F00;--sys2:#009E73;--sys3:#CC79A7;--sys4:#D55E00;--sys5:#56B4E9;--desc:#2f6fed;--rare:#a1006b}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --sys0:#4a97d6;--sys1:#f0a92a;--sys2:#2bbf9e;--sys3:#dd95c6;--sys4:#f0713a;--sys5:#8fd0f5;--desc:#6f9bff;--rare:#e77fc0}}
+:root[data-theme="dark"]{--sys0:#4a97d6;--sys1:#f0a92a;--sys2:#2bbf9e;--sys3:#dd95c6;--sys4:#f0713a;--sys5:#8fd0f5;--desc:#6f9bff;--rare:#e77fc0}
+.rare-tag{color:var(--rare);border:1px solid var(--rare);border-radius:4px;padding:0 4px;font-size:9.5px;font-family:var(--mono);flex:0 0 auto;letter-spacing:.03em}
+
+/* graph (DAG explorer) */
+#view-graph{position:relative;--dim:.2}
+.graph-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--border)}
+.graph-toolbar .grow{flex:1 1 auto}
+.tb-sep{width:1px;align-self:stretch;background:var(--border);margin:2px 4px}
+.tb-label{font-family:var(--mono);font-size:10.5px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+.btn.sm{padding:5px 10px;font-size:12px;border-radius:7px}
+.g-hint{color:var(--muted);font-size:11px;font-family:var(--mono)}
+#graph{width:100%;flex:1 1 auto;min-height:320px;display:block;cursor:grab;touch-action:none;
+  background:radial-gradient(circle at 1px 1px, var(--surface-2) 1.1px, transparent 0) 0 0/24px 24px}
+#graph.grabbing{cursor:grabbing}
+/* dim slider (inline in the graph toolbar; neutral gray, not accent) */
+.dim-ctl{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:10.5px;
+  color:var(--muted);letter-spacing:.04em}
+.dim-ctl input[type=range]{width:84px;accent-color:var(--muted);cursor:pointer}
+.tb-check{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--ink-2);cursor:pointer;white-space:nowrap}
+.tb-check input{accent-color:var(--muted);cursor:pointer}
+.gnode,.gmore{cursor:pointer;transition:transform .4s cubic-bezier(.4,0,.2,1),opacity .3s ease}
+.gnode.dragging{cursor:grabbing}
+.gnode.dragging .gcirc{stroke:var(--accent);stroke-width:2.4}
+.gnode .gcirc{stroke:var(--surface);stroke-width:1.5;transition:r .4s cubic-bezier(.4,0,.2,1)}
+.gnode.sel .gcirc{stroke:var(--accent);stroke-width:2.4}
+.gnode .gring{transition:r .4s cubic-bezier(.4,0,.2,1)}
+.gnode text{font-family:var(--sans);paint-order:stroke;stroke:var(--surface);stroke-width:3.5px;stroke-linejoin:round}
+.gnode .glbl{fill:var(--ink);font-weight:600}
+.gnode .gsub{fill:var(--ink-2);font-family:var(--mono)}
+.gedge{fill:none;stroke:var(--ink-2);stroke-opacity:.5;stroke-width:1.5;stroke-linecap:round;
+  transition:d .4s cubic-bezier(.4,0,.2,1),opacity .3s ease}
+/* edge that summarizes a path through hidden nodes: same solid line, quieter/thinner */
+.gedge.via-hidden{stroke-opacity:.2;stroke-width:1}
+.gmore rect{fill:color-mix(in srgb,var(--accent) 20%,var(--surface));stroke:var(--accent);stroke-width:1.75}
+.gmore text{fill:var(--accent);font-family:var(--mono);font-weight:700}
+.gmore:hover rect{fill:color-mix(in srgb,var(--accent) 34%,var(--surface))}
+.gicon{fill:none;stroke:#fff;stroke-width:7;stroke-linecap:round;stroke-linejoin:round;pointer-events:none;opacity:.95}
+.grare{fill:#f5b301;font-weight:700;paint-order:stroke;stroke:var(--surface);stroke-width:2.6px;pointer-events:none}
+/* per-node menu dot (hover, or right-click anywhere on the node) */
+.gmenu{opacity:0;pointer-events:none;transition:opacity .12s;cursor:pointer}
+.gnode:hover .gmenu{opacity:1;pointer-events:auto}
+.gmenu-bg{fill:var(--surface);stroke:var(--border-strong);stroke-width:1.2}
+.gmenu-dots{fill:var(--ink-2)}
+.gmenu:hover .gmenu-bg{stroke:var(--accent)}
+/* "+" badge: node has children not yet shown; fades out once fully expanded */
+.gplus{transition:opacity .2s;pointer-events:none}
+.gplus-bg{fill:var(--surface);stroke:var(--ink-2);stroke-width:1.3}
+.gplus-sign{stroke:var(--ink-2);stroke-width:1.7;stroke-linecap:round;fill:none}
+/* floating context menu */
+.ctx-menu{position:fixed;z-index:60;min-width:200px;background:var(--surface);
+  border:1px solid var(--border-strong);border-radius:10px;box-shadow:0 14px 40px rgba(10,15,20,.28);
+  padding:5px;font-size:13px;color:var(--ink)}
+.ctx-menu .ctx-title{font-family:var(--mono);font-size:10.5px;letter-spacing:.04em;color:var(--muted);
+  text-transform:uppercase;padding:6px 9px 4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px}
+.ctx-menu button{display:flex;width:100%;gap:10px;align-items:center;justify-content:space-between;
+  background:none;border:0;color:var(--ink);text-align:left;padding:7px 9px;border-radius:6px;cursor:pointer;font-size:13px}
+.ctx-menu button:hover:not(:disabled){background:var(--surface-2)}
+.ctx-menu button:disabled{color:var(--muted);cursor:default;opacity:.6}
+.ctx-menu button .k{color:var(--muted);font-family:var(--mono);font-size:11px}
+.ctx-menu .sep{height:1px;background:var(--border);margin:5px 4px}
+.ctx-menu button.danger{color:var(--collision)}
+/* lineage highlight: ancestors (accent) + descendants (--desc) stay lit, rest recede
+   to --dim (set by the dim slider; edges recede a bit further) */
+.sel-active .gnode:not(.hl):not(.hld){opacity:var(--dim,.2)}
+.sel-active .gmore{opacity:var(--dim,.2)}
+.sel-active .gedge:not(.hl):not(.hld){opacity:calc(var(--dim,.2)*0.35)}
+.gnode.hl .gcirc{stroke:var(--accent);stroke-width:2.1}
+.gnode.hld .gcirc{stroke:var(--desc);stroke-width:1.9}
+.gedge.hl{stroke:var(--accent);stroke-opacity:.95;stroke-width:1.9}
+.gedge.hld{stroke:var(--desc);stroke-opacity:.9;stroke-width:1.7}
+/* hover peek: same two-tone highlight as selection, transient */
+.peek-active .gnode:not(.pk):not(.pkd){opacity:var(--dim,.2)}
+.peek-active .gmore{opacity:var(--dim,.2)}
+.peek-active .gedge:not(.pk):not(.pkd){opacity:calc(var(--dim,.2)*0.35)}
+.gnode.pk .gcirc{stroke:var(--accent);stroke-width:1.8}
+.gnode.pkd .gcirc{stroke:var(--desc);stroke-width:1.7}
+.gedge.pk{stroke:var(--accent);stroke-opacity:.9;stroke-width:1.7}
+.gedge.pkd{stroke:var(--desc);stroke-opacity:.82;stroke-width:1.6}
+.g-legend{display:flex;flex-wrap:wrap;gap:5px 13px;padding:7px 14px 10px;border-bottom:1px solid var(--border);font-size:11px;color:var(--ink-2)}
+.g-legend .lg-item{display:flex;align-items:center;gap:5px}
+.g-legend .lg-sw{width:10px;height:10px;border-radius:3px;flex:0 0 auto}
+.g-focus-chip{display:none;align-items:center;gap:6px;background:var(--surface-2);border:1px solid var(--border-strong);border-radius:20px;padding:3px 5px 3px 11px;font-size:12px;color:var(--ink);font-family:var(--mono)}
+.g-focus-chip button{border:0;background:transparent;color:var(--ink-2);font-size:15px;line-height:1;padding:0 4px;cursor:pointer;border-radius:50%}
+.g-focus-chip button:hover{color:var(--ink);background:var(--surface-3)}
+@media(prefers-reduced-motion:reduce){.gnode,.gmore,.gedge,.gnode .gcirc,.gnode .gring{transition:none}}
+
+/* stage: graph + permanent detail panel side by side (stacked on narrow),
+   filling the viewport height so the graph stays visible */
+.stage{display:flex;gap:14px;align-items:stretch;flex:1 1 auto;min-height:0;margin-top:12px}
+.stage .panel{flex:1 1 auto;min-width:0;display:flex}
+#view-graph{display:flex;flex-direction:column;flex:1 1 auto;min-height:0}
+/* detail panel — a permanent docked column, not a slide-in overlay */
+.drawer{flex:0 0 370px;display:flex;flex-direction:column;background:var(--surface);
+  border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);overflow:hidden}
+@media(max-width:900px){
+  .wrap{min-height:0}
+  .stage{flex-direction:column;flex:0 0 auto}
+  #graph{height:66vh;flex:0 0 auto;min-height:0}
+  .drawer{flex:0 0 auto}
+}
+.drawer-scroll{flex:1 1 auto;overflow:auto;min-height:0}
+.drawer-foot{border-top:1px solid var(--border);padding:10px 16px;display:flex;flex-wrap:wrap;
+  gap:4px 14px;align-items:center;font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+.drawer .dh{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;
+  padding:18px 18px 14px;border-bottom:1px solid var(--border)}
+.drawer .dh h3{font-family:var(--serif);font-size:19px;font-weight:600;line-height:1.2}
+.drawer .close{border:0;background:var(--surface-2);border-radius:7px;width:30px;height:30px;
+  color:var(--ink-2);font-size:17px;flex:0 0 auto;cursor:pointer}
+.drawer .body{padding:16px 18px}
+.drawer-empty{padding:40px 18px;color:var(--muted);font-size:13px;text-align:center;line-height:1.6}
+.kv{display:grid;grid-template-columns:118px 1fr;gap:8px 12px;font-size:13px;margin-bottom:16px}
+.kv dt{color:var(--muted);font-size:12px}
+.kv dd{margin:0;font-family:var(--mono);font-size:12.5px;word-break:break-word}
+.pill{display:inline-flex;align-items:center;gap:6px;border-radius:20px;padding:3px 10px;
+  font-size:12px;font-weight:600;font-family:var(--sans)}
+.section-t{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);
+  font-weight:600;margin:4px 0 8px}
+.chiplist{display:flex;flex-wrap:wrap;gap:6px}
+.chiplist a,.chiplist span{font-family:var(--mono);font-size:11.5px;background:var(--surface-2);
+  border:1px solid var(--border);border-radius:6px;padding:3px 7px;text-decoration:none;color:var(--ink-2)}
+.warn{background:var(--cat-used-small-soft);border:1px solid var(--cat-used-small);border-radius:9px;
+  padding:10px 12px;font-size:12.5px;color:var(--ink);margin-bottom:14px;line-height:1.45}
+.tip{position:fixed;pointer-events:none;background:var(--ink);color:var(--bg);font-size:12px;
+  font-family:var(--mono);padding:6px 9px;border-radius:6px;z-index:40;opacity:0;transition:opacity .1s;max-width:280px}
+.foot{margin-top:26px;color:var(--muted);font-size:11.5px;line-height:1.6;font-family:var(--mono)}
+.foot b{color:var(--ink-2);font-weight:500}
+</style>
+</head>
+<body data-palette="#009e93,#c9760a,#6a55d6,#9aa4b0">
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <h1 id="brand-h1">Counting Diagnoses: AllOfUs on Mondo</h1>
+      <p>Diagnosis counts from the AllOfUs EHR database (v8) mapped to the Mondo disease and HPO phenotype ontologies. Counts of 20 or fewer have been masked; similar counts may be found at the <a href="https://databrowser.researchallofus.org/" target="_blank" rel="noopener">AllOfUs Public Data Browser</a>. <span class="mtip" tabindex="0">Methods details<span class="tip" role="tooltip"><span>Each participant's coded conditions in the AllOfUs <em>condition_occurrence</em> table are routed to a single best-home term by a ladder, taking the most specific reachable: (1) the <em>source</em> code (e.g. ICD) is one of a Mondo term's <em>same&nbsp;as</em> cross-references; else (2) its standardized SNOMED concept maps to a Mondo term via OMOP <em>Maps&nbsp;to</em>; else (3) the concept is an exact <b>HPO</b> phenotype term (used when Mondo has no specific term); else (4) it is rolled up the SNOMED hierarchy to the nearest Mondo ancestor. Mondo (diseases) is preferred, so HPO (phenotypes) claims only what Mondo would otherwise over-generalize &mdash; headache, nausea, lab abnormalities, and the like. Each participant is credited once per term; counts of 1&ndash;20 are masked and shown as &le;20.</span><span>The two ontologies are drawn together but <b>unlinked</b>: Mondo diseases grow rightward from the center, HPO phenotypes leftward, their roots meeting in the middle. Both keep their real branch structure &mdash; a grouping term with no code of its own is retained when it is a genuine <em>branch point</em> (two or more children lead to used terms); purely linear pass-through levels are collapsed.</span><span>A single coded condition can legitimately reach several terms in one ontology at once — its SNOMED concept is shared by several terms (OMOP's ICD&rarr;SNOMED <em>Maps&nbsp;to</em> is one-to-many), or it rolled up to several equally-near ancestors in Mondo's poly-hierarchy. So a term's own count answers "how many participants touch this term," and these per-term counts are not meant to be added together. When terms are combined in a subtree roll-up, each shared diagnosis is instead <em>split 1/m</em> across the <em>m</em> terms it reaches (fractional attribution), so the rolled-up total is de-double-counted and honestly additive.</span><span>Two node-size views are available. <em>Per-term</em> sizes each node by its own count, so a broad classification can look small while its specific children are large. <em>Rolled up</em> sizes each node by its de-double-counted subtree total — a diagnosis count (a participant with several diagnoses under one branch counts once per diagnosis), reported as a central estimate &plusmn; small-cell suppression.</span><span><b>Note that many Mondo disease entries do not have corresponding codes that would be found in an EHR; others do, but there is no direct mapping between them. Small counts or counts of 0 should thus be interpreted as absence of evidence, rather than evidence of absence.</b></span></span></span></p>
+    </div>
+    <div class="toolbar">
+      <button class="btn ic" id="theme" title="Toggle theme" aria-label="Toggle color theme">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v3M12 20v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M1 12h3M20 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg></button>
+    </div>
+    <input type="file" id="file" accept="application/json,.json" hidden>
+  </header>
+
+  <div class="stage">
+    <div class="panel">
+      <div class="view on" id="view-graph">
+        <div class="graph-toolbar">
+          <button class="btn ic" id="g-reset" title="Reset to starting view" aria-label="Reset view">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v4h4"/></svg></button>
+          <button class="btn ic" id="g-fit" title="Fit to view" aria-label="Fit to view">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+          <span class="tb-sep"></span>
+          <span class="tb-label">Node size</span>
+          <div class="tabs mode-t" id="mode" role="tablist" title="Node circle size. Per-term = the term's own exact count (the headline patient number). Rolled up = its subtree total — de-double-counted diagnoses (multi-maps split 1/m), central estimate ± small-cell suppression.">
+            <button role="tab" data-mode="term" aria-selected="true">Per-term</button>
+            <button role="tab" data-mode="rollup" aria-selected="false">Rolled up</button>
+          </div>
+          <label class="search">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>
+            <input id="search" type="search" placeholder="Search term or ID…" autocomplete="off">
+          </label>
+          <div class="dim-ctl" id="dim-ctl" title="Transparency of non-highlighted nodes when a selection or hover is active">
+            <span>dim</span>
+            <input type="range" id="dim-slider" min="0" max="4" step="1" value="1" aria-label="Dim level">
+          </div>
+          <label class="tb-check" title="Hide unused leaf terms (0 patients, no used descendant, not a branch node)">
+            <input type="checkbox" id="hide-unused" checked> Hide unused
+          </label>
+          <span class="grow"></span>
+          <span class="g-focus-chip" id="g-focus-chip"><span></span><button id="g-focus-clear" title="Clear focus" aria-label="Clear focus">×</button></span>
+          <span class="g-focus-chip" id="g-sel-chip"><span></span><button id="g-sel-clear" title="Clear selection" aria-label="Clear selection">×</button></span>
+          <span class="g-hint" id="graph-hint"></span>
+        </div>
+        <div class="g-legend" id="g-legend"></div>
+        <svg id="graph"></svg>
+      </div>
+    </div>
+    <aside class="drawer" id="drawer">
+      <div class="drawer-scroll" id="drawer-inner"></div>
+      <div class="drawer-foot" id="drawer-foot"></div>
+    </aside>
+  </div>
+</div>
+<div class="ctx-menu" id="ctxmenu" hidden></div>
+<div class="tip" id="tip"></div>
+
+<script id="mondo-data" type="application/json">null</script>
+<script>
+"use strict";
+const CATS = [
+  {key:"reported",   label:"Reported (>20)",       color:"var(--cat-reported)",   on:true},
+  {key:"used_small", label:"Used ≤20",              color:"var(--cat-used-small)", on:true},
+  {key:"used_branch",label:"Used branch (0 count)", color:"var(--cat-used-branch)",on:true},
+  {key:"other",      label:"Rest of Mondo",         color:"var(--cat-other)",      on:false},
+];
+const CATMAP = Object.fromEntries(CATS.map(c=>[c.key,c]));
+const $=(s,r=document)=>r.querySelector(s);
+const el=(t,c,txt)=>{const e=document.createElement(t);if(c)e.className=c;if(txt!=null)e.textContent=txt;return e;};
+const fmt=n=>n==null?"":n.toLocaleString("en-US");
+const lg=v=>v>0?Math.log(1+v):0;                       // log scale for prevalence bars
+const fmtK=n=>{n=Math.round(n);return n<1000?(""+n):n<1e6?((n/1e3).toFixed(n<1e4?1:0)+"k"):((n/1e6).toFixed(1)+"M");};
+// A term whose exact total was complementary-suppressed publishes a standard band
+// string in `display` + a [lo,hi] `count_range` (count===null). ownText shows the
+// band; ownNum uses the range midpoint for sizing.
+const ownNum=n=>n.count!=null?n.count:(n.count_range?Math.round((n.count_range[0]+(n.count_range[1]||n.count_range[0]))/2):(DATA.meta.min_cell||20));
+const ownText=n=>n.count!=null?fmt(n.count):(n.display||("≤"+(DATA.meta.min_cell||20)));
+
+// Roll-up nominal: a masked (≤20) term contributes an unknown count in [1,20];
+// SMALL_NOMINAL is the point estimate used for the "nominal add-up" only (the
+// rigorous bracket uses 1 and 19 for floor/ceiling and never this value).
+const SMALL_NOMINAL=10;
+let DATA=null, byId=new Map(), kids=new Map(), dagKids=new Map(), roots=[], expanded=new Set(), selected=null;
+// Dual-axis (Mondo + HPO) plumbing: MONDO is the primary payload (DATA stays aliased
+// to it so all existing single-axis code is untouched). HPO is an optional second
+// payload (hpo_usage.json); HAS_HPO gates any future HPO-aware rendering. Loading
+// HPO must never block or alter the Mondo-only render path — see boot().
+let MONDO=null, HPO=null, HAS_HPO=false;
+let ROLL_MAX=1, OWN_MAX=1, ROLL_EST_MAX=1;
+let graphOpen=new Set(["root"]), graphOpenUp=new Set(), graphCap=new Map(), graphFolded=new Set(), gz={x:24,y:24,k:0.85};
+let gRootIds=["root"];   // the axis root ids present (["root"] single; ["root","HP:root"] dual)
+let gPinned=new Set();   // nodes "landed on" from a search result: kept visible (bypassing the
+                         // fan-out cap and hide-unused, but not an explicit collapse) so you can
+                         // clear the search and keep browsing around what you found.
+let gBounds=null;   // last-layout bounds for Fit
+let gHL=new Set(), gHLD=new Set();  // highlighted lineage: ancestors (hl) / descendants (hld) of the selection
+let gSel=new Set();                 // multi-selection (shift-click); `selected` = primary (drawer target)
+let gIsolateSet=null;               // (retired) reserved; kept null
+let gManualRank=new Map();          // id -> manual rank key (drag-to-reorder within a column)
+let gLastRank=new Map();            // id -> effective rank used at last layout (for drag math)
+let gNodeDrag=null, gJustDragged=false;   // in-progress node reorder drag
+let gFocus=null, gPeek=null, gCoord=new Map(), gExpandNotice="";
+let gColorMode="rarity";            // "rarity" (rare-disease designation) | "usage" (by category)
+const GRAPH_CAP=14;         // max children revealed per expansion before a "＋N more" node
+const state={view:"graph",q:"",rollup:false,hideUnused:true,vis:new Set(CATS.map(c=>c.key))};
+let HAS_FRAC=false;   // payload carries fractional (1/m) de-double-counted counts (computeRollup sets it)
+
+// Two-axis mode. When an hpo_usage.json exists, BOTH ontologies are drawn in ONE canvas:
+// the payloads are merged into a single node set (ids are already namespaced MONDO: / HP:),
+// each node tagged with its axis. Mondo grows rightward, HPO leftward, the two roots meeting
+// in the center. Per-node direction (coord.dir, set by layoutGraph) drives edges + labels,
+// so the single-global-state graph needs no reentrancy — one byId/state/search/drawer covers
+// both. Falls back to the single Mondo view when no HPO payload is present.
+let DUAL=false;
+const _ROOT_LABEL={mondo:"Mondo disease (mapped-term view)", hpo:"HPO phenotype (mapped-term view)"};
+const axisOf=id=>{ if(id&&id.startsWith("more:")) id=id.slice(5);
+  const n=byId.get(id); return (n&&n.axis)|| (String(id).startsWith("HP:")?"hpo":"mondo"); };
+
+// Merge the HPO payload into the Mondo one: tag axis, namespace the HPO root (both payloads
+// use id "root") to "HP:root" and remap parents, apply per-axis root labels.
+function combine(mondo, hpo){
+  const nodes=[];
+  for(const n of mondo.nodes){ n.axis="mondo"; nodes.push(n); }
+  for(const n of hpo.nodes){
+    n.axis="hpo";
+    if(n.kind==="root") n.id="HP:root";
+    n.parents=(n.parents||[]).map(p=>p==="root"?"HP:root":p);
+    nodes.push(n);
+  }
+  // drop the synthetic payload root(s): each has a single child that is the real ontology
+  // root (Mondo 'human disease', HPO 'All'), so promote that child to be the axis root.
+  promoteSpineRoot(nodes,"root"); promoteSpineRoot(nodes,"HP:root");
+  // label the two axis roots as the ontology they head (keep the real term in .term for the drawer)
+  for(const n of nodes){ if(n.kind==="root"){ n.term=n.term||n.label; n.label=n.axis==="hpo"?"HPO":"Mondo"; } }
+  return {meta:mondo.meta, stats:mondo.stats, nodes};
+}
+function promoteSpineRoot(nodes, rid){
+  while(true){
+    const kids=nodes.filter(n=>(n.parents||[]).includes(rid));
+    if(kids.length!==1) break;                 // only collapse a single-child spine
+    const c=kids[0], i=nodes.findIndex(n=>n.id===rid);
+    if(i>=0) nodes.splice(i,1);                 // remove the synthetic/spine root
+    c.parents=(c.parents||[]).filter(p=>p!==rid);
+    c.kind="root";                              // the promoted node becomes the axis root
+    rid=c.id;
+  }
+}
+
+/* ---------- load: dual (mondo+hpo in one canvas) > embedded block > fetched real > sample ---------- */
+async function boot(){
+  let d=null;
+  try{const raw=$("#mondo-data").textContent.trim(); if(raw&&raw!=="null") d=JSON.parse(raw);}catch(e){}
+  if(!d) d=await tryFetch("mondo_usage.json");
+  if(!d) d=await tryFetch("mondo_usage.sample.json");
+  if(!d){document.querySelector(".panel").innerHTML=
+    '<div class="hint">No data found. Place a <code>mondo_usage.json</code> next to this page (or the bundled <code>mondo_usage.sample.json</code>).</div>';return;}
+  const hpo=await tryFetch("hpo_usage.json");
+  // Combine defensively: a present-but-malformed hpo_usage.json must fall back to the
+  // single-Mondo view, never blank the page. On any combine error, keep the Mondo payload.
+  if(hpo){ try{ const merged=combine(d,hpo); d=merged; DUAL=true;
+      const h=$("#brand-h1"); if(h) h.textContent="Counting Diagnoses: AllOfUs on Mondo + HPO";
+    }catch(e){ DUAL=false; console.warn("[axes] hpo payload present but combine failed; Mondo-only",e); } }
+  load(d);
+  console.log(DUAL?"[axes] mondo + hpo (one canvas)":"[axes] mondo only");
+}
+async function tryFetch(u){try{const r=await fetch(u);if(!r.ok)return null;return await r.json();}catch(e){return null;}}
+
+function load(d){
+  DATA=d; MONDO=d; byId=new Map(); kids=new Map(); dagKids=new Map(); roots=[]; expanded=new Set(); selected=null;
+  for(const n of d.nodes) byId.set(n.id,n);
+  for(const n of d.nodes){                        // spanning tree via primary parent
+    const p=(n.parents&&n.parents.length)?n.parents[0]:null;
+    if(p==null||n.kind==="root"){ if(n.kind!=="root") roots.push(n.id); continue; }
+    if(!byId.has(p)){ roots.push(n.id); continue; }
+    if(!kids.has(p)) kids.set(p,[]); kids.get(p).push(n.id);
+  }
+  // DAG child map: every parent->child edge (a node with N parents is a child of all
+  // N). The Graph view expands along THIS, so a used term is reachable from every
+  // Mondo parent — not only the one the spanning tree happened to pick.
+  for(const n of d.nodes){ if(n.kind==="root")continue;
+    for(const p of (n.parents||[])){ if(!byId.has(p))continue;
+      if(!dagKids.has(p)) dagKids.set(p,[]); dagKids.get(p).push(n.id); } }
+  // attach root's declared children too
+  const rootNodes=d.nodes.filter(n=>n.kind==="root");
+  gRootIds=rootNodes.map(n=>n.id);
+  for(const rn of rootNodes){ if(kids.has(rn.id)) roots=roots.concat(kids.get(rn.id)); }
+  roots=[...new Set(roots)];
+  for(const [,arr] of kids) arr.sort(sortNodes);
+  for(const [,arr] of dagKids) arr.sort(sortNodes);
+  roots.sort(sortNodes);
+  computeVisibleDesc(); computeRollup();
+  initialGraphView();
+  gPinned=new Set(); gz={x:24,y:24,k:0.85}; gLayer=null; gBounds=null;
+  gExpandNotice=""; gSel=new Set(); gHL=new Set(); gHLD=new Set(); gPeek=null; gLastRank=new Map();
+  renderSource(); renderDrawerDefault();
+  renderAll(); requestAnimationFrame(graphFit);
+}
+// The starting graph configuration (used by load + the Reset button): open each axis root,
+// The starting / Reset view: open every showable node shallower than INIT_MAX_DEPTH, so the
+// visible tree spans depths 0..INIT_MAX_DEPTH (root=0). INIT_MAX_DEPTH=2 → 3 levels on each side.
+// (Manual expansion beyond this still works; this only sets the default.)
+const INIT_MAX_DEPTH=2;
+function initialGraphView(){
+  graphOpen=new Set(gRootIds); graphOpenUp=new Set(); graphCap=new Map(); graphFolded=new Set();
+  gFocus=null; gManualRank=new Map();
+  for(const id of byId.keys()){
+    const n=byId.get(id);
+    if(n.kind==="root"){ graphOpen.add(id); continue; }   // roots always open (their children = depth 1)
+    if((n.depth||0)<INIT_MAX_DEPTH && couldShowGraph(id)) graphOpen.add(id);
+  }
+}
+function sortNodes(a,b){a=byId.get(a);b=byId.get(b);
+  const ra=rank(a),rb=rank(b); if(ra!==rb)return ra-rb;
+  const ca=a.count||0,cb=b.count||0; if(ca!==cb)return cb-ca;
+  return a.label.localeCompare(b.label);}
+const RANK={reported:0,used_small:1,used_branch:2,other:3,root:-1};
+const rank=n=>RANK[n.category]??9;
+
+/* a node shows if its own category is visible OR any descendant's is (so paths
+   to used nodes stay navigable even when branch/other layers are toggled). */
+function computeVisibleDesc(){
+  const memo=new Map();
+  function anyVis(id){
+    if(memo.has(id))return memo.get(id);
+    const n=byId.get(id); let v=state.vis.has(n.category);
+    for(const c of (kids.get(id)||[])) v=anyVis(c)||v;
+    memo.set(id,v); return v;
+  }
+  for(const id of byId.keys()) anyVis(id);
+  DATA._anyVis=memo;
+}
+
+/* Roll-up aggregates over each node's (primary-parent) subtree. We only have
+   per-term suppressed counts, so a subtree's true DISTINCT-patient coverage is
+   bracketed, not exact:
+     floor = largest single term    (>= this many distinct people — one term alone)
+     ceil  = sum of terms, each ≤20 cell at 20  (<= this many — only if zero overlap)
+   ceil-floor is the aggregated uncertainty (overlap/double-counting + suppression).
+   est = a labeled nominal add-up (small terms at SMALL_NOMINAL). Roll-up is over the
+   full DAG descendant closure (matches the edges you can expand), counting each unique
+   descendant term ONCE — a multi-parent term contributes to every ancestor's roll-up
+   (not just a primary parent), but a shared descendant reached by several paths is not
+   double-counted. Computed by walking each term's ancestor set once and accumulating
+   into every ancestor (cheap; no per-node descendant sets stored). */
+// The payload carries a FRACTIONAL (1/m) de-double-counted count per term when the driver
+// computed it. If present, the roll-up sums those honestly (a shared diagnosis is split
+// across its terms, so the subtree sum never double-counts) and the only residual
+// uncertainty is small-cell suppression — the overlap bracket collapses. Falls back to the
+// old distinct-patient [floor…ceil] overlap bracket for payloads without frac.
+function computeRollup(){
+  const min=DATA.meta.min_cell||20;
+  HAS_FRAC=DATA.nodes.some(n=>typeof n.frac==="number"||(n.frac_display&&n.frac_display.length>0));
+  const memo=new Map();
+  const get=id=>{let r=memo.get(id); if(!r){r={R:0,s:0,maxT:0,nTerms:0,nUsed:0,nColl:0,F:0,fs:0,fmax:0};memo.set(id,r);} return r;};
+  get("root");
+  for(const n of DATA.nodes){
+    if(n.kind==="root")continue;
+    const rep=n.state==="reported", small=n.state==="used_small", cnt=rep?ownNum(n):0;
+    const fr=(typeof n.frac==="number")?n.frac:null;                 // frac reported (>floor)
+    const fsupp=(fr==null && n.frac_display && n.frac_display.startsWith("≤"));  // frac withheld but used
+    const anc=ancestorSet(n.id); anc.add(n.id);      // this term counts toward itself + every ancestor
+    for(const a of anc){
+      const r=get(a);
+      r.nTerms++;
+      if(rep){ r.R+=cnt; if(cnt>r.maxT)r.maxT=cnt; r.nUsed++; }
+      else if(small){ r.s++; r.nUsed++; }
+      if(fr!=null){ r.F+=fr; if(fr>r.fmax)r.fmax=fr; }
+      else if(fsupp){ r.fs++; }
+      if(n.collision) r.nColl++;
+    }
+  }
+  ROLL_MAX=1; OWN_MAX=1; ROLL_EST_MAX=1;
+  for(const [,r] of memo){
+    if(HAS_FRAC){ r.floor=Math.round(r.F); r.ceil=Math.round(r.F+min*r.fs); r.est=r.F+SMALL_NOMINAL*r.fs; }
+    else { r.floor=r.maxT; r.ceil=r.R+min*r.s; r.est=r.R+SMALL_NOMINAL*r.s; }
+    ROLL_MAX=Math.max(ROLL_MAX,r.ceil); ROLL_EST_MAX=Math.max(ROLL_EST_MAX,r.est);
+  }
+  for(const n of DATA.nodes) if(n.state==="reported") OWN_MAX=Math.max(OWN_MAX,n.count||0);
+  DATA._roll=memo;
+}
+
+/* --------------------- provenance (panel footer) -------------------------- */
+function renderSource(){
+  const m=DATA.meta||{}, s=$("#drawer-foot"); if(!s)return; s.innerHTML="";
+  const sample=/sample|synthetic/i.test((m.cdr||"")+(m.count_rule||"")+(m.mondo_version||""));
+  if(sample){const b=el("span","badge-sample","SAMPLE DATA");s.appendChild(b);}
+  const add=(k,v)=>{const w=el("span");w.innerHTML=`${k} <b>${v}</b>`;s.appendChild(w);};
+  add("Mondo",m.mondo_version||"—"); add("CDR",m.cdr||"—");
+  add("source",m.source_table||"—"); add("count space",m.count_space||"standard");
+  add("floor","&le;"+(m.min_cell||20)); add("generated",m.generated_utc||"—");
+}
+function renderDrawerDefault(){
+  const inner=$("#drawer-inner"); if(!inner)return;
+  inner.innerHTML=`<div class="drawer-empty">Select a node to see its counts, source codes, and subtree roll-up.<br><br>Click to expand · drag to reorder · shift-click to multi-select · right-click for the node menu.</div>`;
+}
+
+/* -------------------------------- KPIs ------------------------------------ */
+function renderKPIs(){
+  const s=DATA.stats, box=$("#kpis"); box.innerHTML="";
+  const usedPct=(100*s.used_fraction).toFixed(1);
+  const kpi=(label,value,sub,dot)=>{
+    const k=el("div","kpi");
+    const l=el("div","k-label"); if(dot){const d=el("span","dot");d.style.background=dot;l.appendChild(d);}
+    l.appendChild(el("span",null,label)); k.appendChild(l);
+    k.appendChild(el("div","k-value tnum",value));
+    if(sub)k.appendChild(el("div","k-sub",sub)); box.appendChild(k); return k;
+  };
+  kpi("Mapped Mondo terms",fmt(s.mapped_terms),"disease terms with a diagnosis code").classList.add("span2");
+  kpi("Used ≥1 patient",usedPct+"%",fmt(s.used_terms)+" terms touched in the EHR",CATMAP.reported.color);
+  kpi("Reported (>20)",fmt(s.reported_terms),"exact counts publishable",CATMAP.reported.color);
+  kpi("Used-small (≤20)",fmt(s.used_small_terms),"used, exact count withheld",CATMAP.used_small.color);
+  kpi("Used branch points",fmt(s.used_branch_terms),"0 direct count, above used nodes",CATMAP.used_branch.color);
+  kpi("Multi-mapped",fmt(s.collision_terms),HAS_FRAC?"share codes with sibling terms (split 1/m in roll-ups)":"share a std concept with siblings",CATMAP.collision||"var(--collision)");
+  if(s.rare_used_terms!=null)
+    kpi("Rare used",fmt(s.rare_used_terms),"rare dx (GARD/Orphanet) coded in the EHR","var(--rare)");
+  renderCover();
+}
+function renderCover(){
+  const s=DATA.stats, bar=$("#cover"), leg=$("#cover-legend");
+  const parts=[["reported",s.reported_terms],["used_small",s.used_small_terms],
+    ["used_branch",s.used_branch_terms],["other",s.other_terms]];
+  const tot=parts.reduce((a,[,v])=>a+v,0)||1;
+  bar.innerHTML=""; leg.innerHTML="";
+  for(const [k,v] of parts){
+    const seg=el("span"); seg.style.width=(100*v/tot)+"%"; seg.style.background=CATMAP[k].color;
+    seg.title=`${CATMAP[k].label}: ${fmt(v)}`; bar.appendChild(seg);
+    const li=el("div","li"); const sw=el("span","dot");sw.style.background=CATMAP[k].color;
+    li.appendChild(sw); li.appendChild(el("span",null,`${CATMAP[k].label} · ${fmt(v)}`)); leg.appendChild(li);
+  }
+}
+
+/* ------------------------------- filters ---------------------------------- */
+function renderFilters(){
+  const f=$("#filters"); f.innerHTML="";
+  const counts=catCounts();
+  for(const c of CATS){
+    const b=el("button","chip"); b.setAttribute("aria-pressed",state.vis.has(c.key));
+    const sw=el("span","sw");sw.style.background=c.color;b.appendChild(sw);
+    b.appendChild(el("span",null,c.label));
+    b.appendChild(el("span","cnt tnum",fmt(counts[c.key]||0)));
+    b.onclick=()=>{state.vis.has(c.key)?state.vis.delete(c.key):state.vis.add(c.key);
+      b.setAttribute("aria-pressed",state.vis.has(c.key));computeVisibleDesc();renderAll();};
+    f.appendChild(b);
+  }
+}
+function catCounts(){const o={};for(const n of DATA.nodes){if(n.kind==="root")continue;o[n.category]=(o[n.category]||0)+1;}return o;}
+
+/* ------------------------------- render ----------------------------------- */
+function renderAll(){ renderGraph(); }   // the DAG browser is the only view
+
+/* ---- hierarchy ---- */
+function renderTree(){
+  const host=$("#tree"); host.innerHTML=""; const q=state.q.toLowerCase();
+  let shown=0, matched=null;
+  if(q){ matched=searchSet(q); }
+  const frag=document.createDocumentFragment();
+  const walk=(id,depth)=>{
+    const n=byId.get(id);
+    if(!DATA._anyVis.get(id)) return;
+    if(matched && !matched.has(id)) return;
+    const kidIds=(kids.get(id)||[]).filter(c=>DATA._anyVis.get(c)&&(!matched||matched.has(c)));
+    const isOpen=expanded.has(id)|| (q&&matched);
+    frag.appendChild(rowEl(n,depth,kidIds.length>0,isOpen)); shown++;
+    if(isOpen) for(const c of kidIds) walk(c,depth+1);
+  };
+  for(const r of roots) walk(r,0);
+  host.appendChild(frag);
+  $("#tree-hint").textContent=state.rollup
+    ? (HAS_FRAC
+        ? `${shown.toLocaleString()} rows · bar = subtree total; number = de-double-counted diagnoses (multi-maps split 1/m; ±<${DATA.meta.min_cell||20} suppression)`
+        : `${shown.toLocaleString()} rows · bar = subtree coverage [floor…ceiling]; number = distinct-patient bracket (overlap + <${DATA.meta.min_cell||20} suppression)`)
+    : `${shown.toLocaleString()} rows · bar = this term's own patients; counts are per-term, never summed`;
+}
+function rowEl(n,depth,hasKids,isOpen){
+  const r=el("div","row"+(selected===n.id?" sel":"")); r.style.paddingLeft=(14+depth*17)+"px";
+  const car=el("span","caret"+(hasKids?"":" leaf"));
+  car.innerHTML=hasKids?(isOpen?"▾":"▸"):"";
+  car.onclick=(e)=>{e.stopPropagation();expanded.has(n.id)?expanded.delete(n.id):expanded.add(n.id);renderTree();};
+  r.appendChild(car);
+  const sw=el("span","sw");sw.style.background=CATMAP[n.category]?CATMAP[n.category].color:"var(--muted)";r.appendChild(sw);
+  const lbl=el("span","lbl");
+  lbl.innerHTML=hlMatch(n.label,state.q)+` <small>${hlMatch(n.id,state.q)}</small>`;
+  r.appendChild(lbl);
+  if(n.kind==="internal"){const kt=el("span","kindtag","node");r.appendChild(kt);}
+  if(n.rare){const rt=el("span","rare-tag","rare");rt.title="rare disease: "+((n.rare_src||[]).join(", ")||"Mondo");r.appendChild(rt);}
+  r.appendChild(prevBar(n));
+  const cs=countSpec(n);
+  const cnt=el("span","cnt "+cs.cls,cs.text); if(cs.title)cnt.title=cs.title;
+  r.appendChild(cnt);
+  r.onclick=()=>select(n.id);
+  return r;
+}
+function prevBar(n){
+  const bar=el("span","pbar"), min=DATA.meta.min_cell||20;
+  const w=f=>Math.min(100,Math.max(f>0?2:0,f*100))+"%";     // >=2% so tiny bars stay visible
+  if(state.rollup){
+    const r=DATA._roll.get(n.id); if(!r||r.nUsed===0)return bar;
+    const denom=lg(ROLL_MAX);
+    const unc=el("span","unc"); unc.style.width=w(lg(r.ceil)/denom); unc.style.background="var(--accent)";
+    const fill=el("span","fill"); fill.style.width=w(lg(r.floor)/denom); fill.style.background="var(--accent)";
+    bar.appendChild(unc); bar.appendChild(fill);
+    bar.title=`subtree ${r.floor>0?fmt(r.floor):('≤'+min)}–${fmt(r.ceil)} distinct patients`;
+    return bar;
+  }
+  const denom=lg(OWN_MAX);
+  if(n.state==="reported"){
+    const fill=el("span","fill"); fill.style.width=w(lg(ownNum(n))/denom);
+    fill.style.background=CATMAP[n.category].color; bar.appendChild(fill);
+  } else if(n.state==="used_small"){
+    bar.classList.add("small");
+    const fill=el("span","fill"); fill.style.width=w(lg(min)/denom);
+    fill.style.background=CATMAP.used_small.color; bar.appendChild(fill); bar.title=`1–${min} (withheld)`;
+  }
+  return bar;
+}
+function countSpec(n){
+  const min=DATA.meta.min_cell||20;
+  if(state.rollup){
+    const r=DATA._roll.get(n.id);
+    if(!r||r.nUsed===0)return{cls:"zero",text:"0"};
+    const fl=r.floor>0?fmtK(r.floor):("≤"+min);
+    const sup=HAS_FRAC?r.fs:r.s;
+    const kind=HAS_FRAC?"subtree diagnoses (de-double-counted)":"subtree distinct patients";
+    return{cls:"reported",text:`${fl}–${fmtK(r.ceil)}`,
+      title:`${kind}: ${r.floor>0?fmt(r.floor):('≤'+min)} – ${fmt(r.ceil)}  ·  ${r.nUsed}/${r.nTerms} used, ${sup} suppressed, ${r.nColl} multi-mapped  ·  nominal ≈ ${fmt(r.est)}`};
+  }
+  if(n.state==="reported")return{cls:"reported",text:n.count!=null?fmt(n.count):(n.display||("≤"+min))};
+  if(n.state==="used_small")return{cls:"used_small",text:"≤"+min};
+  return{cls:"zero",text:"0"};
+}
+function searchSet(q){                 // matched nodes + all their ancestors (every DAG path,
+  const keep=new Set();                // not just the primary parent — multi-parent lineages
+  for(const n of DATA.nodes){          // like Niemann-Pick's sphingolipidosis branch matter)
+    if(n.kind==="root")continue;
+    if(n.label.toLowerCase().includes(q)||n.id.toLowerCase().includes(q)){
+      keep.add(n.id); for(const a of ancestorSet(n.id)) keep.add(a);
+    }
+  }
+  return keep;
+}
+
+/* ---- treemap (squarified, 2-level: body system → reported term) ---- */
+function topAncestor(id){                // depth-1 ancestor (body system) of a node
+  let cur=byId.get(id), guard=0;
+  while(cur && cur.depth>1 && guard++<64){const p=cur.parents[0];cur=(p&&byId.has(p))?byId.get(p):null;}
+  return cur?cur.id:id;
+}
+/* ---- graph (DAG node-link, horizontal layered, progressive disclosure) ---- */
+// Node coloring: rare-disease designation (Mondo GARD/Orphanet/NORD subsets) — rare terms
+// in magenta, everything else neutral, so rare diagnoses pop as you drill in.
+// Two-ontology scheme: hue by AXIS (Mondo teal, HPO violet), so the two DAGs read apart
+// at a glance; rare-disease terms keep their pink; usage is shown by OPACITY (below).
+const AXIS_COLOR={mondo:"var(--axis-mondo)", hpo:"var(--axis-hpo)"};
+function nodeFill(id,n){
+  if(n && n.rare) return "var(--rare)";                 // rare-disease designation (Mondo)
+  return AXIS_COLOR[(n&&n.axis)||"mondo"];
+}
+// usage shade WITHIN the axis hue: reported (solid) > used-small > unused/structural (faint);
+// roots stay solid so the two anchors read clearly.
+const nodeOpac=n=>n.kind==="root"?0.95:n.state==="reported"?0.92:n.state==="used_small"?0.6:0.32;
+
+const gval=id=>{const n=byId.get(id); if(!n)return 0;
+  if(state.rollup){const r=DATA._roll.get(id);return r?r.est:0;}   // roll-up central estimate
+  return n.state==="reported"?(n.count!=null?n.count:(n.count_range?Math.round((n.count_range[0]+(n.count_range[1]||n.count_range[0]))/2):(DATA.meta.min_cell||20))):n.state==="used_small"?(DATA.meta.min_cell||20):0.4;};
+
+// Suppression uncertainty on a subtree roll-up: each of the r.s suppressed (<min) terms
+// is an unknown integer in [1, min] (min=20), midpoint (min+1)/2 ≈ SMALL_NOMINAL. We band
+// each at ±SMALL_NOMINAL (the round number; the strict half-range is (min-1)/2 = 9.5, but
+// ±10 reads cleaner), so the reported ± is SMALL_NOMINAL·s. Deliberately NOT a √s band
+// (that assumes independence and understates the uncertainty). s=0 ⇒ exact, no ±.
+function rollupPM(r,min){
+  if(!r) return 0;
+  const s=HAS_FRAC?r.fs:r.s;   // frac roll-up: only the ≤floor terms are uncertain (no overlap term)
+  return s>0?SMALL_NOMINAL*s:0;
+}
+// Count segments drawn under a graph node: the direct (own) count, then the subtree
+// roll-up "of EST (±PM)" whenever the node has used descendants. Bold tracks the sizing
+// metric — per-term mode bolds the direct number, rolled-up mode bolds the roll-up.
+function graphCountSegs(id){
+  const n=byId.get(id), min=DATA.meta.min_cell||20, r=DATA._roll.get(id);
+  if(!r||r.nUsed===0) return [];
+  const direct = n.state==="reported"?(n.count!=null?fmtK(n.count):(n.display||("≤"+min)))
+              : n.state==="used_small"?("≤"+min) : "0";
+  const selfUsed = n.state==="reported"||n.state==="used_small";
+  const descUsed = r.nUsed - (selfUsed?1:0);
+  if(descUsed<=0) return [{t:direct, bold:true}];  // leaf: one number, and it drives size
+  const pm=rollupPM(r,min);
+  const segs=[{t:direct, bold:!state.rollup},
+              {t:" of ", dim:true},
+              {t:fmtK(r.est), bold:state.rollup}];
+  if(pm>0) segs.push({t:" ±"+fmtK(pm), dim:true});
+  return segs;
+}
+function graphCountText(id){return graphCountSegs(id).map(s=>s.t).join("");}
+function renderCountInto(sub,id){
+  while(sub.firstChild) sub.removeChild(sub.firstChild);
+  for(const s of graphCountSegs(id)){
+    const tsp=svgEl("tspan"); tsp.textContent=s.t;
+    if(s.bold) tsp.setAttribute("font-weight","700");
+    if(s.dim) tsp.setAttribute("fill-opacity","0.6");
+    sub.appendChild(tsp);
+  }
+}
+
+// visible node set: root + capped top-prevalence children of open nodes; a truncated
+// fan-out gets a synthetic "more:<parent>" node. Search overrides with matched∪ancestors.
+const GRAPH_SEARCH_CAP=60;     // a broad substring (e.g. "mu") can match thousands of
+                               // terms; rendering matched∪ancestors uncapped blows up the
+                               // O(|S|^2) edge engine. Cap to the most-prevalent matches.
+let gSearchTotal=0;            // total graph matches this render (before the cap)
+function graphVisible(){
+  const vis=new Map(), q=state.q.toLowerCase();
+  const canShow=canShowGraph;
+  if(q){
+    const matches=[];
+    for(const n of DATA.nodes){ if(n.kind==="root")continue;
+      if(canShow(n.id)&&(n.label.toLowerCase().includes(q)||n.id.toLowerCase().includes(q))) matches.push(n.id); }
+    gSearchTotal=matches.length;
+    matches.sort((a,b)=>gval(b)-gval(a));
+    const keep=new Set();
+    for(const id of matches.slice(0,GRAPH_SEARCH_CAP)){
+      keep.add(id); for(const a of ancestorSet(id)) keep.add(a);   // full DAG closure (every parent path)
+    }
+    for(const id of keep) if(canShow(id)) vis.set(id,byId.get(id));
+    for(const rid of gRootIds) if(byId.get(rid)) vis.set(rid,byId.get(rid)); return vis;}
+  const seeds=(gFocus&&byId.has(gFocus))?[gFocus]:(gRootIds.some(r=>byId.has(r))?gRootIds:roots);
+  for(const s of seeds) if(canShow(s)) vis.set(s,byId.get(s));
+  let changed=true;
+  while(changed){changed=false;
+    for(const id of [...vis.keys()]){
+      if(id.startsWith("more:"))continue;
+      // downward expansion: reveal children of open nodes (top/bottom + "＋N more")
+      if(graphOpen.has(id)){
+        const ch=(dagKids.get(id)||[]).filter(canShow).sort((a,b)=>gval(b)-gval(a));
+        const cap=graphCap.get(id)??GRAPH_CAP;
+        let show=ch, hiddenN=0, sortv=0;
+        if(ch.length>cap){                       // show the top few AND the bottom few,
+          const T=Math.max(1,Math.ceil(cap*0.6)), B=Math.max(1,cap-T);  // "more" between
+          show=[...ch.slice(0,T),...ch.slice(ch.length-B)];
+          hiddenN=ch.length-show.length;
+          sortv=(gval(ch[T-1])+gval(ch[ch.length-B]))/2;
+        }
+        for(const c of show) if(!vis.has(c)){vis.set(c,byId.get(c));changed=true;}
+        const mid="more:"+id;
+        if(hiddenN>0 && !vis.has(mid)){
+          vis.set(mid,{id:mid,_more:true,parent:id,hidden:hiddenN,sortv,
+            label:`＋${hiddenN} more`,depth:(byId.get(id).depth||0)+1}); changed=true;
+        }
+      }
+      // upward expansion: reveal parents of "open-up" nodes
+      if(graphOpenUp.has(id)){
+        for(const p of ((byId.get(id)||{}).parents||[]))
+          if(canShow(p)&&!vis.has(p)){vis.set(p,byId.get(p));changed=true;}
+      }
+    }
+  }
+  // reveal ancestor lineage of the focus node (context of where it sits); with
+  // reachability edges other nodes reach root via shortcuts, so we don't force the
+  // whole selection's lineage into view (that's what the highlight is for).
+  if(gFocus && byId.has(gFocus)){
+    const anc=ancestorSet(gFocus); anc.add(gFocus);
+    for(const id of anc) if(canShow(id)&&!vis.has(id)) vis.set(id,byId.get(id));
+  }
+  // pinned search-landings: keep them (and their lineage) on screen regardless of the
+  // fan-out cap / hide-unused, unless explicitly collapsed (folded). Reachability edges
+  // connect them to the rest, so they never float.
+  for(const id of gPinned) if(byId.has(id) && !graphFolded.has(id) && !vis.has(id)) vis.set(id,byId.get(id));
+  return vis;
+}
+function descendantSet(id){               // DAG descendants (every child edge)
+  const out=new Set(), st=[...(dagKids.get(id)||[])];
+  while(st.length){const c=st.pop(); if(out.has(c))continue; out.add(c); for(const cc of (dagKids.get(c)||[]))st.push(cc);}
+  return out;
+}
+// couldShowGraph = eligible to appear at all (exists, passes the used/hide-unused filter),
+// IGNORING collapse-folding. canShowGraph adds the reversible fold check on top.
+function couldShowGraph(id){const n=byId.get(id);
+  if(!n)return false;
+  if(n.kind==="root")return true;
+  if(!DATA._anyVis.get(id))return false;
+  // "Hide unused terms": drop every fully-unused term. Category "other" already means
+  // 0 support AND no used descendant, so the whole subtree under an "other" node is dead
+  // (even branches like chondrodysplasia). Branch nodes that actually lead to used terms
+  // are category "used_branch", not "other", so they're kept.
+  if(state.hideUnused && n.category==="other")return false;
+  return true;}
+function canShowGraph(id){return couldShowGraph(id) && !graphFolded.has(id);}
+// Reduced parents of `id` within the shown set = the transitive reduction of full-DAG
+// reachability restricted to `shown`. Walk up; the first shown node on each path is a
+// candidate parent (stop there). Then drop any candidate that is itself an ancestor of
+// another candidate (that link is redundant via the nearer one). direct = candidate is
+// a real DAG parent of id (draw solid); otherwise the edge summarizes a hidden path.
+function reducedParents(id, shown){
+  const node=byId.get(id); if(!node) return [];
+  const directParents=new Set(node.parents||[]);
+  const cand=new Set(), seen=new Set(), st=[...(node.parents||[])];
+  while(st.length){
+    const p=st.pop(); if(seen.has(p)||!byId.has(p))continue; seen.add(p);
+    if(shown.has(p)){ cand.add(p); continue; }        // nearest shown ancestor on this path
+    for(const pp of (byId.get(p).parents||[])) st.push(pp);
+  }
+  const ps=[...cand];
+  const reduced=ps.filter(p=>!ps.some(q=>q!==p && ancestorSet(q).has(p)));
+  return reduced.map(p=>({p, direct:directParents.has(p)}));
+}
+function ancestorSet(id){                 // all transitive parents up the DAG (every path)
+  const out=new Set(), st=[...((byId.get(id)||{}).parents||[])];
+  while(st.length){const p=st.pop(); if(out.has(p)||!byId.has(p))continue; out.add(p);
+    for(const pp of (byId.get(p).parents||[])) st.push(pp);}
+  return out;
+}
+// radius: LOG (per-decade) scale against a STABLE global max, so a handful of very large
+// rolled-up spine nodes (whose subtree aggregates everything) don't crush the low-end
+// resolution — 20 / 200 / 2k / 20k step up evenly. +1 floor keeps ≤20 nodes readable.
+function graphRadius(id){
+  const nn=byId.get(id);
+  if(nn===undefined) return 7;                          // more-node
+  if(nn.kind==="root") return 33;                       // axis root: fixed (1.5x), not sized
+  const maxV=state.rollup?ROLL_EST_MAX:OWN_MAX;   // ROLL_EST_MAX = max subtree central estimate
+  const lv=Math.log10(Math.max(gval(id),0)+1), lm=Math.log10((maxV||1)+1);
+  return 11+44*(lm>0?Math.min(1,lv/lm):0);
+}
+// dir = growth direction of the layer axis: +1 grows rightward (today's default,
+// Mondo view), -1 mirrors leftward for a second axis stacked on the other side.
+// It only scales each layer's horizontal offset from the origin column — the
+// per-layer vertical stacking (y) is unaffected.
+function layoutGraph(vis){
+  const rad=id=>vis.get(id)._more?8:graphRadius(id);
+  const lab=id=>vis.get(id).label||"";
+  // ordering key: manual rank (drag-to-reorder) if set, else by size (desc). Ascending
+  // sort, so smaller key = higher up; auto key = -size puts the biggest on top.
+  const autoKey=id=>vis.get(id)._more?-(vis.get(id).sortv||0):-gval(id);
+  const effKey=id=>gManualRank.has(id)?gManualRank.get(id):autoKey(id);
+  const coord=new Map();
+  const sides={mondo:[],hpo:[]};
+  for(const [id] of vis){ (sides[axisOf(id)]||sides.mondo).push(id); }
+  // one side's columns, growing in `dir` from the center; per-column vertical stack around y=0.
+  const doSide=(ids,dir)=>{
+    if(!ids.length) return;
+    const layers={}; let maxD=0;
+    for(const id of ids){const d=vis.get(id).depth||0;(layers[d]=layers[d]||[]).push(id);maxD=Math.max(maxD,d);}
+    // In dual view the roots' inner edge starts at ROOT_HALFGAP from the centerline, so the two
+    // roots sit 2*ROOT_HALFGAP apart. Their labels are short ("Mondo"/"HPO"), so the gap to col-1
+    // is tightened (ROOT_STEP) rather than the wide inter-column gap (210) that fits long labels.
+    const ROOT_HALFGAP=20, ROOT_STEP=90;
+    let x=DUAL?ROOT_HALFGAP:14; const gap=26;
+    for(let d=0;d<=maxD;d++){
+      const arr=(layers[d]||[]).slice().sort((a,b)=> (effKey(a)-effKey(b)) || (lab(a)<lab(b)?-1:1));
+      for(const id of arr) gLastRank.set(id, effKey(id));   // remember for drag math
+      const maxR=Math.max(14,...arr.map(rad));
+      let H=0; for(const id of arr) H+=2*rad(id)+gap; H=Math.max(0,H-gap);
+      let y=-H/2;                               // center each column around y=0
+      for(const id of arr){const r=rad(id); coord.set(id,{x:dir*(x+maxR),y:y+r,r,dir}); y+=2*r+gap;}
+      x+=maxR*2+((d===0&&DUAL)?ROOT_STEP:210);
+    }
+  };
+  doSide(sides.mondo, 1);
+  doSide(sides.hpo, DUAL?-1:1);      // dual: HPO grows leftward; HPO-only payload grows rightward
+  return {coord};
+}
+function edgePath(a,b){const mx=(a.x+b.x)/2; const dir=a.dir||b.dir||1;
+  // exit the parent on the side facing the child, enter the child on the side
+  // facing the parent; for dir=1 this is right-of-a -> left-of-b (unchanged).
+  return `M${a.x+dir*a.r},${a.y} C${mx},${a.y} ${mx},${b.y} ${b.x-dir*b.r},${b.y}`;}
+// Keyed enter/update/exit reconciler so nodes glide (CSS transitions) instead of
+// the whole SVG being torn down and rebuilt on every expand/collapse.
+let gLayer=null, gEdgeG=null, gNodeG=null, gEdgeEls=new Map(), gNodeEls=new Map();
+function graphInit(){
+  const svg=$("#graph"); while(svg.firstChild)svg.removeChild(svg.firstChild);
+  gLayer=svgEl("g",{}); gEdgeG=svgEl("g",{}); gNodeG=svgEl("g",{});
+  gLayer.appendChild(gEdgeG); gLayer.appendChild(gNodeG); svg.appendChild(gLayer);
+  gEdgeEls=new Map(); gNodeEls=new Map(); applyGT(gLayer);
+}
+function renderGraph(){
+  if(!gLayer||!gLayer.isConnected) graphInit();
+  const vis=graphVisible(), {coord}=layoutGraph(vis); gCoord=coord;
+  // highlight = union of every selected node's ancestors (hl) and visible descendants (hld)
+  gHL=new Set(); gHLD=new Set();
+  for(const s of gSel){ if(!byId.has(s))continue;
+    for(const a of ancestorSet(s)) gHL.add(a); gHL.add(s);
+    for(const dd of descendantSet(s)) if(vis.has(dd)) gHLD.add(dd);
+  }
+  if(gLayer) gLayer.classList.toggle("sel-active",gSel.size>0);
+  // bounds for Fit — include each node's label extent on the side it renders (dir): Mondo
+  // (dir>0) labels grow rightward, HPO (dir<0) leftward, so both sides must be padded or
+  // Fit clips them. Label sits at c.r+9 from center; clip(label,36) at ~7px/char.
+  let minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
+  for(const [id,c] of coord){
+    const nn=vis.get(id)||{}, lbl=nn.label||"";
+    const labW=Math.min(lbl.length,36)*7+20;      // rough label pixel run past the node edge
+    const farX=c.x+(c.dir||1)*(c.r+9+labW);       // outer edge of the label on its side
+    minX=Math.min(minX,c.x-c.r,farX); maxX=Math.max(maxX,c.x+c.r,farX);
+    minY=Math.min(minY,c.y-c.r); maxY=Math.max(maxY,c.y+c.r);}
+  gBounds={minX,minY,maxX,maxY};
+  // ---- edges (enter/update/exit): reachability, transitively reduced over shown ----
+  const shown=new Set(); for(const [k,nn] of vis) if(!nn._more) shown.add(k);
+  const seenE=new Set();
+  const addEdge=(p,id,viaHidden)=>{
+    const a=coord.get(p), b=coord.get(id); if(!a||!b)return;
+    const key=p+">"+id; seenE.add(key); const d=edgePath(a,b);
+    let e=gEdgeEls.get(key);
+    if(!e){e=svgEl("path",{class:"gedge"}); e.style.opacity=0; e.style.transition="none";
+      e.setAttribute("d",d); e.style.d=`path("${d}")`;
+      gEdgeG.appendChild(e); gEdgeEls.set(key,e);
+      requestAnimationFrame(()=>{e.style.transition=""; e.style.opacity="";}); }
+    else { e.setAttribute("d",d); e.style.d=`path("${d}")`; }
+    const up=gHL.has(p)&&gHL.has(id), down=(gHLD.has(p)||gSel.has(p))&&gHLD.has(id);
+    e.setAttribute("class","gedge"+(viaHidden?" via-hidden":"")+(up?" hl":down?" hld":""));
+  };
+  for(const [id,n] of vis){
+    if(!coord.get(id))continue;
+    if(n._more){ addEdge(n.parent,id,false); continue; }
+    for(const {p,direct} of reducedParents(id,shown)) addEdge(p,id,!direct);
+  }
+  for(const [key,e] of gEdgeEls){ if(!seenE.has(key)){ e.style.opacity=0;
+    setTimeout(()=>{e.remove();},260); gEdgeEls.delete(key); } }
+  // ---- nodes (enter/update/exit) ----
+  const seenN=new Set(); const min=DATA.meta.min_cell||20;
+  for(const [id,n] of vis){const c=coord.get(id); if(!c)continue; seenN.add(id);
+    let g=gNodeEls.get(id);
+    if(!g){ g=n._more?buildMore(n):buildNode(id,n); g.style.opacity=0; g.style.transition="none";
+      g.style.transform=`translate(${c.x}px,${c.y}px)`; gNodeG.appendChild(g); gNodeEls.set(id,g);
+      requestAnimationFrame(()=>{g.style.transition=""; g.style.opacity="";}); }
+    else { g.style.transform=`translate(${c.x}px,${c.y}px)`; }
+    if(n._more) updateMore(g,n); else updateNode(g,id,n,c);
+  }
+  for(const [id,g] of gNodeEls){ if(!seenN.has(id)){ g.style.opacity=0;
+    setTimeout(()=>{g.remove();},260); gNodeEls.delete(id); } }
+  const bits=[];   // transient notices only (no always-on help line)
+  if(state.q) bits.push(gSearchTotal>GRAPH_SEARCH_CAP
+    ? `${gSearchTotal} match “${state.q}” — showing ${GRAPH_SEARCH_CAP} most-prevalent; keep typing to narrow`
+    : `${gSearchTotal} match “${state.q}”`);
+  $("#graph-hint").textContent=bits.join(" · ");
+  renderLegend(); updateFocusChip(); updateSelChip();
+}
+function renderLegend(){
+  const box=$("#g-legend"); if(!box)return; box.innerHTML="";
+  const add=(sw,txt)=>{const s=el("span","lg-item");const d=el("span","lg-sw");
+    if(sw.startsWith("--"))d.style.background=`var(${sw})`; else d.style.background=sw;
+    s.appendChild(d);s.appendChild(el("span",null,txt));box.appendChild(s);};
+  add("--axis-mondo", DUAL?"Mondo · disease":"disease");
+  if(DUAL) add("--axis-hpo","HPO · phenotype");
+  add("--rare","rare disease (GARD/Orphanet/NORD)");
+  const note=el("span","lg-item"); note.style.opacity=".7";
+  note.appendChild(el("span",null,"paler = less used")); box.appendChild(note);
+}
+function updateFocusChip(){
+  const chip=$("#g-focus-chip"); if(!chip)return;
+  if(gFocus&&byId.has(gFocus)){chip.style.display="inline-flex";
+    chip.querySelector("span").textContent="Focus: "+clip(byId.get(gFocus).label,26);}
+  else chip.style.display="none";
+}
+function updateSelChip(){
+  const chip=$("#g-sel-chip"); if(!chip)return;
+  if(gSel.size>1){chip.style.display="inline-flex"; chip.querySelector("span").textContent=`${gSel.size} selected`;}
+  else chip.style.display="none";
+}
+function focusNode(id){gFocus=id; gIsolateSet=null; leaveSearch(id); graphOpen.add(id); select(id,true);
+  requestAnimationFrame(()=>graphFit());}
+function clearFocus(){gFocus=null; renderGraph(); requestAnimationFrame(()=>graphFit());}
+// "Land" on a search result: pin the node + its full lineage so they persist, then drop
+// the search filter so normal (expansion-driven) browsing resumes around what you found.
+function leaveSearch(id){
+  if(!state.q) return;
+  if(byId.has(id)){ gPinned.add(id); graphFolded.delete(id); graphOpenUp.add(id);
+    for(const a of ancestorSet(id)){ gPinned.add(a); graphFolded.delete(a); graphOpenUp.add(a); } }
+  state.q=""; const si=$("#search"); if(si) si.value="";
+}
+// ---- graph expand / collapse actions (menu) ----
+// Collapse folds nodes into graphFolded (removed from view regardless of other open
+// routes), and is REVERSIBLE: any expand of a node clears its revealed relatives from
+// graphFolded, so re-expanding brings them back (no Reset needed). There is no "hide".
+function expandChildren(id){ gIsolateSet=null; leaveSearch(id);
+  for(const c of (dagKids.get(id)||[])) graphFolded.delete(c);   // un-fold what we're revealing
+  graphOpen.add(id); }
+function expandParents(id){ gIsolateSet=null; leaveSearch(id);
+  for(const p of ((byId.get(id)||{}).parents||[])) graphFolded.delete(p);
+  graphOpenUp.add(id); }
+function expandAllDescendants(id){
+  gIsolateSet=null; leaveSearch(id);
+  // open the WHOLE subtree (marking open is cheap; the per-fan-out cap still paginates
+  // with "＋N more"). Un-fold everything below so a prior collapse is fully undone.
+  const q=[id], visited=new Set([id]);
+  while(q.length){ const cur=q.shift();
+    graphOpen.add(cur); graphFolded.delete(cur);
+    for(const c of (dagKids.get(cur)||[])){
+      graphFolded.delete(c);
+      if(!couldShowGraph(c)||visited.has(c))continue;
+      visited.add(c); q.push(c);
+    }
+  }
+  renderGraph(); requestAnimationFrame(graphFit);
+}
+function expandAllAncestors(id){
+  gIsolateSet=null; leaveSearch(id); graphOpenUp.add(id);
+  for(const a of ancestorSet(id)) if(byId.has(a)){ graphOpenUp.add(a); graphFolded.delete(a); }
+  renderGraph(); requestAnimationFrame(graphFit);
+}
+function collapseDescendants(id){    // fold the whole subtree out of view (reversible)
+  for(const d of descendantSet(id)){ graphFolded.add(d); graphOpen.delete(d); graphOpenUp.delete(d); graphCap.delete(d); }
+  graphOpen.delete(id); graphCap.delete(id);
+  if(gSel.size) for(const s of [...gSel]) if(!canShowGraph(s)) gSel.delete(s);
+  if(selected&&!canShowGraph(selected)) closeDrawer(); else renderGraph();
+}
+function collapseAncestors(id){      // fold the ancestor chain out of view (reversible; root stays)
+  for(const a of ancestorSet(id)){ if(a==="root")continue; graphFolded.add(a); graphOpen.delete(a); graphOpenUp.delete(a); }
+  graphOpenUp.delete(id);
+  if(gSel.size) for(const s of [...gSel]) if(!canShowGraph(s)) gSel.delete(s);
+  if(selected&&!canShowGraph(selected)) closeDrawer(); else renderGraph();
+}
+function isolateNode(id){gFocus=id; gIsolateSet=null; graphOpen.add(id); renderGraph(); requestAnimationFrame(graphFit);}
+// ---- multi-selection ----
+function toggleSel(id){
+  if(gSel.has(id)){ gSel.delete(id); if(selected===id) selected=gSel.size?[...gSel][gSel.size-1]:null; }
+  else { gSel.add(id); selected=id; }
+  if(selected) select(selected,true); else closeDrawer();
+  renderGraph();
+}
+function clearSelection(){gSel=new Set(); selected=null; closeDrawer(); renderGraph();}
+// ---- per-node context menu ----
+function closeCtxMenu(){const m=$("#ctxmenu"); if(m){m.hidden=true; m.innerHTML="";}}
+function openNodeMenu(id,px,py){
+  const n=byId.get(id); if(!n)return;
+  const m=$("#ctxmenu"); m.innerHTML="";
+  const title=el("div","ctx-title"); title.textContent=clip(n.label,34); m.appendChild(title);
+  const hasKids=(dagKids.get(id)||[]).some(couldShowGraph);
+  const hasParents=(n.parents||[]).some(p=>byId.has(p));
+  const item=(label,enabled,fn,cls)=>{const b=el("button",cls||null);b.textContent=label;
+    b.disabled=!enabled; if(enabled)b.onclick=()=>{closeCtxMenu();fn();}; m.appendChild(b);};
+  const sep=()=>m.appendChild(el("div","sep"));
+  item("Expand children", hasKids&&!graphOpen.has(id), ()=>{expandChildren(id);renderGraph();});
+  item("Expand all descendants", hasKids, ()=>expandAllDescendants(id));
+  item("Collapse descendants", hasKids, ()=>collapseDescendants(id));
+  sep();
+  item("Expand parents", hasParents&&!graphOpenUp.has(id), ()=>{expandParents(id);renderGraph();});
+  item("Expand all ancestors", hasParents, ()=>expandAllAncestors(id));
+  item("Collapse ancestors", hasParents, ()=>collapseAncestors(id));
+  sep();
+  item("Focus here (re-root)", true, ()=>isolateNode(id));
+  m.hidden=false;
+  const r=m.getBoundingClientRect(), W=innerWidth, H=innerHeight;
+  let x=px+2, y=py+2; if(x+r.width>W-8)x=W-r.width-8; if(y+r.height>H-8)y=H-r.height-8;
+  m.style.left=Math.max(8,x)+"px"; m.style.top=Math.max(8,y)+"px";
+}
+function centerNodeInView(id){
+  const c=gCoord.get(id); if(!c||!gLayer)return;
+  const svg=$("#graph"),W=svg.clientWidth,H=svg.clientHeight;
+  gz.x=W/2-c.x*gz.k; gz.y=H/2-c.y*gz.k;
+  gLayer.style.transition="transform .42s cubic-bezier(.4,0,.2,1)"; applyGT(gLayer);
+  setTimeout(()=>{if(gLayer)gLayer.style.transition="";},460);
+}
+// hover peek: transient lineage highlight without changing the selection
+function peekOn(id){
+  if(!gLayer)return; gPeek=id;
+  const up=ancestorSet(id); up.add(id); const down=descendantSet(id);
+  for(const [nid,gnEl] of gNodeEls){
+    gnEl.classList.toggle("pk", up.has(nid)); gnEl.classList.toggle("pkd", down.has(nid)&&!up.has(nid));
+  }
+  for(const [key,eEl] of gEdgeEls){const [p,c]=key.split(">");
+    eEl.classList.toggle("pk", up.has(p)&&up.has(c));
+    eEl.classList.toggle("pkd", (down.has(p)||p===id)&&down.has(c));
+  }
+  gLayer.classList.add("peek-active");
+}
+function peekOff(){
+  if(!gLayer)return; gPeek=null; gLayer.classList.remove("peek-active");
+  for(const [,gnEl] of gNodeEls) gnEl.classList.remove("pk","pkd");
+  for(const [,eEl] of gEdgeEls) eEl.classList.remove("pk","pkd");
+}
+function buildMore(n){
+  const gm=svgEl("g",{class:"gmore"}); gm.style.cursor="pointer";
+  gm.appendChild(svgEl("rect",{y:-11,height:22,rx:9}));
+  gm.appendChild(svgEl("text",{x:0,y:4,"text-anchor":"middle","font-size":11}));
+  gm.addEventListener("click",e=>{e.stopPropagation();
+    graphCap.set(n.parent,(graphCap.get(n.parent)??GRAPH_CAP)+10); renderGraph();});
+  updateMore(gm,n);
+  return gm;
+}
+function updateMore(gm,n){                 // refresh label + width each render (count changes)
+  const w=n.label.length*7+16;
+  const rect=gm.querySelector("rect"); rect.setAttribute("x",-w/2); rect.setAttribute("width",w);
+  gm.querySelector("text").textContent=n.label;
+}
+// Monarch's own category glyphs (viewBox 0 0 100 100, centered 50,50): the disease "wing"
+// and the phenotype "figure". Drawn inside the two axis-root nodes as their icons.
+const MONARCH_GLYPH={
+  mondo:[["path",{d:"M70 80C25 50 30 17 50 17s25 33-20 63"}]],
+  hpo:[["circle",{cx:50,cy:42,r:18}],["path",{d:"M32 42v41"}],["path",{d:"M32 21s7-7 18-7 18 7 18 7"}]],
+};
+function buildNode(id,n){
+  const g=svgEl("g",{class:"gnode"});
+  g.appendChild(svgEl("circle",{class:"gcirc",cx:0,cy:0}));
+  if(n.kind==="root"){                                   // axis root: Monarch category glyph
+    const gi=svgEl("g",{class:"gicon"});
+    for(const [t,a] of (MONARCH_GLYPH[n.axis]||[])) gi.appendChild(svgEl(t,a));
+    g.appendChild(gi);
+  }
+  g.appendChild(svgEl("text",{class:"glbl","font-size":12.5}));
+  g.appendChild(svgEl("text",{class:"gsub","font-size":10.5}));
+  const pl=svgEl("g",{class:"gplus",opacity:0});     // "+" = has children not yet shown
+  pl.appendChild(svgEl("circle",{class:"gplus-bg",r:7,cx:0,cy:0}));
+  pl.appendChild(svgEl("path",{class:"gplus-sign"}));
+  g.appendChild(pl);
+  const rm=svgEl("text",{class:"grare","text-anchor":"middle",opacity:0}); rm.textContent="✦"; g.appendChild(rm);
+  const mn=svgEl("g",{class:"gmenu"});                  // hover menu dot (top-right)
+  mn.appendChild(svgEl("circle",{class:"gmenu-bg",r:7.5,cx:0,cy:0}));
+  for(const dx of [-3,0,3]) mn.appendChild(svgEl("circle",{class:"gmenu-dots",r:1,cx:dx,cy:0}));
+  mn.addEventListener("click",e=>{e.stopPropagation(); openNodeMenu(id,e.clientX,e.clientY);});
+  g.appendChild(mn);
+  g.addEventListener("click",e=>{e.stopPropagation();
+    if(gJustDragged){ gJustDragged=false; return; }   // this "click" ended a reorder drag
+    if(e.shiftKey){ toggleSel(id); return; }
+    const landed=!!state.q;
+    if(landed) leaveSearch(id);   // clicking a search result lands here: pin lineage, drop filter
+    if(!graphOpen.has(id) && (dagKids.get(id)||[]).some(couldShowGraph)) expandChildren(id);  // expand one level (un-folds)
+    select(id);
+    if(landed) requestAnimationFrame(()=>centerNodeInView(id));   // deliberate nav: bring it into view
+  });
+  g.addEventListener("contextmenu",e=>{e.preventDefault();e.stopPropagation(); openNodeMenu(id,e.clientX,e.clientY);});
+  g.addEventListener("pointerdown",e=>{ if(e.button!==0)return;   // begin possible reorder drag
+    gNodeDrag={id,startY:e.clientY,moved:false}; });
+  g.addEventListener("mouseenter",()=>{ if(!gNodeDrag) peekOn(id); });
+  g.addEventListener("mousemove",e=>{ if(gNodeDrag&&gNodeDrag.moved)return;
+    showTip(e,`${byId.get(id).label} · ${graphCountText(id)||'0'}`);});
+  g.addEventListener("mouseleave",()=>{hideTip();peekOff();});
+  return g;
+}
+function updateNode(g,id,n,c){
+  const pk=g.classList.contains("pk")?" pk":g.classList.contains("pkd")?" pkd":"";  // preserve hover peek
+  g.setAttribute("class","gnode"+(gSel.has(id)?" sel":"")+(gHL.has(id)?" hl":gHLD.has(id)?" hld":"")+pk+(matchesQ(n)?" match":""));
+  const circ=g.querySelector(".gcirc"); circ.setAttribute("r",c.r); circ.style.r=c.r+"px";
+  const gi=g.querySelector(".gicon");   // Monarch glyph on roots: fit its 100-space into the node
+  if(gi) gi.setAttribute("transform",`translate(${(-c.r*0.95).toFixed(2)},${(-c.r*0.95).toFixed(2)}) scale(${(c.r/52.6).toFixed(3)})`);
+  circ.setAttribute("fill",nodeFill(id,n));
+  circ.setAttribute("fill-opacity",nodeOpac(n));
+  const dir=c.dir||1, lx=dir*(c.r+9), anchor=dir<0?"end":"start";
+  const lbl=g.querySelector(".glbl"); lbl.setAttribute("x",lx); lbl.setAttribute("y",c.r>14?-2:4);
+  lbl.setAttribute("text-anchor",anchor); lbl.textContent=clip(n.label,36);
+  const sub=g.querySelector(".gsub");
+  sub.setAttribute("x",lx); sub.setAttribute("y",13); sub.setAttribute("text-anchor",anchor); renderCountInto(sub,id);
+  const bx=c.r*0.72, by=c.r*0.72;
+  // "+" when the node has ≥1 can-show child not currently on screen (incl. behind "＋N more");
+  // fades out when terminal or fully expanded. gCoord holds the current visible set.
+  const hasUnshown=(dagKids.get(id)||[]).some(k=>couldShowGraph(k)&&!gCoord.has(k));
+  const pl=g.querySelector(".gplus"); pl.setAttribute("transform",`translate(${bx},${by})`); pl.setAttribute("opacity",hasUnshown?1:0);
+  pl.querySelector(".gplus-sign").setAttribute("d",`M-3.2,0 h6.4 M0,-3.2 v6.4`);
+  const rm=g.querySelector(".grare");
+  rm.setAttribute("opacity",n.rare?1:0);
+  rm.setAttribute("x",-bx); rm.setAttribute("y",-by+4);
+  rm.setAttribute("font-size",Math.max(10,Math.min(15,c.r*0.9)));
+  g.querySelector(".gmenu").setAttribute("transform",`translate(${bx},${-by})`);
+}
+function applyGT(g){if(g)g.setAttribute("transform",`translate(${gz.x},${gz.y}) scale(${gz.k})`);}
+function graphFit(){
+  const svg=$("#graph"); if(!gBounds||!gLayer)return;
+  const w=gBounds.maxX-gBounds.minX, h=gBounds.maxY-gBounds.minY;
+  if(w<=0||h<=0)return;
+  const W=svg.clientWidth,H=svg.clientHeight,pad=34;
+  gz.k=Math.min(1.3,Math.max(0.12,Math.min((W-2*pad)/w,(H-2*pad)/h)));
+  gz.x=pad-gBounds.minX*gz.k+Math.max(0,(W-2*pad-w*gz.k)/2);
+  gz.y=Math.max(pad,(H-h*gz.k)/2)-gBounds.minY*gz.k;   // vertically centered
+  gLayer.style.transition="transform .4s cubic-bezier(.4,0,.2,1)";
+  applyGT(gLayer);
+  setTimeout(()=>{if(gLayer)gLayer.style.transition="";},450);
+}
+
+function renderTreemap(){
+  const svg=$("#treemap"); while(svg.firstChild)svg.removeChild(svg.firstChild);
+  const W=svg.clientWidth||svg.parentElement.clientWidth-28, H=Math.max(360,Math.min(620,W*0.52));
+  svg.setAttribute("viewBox",`0 0 ${W} ${H}`); svg.style.height=H+"px";
+  const note=$("#tm-note");
+  if(state.rollup){
+    note.innerHTML="Area ∝ <b>rolled-up subtree size</b> (nominal add-up). Top tiles = body systems, split by sub-branch. Hover for the honest distinct-patient bracket [floor…ceiling] — the sum over-counts comorbidities and includes &le;20 cells at 20.";
+    return drawRollupTreemap(svg,W,H);
+  }
+  note.textContent="Area ∝ patients coded exactly at each reported term (>20). Grouped by top-level body system. Used-small (≤20) terms carry no publishable number and are not sized here — switch to Rolled up to include subtrees.";
+  const groups=new Map();
+  for(const n of DATA.nodes){
+    if(n.state!=="reported"||n.count==null||!state.vis.has("reported"))continue;
+    const g=topAncestor(n.id); if(!groups.has(g))groups.set(g,[]); groups.get(g).push(n);
+  }
+  let gl=[...groups.entries()].map(([id,ns])=>({id,label:byId.get(id)?byId.get(id).label:id,
+    value:ns.reduce((a,n)=>a+(n.count||0),0),items:ns})).filter(g=>g.value>0);
+  gl.sort((a,b)=>b.value-a.value);
+  if(!gl.length){svg.innerHTML=`<text x="14" y="28" fill="var(--muted)" font-family="var(--mono)" font-size="13">No reported (>20) terms in view.</text>`;return;}
+  const total=gl.reduce((a,g)=>a+g.value,0);
+  const cells=squarify(gl.map(g=>g.value),{x:0,y:0,w:W,h:H});
+  const maxC=Math.max(...DATA.nodes.filter(n=>n.state==="reported"&&n.count!=null).map(n=>n.count));
+  gl.forEach((g,i)=>{
+    const c=cells[i]; const inner=squarify(g.items.map(n=>n.count),{x:c.x+2,y:c.y+2,w:c.w-4,h:c.h-4});
+    g.items.forEach((n,j)=>{
+      const t=inner[j]; if(t.w<1||t.h<1)return;
+      const lum=0.30+0.55*(Math.log(1+n.count)/Math.log(1+maxC));
+      const rect=svgEl("rect",{x:t.x,y:t.y,width:Math.max(0,t.w-1.5),height:Math.max(0,t.h-1.5),
+        rx:2,fill:"var(--cat-reported)","fill-opacity":lum.toFixed(3),
+        stroke:"var(--surface)","stroke-width":1.5,style:"cursor:pointer"});
+      rect.addEventListener("mousemove",e=>showTip(e,`${n.label} · ${fmt(n.count)}`));
+      rect.addEventListener("mouseleave",hideTip);
+      rect.addEventListener("click",()=>select(n.id));
+      svg.appendChild(rect);
+      if(t.w>62&&t.h>26){
+        svg.appendChild(svgText(t.x+5,t.y+15,clip(n.label,Math.floor(t.w/6.4)),"var(--surface)","600",11.5));
+        svg.appendChild(svgText(t.x+5,t.y+29,fmt(n.count),"var(--surface)","500",10.5,.85));
+      }
+    });
+    // group label ribbon
+    if(c.w>70&&c.h>16) svg.appendChild(svgText(c.x+4,c.y+ (c.h>40?c.h-6:12),
+      clip(g.label.toUpperCase(),Math.floor(c.w/7)),"var(--ink-2)","600",10,.9,"var(--mono)"));
+  });
+}
+function drawRollupTreemap(svg,W,H){
+  const min=DATA.meta.min_cell||20;
+  const systems=DATA.nodes.filter(n=>n.depth===1 && DATA._roll.get(n.id)&&DATA._roll.get(n.id).nUsed>0);
+  let gl=systems.map(n=>{
+    const r=DATA._roll.get(n.id);
+    let items=(kids.get(n.id)||[]).map(c=>({node:byId.get(c),r:DATA._roll.get(c)}))
+      .filter(x=>x.r&&x.r.nUsed>0).map(x=>({node:x.node,v:Math.max(1,x.r.est),r:x.r}));
+    if(!items.length) items=[{node:n,v:Math.max(1,r.est),r}];
+    return {node:n,label:n.label,value:Math.max(1,r.est),items};
+  }).filter(g=>g.value>0);
+  if(!gl.length){svg.innerHTML=`<text x="14" y="28" fill="var(--muted)" font-family="var(--mono)" font-size="13">No used terms in view.</text>`;return;}
+  gl.sort((a,b)=>b.value-a.value);
+  const cells=squarify(gl.map(g=>g.value),{x:0,y:0,w:W,h:H});
+  const maxE=Math.max(...gl.flatMap(g=>g.items.map(i=>i.v)));
+  gl.forEach((g,i)=>{
+    const c=cells[i]; const inner=squarify(g.items.map(it=>it.v),{x:c.x+2,y:c.y+2,w:c.w-4,h:c.h-4});
+    g.items.forEach((it,j)=>{
+      const t=inner[j]; if(t.w<1||t.h<1)return;
+      const lum=0.30+0.55*(lg(it.v)/lg(maxE||1));
+      const fl=it.r.floor>0?fmt(it.r.floor):("≤"+min), cl=fmt(it.r.ceil);
+      const rect=svgEl("rect",{x:t.x,y:t.y,width:Math.max(0,t.w-1.5),height:Math.max(0,t.h-1.5),
+        rx:2,fill:"var(--accent)","fill-opacity":lum.toFixed(3),
+        stroke:"var(--surface)","stroke-width":1.5,style:"cursor:pointer"});
+      rect.addEventListener("mousemove",e=>showTip(e,
+        `${it.node.label} · ${fl}–${cl} patients`));
+      rect.addEventListener("mouseleave",hideTip);
+      rect.addEventListener("click",()=>select(it.node.id));
+      svg.appendChild(rect);
+      if(t.w>62&&t.h>26){
+        svg.appendChild(svgText(t.x+5,t.y+15,clip(it.node.label,Math.floor(t.w/6.4)),"var(--surface)","600",11.5));
+        svg.appendChild(svgText(t.x+5,t.y+29,fmtK(it.v),"var(--surface)","500",10.5,.85));
+      }
+    });
+    if(c.w>70&&c.h>16) svg.appendChild(svgText(c.x+4,c.y+(c.h>40?c.h-6:12),
+      clip(g.label.toUpperCase(),Math.floor(c.w/7)),"var(--ink-2)","600",10,.9,"var(--mono)"));
+  });
+}
+function squarify(values,rect){         // returns array of {x,y,w,h} aligned to values
+  const total=values.reduce((a,v)=>a+v,0)||1; const items=values.map((v,i)=>({v:v/total*rect.w*rect.h,i}));
+  const out=new Array(values.length); let {x,y,w,h}=rect; let row=[];
+  const worst=(row,len)=>{const s=row.reduce((a,r)=>a+r.v,0);const mx=Math.max(...row.map(r=>r.v)),mn=Math.min(...row.map(r=>r.v));
+    return Math.max(len*len*mx/(s*s),(s*s)/(len*len*mn));};
+  let rest=items.slice();
+  while(rest.length){
+    const len=Math.min(w,h);
+    if(!row.length){row.push(rest.shift());continue;}
+    const cur=worst(row,len), test=worst(row.concat(rest[0]),len);
+    if(rest.length&&test<=cur){row.push(rest.shift());}
+    else{layoutRow(row);row=[];}
+  }
+  if(row.length)layoutRow(row);
+  return out;
+  function layoutRow(row){
+    const s=row.reduce((a,r)=>a+r.v,0); const horizontal=w>=h;
+    if(horizontal){const rw=s/h; let cy=y; for(const r of row){const rh=r.v/rw;out[r.i]={x,y:cy,w:rw,h:rh};cy+=rh;} x+=rw;w-=rw;}
+    else{const rh=s/w; let cx=x; for(const r of row){const rw=r.v/rh;out[r.i]={x:cx,y,w:rw,h:rh};cx+=rw;} y+=rh;h-=rh;}
+  }
+}
+
+/* ---- table ---- */
+let sortKey="count", sortDir=-1;
+function renderTable(){
+  const host=$("#table-scroll"); const q=state.q.toLowerCase();
+  let rows=DATA.nodes.filter(n=>n.kind!=="root"&&state.vis.has(n.category)&&
+    (!q||n.label.toLowerCase().includes(q)||n.id.toLowerCase().includes(q)));
+  rows.sort((a,b)=>{let av,bv;
+    if(sortKey==="count"){av=sortVal(a);bv=sortVal(b);}
+    else if(sortKey==="depth"){av=a.depth;bv=b.depth;}
+    else if(sortKey==="n_codes"){av=a.n_codes||0;bv=b.n_codes||0;}
+    else{av=(a[sortKey]||"").toString().toLowerCase();bv=(b[sortKey]||"").toString().toLowerCase();}
+    return av<bv?sortDir:av>bv?-sortDir:0;});
+  const CAP=400, total=rows.length; rows=rows.slice(0,CAP);
+  const hasCodes=DATA.nodes.some(n=>n.n_codes);
+  const cols=[["label","Term"],["id","MONDO id"],["kind","Kind"],["category","Category"],["depth","Depth"]]
+    .concat(hasCodes?[["n_codes","Codes"]]:[]).concat([["count","Patients"]]);
+  const numCol=k=>k==="count"||k==="depth"||k==="n_codes";
+  const t=el("table"); const thead=el("thead"); const trh=el("tr");
+  for(const [k,lab] of cols){const th=el("th",null,lab+(sortKey===k?(sortDir<0?" ↓":" ↑"):""));
+    if(numCol(k))th.style.textAlign="right";
+    th.onclick=()=>{if(sortKey===k)sortDir*=-1;else{sortKey=k;sortDir=numCol(k)?-1:1;}renderTable();};trh.appendChild(th);}
+  thead.appendChild(trh);t.appendChild(thead);
+  const tb=el("tbody");
+  for(const n of rows){
+    const tr=el("tr","trow");tr.onclick=()=>select(n.id);
+    const c1=el("td"); c1.innerHTML=hlMatch(n.label,state.q); tr.appendChild(c1);
+    const c2=el("td"); c2.innerHTML=hlMatch(n.id,state.q);
+    c2.style.fontFamily="var(--mono)"; c2.style.fontSize="11.5px"; c2.style.color="var(--ink-2)"; tr.appendChild(c2);
+    tr.appendChild(td(n.kind));
+    const ct=el("td");const p=el("span","pill");p.style.color=CATMAP[n.category].color;
+    p.style.background="color-mix(in srgb,"+CATMAP[n.category].color+" 14%,transparent)";
+    p.textContent=CATMAP[n.category].label;ct.appendChild(p);tr.appendChild(ct);
+    tr.appendChild(numTd(n.depth));
+    if(hasCodes){const cc=numTd(n.n_codes||0);cc.style.color="var(--ink-2)";tr.appendChild(cc);}
+    const c=el("td","num");c.textContent=n.state==="reported"?ownText(n):n.state==="used_small"?"≤"+(DATA.meta.min_cell||20):"0";
+    c.style.color=n.state==="reported"?"var(--cat-reported)":n.state==="used_small"?"var(--cat-used-small)":"var(--muted)";
+    tr.appendChild(c);
+    tb.appendChild(tr);
+  }
+  t.appendChild(tb);host.innerHTML="";host.appendChild(t);
+  $("#table-hint").textContent=total>CAP?`showing top ${CAP} of ${total.toLocaleString()} — narrow with search or category filters`:`${total.toLocaleString()} terms`;
+}
+const sortVal=n=>n.state==="reported"?ownNum(n):n.state==="used_small"?0.5:0;
+const td=(x)=>{const d=el("td");d.textContent=x;return d;};
+const mono=(x)=>{const d=el("td");d.textContent=x;d.style.fontFamily="var(--mono)";d.style.fontSize="11.5px";d.style.color="var(--ink-2)";return d;};
+const numTd=(x)=>{const d=el("td","num");d.textContent=x;return d;};
+
+/* ------------------------------ detail drawer ----------------------------- */
+function select(id,quiet){
+  // quiet = keep the current multi-selection & don't re-center (used by shift-toggle/focus);
+  // a plain select resets to a single selection and exits any isolate view.
+  if(!quiet){ gSel=new Set([id]); gIsolateSet=null; }
+  selected=id; const n=byId.get(id); const dr=$("#drawer"); const inner=$("#drawer-inner");
+  const min=DATA.meta.min_cell||20;
+  const disp=n.state==="reported"?ownText(n):n.state==="used_small"?`≤ ${min} (withheld)`:"0";
+  const purl=n.id.startsWith("MONDO:")?`https://monarchinitiative.org/${n.id}`:null;
+  const cat=CATMAP[n.category]||{label:n.category,color:"var(--muted)"};
+  let html=`<div class="dh"><div>
+      <div class="section-t">${n.kind} term · depth ${n.depth}</div>
+      <h3>${esc(n.label)}</h3></div>
+      <div style="display:flex;gap:6px">
+      <button class="close" id="dfocus" title="Focus this node in the graph" aria-label="Focus in graph" style="font-size:15px">⌖</button>
+      <button class="close" aria-label="Close">×</button></div></div><div class="body">`;
+  html+=`<span class="pill" style="color:${cat.color};background:color-mix(in srgb,${cat.color} 15%,transparent)">${cat.label}</span>`;
+  if(n.rare) html+=` <span class="pill" style="color:var(--rare);background:color-mix(in srgb,var(--rare) 15%,transparent)" title="Mondo rare-disease designation">✦ rare · ${(n.rare_src||["Mondo"]).join(", ")}</span>`;
+  html+=`<dl class="kv" style="margin-top:14px">
+    <dt>Patients</dt><dd style="font-size:15px;color:${n.state==="reported"?cat.color:"var(--ink)"}">${disp}</dd>
+    <dt>MONDO id</dt><dd>${purl?`<a href="${purl}" target="_blank" rel="noopener">${n.id}</a>`:n.id}</dd>
+    ${(n.source_codes&&n.source_codes.length)?sourceCatalogRow(n):codesRow(n)}
+  </dl>`;
+  const rr=DATA._roll&&DATA._roll.get(id);
+  if(rr && (kids.get(id)||[]).length){
+    const pm=rollupPM(rr,min);
+    const own=n.state==="reported"?ownText(n):n.state==="used_small"?("&le;"+min):"0";
+    const descUsed=Math.max(0, rr.nUsed - ((n.state==="reported"||n.state==="used_small")?1:0));
+    html+=`<div class="section-t">Subtree roll-up</div>
+      <div class="warn" style="background:var(--surface-2);border-color:var(--border);color:var(--ink-2)">
+        <b style="color:var(--ink);font-size:16px">${fmt(rr.est)}${pm>0?` ± ${fmt(pm)}`:""}</b> ${HAS_FRAC?"de-double-counted":"distinct participant"} diagnoses across this disease and its ${fmt(descUsed)} descendant term(s) with at least one diagnosis. <b>${own}</b> are diagnosed specifically at this node.${HAS_FRAC?" Multi-mapped diagnoses are split 1/m across their terms, so this total does not double-count them.":""}
+      </div>
+      <dl class="kv"><dt>Used terms</dt><dd>${fmt(rr.nUsed)} of ${fmt(rr.nTerms)}</dd>
+        <dt>Suppressed</dt><dd>${fmt(HAS_FRAC?rr.fs:rr.s)} term(s) &le;${min}</dd></dl>`;
+  }
+  if(n.collision&&n.collision_siblings.length){
+    const k=n.collision_kind||"shared_concept";
+    const m=n.collision_siblings.length+1;   // this term + its tied siblings share the diagnosis
+    const how=k==="climb_tie"
+      ? `a source code with no Mondo term of its own rolled up and <b>tied</b> between them (equally-near ancestors in Mondo's poly-hierarchy)`
+      : k==="mixed"
+      ? `they share a standard (SNOMED) concept for some codes and are climb-tied for others`
+      : `OMOP maps them onto a <b>shared</b> standard (SNOMED) concept — often one generic ICD code splitting into several via <span class="mono">Maps&nbsp;to</span>`;
+    const note=`<b>${esc(n.label)}</b> shares diagnoses with the term(s) below because ${how}. A patient carrying that code touches all ${m} terms — but a shared diagnosis is <b>split 1/m</b> (here 1/${m}) across them, so roll-ups that include several of these terms don't double-count it. Read each term's own <b>Patients</b> figure as "everyone who touches this term"; use the subtree roll-up for an honest combined total.`;
+    html+=`<div class="section-t" style="margin-top:16px">Shares diagnoses with</div>`+
+    `<div style="color:var(--muted);font-size:11.5px;margin:-2px 0 8px;line-height:1.45">${note}</div>`+
+    `<div class="chiplist">`+
+    n.collision_siblings.slice(0,30).map(c=>byId.has(c)?`<a data-goto="${c}">${esc(byId.get(c).label)}</a>`:`<span>${c}</span>`).join("")+`</div>`;}
+  html+=`</div>`;
+  inner.innerHTML=html;
+  inner.querySelector(".close[aria-label='Close']").onclick=closeDrawer;
+  const df=inner.querySelector("#dfocus"); if(df) df.onclick=()=>focusNode(id);
+  inner.querySelectorAll("[data-goto]").forEach(a=>a.onclick=()=>{const t=a.getAttribute("data-goto");select(t);});
+  renderGraph();
+  // (pan-to-center on select intentionally disabled — the view stays put)
+  if(!quiet && matchMedia("(max-width:900px)").matches) $("#drawer").scrollIntoView({behavior:"smooth",block:"nearest"});
+}
+function closeDrawer(){selected=null; gSel=new Set(); renderDrawerDefault(); renderGraph();}
+const esc=s=>s.replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+// Athena links: by OMOP concept_id (exact concept page) when we have one, else a
+// search by the source code — Athena has no by-vocab-code deep link, so a search
+// lands the user on the matching concept(s) for codes we only know by string.
+const athena=id=>`https://athena.ohdsi.org/search-terms/terms/${id}`;
+const athenaSearch=q=>`https://athena.ohdsi.org/search-terms/terms?query=${encodeURIComponent(q)}`;
+function codesRow(n){
+  if(n.codes && n.codes.length){                    // source-space: real source codes
+    const byv=Object.entries(n.codes_by_vocab||{}).map(([v,c])=>`${c} ${v}`).join(" · ");
+    const list=n.codes.slice(0,24).map(c=>{const t=`${c.vocab} ${esc(String(c.code))}`;
+      const href=c.id?athena(c.id):athenaSearch(c.code);
+      return `<a href="${href}" target="_blank" rel="noopener" title="${c.vocab}${c.id?"":" — search Athena for this code"}">${t}</a>`;}).join(", ");
+    return `<dt>Codes (${n.n_codes||n.codes.length})</dt><dd>${list}${n.codes.length>24?` +${n.codes.length-24}`:""}`+
+      (byv?`<div style="color:var(--muted);margin-top:3px">${byv}</div>`:"")+`</dd>`;
+  }
+  const std=(n.std_concepts||[]);                   // standard-space fallback
+  return `<dt>Std concepts</dt><dd>${std.map(c=>`<a href="${athena(c)}" target="_blank" rel="noopener">${c}</a>`).join(", ")||"—"}</dd>`;
+}
+// Human-readable names for PUBLIC-DOMAIN source vocabularies, resolved live from NIH
+// Clinical Tables (clinicaltables.nlm.nih.gov — CORS-enabled, no key, US-government
+// public domain). Nothing is embedded in the payload, so no name text is egressed and
+// no licensed content (SNOMED/CPT4) is redistributed. SNOMED etc. have no NIH endpoint
+// and keep code-only display + the Athena link.
+const NIH_EP={ICD10CM:"icd10cm",ICD9CM:"icd9cm_dx",HCPCS:"hcpcs"};
+const nihCache={};                                   // "VOCAB:code" -> name | null (miss)
+function nihName(vocab,code){
+  const key=vocab+":"+code;
+  if(key in nihCache) return Promise.resolve(nihCache[key]);
+  const ep=NIH_EP[vocab];
+  if(!ep){nihCache[key]=null;return Promise.resolve(null);}
+  const norm=s=>String(s).replace(/\./g,"").toUpperCase();   // match dotted vs undotted
+  // ICD-9-CM's code index is UNDOTTED (250.00 -> 25000); ICD-10/HCPCS index as-is. Use the
+  // endpoint's DEFAULT display fields (code, description) — a forced df=name comes back blank.
+  const term=vocab==="ICD9CM"?norm(code):code;
+  const url=`https://clinicaltables.nlm.nih.gov/api/${ep}/v3/search?sf=code&maxList=12&terms=${encodeURIComponent(term)}`;
+  return fetch(url).then(r=>r.json()).then(j=>{
+    const rows=(j&&j[3])||[]; const want=norm(code); let nm=null;
+    for(const row of rows){ if(norm(row[0])===want){nm=String(row[1]||"").trim(); break;} }
+    nihCache[key]=nm||null; return nihCache[key];
+  }).catch(()=>{nihCache[key]=null; return null;});
+}
+// resolve-on-hover, reusing the graph's floating tooltip; cached so a code is fetched once.
+(function(){
+  const host=$("#drawer-inner"); if(!host) return;
+  let cur=null;
+  const codeAt=t=>t&&t.closest?t.closest("a[data-nih]"):null;
+  const keyOf=a=>a.getAttribute("data-nih")+":"+a.getAttribute("data-code");
+  const label=(a,nm)=>{const bt=a.getAttribute("data-tip")||""; return nm?nm+" · "+bt:bt;};
+  host.addEventListener("mouseover",e=>{
+    const a=codeAt(e.target); if(!a) return; cur=a;
+    const k=keyOf(a);
+    if(k in nihCache){ showTip(e,label(a,nihCache[k])); return; }
+    showTip(e,label(a,null));      // show base context immediately while the name loads
+    nihName(a.getAttribute("data-nih"),a.getAttribute("data-code"))
+      .then(nm=>{ if(cur===a) showTip(e,label(a,nm)); });
+  });
+  host.addEventListener("mousemove",e=>{
+    const a=codeAt(e.target); if(!a) return;
+    const k=keyOf(a); showTip(e,label(a, k in nihCache?nihCache[k]:null));
+  });
+  host.addEventListener("mouseout",e=>{ if(codeAt(e.target)){cur=null; hideTip();} });
+})();
+// source_climb catalog: the originating source codes (ICD etc.) that reached this
+// term, each tagged exact (own map) or climbed (rolled up a mapped ancestor). Identity
+// only — a "↑" marks the climbed ones. Absent (empty) for the exact-map count spaces.
+function sourceCatalogRow(n){
+  const sc=n.source_codes||[]; const bands=n.source_bands||[];
+  if(!sc.length&&!bands.length) return "";
+  const total=n.n_source_codes||sc.length;
+  if(!bands.length){                          // legacy payload (pre-band): plain identity list
+    const list=sc.map(c=>{const climbed=c.via==="climbed";
+      const t=`${c.vocab} ${esc(String(c.code))}${climbed?" ↑":""}`;
+      const href=c.id?athena(c.id):athenaSearch(c.code);
+      return `<a href="${href}" target="_blank" rel="noopener" title="${c.vocab} · ${climbed?"climbed (rolled up from a descendant)":"exact match"}">${t}</a>`;}).join(", ");
+    const extra=total>sc.length?` +${total-sc.length}`:"";
+    return `<dt>Source codes (${total})</dt><dd>${list}${extra}`+
+      `<div style="color:var(--muted);margin-top:3px">codes coded in the EHR that map here; <b>↑</b> = climbed to the nearest mapped ancestor</div></dd>`;
+  }
+  // bands arrive heavy->light; opacity ramps with rank so the histogram reads as a shape.
+  const order=bands.map(b=>b.band);
+  const opOf=lab=>{const i=order.indexOf(lab), N=Math.max(order.length-1,1);
+    return i<0?0.4:1-(i/N)*0.6;};
+  const chip=(lab,extra)=>{const o=opOf(lab);
+    return `<span style="display:inline-block;padding:1px 7px;margin:1px 4px 1px 0;border-radius:9px;`+
+      `font-size:11px;white-space:nowrap;background:rgba(122,162,222,${(o*0.30).toFixed(2)});`+
+      `border:1px solid rgba(122,162,222,${(o*0.55).toFixed(2)})">${lab}${extra||""}</span>`;};
+  // "shape": how many CODES sit in each volume band (a code count, never patients).
+  const hist=bands.map(b=>chip(b.band,`<b style="opacity:.6"> ×${b.codes}</b>`)).join("");
+  const histRow=bands.length?`<div style="margin:2px 0 5px">${hist}</div>`:"";
+  // Mondo's declared same-as cross-references for this term (n.codes) = the DIRECT codes.
+  // A catalogued source code that is one of them is a direct same-as match (≡); an "exact"
+  // code that is NOT is standardised in via OMOP Maps to (→); "climbed" rolled up (↑).
+  const sameAs=new Set((n.codes||[]).filter(c=>c&&c.id!=null).map(c=>c.id));
+  const kindOf=c=>c.via==="climbed"?"up":(c.id!=null&&sameAs.has(c.id))?"same":"in";
+  const MARK={same:" ≡",in:" =",up:" ↑"};
+  const WORD={same:"Mondo same-as (direct cross-reference)",in:"standardised in via OMOP Maps to",up:"climbed to the nearest mapped ancestor"};
+  const link=c=>{const kd=kindOf(c);
+    const t=`${c.vocab} ${esc(String(c.code))}${MARK[kd]}`;
+    const href=c.id?athena(c.id):athenaSearch(c.code);
+    const b=c.band&&!c.band.startsWith("≤")?` <span style="font-size:10px;color:var(--muted)">${c.band}</span>`:"";
+    const tip=`${c.vocab} · ${WORD[kd]}${c.band?" · "+c.band+" patients":""}`;
+    // public-domain vocabs (ICD/HCPCS) resolve their name on hover from NIH Clinical Tables
+    // (handler below) — no `title`, so the native browser tooltip doesn't fight the custom
+    // one; the base context rides in data-tip. Licensed vocabs (SNOMED) keep the native title.
+    if(NIH_EP[c.vocab])
+      return `<a href="${href}" target="_blank" rel="noopener" data-nih="${c.vocab}" data-code="${esc(String(c.code))}" data-tip="${esc(tip)}">${t}</a>${b}`;
+    return `<a href="${href}" target="_blank" rel="noopener" title="${tip}">${t}</a>${b}`;};
+  // each code+band is an UNBREAKABLE unit; the list wraps between units (no commas), so a
+  // vocab/code never splits across lines.
+  const unit=c=>`<span style="display:inline-block;white-space:nowrap;margin:0 14px 3px 0">${link(c)}</span>`;
+  // preview the first few (heavy-first); the drawer expands to show ONLY the codes not
+  // already shown (the rest of the in-payload list + a note for any beyond the export cap).
+  const PREVIEW=8;
+  const inPayload=sc.length;
+  const notListed=Math.max(total-inPayload,0);
+  const preview=sc.slice(0,PREVIEW).map(unit).join("");
+  const rest=sc.slice(PREVIEW);
+  const moreN=rest.length+notListed;
+  // heavy-first sort means any un-shipped remainder is the LOWEST-volume codes; the band
+  // histogram above already shows the true full distribution, so this note stays honest.
+  const restBody=rest.map(unit).join("")
+    +(notListed?` <span style="color:var(--muted)">+${notListed} lower-volume codes not listed</span>`:"");
+  const drawer=moreN
+    ? `<details style="margin-top:5px"><summary style="cursor:pointer;color:var(--desc)">`
+      +`Show ${fmt(moreN)} more code${moreN===1?"":"s"}</summary>`
+      +`<div style="margin-top:6px">${restBody}</div></details>`
+    : "";
+  const anySame=sc.some(c=>kindOf(c)==="same"), anyIn=sc.some(c=>kindOf(c)==="in"), anyUp=sc.some(c=>kindOf(c)==="up");
+  const legend=[anySame?"<b>≡</b> = Mondo same-as (direct)":"",anyIn?"<b>=</b> = exact via OMOP Maps&nbsp;to":"",anyUp?"<b>↑</b> = climbed to nearest mapped ancestor":""]
+    .filter(Boolean).join("; ");
+  return `<dt>Source codes (${total})</dt><dd>${histRow}<div>${preview}</div>${drawer}`+
+    `<div style="color:var(--muted);margin-top:4px">codes coded in the EHR that map here${legend?"; "+legend:""}. `+
+    `Hover an ICD/HCPCS code for its name (NIH Clinical Tables); SNOMED&nbsp;CT&reg; and other codes link to Athena. `+
+    `Bands = distinct-patient volume as ranges; the shape shows where the weight sits.</div></dd>`;
+}
+function hlMatch(text,q){                  // HTML-escaped text with <mark> around query matches
+  text=String(text); if(!q) return esc(text);
+  const low=text.toLowerCase(); let out="",pos=0,k;
+  while((k=low.indexOf(q,pos))>=0){out+=esc(text.slice(pos,k))+"<mark>"+esc(text.slice(k,k+q.length))+"</mark>";pos=k+q.length;}
+  return out+esc(text.slice(pos));
+}
+const matchesQ=n=>state.q && (n.label.toLowerCase().includes(state.q.toLowerCase())||n.id.toLowerCase().includes(state.q.toLowerCase()));
+const clip=(s,n)=>s.length>n?s.slice(0,n-1)+"…":s;
+
+/* --------------------------------- svg utils ------------------------------ */
+function svgEl(t,attrs){const e=document.createElementNS("http://www.w3.org/2000/svg",t);
+  for(const k in attrs)e.setAttribute(k,attrs[k]);return e;}
+function svgText(x,y,txt,fill,weight,size,op,fam){const t=svgEl("text",{x,y,fill,
+  "font-family":fam||"var(--sans)","font-weight":weight||"500","font-size":size||11,
+  "fill-opacity":op==null?1:op,"pointer-events":"none"});t.textContent=txt;return t;}
+const tip=$("#tip");
+function showTip(e,txt){tip.textContent=txt;tip.style.opacity=1;
+  tip.style.left=Math.min(e.clientX+12,innerWidth-tip.offsetWidth-8)+"px";tip.style.top=(e.clientY+14)+"px";}
+function hideTip(){tip.style.opacity=0;}
+
+/* --------------------------------- wiring --------------------------------- */
+// graph controls + pan/zoom (listeners on the persistent svg, once)
+$("#g-reset").onclick=()=>{initialGraphView();gPinned=new Set();gSel=new Set();selected=null;closeDrawer();gz={x:24,y:24,k:0.85};renderGraph();requestAnimationFrame(graphFit);};
+$("#g-fit").onclick=graphFit;
+$("#g-focus-clear").onclick=()=>clearFocus();
+$("#g-sel-clear").onclick=()=>clearSelection();
+// dim slider (transparency of non-highlighted nodes)
+const DIM_STOPS=[0.05,0.2,0.4,0.65,1.0];
+function applyDim(){const s=$("#dim-slider"); if(!s)return; const v=Math.max(0,Math.min(4,+s.value||0));
+  $("#view-graph").style.setProperty("--dim",DIM_STOPS[v]);
+  try{localStorage.setItem("mondo-dim",v);}catch(e){}}
+(function(){const s=$("#dim-slider"); if(!s)return;
+  try{const v=localStorage.getItem("mondo-dim"); if(v!==null)s.value=v;}catch(e){}
+  s.addEventListener("input",applyDim); applyDim();})();
+$("#hide-unused").addEventListener("change",e=>{state.hideUnused=e.target.checked;
+  if(selected&&!canShowGraph(selected))closeDrawer(); renderGraph();});
+// dismiss the context menu on any outside interaction / escape
+document.addEventListener("pointerdown",e=>{const m=$("#ctxmenu"); if(m&&!m.hidden&&!e.target.closest("#ctxmenu"))closeCtxMenu();},true);
+document.addEventListener("keydown",e=>{if(e.key==="Escape"){closeCtxMenu();}});
+(function(){const svg=$("#graph");let drag=null;
+  svg.addEventListener("wheel",e=>{e.preventDefault();const r=svg.getBoundingClientRect();
+    const mx=e.clientX-r.left,my=e.clientY-r.top,f=Math.exp(-e.deltaY*0.0016);
+    const nk=Math.min(3,Math.max(0.12,gz.k*f));
+    gz.x=mx-(mx-gz.x)*(nk/gz.k);gz.y=my-(my-gz.y)*(nk/gz.k);gz.k=nk;
+    const g=svg.firstChild;if(g)applyGT(g);},{passive:false});
+  svg.addEventListener("pointerdown",e=>{if(e.target.closest(".gnode,.gmore"))return;
+    drag={x:e.clientX,y:e.clientY,ox:gz.x,oy:gz.y,moved:false};svg.classList.add("grabbing");
+    try{svg.setPointerCapture(e.pointerId);}catch(_){}});
+  svg.addEventListener("pointermove",e=>{if(!drag)return;
+    if(Math.abs(e.clientX-drag.x)+Math.abs(e.clientY-drag.y)>4)drag.moved=true;
+    gz.x=drag.ox+(e.clientX-drag.x);gz.y=drag.oy+(e.clientY-drag.y);
+    const g=svg.firstChild;if(g)applyGT(g);});
+  const end=()=>{
+    if(drag&&!drag.moved&&selected){closeDrawer();}   // background click clears selection + dimming
+    drag=null;svg.classList.remove("grabbing");};
+  svg.addEventListener("pointerup",end);svg.addEventListener("pointercancel",end);
+})();
+// node drag-to-reorder (within a column): document-level so it survives leaving the node
+function finalizeNodeReorder(clientY){
+  const id=gNodeDrag.id, n=byId.get(id); if(!n)return;
+  const c=gCoord.get(id); if(!c)return;
+  const newY=c.y+(clientY-gNodeDrag.startY)/gz.k;
+  const peers=[...gCoord.entries()].filter(([pid,pc])=>pid!==id && Math.abs(pc.x-c.x)<1)
+    .sort((a,b)=>a[1].y-b[1].y);
+  let idx=peers.findIndex(([,pc])=>newY<pc.y); if(idx<0)idx=peers.length;
+  const above=idx>0?peers[idx-1][0]:null, below=idx<peers.length?peers[idx][0]:null;
+  const rk=pid=>gLastRank.has(pid)?gLastRank.get(pid):0;
+  let nk;
+  if(above===null&&below===null) nk=0;
+  else if(above===null) nk=rk(below)-1;
+  else if(below===null) nk=rk(above)+1;
+  else nk=(rk(above)+rk(below))/2;
+  gManualRank.set(id,nk); renderGraph();
+}
+document.addEventListener("pointermove",e=>{
+  if(!gNodeDrag)return;
+  if(Math.abs(e.clientY-gNodeDrag.startY)>4) gNodeDrag.moved=true;
+  if(gNodeDrag.moved){ hideTip();
+    const id=gNodeDrag.id, gEl=gNodeEls.get(id), c=gCoord.get(id);
+    if(gEl&&c){ gEl.classList.add("dragging"); gEl.style.transition="none";
+      const liveY=c.y+(e.clientY-gNodeDrag.startY)/gz.k;
+      gEl.style.transform=`translate(${c.x}px,${liveY}px)`;
+      // keep every incident edge attached to the node's live position
+      const dpos={x:c.x,y:liveY,r:c.r};
+      for(const [key,el] of gEdgeEls){
+        const gt=key.indexOf(">"); const p=key.slice(0,gt), ch=key.slice(gt+1);
+        if(p!==id && ch!==id) continue;
+        const a=p===id?dpos:gCoord.get(p), b=ch===id?dpos:gCoord.get(ch);
+        if(!a||!b) continue;
+        const d=edgePath(a,b); el.style.transition="none"; el.setAttribute("d",d); el.style.d=`path("${d}")`;
+      }
+    }
+  }
+});
+document.addEventListener("pointerup",e=>{
+  if(!gNodeDrag)return;
+  const {id,moved}=gNodeDrag;
+  const gEl=gNodeEls.get(id); if(gEl){ gEl.classList.remove("dragging"); gEl.style.transition=""; }
+  for(const [,el] of gEdgeEls) el.style.transition="";   // let edges animate to their settled paths
+  if(moved){ gJustDragged=true; finalizeNodeReorder(e.clientY); }
+  gNodeDrag=null;
+});
+document.querySelectorAll("#mode button").forEach(b=>b.onclick=()=>{
+  state.rollup=b.dataset.mode==="rollup";
+  document.querySelectorAll("#mode button").forEach(x=>x.setAttribute("aria-selected",x===b));
+  gManualRank=new Map();   // size scale changes, so drop manual reorderings
+  renderAll();
+  if(selected) select(selected,true);
+});
+let searchT; $("#search").addEventListener("input",e=>{clearTimeout(searchT);
+  searchT=setTimeout(()=>{state.q=e.target.value.trim();renderAll();},130);});
+$("#file").addEventListener("change",e=>{const f=e.target.files[0];if(!f)return;
+  const rd=new FileReader();rd.onload=()=>{try{load(JSON.parse(rd.result));}catch(err){alert("Could not parse JSON: "+err.message);}};rd.readAsText(f);});
+$("#theme").onclick=()=>{const r=document.documentElement;
+  const cur=r.getAttribute("data-theme")|| (matchMedia("(prefers-color-scheme:dark)").matches?"dark":"light");
+  const next=cur==="dark"?"light":"dark"; r.setAttribute("data-theme",next);
+  try{localStorage.setItem("mondo-theme",next);}catch(e){}};
+try{const saved=localStorage.getItem("mondo-theme");if(saved)document.documentElement.setAttribute("data-theme",saved);}catch(e){}
+addEventListener("keydown",e=>{if(e.key==="Escape")closeDrawer();});
+let rz; addEventListener("resize",()=>{clearTimeout(rz);rz=setTimeout(()=>{if(gLayer)graphFit();},180);});
+
+boot();
+</script>
+</body>
+</html>
