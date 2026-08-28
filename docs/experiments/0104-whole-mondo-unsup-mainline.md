@@ -89,13 +89,21 @@ spark_conf:
   # per iteration and the readout's (C,K) partials are ~117 MB, so the 2g default
   # overhead is what the container gets killed for exceeding, not the heap.
   spark.executor.memoryOverhead: 4g
-  # Dynamic allocation is CONFIRMED enabled on the cluster (08-28: checked in the
-  # Spark config directly). Separately, `yarn node -list` showed all nodes RUNNING
-  # while containers were "killed on request", ruling preemption OUT for those
-  # waves; DA idle-release is the remaining suspect, not a proven cause. The floor
-  # is cheap insurance either way: it stops the app shrinking below the
-  # non-preemptible primaries during the driver-side L-BFGS gaps.
-  spark.dynamicAllocation.minExecutors: 8
+  # Dynamic allocation OFF, fixed executors. DA is confirmed enabled on the
+  # cluster, and the 08-28 evening relaunch hardened the case that DA idle-release
+  # IS the kill mechanism: containers were killed "on request" / "by external
+  # signal" on PRIMARY workers (w-2 here; w-0/w-1 in earlier waves) — hostnames
+  # GCP cannot preempt — right after the driver-side reconstruct/transform gap
+  # where every executor idles past DA's 60s timeout, and the kill/task-launch
+  # races then feed excludeOnFailure until the scheduler starves (stage 3, 4 min
+  # in). A minExecutors=8 floor did NOT stop it. A long batch solve wants a
+  # deterministic executor set anyway: DA off + an explicit instance count sized
+  # to the cluster (12 nodes x 1 executor of 4 cores/6g+4g). YARN grants what
+  # exists and holds the rest pending, so a smaller cluster still runs — adjust
+  # instances when the cluster shape changes. If kills persist on primaries even
+  # with DA off, the mechanism is platform-level (autoscaler/YARN), not Spark.
+  spark.dynamicAllocation.enabled: "false"
+  spark.executor.instances: 12
   # Preemption-wave exclusion starvation (08-28 evening: the solve died 9,112s in
   # when a retry of task 0 "cannot run anywhere due to node and executor
   # excludeOnFailure" aborted the TaskSet). At the 1h default, every spot kill wave
@@ -392,6 +400,29 @@ solve's entire resumable state is one (C,K) array. Fix, three independent layers
 Layer 1 is what should stop this happening; layers 2 and 3 are what make it cheap when
 something else in the same family does. Cost of the whole thing when nothing goes wrong:
 one npz write per 10 iterations.
+
+**2026-08-28 (late) — the relaunch died the SAME way in 4 minutes, and the two facts it
+surfaced re-aim the whole diagnosis.** Stage 3 of the fresh app aborted on the identical
+"cannot run anywhere due to node and executor excludeOnFailure" — but this time (1) the
+killed container was on **`-w-2`, a PRIMARY worker**, a hostname GCP cannot preempt, and
+(2) the abort came out of `scored_df.select(topic_col).rdd` at the top of
+`theta_topm_coverage` — the `javaToPython` behind `.rdd` runs Spark jobs of its own on a
+not-yet-materialized cached transform, and that line sat one statement OUTSIDE the retry
+closure, so layer 1 never engaged. Two consequences:
+
+- **The kill mechanism was never spot preemption.** Primaries in the kill set (w-2 here,
+  w-0/w-1 in earlier waves), kills landing right after the driver-side
+  reconstruct/transform gap where every executor idles past dynamic allocation's 60s
+  timeout, DA confirmed enabled, and a `minExecutors=8` floor demonstrably not stopping
+  the kill/launch races: DA idle-release is now the working attribution for the entire
+  week of "kill swarms". `spark_conf:` therefore pins **`spark.dynamicAllocation.enabled:
+  false` + `spark.executor.instances: 12`** (deterministic executor set, sized 1/node).
+  This is also the clean experiment: any further primary-worker kill with DA off is
+  platform-level, not Spark.
+- **The retry seam moved one line up.** `theta_topm_coverage` and `masked_moments` now
+  take `.rdd` INSIDE the retried closure, so the first materialization of the transform —
+  which is exactly where a cold app meets its first kill wave — is covered like every
+  other pass. (`_collect_lean_proba` and the stats passes already were.)
 
 **2026-08-21 — UNBLOCKED: the 0103 A/B gate PASSED** (macro |Δ| ≤ 1.1e-4 both arms; see
 0103's run log). Reference bar from 0103's full-row readout: unsup cardiovascular
