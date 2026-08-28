@@ -391,6 +391,11 @@ const el=(t,c,txt)=>{const e=document.createElement(t);if(c)e.className=c;if(txt
 const fmt=n=>n==null?"":n.toLocaleString("en-US");
 const lg=v=>v>0?Math.log(1+v):0;                       // log scale for prevalence bars
 const fmtK=n=>{n=Math.round(n);return n<1000?(""+n):n<1e6?((n/1e3).toFixed(n<1e4?1:0)+"k"):((n/1e6).toFixed(1)+"M");};
+// A term whose exact total was complementary-suppressed publishes a standard band
+// string in `display` + a [lo,hi] `count_range` (count===null). ownText shows the
+// band; ownNum uses the range midpoint for sizing.
+const ownNum=n=>n.count!=null?n.count:(n.count_range?Math.round((n.count_range[0]+(n.count_range[1]||n.count_range[0]))/2):(DATA.meta.min_cell||20));
+const ownText=n=>n.count!=null?fmt(n.count):(n.display||("≤"+(DATA.meta.min_cell||20)));
 
 // Roll-up nominal: a masked (≤20) term contributes an unknown count in [1,20];
 // SMALL_NOMINAL is the point estimate used for the "nominal add-up" only (the
@@ -571,7 +576,7 @@ function computeRollup(){
   get("root");
   for(const n of DATA.nodes){
     if(n.kind==="root")continue;
-    const rep=n.state==="reported", small=n.state==="used_small", cnt=rep?(n.count||0):0;
+    const rep=n.state==="reported", small=n.state==="used_small", cnt=rep?ownNum(n):0;
     const fr=(typeof n.frac==="number")?n.frac:null;                 // frac reported (>floor)
     const fsupp=(fr==null && n.frac_display && n.frac_display.startsWith("≤"));  // frac withheld but used
     const anc=ancestorSet(n.id); anc.add(n.id);      // this term counts toward itself + every ancestor
@@ -591,7 +596,7 @@ function computeRollup(){
     else { r.floor=r.maxT; r.ceil=r.R+min*r.s; r.est=r.R+SMALL_NOMINAL*r.s; }
     ROLL_MAX=Math.max(ROLL_MAX,r.ceil); ROLL_EST_MAX=Math.max(ROLL_EST_MAX,r.est);
   }
-  for(const n of DATA.nodes) if(n.state==="reported") OWN_MAX=Math.max(OWN_MAX,n.count);
+  for(const n of DATA.nodes) if(n.state==="reported") OWN_MAX=Math.max(OWN_MAX,n.count||0);
   DATA._roll=memo;
 }
 
@@ -720,7 +725,7 @@ function prevBar(n){
   }
   const denom=lg(OWN_MAX);
   if(n.state==="reported"){
-    const fill=el("span","fill"); fill.style.width=w(lg(n.count)/denom);
+    const fill=el("span","fill"); fill.style.width=w(lg(ownNum(n))/denom);
     fill.style.background=CATMAP[n.category].color; bar.appendChild(fill);
   } else if(n.state==="used_small"){
     bar.classList.add("small");
@@ -740,7 +745,7 @@ function countSpec(n){
     return{cls:"reported",text:`${fl}–${fmtK(r.ceil)}`,
       title:`${kind}: ${r.floor>0?fmt(r.floor):('≤'+min)} – ${fmt(r.ceil)}  ·  ${r.nUsed}/${r.nTerms} used, ${sup} suppressed, ${r.nColl} multi-mapped  ·  nominal ≈ ${fmt(r.est)}`};
   }
-  if(n.state==="reported")return{cls:"reported",text:fmt(n.count)};
+  if(n.state==="reported")return{cls:"reported",text:n.count!=null?fmt(n.count):(n.display||("≤"+min))};
   if(n.state==="used_small")return{cls:"used_small",text:"≤"+min};
   return{cls:"zero",text:"0"};
 }
@@ -777,7 +782,7 @@ const nodeOpac=n=>n.kind==="root"?0.95:n.state==="reported"?0.92:n.state==="used
 
 const gval=id=>{const n=byId.get(id); if(!n)return 0;
   if(state.rollup){const r=DATA._roll.get(id);return r?r.est:0;}   // roll-up central estimate
-  return n.state==="reported"?n.count:n.state==="used_small"?(DATA.meta.min_cell||20):0.4;};
+  return n.state==="reported"?(n.count!=null?n.count:(n.count_range?Math.round((n.count_range[0]+(n.count_range[1]||n.count_range[0]))/2):(DATA.meta.min_cell||20))):n.state==="used_small"?(DATA.meta.min_cell||20):0.4;};
 
 // Suppression uncertainty on a subtree roll-up: each of the r.s suppressed (<min) terms
 // is an unknown integer in [1, min] (min=20), midpoint (min+1)/2 ≈ SMALL_NOMINAL. We band
@@ -795,7 +800,7 @@ function rollupPM(r,min){
 function graphCountSegs(id){
   const n=byId.get(id), min=DATA.meta.min_cell||20, r=DATA._roll.get(id);
   if(!r||r.nUsed===0) return [];
-  const direct = n.state==="reported"?fmtK(n.count)
+  const direct = n.state==="reported"?(n.count!=null?fmtK(n.count):(n.display||("≤"+min)))
               : n.state==="used_small"?("≤"+min) : "0";
   const selfUsed = n.state==="reported"||n.state==="used_small";
   const descUsed = r.nUsed - (selfUsed?1:0);
@@ -1292,7 +1297,7 @@ function renderTreemap(){
   note.textContent="Area ∝ patients coded exactly at each reported term (>20). Grouped by top-level body system. Used-small (≤20) terms carry no publishable number and are not sized here — switch to Rolled up to include subtrees.";
   const groups=new Map();
   for(const n of DATA.nodes){
-    if(n.state!=="reported"||!state.vis.has("reported"))continue;
+    if(n.state!=="reported"||n.count==null||!state.vis.has("reported"))continue;
     const g=topAncestor(n.id); if(!groups.has(g))groups.set(g,[]); groups.get(g).push(n);
   }
   let gl=[...groups.entries()].map(([id,ns])=>({id,label:byId.get(id)?byId.get(id).label:id,
@@ -1301,7 +1306,7 @@ function renderTreemap(){
   if(!gl.length){svg.innerHTML=`<text x="14" y="28" fill="var(--muted)" font-family="var(--mono)" font-size="13">No reported (>20) terms in view.</text>`;return;}
   const total=gl.reduce((a,g)=>a+g.value,0);
   const cells=squarify(gl.map(g=>g.value),{x:0,y:0,w:W,h:H});
-  const maxC=Math.max(...DATA.nodes.filter(n=>n.state==="reported").map(n=>n.count));
+  const maxC=Math.max(...DATA.nodes.filter(n=>n.state==="reported"&&n.count!=null).map(n=>n.count));
   gl.forEach((g,i)=>{
     const c=cells[i]; const inner=squarify(g.items.map(n=>n.count),{x:c.x+2,y:c.y+2,w:c.w-4,h:c.h-4});
     g.items.forEach((n,j)=>{
@@ -1417,7 +1422,7 @@ function renderTable(){
     p.textContent=CATMAP[n.category].label;ct.appendChild(p);tr.appendChild(ct);
     tr.appendChild(numTd(n.depth));
     if(hasCodes){const cc=numTd(n.n_codes||0);cc.style.color="var(--ink-2)";tr.appendChild(cc);}
-    const c=el("td","num");c.textContent=n.state==="reported"?fmt(n.count):n.state==="used_small"?"≤"+(DATA.meta.min_cell||20):"0";
+    const c=el("td","num");c.textContent=n.state==="reported"?ownText(n):n.state==="used_small"?"≤"+(DATA.meta.min_cell||20):"0";
     c.style.color=n.state==="reported"?"var(--cat-reported)":n.state==="used_small"?"var(--cat-used-small)":"var(--muted)";
     tr.appendChild(c);
     tb.appendChild(tr);
@@ -1425,7 +1430,7 @@ function renderTable(){
   t.appendChild(tb);host.innerHTML="";host.appendChild(t);
   $("#table-hint").textContent=total>CAP?`showing top ${CAP} of ${total.toLocaleString()} — narrow with search or category filters`:`${total.toLocaleString()} terms`;
 }
-const sortVal=n=>n.state==="reported"?n.count:n.state==="used_small"?0.5:0;
+const sortVal=n=>n.state==="reported"?ownNum(n):n.state==="used_small"?0.5:0;
 const td=(x)=>{const d=el("td");d.textContent=x;return d;};
 const mono=(x)=>{const d=el("td");d.textContent=x;d.style.fontFamily="var(--mono)";d.style.fontSize="11.5px";d.style.color="var(--ink-2)";return d;};
 const numTd=(x)=>{const d=el("td","num");d.textContent=x;return d;};
@@ -1437,7 +1442,7 @@ function select(id,quiet){
   if(!quiet){ gSel=new Set([id]); gIsolateSet=null; }
   selected=id; const n=byId.get(id); const dr=$("#drawer"); const inner=$("#drawer-inner");
   const min=DATA.meta.min_cell||20;
-  const disp=n.state==="reported"?fmt(n.count):n.state==="used_small"?`≤ ${min} (withheld)`:"0";
+  const disp=n.state==="reported"?ownText(n):n.state==="used_small"?`≤ ${min} (withheld)`:"0";
   const purl=n.id.startsWith("MONDO:")?`https://monarchinitiative.org/${n.id}`:null;
   const cat=CATMAP[n.category]||{label:n.category,color:"var(--muted)"};
   let html=`<div class="dh"><div>
@@ -1456,7 +1461,7 @@ function select(id,quiet){
   const rr=DATA._roll&&DATA._roll.get(id);
   if(rr && (kids.get(id)||[]).length){
     const pm=rollupPM(rr,min);
-    const own=n.state==="reported"?fmt(n.count):n.state==="used_small"?("&le;"+min):"0";
+    const own=n.state==="reported"?ownText(n):n.state==="used_small"?("&le;"+min):"0";
     const descUsed=Math.max(0, rr.nUsed - ((n.state==="reported"||n.state==="used_small")?1:0));
     html+=`<div class="section-t">Subtree roll-up</div>
       <div class="warn" style="background:var(--surface-2);border-color:var(--border);color:var(--ink-2)">

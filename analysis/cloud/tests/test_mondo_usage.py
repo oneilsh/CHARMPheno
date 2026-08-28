@@ -502,3 +502,60 @@ def test_dag_structures():
     assert parent_adj["D"] == []            # unknown parent Z dropped
     assert has_child == {"A", "B"}          # A parents B,C; B parents C; D has no children
     assert "C" not in has_child
+
+
+# --- complementary suppression of the source-code -> term roll-up marginal ----------
+def test_forced_lower_inclusion_exclusion():
+    # N_T=115, one 21-100 code (caps at 100) + one <=20 code -> |<=20 code| >= 15.
+    sb = [{"band": "21–100", "codes": 1}, {"band": "≤20", "codes": 1}]
+    assert m._forced_lower(115, 115, sb) == 15
+    # two <=20 codes, N_T=32 -> each forced >= 12 (endometriosis-in-scar shape).
+    assert m._forced_lower(32, 32, [{"band": "≤20", "codes": 2}]) == 12
+    # a big code covers the term -> the <=20 code is NOT forced up.
+    assert m._forced_lower(5000, 5000,
+                           [{"band": "1k–10k", "codes": 1}, {"band": "≤20", "codes": 1}]) <= 1
+    # no <=floor code present -> nothing to box.
+    assert m._forced_lower(5000, 5000, [{"band": "1k–10k", "codes": 2}]) == 0
+
+
+def test_safe_total_band_picks_finest_boring_band():
+    # flagged -> the small two-sided CONTAINING band already removes the narrowing.
+    need, disp, (lo, hi) = m.safe_total_band(32, [{"band": "≤20", "codes": 2}])
+    assert need and disp == "21–100" and (lo, hi) == (21, 100)
+    # once banded, differencing can no longer force the <=20 code >= 2.
+    assert m._forced_lower(lo, hi, [{"band": "≤20", "codes": 2}]) <= 1
+    # a safe term is left exact (no banding).
+    assert m.safe_total_band(5000,
+                             [{"band": "1k–10k", "codes": 1}, {"band": "≤20", "codes": 1}]) \
+        == (False, "5000", (5000, 5000))
+
+
+def test_complementary_suppress_bands_only_the_unsafe_and_assert_passes():
+    rows = [
+        {"mondo_id": "MONDO:SCAR", "label": "endometriosis in scar", "is_internal": False,
+         "parents": [], "std_concepts": [1], "n_persons": 32, "collision_siblings": [],
+         "source_bands": [{"band": "≤20", "codes": 2}]},
+        {"mondo_id": "MONDO:BIG", "label": "hypertension", "is_internal": False,
+         "parents": [], "std_concepts": [2], "n_persons": 5000, "collision_siblings": [],
+         "source_bands": [{"band": "1k–10k", "codes": 1}, {"band": "≤20", "codes": 1}]},
+    ]
+    p = m.assemble_payload(meta={}, term_rows=rows)   # calls assert_diff_safe internally
+    by = {n["id"]: n for n in p["nodes"]}
+    scar = by["MONDO:SCAR"]
+    assert scar["total_banded"] is True and scar["count"] is None
+    assert scar["display"] == "21–100" and scar["count_range"] == [21, 100]
+    assert scar["state"] == "reported"
+    assert by["MONDO:BIG"]["count"] == 5000 and not by["MONDO:BIG"].get("total_banded")
+    assert p["stats"]["total_banded_terms"] == 1
+    assert p["stats"]["reported_terms"] == 2
+
+
+def test_assert_diff_safe_catches_an_unsuppressed_narrowing():
+    import pytest
+    bad = [{"id": "X", "state": "reported", "count": 115,
+            "source_bands": [{"band": "21–100", "codes": 1}, {"band": "≤20", "codes": 1}]}]
+    with pytest.raises(AssertionError):
+        m.assert_diff_safe(bad)
+    ok = [{"id": "X", "state": "reported", "count": None, "count_range": [101, 1000],
+           "source_bands": [{"band": "21–100", "codes": 1}, {"band": "≤20", "codes": 1}]}]
+    m.assert_diff_safe(ok)

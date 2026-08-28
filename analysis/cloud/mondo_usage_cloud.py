@@ -487,6 +487,112 @@ def band_histogram(bands, min_cell: int = _MIN_CELL) -> "list[dict]":
     return out
 
 
+# --- complementary suppression: the source-code -> term roll-up marginal ------------
+# A term's total N_T is the union of its source codes' person sets, so it is a
+# roll-up MARGINAL over its per-code cells. That within-term roll-up (NOT any
+# term-to-term one — those don't exist here) lets inclusion-exclusion narrow a
+# suppressed cell: with two codes and N_T=115 where one code caps at 100,
+# |other| >= 115 - 100 = 15, boxing a <=floor code into [15,20] even though no exact
+# small count is published. So per-code bands do NOT compose safely with an EXACT
+# total for near-floor terms (correcting the note above): we complementary-suppress
+# the marginal — publish such a term's total as a STANDARD band instead of the exact
+# number. Because the only differencing channel is within a single term (no global
+# per-code count and no rolled-up term-to-term total are published), per-term safety
+# implies whole-file safety, and banding is information-removing, so ONE pass with no
+# recheck suffices. `assert_diff_safe` re-checks only as a redundant tripwire that
+# fires if those two structural preconditions are ever violated.
+def _band_bounds(label: str, min_cell: int = _MIN_CELL):
+    """(lo, hi) integer bounds for a standard band label. Pure."""
+    for lab, lo, hi in [
+        (f"≤{min_cell}", 1, min_cell), (f"{min_cell + 1}–100", min_cell + 1, 100),
+        ("101–1k", 101, 1000), ("1k–10k", 1001, 10000),
+        ("10k–100k", 10001, 100000), (">100k", 100001, float("inf")),
+    ]:
+        if lab == label:
+            return lo, hi
+    return 1, float("inf")
+
+
+def _forced_lower(total_lo, total_hi, source_bands, min_cell: int = _MIN_CELL):
+    """Tightest lower bound sound differencing can place on a ≤floor source code of a
+    term whose published total lies in ``[total_lo, total_hi]`` and whose per-code band
+    histogram is ``source_bands`` (``[{"band", "codes"}]``, the FULL set).
+
+    From |c| >= N - Σ_{k≠c} min(band_hi(k), N): the attacker uses the smallest total
+    (total_lo) and each OTHER code's largest possible count (min(band_hi(k), total_hi)).
+    Returns the forced lower bound; >= 2 means a ≤floor cell is boxed into the
+    suppressed interior [2, floor]. 0 when the term carries no ≤floor code. Pure."""
+    floor = f"≤{min_cell}"
+    if not any(b["band"] == floor for b in source_bands):
+        return 0
+    others_max = 0
+    for b in source_bands:
+        _, hi = _band_bounds(b["band"], min_cell)
+        others_max += min(hi, total_hi) * int(b["codes"])
+    return total_lo - (others_max - min_cell)       # drop one ≤floor code (its cap = min_cell)
+
+
+def safe_total_band(n_persons, source_bands, min_cell: int = _MIN_CELL):
+    """``(needs_banding, display, (lo, hi))`` for a reported term's total.
+
+    If publishing the EXACT total would let differencing box a ≤floor code >= 2 into
+    the suppressed interior, return the finest STANDARD band that removes it: the
+    two-sided band CONTAINING the total when that already suffices (small, boring,
+    e.g. ``21–100``), else its ceiling (``≤100``), whose published lower bound is 1
+    and so is always safe. Standard buckets only — never a bespoke tight range.
+    Deterministic and one-shot (no retry loop). Pure."""
+    N = int(n_persons)
+    if _forced_lower(N, N, source_bands, min_cell) < 2:
+        return False, str(N), (N, N)
+    lbl = volume_band(N, min_cell)                   # containing two-sided band
+    lo, hi = _band_bounds(lbl, min_cell)
+    if _forced_lower(lo, hi, source_bands, min_cell) <= 1:
+        return True, lbl, (int(lo), int(hi))         # small two-sided band suffices
+    up = lbl.split("–")[1] if "–" in lbl else lbl.lstrip("≤")
+    return True, f"≤{up}", (1, int(hi) if hi != float("inf") else hi)  # ceiling fallback
+
+
+def complementary_suppress(nodes, min_cell: int = _MIN_CELL) -> int:
+    """Band the total of any reported node whose exact total + per-code bands would
+    box a ≤floor code into the suppressed interior. Mutates nodes in place (count ->
+    None, display -> band label, adds ``count_range`` + ``total_banded``); keeps
+    state/category/per-code bands untouched. Returns how many nodes were banded."""
+    banded = 0
+    for nd in nodes:
+        if nd.get("state") != "reported" or nd.get("count") is None:
+            continue
+        need, disp, (lo, hi) = safe_total_band(
+            nd["count"], nd.get("source_bands") or [], min_cell)
+        if need:
+            nd["count"] = None
+            nd["display"] = disp
+            nd["count_range"] = [lo, hi if hi != float("inf") else None]
+            nd["total_banded"] = True
+            banded += 1
+    return banded
+
+
+def assert_diff_safe(nodes, min_cell: int = _MIN_CELL) -> None:
+    """Post-condition tripwire: no published node lets sound differencing box a ≤floor
+    source code into a strict sub-interval of [1, floor]. Redundant given
+    ``complementary_suppress`` + within-term independence; it fires only if those
+    structural preconditions are broken later (e.g. a rolled-up total is added)."""
+    for nd in nodes:
+        if nd.get("state") != "reported":
+            continue
+        if nd.get("count") is not None:
+            lo = hi = int(nd["count"])
+        else:
+            rng = nd.get("count_range") or [1, None]
+            lo, hi = rng[0], (rng[1] if rng[1] is not None else float("inf"))
+        f = _forced_lower(lo, hi, nd.get("source_bands") or [], min_cell)
+        if f >= 2:
+            raise AssertionError(
+                f"diff-unsafe term {nd.get('id')}: a ≤{min_cell} source code is boxed "
+                f"to >= {f} (within-term roll-up narrowing not suppressed)")
+
+
+
 # HPO (Human Phenotype Ontology) cross-reference vocab prefixes -> the OMOP vocabulary_id
 # they correspond to. HPO's `xref:` values look like ``SNOMEDCT_US:190855004`` /
 # ``UMLS:C0151723`` / ``ICD-10:E83.42``. SNOMED is the bridge that matters most (it is
@@ -712,7 +818,13 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
       * ``used_branch``  — 0 direct count but an ANCESTOR of a used node (a branch
                            point on the used skeleton — kept, structurally relevant)
       * ``other``        — 0 count and NOT above any used node (the rest of Mondo)
-    Headline stats are exact term counts (terms are not patients)."""
+    Headline stats are exact term counts (terms are not patients).
+
+    A final `complementary_suppress` pass bands the total (``count`` -> None,
+    ``display`` -> a standard band, ``count_range`` + ``total_banded`` added) for any
+    reported term whose exact total + per-code bands would let differencing box a
+    ≤floor source code into the suppressed interior; `assert_diff_safe` then re-checks
+    as a redundant post-condition. Such terms stay ``reported``/used in the stats."""
     nodes: list[dict] = []
     parents_of: dict[str, list[str]] = {_ROOT_ID: []}
     state_of: dict[str, str] = {}
@@ -792,6 +904,13 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
         nd["category"] = cat
         cat_counts[cat] += 1
 
+    # Complementary suppression of the source-code -> term roll-up marginal: band the
+    # total of any term whose exact total + per-code bands would box a ≤floor code into
+    # the suppressed interior. One pass suffices (within-term independence; see the note
+    # by `complementary_suppress`); category/state/stats are unaffected (banded terms are
+    # still reported & used — only their exact number becomes a standard band).
+    n_total_banded = complementary_suppress(nodes, min_cell)
+
     n_terms = len(term_rows)
     n_used = counts["used_small"] + counts["reported"]
     stats = {
@@ -799,6 +918,7 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
         "used_terms": n_used,
         "used_small_terms": counts["used_small"],
         "reported_terms": counts["reported"],
+        "total_banded_terms": n_total_banded,
         "unused_terms": counts["unused"],
         "used_branch_terms": cat_counts["used_branch"],
         "other_terms": cat_counts["other"],
@@ -821,6 +941,7 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
             "collision_siblings": [], "collision_kind": "", "rare": False, "rare_src": [],
             "codes": [], "n_codes": 0, "codes_by_vocab": {},
             "source_codes": [], "n_source_codes": 0, "source_bands": [], "depth": 0}
+    assert_diff_safe(nodes, min_cell)     # redundant post-condition; see the note above
     return {"meta": meta, "stats": stats, "nodes": [root] + nodes}
 
 
