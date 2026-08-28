@@ -938,7 +938,6 @@ def theta_topm_coverage(scored_df, K, *, ms=(64, 128, 256, 512),
     fraction of one L-BFGS pass and nothing D-sized reaches the driver.
     """
     ms = tuple(int(m) for m in ms)
-    rdd = scored_df.select(topic_col).rdd
 
     def _local(rows, _col=topic_col, _ms=ms, _nb=int(n_bins)):
         return [_topm_coverage_kernel((_to_array(r[_col]) for r in rows), _ms, _nb)]
@@ -947,8 +946,13 @@ def theta_topm_coverage(scored_df, K, *, ms=(64, 128, 256, 512),
         return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
 
     zero = (np.zeros(len(ms)), np.zeros((len(ms), int(n_bins)), dtype=np.int64), 0)
+    # `.rdd` is taken INSIDE the retried closure: on a DataFrame whose cached
+    # transform has not materialized yet, the `javaToPython` conversion behind
+    # `.rdd` can itself run Spark jobs — and this coverage pass is the FIRST
+    # action of the whole readout, so it is exactly where that happens. Exp
+    # 0104's 08-28 relaunch died right there, one line OUTSIDE the wrapper.
     sums, hist, n = _retry_spark_action(
-        lambda: rdd.mapPartitions(_local).treeAggregate(
+        lambda: scored_df.select(topic_col).rdd.mapPartitions(_local).treeAggregate(
             zero, _combine, _combine, depth=int(depth)),
         label="theta top-m coverage")
     return coverage_from_accum(sums, hist, n, ms, q=q)
@@ -979,7 +983,6 @@ def masked_moments(scored_df, C, K, *, topic_col="topicDistribution",
     """
     C, K = int(C), int(K)
     topm = int(topm)
-    rdd = scored_df.select(topic_col, label_col, mask_col).rdd
 
     def _local(rows, _cols=(topic_col, label_col, mask_col), _C=C, _K=K, _m=topm):
         if _m > 0:
@@ -992,9 +995,12 @@ def masked_moments(scored_df, C, K, *, topic_col="topicDistribution",
     zero = (np.zeros((C, K)), np.zeros((C, K)), np.zeros(C), np.zeros(C))
     # Retried: the moments pass is a pure sum over a lineage-recomputable
     # projection, and losing it to a preemption wave costs the whole fit (it is
-    # the standardization every later pass is expressed in).
+    # the standardization every later pass is expressed in). `.rdd` is taken
+    # inside the closure — `javaToPython` can run jobs of its own on an
+    # unmaterialized frame (see theta_topm_coverage).
     sum_theta, sum_theta_sq, n_obs, n_pos = _retry_spark_action(
-        lambda: rdd.mapPartitions(_local).treeAggregate(
+        lambda: scored_df.select(topic_col, label_col, mask_col)
+        .rdd.mapPartitions(_local).treeAggregate(
             zero, _combine, _combine, depth=int(depth)),
         label="masked moments")
     mu, sd = moments_to_mu_sd(sum_theta, sum_theta_sq, n_obs, eps=eps)
