@@ -440,6 +440,7 @@ lr-readout: zip cluster-overlay $(WORKSPACE_ENV)
 # REFERENCE, so the executors must be able to `import distributed_readout` too.
 # Example (re-read a lost readout WITH the A/B equality gate):
 #   make gated-pc-readout ID=103 GPR_ARGS="--readout-mode distributed --readout-ab-check"
+GPR_SPARK_CONF     ?=
 GPR_CACHE_URI      ?= hdfs:///user/dataproc/charm/case_finding_cache
 GPR_DOC_MIN_LENGTH ?=
 # The run-dir is passed as a QUOTED glob so the shell does NOT pre-expand it (the
@@ -460,6 +461,7 @@ gated-pc-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	    --conf spark.python.worker.memory=2g \
 	    --conf spark.task.maxFailures=8 \
 	    --conf spark.excludeOnFailure.enabled=true \
+	    $(foreach kv,$(GPR_SPARK_CONF),--conf $(kv)) \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/distributed_readout.py \
 	    $(REPO_ROOT)/analysis/cloud/gated_pc_readout.py \
 	    --run-dir "$(GPR_RUN_DIR)" \
