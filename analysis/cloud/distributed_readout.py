@@ -802,6 +802,122 @@ def _dense_triples(packed, C):
 
 
 # --------------------------------------------------------------------------- #
+# Driver-side retry around a Spark ACTION (spot-VM survivability).            #
+# --------------------------------------------------------------------------- #
+def _spark_job_failure_types():
+    """The exception types a failed Spark JOB surfaces on the driver.
+
+    Resolved lazily (and defensively) rather than imported at module scope, for
+    the same reason every other pyspark import here is function-local: this file
+    ships to executors as a bare top-level .py and must import on a worker that
+    has no gateway. If py4j is somehow absent the tuple comes back EMPTY, which
+    makes `except ():` match nothing — a missing dependency degrades to "no
+    retry", never to "retry every exception, including our own bugs".
+
+    `Py4JJavaError` is what an RDD action raises when the JVM job dies (a job
+    abort, an unrecoverable stage failure, a lost driver-side call);
+    `PySparkException` is the pyspark-3.x wrapper the SQL/DataFrame paths raise
+    for the same underlying JVM error, and costs nothing to include.
+    """
+    types = []
+    try:
+        from py4j.protocol import Py4JJavaError
+        types.append(Py4JJavaError)
+    except Exception:                            # pragma: no cover - no py4j
+        pass
+    try:
+        from pyspark.errors import PySparkException
+        types.append(PySparkException)
+    except Exception:                            # pragma: no cover - old pyspark
+        pass
+    return tuple(types)
+
+
+def _error_first_line(exc):
+    """First line of a Spark exception, safely.
+
+    `str(Py4JJavaError)` round-trips to the JVM to fetch the stack trace, which
+    can itself raise if the gateway is the thing that died — and this runs on the
+    failure path, where a second exception would replace a recoverable job abort
+    with an unrecoverable driver crash. So: try the real message, fall back to
+    the py4j-side `errmsg`, then to `repr`.
+    """
+    try:
+        text = str(exc)
+    except Exception:                            # pragma: no cover - dead gateway
+        try:
+            text = getattr(exc, "errmsg", "") or repr(exc)
+        except Exception:
+            text = exc.__class__.__name__
+    for line in str(text).splitlines():
+        if line.strip():
+            return line.strip()
+    return exc.__class__.__name__
+
+
+def _retry_spark_action(fn, *, attempts=4, base_sleep_s=60, label=""):
+    """Run one Spark ACTION, retrying a failed job after a backoff sleep.
+
+    **Why this is sound here, and not a general "retry everything" wrapper.**
+    Every kernel in this module is a PURE FUNCTION of a persisted RDD: partitions
+    lost to a preemption recompute from lineage, and the aggregate is a sum over
+    partitions, so re-running the action recomputes exactly the same number. A
+    retried action is therefore idempotent — not "probably fine", but identical
+    by construction. (The one thing a retry must NOT reuse is a broadcast whose
+    blocks may have died with the executors, which is why the call sites below
+    build their broadcast INSIDE the retried closure.)
+
+    **Why a retry actually fixes the failure it is aimed at** (exp 0104,
+    2026-08-28): spot-VM preemption waves accumulate Spark `excludeOnFailure`
+    state until a task retry has no schedulable executor left and Spark aborts
+    the TaskSet — "task 0 (partition 0) cannot run anywhere due to node and
+    executor excludeOnFailure". Two independent clocks then work in our favour
+    during the sleep: YARN replaces the killed containers within a couple of
+    minutes, and — decisively — the per-taskset exclusion lists are per-JOB, so a
+    NEW job starts with a clean slate regardless of how poisoned the aborted
+    one's were. (App-level node exclusions age out on
+    `spark.excludeOnFailure.timeout`, which is why this run's doc pins it to
+    10m instead of the 1h default.) The sleeps are sized for that: 60s, 120s,
+    240s.
+
+    Retries on ANY Spark job failure rather than pattern-matching the abort
+    message on purpose. The phrasings that matter here (excludeOnFailure aborts,
+    `FetchFailed`, `ExecutorLostFailure`, "Killed by external signal") vary by
+    Spark version and by which layer noticed first, and a missed pattern costs
+    hours of solve. The cost of the opposite error — retrying a deterministic
+    bug — is bounded at ~7 minutes of sleeping before the same exception is
+    re-raised with its traceback intact, which is a trade this path should always
+    take. Non-Spark exceptions (our own `ValueError`s, `KeyboardInterrupt`)
+    propagate on the first raise.
+
+    `label` is prefixed to the log lines so a failure in a multi-hour solve says
+    WHICH pass died.
+    """
+    import time
+
+    attempts = max(1, int(attempts))
+    retryable = _spark_job_failure_types()
+    tag = f"{label}: " if label else ""
+    for k in range(attempts):
+        try:
+            return fn()
+        except retryable as exc:
+            if k + 1 >= attempts:
+                print(f"[driver]   {tag}spark action FAILED on attempt "
+                      f"{k + 1}/{attempts}, giving up: {_error_first_line(exc)}",
+                      flush=True)
+                raise
+            sleep_s = float(base_sleep_s) * (2 ** k)
+            print(f"[driver]   {tag}spark action FAILED on attempt "
+                  f"{k + 1}/{attempts}: {_error_first_line(exc)}", flush=True)
+            print(f"[driver]   {tag}retrying in {sleep_s:.0f}s (a fresh job resets "
+                  "per-taskset excludeOnFailure state; YARN replaces preempted "
+                  "containers meanwhile)", flush=True)
+            time.sleep(sleep_s)
+    raise AssertionError("unreachable")          # pragma: no cover
+
+
+# --------------------------------------------------------------------------- #
 # Spark wiring (cluster-covered; thin shells over the kernels above).         #
 # --------------------------------------------------------------------------- #
 def theta_topm_coverage(scored_df, K, *, ms=(64, 128, 256, 512),
@@ -831,8 +947,10 @@ def theta_topm_coverage(scored_df, K, *, ms=(64, 128, 256, 512),
         return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
 
     zero = (np.zeros(len(ms)), np.zeros((len(ms), int(n_bins)), dtype=np.int64), 0)
-    sums, hist, n = rdd.mapPartitions(_local).treeAggregate(
-        zero, _combine, _combine, depth=int(depth))
+    sums, hist, n = _retry_spark_action(
+        lambda: rdd.mapPartitions(_local).treeAggregate(
+            zero, _combine, _combine, depth=int(depth)),
+        label="theta top-m coverage")
     return coverage_from_accum(sums, hist, n, ms, q=q)
 
 
@@ -872,8 +990,13 @@ def masked_moments(scored_df, C, K, *, topic_col="topicDistribution",
         return (a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3])
 
     zero = (np.zeros((C, K)), np.zeros((C, K)), np.zeros(C), np.zeros(C))
-    sum_theta, sum_theta_sq, n_obs, n_pos = rdd.mapPartitions(_local).treeAggregate(
-        zero, _combine, _combine, depth=int(depth))
+    # Retried: the moments pass is a pure sum over a lineage-recomputable
+    # projection, and losing it to a preemption wave costs the whole fit (it is
+    # the standardization every later pass is expressed in).
+    sum_theta, sum_theta_sq, n_obs, n_pos = _retry_spark_action(
+        lambda: rdd.mapPartitions(_local).treeAggregate(
+            zero, _combine, _combine, depth=int(depth)),
+        label="masked moments")
     mu, sd = moments_to_mu_sd(sum_theta, sum_theta_sq, n_obs, eps=eps)
     return mu, sd, n_obs, n_pos
 
@@ -908,6 +1031,10 @@ class SparkStatsFn:
         parameters change every L-BFGS pass, so a long-lived broadcast would only
         pile up ~87 MB (C=K=3,300) of stale blocks per executor; the plan sizes this
         broadcast as "same order as the existing λ broadcast" precisely once per pass.
+        The broadcast/unpersist pair lives INSIDE the retried closure
+        (`_retry_spark_action`), so a preemption-wave job abort costs one pass and a
+        backoff sleep rather than the whole solve — see that helper for why the
+        retry is idempotent rather than hopeful.
       * `close()` (or `with make_spark_stats_fn(...) as stats_fn:`) unpersists the
         cached RDD. The caller owns that — an un-closed instance leaks executor
         storage for the life of the SparkContext.
@@ -959,30 +1086,51 @@ class SparkStatsFn:
             if keep.all():
                 keep = None                     # nothing to skip: the plain pass
         sc = self._rdd.context
-        # The mask rides IN the parameter broadcast rather than in a second one:
-        # it changes on every trial exactly as (V, b_raw) do, and it is (C,) bools
-        # against ~87 MB of parameters, so a separate broadcast would only add a
-        # round trip per pass.
-        bcast = sc.broadcast((V, b_raw, keep))
-        try:
-            C, K = self.C, self.K
+        C, K = self.C, self.K
 
-            def _local(packed, _b=bcast, _C=C, _K=K, _m=self._topm):
-                V_, b_, keep_ = _b.value
-                if _m > 0:
-                    return [_sparse_stats_kernel(packed, V_, b_, _C, _K,
-                                                 node_mask=keep_)]
-                return [_stats_kernel(_dense_triples(packed, _C), V_, b_, _C, _K,
-                                      node_mask=keep_)]
+        def _combine(a, b):
+            return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
 
-            def _combine(a, b):
-                return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+        zero = (np.zeros(C), np.zeros((C, K)), np.zeros(C))
 
-            zero = (np.zeros(C), np.zeros((C, K)), np.zeros(C))
-            loss, g_raw, s = self._rdd.mapPartitions(_local).treeAggregate(
-                zero, _combine, _combine, depth=self._depth)
-        finally:
-            bcast.unpersist(blocking=True)
+        def _pass(_m=self._topm):
+            # The broadcast is created INSIDE the retried closure. A retry is here
+            # precisely because executors died, and their copies of the broadcast
+            # blocks died with them; a fresh broadcast per attempt keeps the
+            # "parameters for THIS pass, then gone" lifecycle exact instead of
+            # carrying a half-torn-down one into the retry. ~87 MB per attempt is
+            # noise next to the pass it feeds.
+            #
+            # The mask rides IN the parameter broadcast rather than in a second
+            # one: it changes on every trial exactly as (V, b_raw) do, and it is
+            # (C,) bools against ~87 MB of parameters, so a separate broadcast
+            # would only add a round trip per pass.
+            bcast = sc.broadcast((V, b_raw, keep))
+            try:
+                def _local(packed, _b=bcast, _C=C, _K=K, _m=_m):
+                    V_, b_, keep_ = _b.value
+                    if _m > 0:
+                        return [_sparse_stats_kernel(packed, V_, b_, _C, _K,
+                                                     node_mask=keep_)]
+                    return [_stats_kernel(_dense_triples(packed, _C), V_, b_, _C,
+                                          _K, node_mask=keep_)]
+
+                return self._rdd.mapPartitions(_local).treeAggregate(
+                    zero, _combine, _combine, depth=self._depth)
+            finally:
+                # Unpersist per ATTEMPT — the stale-block accounting that the
+                # fresh-per-call broadcast exists for applies just as much to an
+                # attempt that died as to one that returned.
+                bcast.unpersist(blocking=True)
+
+        # THE hot seam: L-BFGS calls this once per line-search trial, so a
+        # multi-hour solve is overwhelmingly likely to be inside this action when
+        # a preemption wave lands — which is exactly how exp 0104 lost 9,112s of
+        # solve on 2026-08-28.
+        loss, g_raw, s = _retry_spark_action(
+            _pass,
+            label=f"stats pass ({'all' if keep is None else int(keep.sum())}/{C} "
+                  "nodes)")
         gW_std = self._fold_grad(g_raw, s, self.mu, self.sd)
         return loss, gW_std, s
 

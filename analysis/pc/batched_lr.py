@@ -515,7 +515,14 @@ def solve_batched_lr(
     a small dict (`iter`, `n_stats_calls`, `n_node_evals`, `n_active`,
     `n_converged`, `n_stalled`, `max_grad_inf_norm`) so a driver can heartbeat a
     long distributed solve — each stats call is a full cluster pass, so iterations
-    are minutes, not microseconds, at whole-Mondo scale.
+    are minutes, not microseconds, at whole-Mondo scale. The payload also carries
+    the CURRENT iterate as ``W_std`` (C,K) and ``b_std`` (C,), which is what lets
+    a driver CHECKPOINT a multi-hour solve (`_fit_readout_heads` in the cloud
+    driver writes them every N iterations and feeds them back as `x0` after a
+    crash): the iterate is the entire resumable state, since `x0` is a point and
+    the curvature history is rebuilt either way. **They are live views into the
+    solver's parameter matrix**, which the loop rebinds and mutates as it
+    iterates, so a caller that RETAINS them must copy.
 
     ``converged`` is ``converged_gtol | stalled``: a node stops either because
     its gradient inf-norm fell below `gtol` or because it hit the arithmetic's
@@ -750,8 +757,19 @@ def solve_batched_lr(
             # the wall-clock goes, so the caller can turn this into a meaningful
             # "passes so far / nodes still active" heartbeat. Reporting-only —
             # exceptions are the caller's problem, not swallowed here.
+            #
+            # `W_std`/`b_std` are the CURRENT accepted iterate (X == X_best at this
+            # point in the loop), which is what makes a caller-side checkpoint
+            # possible without the solver knowing anything about files: the hook
+            # already fires exactly once per completed iteration, and the iterate
+            # is the only state a warm start needs (`x0`). They are LIVE VIEWS
+            # into the solver's own parameter matrix (free for the callers that
+            # ignore them), which the loop rebinds and mutates as it iterates —
+            # so a caller that RETAINS them past the call MUST copy.
             progress_fn({
                 "iter": it,
+                "W_std": X[:, :K],
+                "b_std": X[:, K],
                 "n_stats_calls": calls,
                 "n_node_evals": node_evals,
                 "n_active": int((~frozen).sum()),

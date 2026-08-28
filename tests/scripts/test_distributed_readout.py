@@ -509,6 +509,114 @@ def test_pack_partition_and_row_sparse_agree_on_the_truncated_form():
 
 
 # --------------------------------------------------------------------------- #
+# Driver-side retry around a Spark action (exp 0104, 2026-08-28).             #
+# --------------------------------------------------------------------------- #
+def _job_abort(msg="Aborting TaskSet 3258.0 because task 0 (partition 0) cannot "
+                   "run anywhere due to node and executor excludeOnFailure."):
+    """A real `Py4JJavaError` instance, raisable without a live JVM gateway.
+
+    The type matters: `_retry_spark_action` resolves what to catch from py4j
+    itself, so a stand-in exception class would test the test rather than the
+    helper. What cannot be faked is the base class's `__str__`, which round-trips
+    to the JVM for a stack trace — hence the subclass, which is also the
+    situation `_error_first_line` is written to survive.
+    """
+    from py4j.protocol import Py4JJavaError
+
+    class _FakeJobAbort(Py4JJavaError):
+        def __init__(self, m):
+            Exception.__init__(self, m)
+            self.errmsg = m
+            self.java_exception = None
+
+        def __str__(self):
+            return self.errmsg
+
+    return _FakeJobAbort(msg)
+
+
+@pytest.fixture()
+def no_sleep(monkeypatch):
+    """Record the backoff sleeps instead of taking them."""
+    import time as _time
+    slept = []
+    monkeypatch.setattr(_time, "sleep", slept.append)
+    return slept
+
+
+def test_retry_spark_action_returns_after_transient_job_aborts(no_sleep, capsys):
+    """The failure this exists for: a preemption wave aborts the job, the cluster
+    is healthy again a minute later, and a fresh job gets clean per-taskset
+    exclude lists. Two aborts then a success must return the success — and log
+    both retries, because a solve that silently absorbed cluster failures would
+    misreport its own wall-clock."""
+    calls = []
+
+    def _fn():
+        calls.append(1)
+        if len(calls) <= 2:
+            raise _job_abort()
+        return ("aggregate", 42)
+
+    got = dr._retry_spark_action(_fn, attempts=4, base_sleep_s=60, label="stats pass")
+    assert got == ("aggregate", 42)
+    assert len(calls) == 3
+    assert no_sleep == [60.0, 120.0]             # doubling, one per retry
+    out = capsys.readouterr().out
+    assert out.count("spark action FAILED") == 2
+    assert out.count("retrying in") == 2
+    assert "excludeOnFailure" in out             # the first line of the error
+    assert "stats pass" in out                   # the label names WHICH pass died
+
+
+def test_retry_spark_action_reraises_after_the_last_attempt(no_sleep, capsys):
+    """A cluster that is really gone must still surface the original exception,
+    with its traceback, rather than a wrapper — the driver's exit code and log are
+    how a run of record reports an unrecoverable failure."""
+    err = _job_abort("Job aborted due to stage failure: nope")
+    n = []
+
+    def _fn():
+        n.append(1)
+        raise err
+
+    with pytest.raises(Exception) as excinfo:
+        dr._retry_spark_action(_fn, attempts=3, base_sleep_s=1)
+    assert excinfo.value is err
+    assert len(n) == 3                            # attempts, not attempts + 1
+    assert no_sleep == [1.0, 2.0]                 # no sleep after the last try
+    assert "giving up" in capsys.readouterr().out
+
+
+def test_retry_spark_action_does_not_retry_non_spark_exceptions(no_sleep):
+    """Our own bugs must fail fast. A shape check or a KeyError is deterministic:
+    retrying it burns minutes of backoff and re-raises the same thing, and worse,
+    hides it behind cluster-failure log lines."""
+    n = []
+
+    def _fn():
+        n.append(1)
+        raise ValueError("node_mask shape (3,) != (8,)")
+
+    with pytest.raises(ValueError, match="node_mask shape"):
+        dr._retry_spark_action(_fn, attempts=4, base_sleep_s=60)
+    assert len(n) == 1
+    assert no_sleep == []
+
+
+def test_retry_spark_action_first_line_survives_a_dead_gateway():
+    """`str(Py4JJavaError)` calls back into the JVM for the stack trace, so on the
+    one path that matters — the gateway itself died — it raises. The logger must
+    degrade to a name, never replace a retryable job abort with a driver crash."""
+    class _Hostile(Exception):
+        def __str__(self):
+            raise RuntimeError("gateway is gone")
+
+    assert dr._error_first_line(_Hostile()) == "_Hostile()"      # repr fallback
+    assert dr._error_first_line(_job_abort("line one\nline two")) == "line one"
+
+
+# --------------------------------------------------------------------------- #
 # Local-Spark round trip (thin wiring; AGENTS.md: local Spark => @slow).       #
 # --------------------------------------------------------------------------- #
 def _make_df(spark, Pi, y, mask):
