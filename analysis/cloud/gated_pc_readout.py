@@ -54,6 +54,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -308,6 +309,24 @@ def spec_is_multidomain(spec) -> bool:
     extra domains) — the two flavours whose cache key carries the extra fold."""
     return (str(spec.get("dag_source", "snomed")) == "mondo"
             or bool(spec.get("extra_domains")))
+
+
+def mondo_spec_mismatch(spec, manifest) -> bool:
+    """True when the rebuild spec says snomed but the SAVED FIT is a Mondo run.
+
+    A manifest written before ``corpus_manifest`` recorded ``dag_source`` resolves
+    to the snomed default, and a Mondo fit then keys — and, on the MISS that wrong
+    key guarantees — REBUILDS the wrong corpus. That cost a fresh-cluster recovery
+    of exp 0104 a rebuild attempt (it also surfaced as a billing NPE, but the
+    corpus was already wrong before BigQuery was ever reached). The fit itself is
+    the witness the manifest lacks: a Mondo run's label space is Mondo ids, so
+    ``int2cid`` carries the ``MONDO:`` prefix. Detecting the mismatch here — BEFORE
+    the key is computed — turns ~20 minutes of rebuilding the wrong thing (caught
+    only by the drift gate, exit 3) into an immediate exit 2 naming the flags."""
+    int2cid = manifest.get("int2cid") or []
+    cids = int2cid.values() if isinstance(int2cid, dict) else int2cid
+    looks_mondo = any(str(c).startswith("MONDO:") for c in cids)
+    return looks_mondo and str(spec.get("dag_source")) != "mondo"
 
 
 def bundle_key_from_manifest(manifest: dict, *, doc_min_length=None, **spec_over):
@@ -603,6 +622,18 @@ def main(argv=None) -> int:
                     return 1
                 spec = corpus_spec_from_manifest(
                     manifest, doc_min_length=args.doc_min_length, **spec_over)
+                if mondo_spec_mismatch(spec, manifest):
+                    print("[readout] ERROR: the saved fit's label space is MONDO "
+                          "ids, but the rebuild spec resolved dag_source="
+                          f"{spec['dag_source']!r} — this manifest predates "
+                          "corpus_manifest recording the Mondo build inputs, so "
+                          "the defaults would key (and on the MISS that wrong key "
+                          "guarantees, rebuild) the WRONG corpus. Pass the fit's "
+                          "own values from the experiment doc's front matter, "
+                          "e.g. for exp 0104:", flush=True)
+                    print("[readout]   --dag-source mondo --mondo-version "
+                          "2026-06-02 --min-positives 100", flush=True)
+                    return 2
                 key = bundle_key_from_manifest(
                     manifest, doc_min_length=args.doc_min_length, **spec_over)
             bundle = try_load(spark, cache_uri, key)
@@ -622,7 +653,32 @@ def main(argv=None) -> int:
                 # to lose a finished fit. Rebuild through the fit's own seam and
                 # write it through, so this is paid once.
                 print("[readout] cache MISS — rebuilding bundle from manifest "
-                      "params (~5 min at whole-Mondo)", flush=True)
+                      "params (~20 min at whole-Mondo)", flush=True)
+                # billing/cdr are ENVIRONMENT, not corpus identity: the fit takes
+                # them from the sourced .workspace_env, and manifests from before
+                # they were recorded carry neither. Fall back to the same env vars
+                # here — the Makefile target sources .workspace_env before this
+                # tool runs — rather than handing spark-bigquery a null
+                # parentProject, which dies as an opaque py4j NPE (exp 0104's
+                # fresh-cluster recovery, 08-28).
+                for field, env_var, flag in (("billing", "GOOGLE_CLOUD_PROJECT",
+                                              "--billing"),
+                                             ("cdr", "WORKSPACE_CDR", None)):
+                    if spec.get(field) is None:
+                        env_val = os.environ.get(env_var)
+                        if env_val:
+                            spec[field] = env_val
+                            print(f"[readout]   {field} not in the manifest; "
+                                  f"using {env_var} from the environment (the "
+                                  "same source the fit used)", flush=True)
+                        else:
+                            print(f"[readout] ERROR: a rebuild needs {field}, "
+                                  "but the manifest predates recording it and "
+                                  f"{env_var} is unset"
+                                  + (f" — pass {flag}." if flag else
+                                     " — source .workspace_env (make setup)."),
+                                  flush=True)
+                            return 2
                 print(f"[readout]   corpus: dag_source={spec['dag_source']} "
                       f"extra_domains={spec['extra_domains']} "
                       f"index_mode={spec['index_mode']} min_n={spec['min_n']} "
