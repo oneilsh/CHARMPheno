@@ -239,6 +239,32 @@ load_or_build (DAG-climb skipped on a hit), manifest records the mondo key field
 the readout tool gains load-OR-REBUILD with a vocab/λ-dimension safety check so a saved
 fit is never scored against a drifted corpus.
 
+**2026-08-28 — recovery attempt (fresh cluster, 2 primary + 10 spot): the load-or-rebuild
+path WORKS in production, and the "kill swarms" get a better explanation.**
+- Cache MISS → **bundle rebuilt from manifest params in 1,086s and written through**
+  (`.../case_finding_cache/d0f1fba8c73d7860`); multi-domain model reconstruct + transform
+  17s; **coverage line bit-identical to the fit-era run (assembly is deterministic; the
+  drift gate passed silently)**. The whole recovery seam is validated end-to-end.
+- Solve progressing on the saved fit: identical gradient trajectory to prior attempts
+  (5.56e4 → 9.9e3 by iter 5), and the line-search economy is visibly working at scale —
+  **~4.5 passes/iter (vs ~26 pre-fix)**, avg nodes/pass falling 2,384 → 1,096 by iter 5.
+- Pace is core-starved, though: ~85-100s/pass. The kill waves left 8 registered nodes ×
+  1 container × the GPR_SPARK_CONF cores=2 override = **16 active cores (vs ~48 in fit
+  runs)** — ETA ~5-7h at this pace. The bundle being cached now makes a restart cheap:
+  drop the cores=2 override (keep memoryOverhead=4g if desired), lose ~5 solve
+  iterations, run ~2×+ faster.
+- **Kill-swarm reframe:** `yarn node -list -all` mid-run shows ALL 8 nodes RUNNING (none
+  UNHEALTHY) — including w-0/w-1 (primaries), whose containers were among those "killed
+  by external signal". Non-preemptible primaries can't be reclaimed and their nodes never
+  went bad, so a large share of the week's "kill swarms" are most plausibly **Spark
+  dynamic allocation releasing idle executors at phase boundaries** (kills cluster right
+  AFTER heavy phases = when executors go idle; "Container killed on request" = the AM
+  asked) — cosmetic churn, not failures — interleaved with genuine spot preemptions
+  (which DID abort a stage once, pre-maxFailures-8). Candidate hardening for long solves:
+  pin `spark.dynamicAllocation.enabled=false` (or a floor via minExecutors) in the
+  readout/fit submits so executors stop flapping across the driver-side L-BFGS gaps.
+  Disk-health theory: not supported by this listing (no UNHEALTHY nodes).
+
 **2026-08-21 — UNBLOCKED: the 0103 A/B gate PASSED** (macro |Δ| ≤ 1.1e-4 both arms; see
 0103's run log). Reference bar from 0103's full-row readout: unsup cardiovascular
 **0.7584 AUC / 0.5428 AP over 241 nodes**, pooled conditional ECE 0.0028 (isotonic →
