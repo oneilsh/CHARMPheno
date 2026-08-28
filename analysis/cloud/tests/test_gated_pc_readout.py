@@ -142,3 +142,34 @@ class TestResolveReadoutMaxIter:
         b = build_parser().parse_args(["--run-dir", "/runs/0104-x",
                                        "--readout-max-iter", "60"])
         assert b.readout_max_iter == 60
+
+
+class TestMondoSpecMismatch:
+    """The saved fit's int2cid is the witness for its label space: a manifest that
+    predates corpus_manifest recording dag_source resolves to the snomed default,
+    and for a Mondo fit that keys (and on the guaranteed MISS, rebuilds) the wrong
+    corpus — exp 0104's fresh-cluster recovery. The guard fires before the key."""
+
+    def test_mondo_ids_with_snomed_spec_is_a_mismatch(self):
+        from gated_pc_readout import mondo_spec_mismatch
+        m = _manifest(int2cid=["MONDO:0005267", "MONDO:0002869"])
+        assert mondo_spec_mismatch({"dag_source": "snomed"}, m)
+
+    def test_mondo_ids_with_mondo_spec_is_fine(self):
+        from gated_pc_readout import mondo_spec_mismatch
+        m = _manifest(int2cid=["MONDO:0005267"])
+        assert not mondo_spec_mismatch({"dag_source": "mondo"}, m)
+
+    def test_snomed_ids_never_mismatch(self):
+        from gated_pc_readout import mondo_spec_mismatch
+        # A genuine SNOMED run: numeric concept ids, snomed default is correct.
+        m = _manifest(int2cid=["44054006", "73211009"])
+        assert not mondo_spec_mismatch({"dag_source": "snomed"}, m)
+
+    def test_dict_shaped_int2cid_and_missing_field(self):
+        from gated_pc_readout import mondo_spec_mismatch
+        # int2cid serialized as {engine-int: cid} instead of a list, and a
+        # manifest with no int2cid at all (nothing to witness -> no mismatch).
+        m = _manifest(int2cid={"0": "MONDO:0005267"})
+        assert mondo_spec_mismatch({"dag_source": "snomed"}, m)
+        assert not mondo_spec_mismatch({"dag_source": "snomed"}, _manifest())

@@ -149,17 +149,21 @@ make -C analysis/cloud report ID=104
 
 # Recovery re-readout on a SAVED fit (the early save lands npz + fit-only manifest
 # before the readout, so a readout death never costs the fit):
-make -C analysis/cloud gated-pc-readout ID=104 GPR_ARGS="--readout-max-iter 60"
+make -C analysis/cloud gated-pc-readout ID=104 \
+  GPR_ARGS="--readout-max-iter 60 --dag-source mondo --mondo-version 2026-06-02 --min-positives 100"
 ```
 
 The front matter's `spark_conf:` (memoryOverhead 4g + a minExecutors floor) is
 injected into BOTH commands automatically — do not retype it into
 `CHARM_SPARK_CONF` / `GPR_SPARK_CONF`; those remain for genuinely one-off probes
 (`spark.locality.wait=0s` after a mid-run scale-up) and win over the doc if passed.
-The explicit `--readout-max-iter 60` above is needed for THIS run only: its manifest
-was written before fits recorded `readout_max_iter`, so the tool cannot tell a
-60-iter `CHARM_DEV` smoke from a 200-iter record run and falls back to 200. Fits
-written from now on record it, and the flag can be dropped.
+EVERY GPR_ARGS flag above is needed for THIS run's manifest only, which was saved
+(08-27 early save) before fits recorded `readout_max_iter`, `dag_source`,
+`billing`, or the Mondo build inputs: without them the tool falls back to a
+200-iter budget and a snomed-keyed corpus (mismatch now caught at exit 2 by the
+`int2cid` MONDO-prefix witness rather than after a ~20-min wrong rebuild). Billing
+and CDR fall back to the sourced `.workspace_env` automatically. Fits written from
+now on record all of it, and the flags drop away.
 
 ## Run log
 
@@ -315,9 +319,29 @@ driver-side L-BFGS gaps). `make gated-pc-readout ID=104` reads the same block vi
 `run_experiment.py --print-spark-conf`, so the recovery path and the fit path can no
 longer drift apart. Companion fix for the OTHER thing that had to be remembered: the
 fit manifest now records `readout_max_iter` (the post-`CHARM_DEV` effective value)
-and the readout tool defaults to it, so the relaunch is just
-`make -C analysis/cloud gated-pc-readout ID=104 GPR_ARGS="--readout-max-iter 60"` —
-and the explicit 60 is needed for THIS run only, whose manifest predates the field.
+and the readout tool defaults to it — the explicit 60 stays needed for THIS run
+only, whose manifest predates the field (full relaunch command under ## Run).
+
+**2026-08-28 — fresh-cluster recovery attempt: the shortened relaunch command hit
+the OTHER manifest-era gap, and the tool now guards it.** On the new cluster
+(4 primary + 8 spot n2-standard-4, n2-standard-8 driver) the expected cache MISS
+went to rebuild — with `dag_source=snomed`, `min_positives=0`, no mondo fields,
+and then died in the BigQuery read on an opaque
+`NullPointerException: parentproject=null`. Root cause: this run's manifest was
+saved by the 08-27 early save, BEFORE `corpus_manifest` became self-sufficient —
+it records neither `dag_source` nor `billing` nor the Mondo build inputs, so the
+rebuild path fell back to its snomed/None defaults. The earlier successful rebuild
+(old cluster) had passed the overrides explicitly; the shortened command dropped
+them, and nothing failed fast. Two guards added (same commit): (1) a
+**MONDO-prefix witness** — the saved fit's `int2cid` IS the record of its label
+space, so `MONDO:`-prefixed ids with a resolved `dag_source != mondo` now exit 2
+immediately, naming the flags to pass, BEFORE the wrong key is computed (the wrong
+key guaranteed the MISS and a ~20-min wrong-corpus rebuild that only the drift
+gate would catch); (2) **billing/cdr env fallback** — they are environment, not
+corpus identity; a rebuild whose manifest lacks them now takes
+`GOOGLE_CLOUD_PROJECT` / `WORKSPACE_CDR` from the sourced `.workspace_env` (the
+fit's own source) instead of handing spark-bigquery a null parentProject, and
+exits 2 with the flag to pass when even the env lacks them.
 
 **2026-08-21 — UNBLOCKED: the 0103 A/B gate PASSED** (macro |Δ| ≤ 1.1e-4 both arms; see
 0103's run log). Reference bar from 0103's full-row readout: unsup cardiovascular
