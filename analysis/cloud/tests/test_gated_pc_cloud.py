@@ -264,26 +264,29 @@ class _FakeDR:
         return nullcontext(_stats)
 
 
-def test_readout_ckpt_fingerprint_pins_the_problem_not_just_the_shapes():
-    """The fingerprint's job is to refuse a checkpoint from a DIFFERENT arm or
-    corpus, which would otherwise deserialize cleanly (right shapes, wrong
-    meaning) and warm-start a solve from a meaningless point. Every input that
-    changes the standardized basis or the degenerate mask must change it."""
+def test_readout_ckpt_fingerprint_pins_the_problem_and_survives_float_noise():
+    """The fingerprint must refuse a checkpoint from a DIFFERENT arm or corpus
+    (labels change n_pos; a different corpus/split changes n_obs; C/K/top-m are
+    the shape of the design matrix) — and it must NOT depend on anything a
+    parallel float reduction perturbs. v1 hashed mu/sd bytes and every cross-run
+    resume mismatched on treeAggregate combine-order noise (exp 0104, 08-29:
+    an identical solve's iter-50 checkpoint was rejected). Counts are integer
+    sums — exact in float64 in any order — so they, and only they, are hashed."""
     from gated_pc_cloud import _readout_ckpt_fingerprint
     C, K = 3, 4
-    mu = np.arange(C * K, dtype=float).reshape(C, K)
-    sd = np.ones((C, K))
     n_obs, n_pos = np.array([10.0, 20.0, 30.0]), np.array([1.0, 2.0, 3.0])
-    base = _readout_ckpt_fingerprint(C, K, mu, sd, n_obs, n_pos)
-    assert base == _readout_ckpt_fingerprint(C, K, mu.copy(), sd, n_obs, n_pos)
+    base = _readout_ckpt_fingerprint(C, K, n_obs, n_pos)
+    assert base == _readout_ckpt_fingerprint(C, K, n_obs.copy(), n_pos.copy())
     assert len(base) == 64                        # sha256 hex
-    for kw in ("mu", "sd", "n_obs", "n_pos"):
-        arrs = {"mu": mu.copy(), "sd": sd.copy(),
-                "n_obs": n_obs.copy(), "n_pos": n_pos.copy()}
-        arrs[kw].flat[0] += 1e-9                  # a moments pass is deterministic
-        assert _readout_ckpt_fingerprint(C, K, **arrs) != base, kw
-    assert _readout_ckpt_fingerprint(C + 1, K, mu, sd, n_obs, n_pos) != base
-    assert _readout_ckpt_fingerprint(C, K + 1, mu, sd, n_obs, n_pos) != base
+    # Sub-integer float noise (a count can only differ by whole units) is
+    # rounded away — the property v1 lacked.
+    assert base == _readout_ckpt_fingerprint(C, K, n_obs + 1e-9, n_pos - 1e-9)
+    # Whole-unit changes ARE a different problem.
+    assert _readout_ckpt_fingerprint(C, K, n_obs + 1.0, n_pos) != base
+    assert _readout_ckpt_fingerprint(C, K, n_obs, n_pos + 1.0) != base
+    assert _readout_ckpt_fingerprint(C + 1, K, n_obs, n_pos) != base
+    assert _readout_ckpt_fingerprint(C, K + 1, n_obs, n_pos) != base
+    assert _readout_ckpt_fingerprint(C, K, n_obs, n_pos, theta_topm=256) != base
 
 
 def test_readout_ckpt_write_read_round_trip_and_rejections(tmp_path, capsys):
@@ -344,11 +347,11 @@ def test_fit_readout_heads_checkpoint_survives_a_mid_solve_death(tmp_path, capsy
         assert int(z["iter"]) >= 1
         recorded_fp = str(z["fingerprint"].item())
 
-    # The stored fingerprint is the one THIS problem's moments produce.
+    # The stored fingerprint is the one THIS problem's counts produce.
     from analysis.pc.batched_lr import standardization_moments
-    mu, sd, n_obs = standardization_moments(Pi, obs.astype(bool))
+    _mu, _sd, n_obs = standardization_moments(Pi, obs.astype(bool))
     assert recorded_fp == gpc._readout_ckpt_fingerprint(
-        C, K, mu, sd, n_obs, (y * obs).sum(axis=0))
+        C, K, n_obs, (y * obs).sum(axis=0), 0)
 
     # 3. Resume: same answer, and it says so in the log (curvature is NOT carried,
     #    so the first iterations re-learn it — expected, not a regression).
@@ -378,8 +381,8 @@ def test_fit_readout_heads_resume_zeroes_degenerate_rows(tmp_path, monkeypatch):
     Pi, y, obs = _ckpt_problem(seed=3)
     C, K = 6, 4
     path = tmp_path / "readout_ckpt_gated_pc.npz"
-    mu, sd, n_obs = batched_lr.standardization_moments(Pi, obs.astype(bool))
-    fp = gpc._readout_ckpt_fingerprint(C, K, mu, sd, n_obs, (y * obs).sum(axis=0))
+    _mu, _sd, n_obs = batched_lr.standardization_moments(Pi, obs.astype(bool))
+    fp = gpc._readout_ckpt_fingerprint(C, K, n_obs, (y * obs).sum(axis=0), 0)
     # A checkpoint whose rows are ALL nonzero, including the degenerate node's.
     gpc._write_readout_ckpt(path, np.ones((C, K)), np.ones(C), 17, fp)
 
