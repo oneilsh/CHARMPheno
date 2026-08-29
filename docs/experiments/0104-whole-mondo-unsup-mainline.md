@@ -424,6 +424,36 @@ closure, so layer 1 never engaged. Two consequences:
   which is exactly where a cold app meets its first kill wave — is covered like every
   other pass. (`_collect_lean_proba` and the stats passes already were.)
 
+**2026-08-29 — ROOT CAUSE, finally, from the aggregated container logs: executor JVM
+heap OOM, masked all week by the JVM's own `-XX:OnOutOfMemoryError='kill %p'`.** The
+all-primary, DA-off relaunch died the same way, which forced the question down to the
+container logs — and there it was, as the chronologically first error:
+`java.lang.OutOfMemoryError: Java heap space` at
+`SerializerHelper.serializeToChunkedBuffer` (task 1.0, stage 492), immediately followed
+by `RECEIVED SIGNAL TERM` and a spray of `Python worker exited unexpectedly (crashed)`.
+The launch command explains the week of misdirection: Dataproc starts executors with
+`-XX:OnOutOfMemoryError='kill %p'`, so a heap OOM SIGTERMs the executor itself — which
+every upstream observer then reports as "Container killed on request / exit 143 /
+Killed by external signal", i.e. indistinguishable from a preemption or an idle
+release. Spot preemption, DA idle-release, YARN memory-limit kills: each was ruled out
+in turn (no spots; DA off; no "beyond physical memory limits" anywhere in 11,781
+aggregated lines), and each had been plausible precisely because the real signal never
+left the JVM.
+
+Mechanism at this scale: every stats pass ships (C,K)≈3,820×3,827 float64 gradient
+partials (~117 MB raw, ~2× pickled), and a tree-combine task holds SEVERAL of them in
+JVM heap at once; 4 concurrent tasks per executor × a few partials each, sharing a 6g
+heap with the cached packed corpus, blows up eventually — thousands of stages in, on
+whichever executor gets unlucky first. It also retro-explains the fit's kill waves (λ
+partials ~355 MB, same shape) and the one anomaly that never fit any cluster theory:
+the `cores=2` run was the only one that ran quietly for hours, because it halved the
+concurrent partials in flight. The fix is memory geometry, applied per worker RAM
+(16 GB workers: `cores=2 + memory=8g + overhead=3g`; 32 GB workers: `memory=12g +
+overhead=6g` at cores=4), to be baked into `spark_conf` once a run survives it. The
+durable fix is smaller partials, not bigger heaps: the deferred masked-pass
+optimization (ship only still-searching rows) shrinks late-solve partials ~10× and is
+the right follow-up after this run finally lands numbers.
+
 **2026-08-21 — UNBLOCKED: the 0103 A/B gate PASSED** (macro |Δ| ≤ 1.1e-4 both arms; see
 0103's run log). Reference bar from 0103's full-row readout: unsup cardiovascular
 **0.7584 AUC / 0.5428 AP over 241 nodes**, pooled conditional ECE 0.0028 (isotonic →
