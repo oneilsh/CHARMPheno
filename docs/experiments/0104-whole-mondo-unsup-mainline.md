@@ -85,10 +85,17 @@ cache_uri: hdfs:///user/dataproc/charm/case_finding_cache
 # block is injected into `make gated-pc-readout ID=104` so a recovery re-readout
 # runs under the same settings as the fit it is rescuing.
 spark_conf:
-  # Spot-VM kill waves under memory pressure: at K≈3,827 the fit broadcasts ~355 MB
-  # per iteration and the readout's (C,K) partials are ~117 MB, so the 2g default
-  # overhead is what the container gets killed for exceeding, not the heap.
-  spark.executor.memoryOverhead: 4g
+  # THE week-of-kill-swarms root cause (run log 08-29): executor JVM heap OOM,
+  # self-masked by Dataproc's -XX:OnOutOfMemoryError='kill %p' (every heap OOM
+  # presents upstream as "killed by external signal"). At K≈3,827 a tree-combine
+  # task holds several ~117 MB (C,K) pickled partials at once; 4 concurrent tasks
+  # against the 6g default heap (shared with the cached packed corpus) blow up
+  # thousands of stages in. 12g heap + 6g overhead survived 449 passes with ZERO
+  # executor deaths on 32 GB workers (08-29). Sized for 32 GB workers — on 16 GB
+  # workers use the run log's alternative (cores=2 + memory=8g + overhead=3g)
+  # via GPR_SPARK_CONF/CHARM_SPARK_CONF.
+  spark.executor.memory: 12g
+  spark.executor.memoryOverhead: 6g
   # Dynamic allocation OFF, fixed executors. DA is confirmed enabled on the
   # cluster, and the 08-28 evening relaunch hardened the case that DA idle-release
   # IS the kill mechanism: containers were killed "on request" / "by external
@@ -453,6 +460,26 @@ overhead=6g` at cores=4), to be baked into `spark_conf` once a run survives it. 
 durable fix is smaller partials, not bigger heaps: the deferred masked-pass
 optimization (ship only still-searching rows) shrinks late-solve partials ~10× and is
 the right follow-up after this run finally lands numbers.
+
+**2026-08-29 (later) — the memory geometry WORKED (449 passes, iter 50, ZERO executor
+deaths — the healthiest solve of the week), and then the DRIVER'S DISK filled: the
+per-pass broadcast lifecycle leaked ~117 MB of master-local temp file per pass.**
+The 12g-heap/6g-overhead run (32 GB workers) sailed: converged count climbing
+(4→373/3,057 over iters 20→50), max|grad| 5.56e4→603, no kill waves at all — the JVM
+heap OOM diagnosis holds. At iter ~50 `sc.broadcast` itself raised `[Errno 28] No
+space left on device`: pyspark writes every broadcast's pickle to a temp file under
+the Spark temp dir on the MASTER, and our per-pass cleanup called `unpersist` — which
+drops executor copies only. The driver block-manager copy and the temp file survive
+until `destroy`, so 449 passes leaked ≈53 GB and ran the master dry. Fix (same
+commit): `_destroy_broadcast` (destroy, falling back to unpersist, never raising —
+it runs in `finally`) replaces unpersist in the stats-pass and lean-eval lifecycles.
+Two consequences worth recording: (1) the earlier driver-side ENOSPC deaths of 08-26/
+08-27, attributed wholly to gcsfuse append behavior, almost certainly had this leak as
+a contributor — the gcsfuse batching was still right, but the disk pressure had two
+sources; (2) the iter-50 checkpoint (`readout_ckpt_gated_pc.npz`) survived, so the
+next run resumes from max|grad|=603 rather than 5.56e4 — the checkpoint layer's first
+real rescue. `spark_conf` now records the surviving memory geometry (12g/6g; the
+16 GB-worker alternative cores=2/8g/3g stays an override).
 
 **2026-08-21 — UNBLOCKED: the 0103 A/B gate PASSED** (macro |Δ| ≤ 1.1e-4 both arms; see
 0103's run log). Reference bar from 0103's full-row readout: unsup cardiovascular

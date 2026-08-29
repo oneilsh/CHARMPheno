@@ -855,6 +855,29 @@ def _error_first_line(exc):
     return exc.__class__.__name__
 
 
+def _destroy_broadcast(bcast):
+    """Fully release a per-pass broadcast — executor blocks, driver block, and the
+    driver-local pickled temp file.
+
+    `unpersist` alone is one level too weak for a fresh-broadcast-per-pass
+    lifecycle: it drops the executor copies but leaves the driver block-manager
+    copy and the temp file `sc.broadcast` wrote under the Spark temp dir, both of
+    which only `destroy` reclaims. Leaked at ~117 MB per pass, that filled the
+    master's disk at solve iteration ~50 (exp 0104, 2026-08-29). Cleanup-path
+    safe: this runs in `finally` blocks, where a raised exception would REPLACE
+    the real one, so failures degrade to unpersist and a log line, never a raise.
+    """
+    try:
+        bcast.destroy()
+    except Exception as exc:
+        try:
+            bcast.unpersist(blocking=True)
+        except Exception:
+            pass
+        print(f"[driver]   broadcast destroy fell back to unpersist "
+              f"({_error_first_line(exc)})", flush=True)
+
+
 def _retry_spark_action(fn, *, attempts=4, base_sleep_s=60, label=""):
     """Run one Spark ACTION, retrying a failed job after a backoff sleep.
 
@@ -1157,10 +1180,19 @@ class SparkStatsFn:
                 return self._rdd.mapPartitions(_local).treeAggregate(
                     zero, _combine, _combine, depth=self._depth)
             finally:
-                # Unpersist per ATTEMPT — the stale-block accounting that the
-                # fresh-per-call broadcast exists for applies just as much to an
-                # attempt that died as to one that returned.
-                bcast.unpersist(blocking=True)
+                # DESTROY per attempt, not unpersist. `unpersist` removes the
+                # EXECUTOR copies only; the driver keeps both its block-manager
+                # copy AND the pickled temp file pyspark wrote under the Spark
+                # temp dir when the broadcast was created — and those survive
+                # until `destroy`. At one fresh ~117 MB broadcast per pass, an
+                # unpersist-only lifecycle leaks ~117 MB of MASTER-LOCAL disk per
+                # pass: exp 0104's 2026-08-29 solve died at iteration ~50 (449
+                # passes ≈ 53 GB of temp files) with `[Errno 28] No space left on
+                # device` from `sc.broadcast` itself — the healthiest solve of
+                # the week, killed by its own cleanup being one level too weak.
+                # A destroyed broadcast is unusable afterwards, which is exactly
+                # the contract here: the next attempt/pass builds a fresh one.
+                _destroy_broadcast(bcast)
 
         # THE hot seam: L-BFGS calls this once per line-search trial, so a
         # multi-hour solve is overwhelmingly likely to be inside this action when

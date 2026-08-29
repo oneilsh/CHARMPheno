@@ -820,7 +820,10 @@ def _collect_lean_proba(scored_df, C, V=None, b_raw=None, *, degenerate=None,
             return scored_df.select(*cols).rdd.mapPartitions(_block).collect()
         finally:
             if bcast is not None:
-                bcast.unpersist(blocking=True)
+                # destroy, not unpersist: reclaims the driver-local temp file too
+                # (see distributed_readout._destroy_broadcast — the leak that
+                # filled the master's disk at one broadcast per solver pass).
+                _dr._destroy_broadcast(bcast)
 
     blocks = _dr._retry_spark_action(_collect, label="lean eval collect")
     proba, y, mask, ids = _densify_lean_blocks(blocks, C)
