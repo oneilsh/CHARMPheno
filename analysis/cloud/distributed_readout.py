@@ -895,6 +895,32 @@ def _retry_spark_action(fn, *, attempts=4, base_sleep_s=60, label=""):
     """
     import time
 
+    # A retry only helps while the APPLICATION is alive: a job abort leaves the
+    # SparkContext healthy, but when YARN fails the whole application (exp 0104,
+    # 2026-08-29: unmanaged-AM heartbeat timeout) the client backend stops the
+    # context, and every further attempt fails at `broadcast` before any work is
+    # even submitted. Sleeping through 3 more attempts then only delays the exit
+    # the checkpoint needs — a rerun of the same command is the actual recovery.
+    # "Dead" is judged RELATIVE TO ENTRY: `sc.stop()` nulls
+    # `_active_spark_context`, so "a context existed when the action started and
+    # is now gone/stopped" is the app-death signature — while "no context ever"
+    # (a unit test driving the helper with fakes) is not evidence of anything and
+    # keeps the normal retry budget.
+    try:
+        from pyspark import SparkContext as _SC
+        _entry_ctx = _SC._active_spark_context
+    except Exception:                            # pragma: no cover - no pyspark
+        _SC, _entry_ctx = None, None
+
+    def _context_is_dead():
+        if _SC is None or _entry_ctx is None:
+            return False
+        try:
+            sc = _SC._active_spark_context
+            return sc is None or sc._jsc is None or sc._jsc.sc().isStopped()
+        except Exception:
+            return False
+
     attempts = max(1, int(attempts))
     retryable = _spark_job_failure_types()
     tag = f"{label}: " if label else ""
@@ -902,6 +928,13 @@ def _retry_spark_action(fn, *, attempts=4, base_sleep_s=60, label=""):
         try:
             return fn()
         except retryable as exc:
+            if _context_is_dead():
+                print(f"[driver]   {tag}spark action FAILED and the SparkContext "
+                      "has STOPPED (application-level failure — YARN failed or "
+                      "killed the app). Retrying cannot help; rerun the same "
+                      "command to resume from the last checkpoint. Original "
+                      f"error: {_error_first_line(exc)}", flush=True)
+                raise
             if k + 1 >= attempts:
                 print(f"[driver]   {tag}spark action FAILED on attempt "
                       f"{k + 1}/{attempts}, giving up: {_error_first_line(exc)}",
@@ -1141,10 +1174,23 @@ class SparkStatsFn:
         return loss, gW_std, s
 
     def close(self):
-        """Unpersist the cached projection. Idempotent."""
+        """Unpersist the cached projection. Idempotent, and SAFE ON A DEAD CONTEXT.
+
+        This runs on the error path too (`with` exit), and when the failure is the
+        SparkContext itself dying — YARN failing the whole application, as on exp
+        0104's 2026-08-29 run — the JVM-side unpersist NPEs, and an exception here
+        REPLACES the real one mid-propagation. Cleanup of a dead context's blocks
+        is moot (the block managers died with it), so a failed unpersist is logged
+        and swallowed, never raised.
+        """
         if not self._closed:
-            self._rdd.unpersist()
             self._closed = True
+            try:
+                self._rdd.unpersist()
+            except Exception as exc:
+                print("[driver]   packed-projection unpersist skipped "
+                      f"({_error_first_line(exc)}) — harmless if the SparkContext "
+                      "is shutting down", flush=True)
 
     def __enter__(self):
         return self
