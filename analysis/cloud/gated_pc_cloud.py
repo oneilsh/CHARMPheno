@@ -833,34 +833,36 @@ def _collect_lean_proba(scored_df, C, V=None, b_raw=None, *, degenerate=None,
     return proba, y, mask, ids
 
 
-_CKPT_VERSION = "readout-ckpt-v1"
+_CKPT_VERSION = "readout-ckpt-v2"
 
 
-def _readout_ckpt_fingerprint(C, K, mu, sd, n_obs, n_pos):
+def _readout_ckpt_fingerprint(C, K, n_obs, n_pos, theta_topm=0):
     """Digest identifying the PROBLEM a solver checkpoint belongs to.
 
-    A checkpoint is a point in a STANDARDIZED coordinate system, and those
-    coordinates are `(mu, sd)` — a deterministic function of this arm's train
-    rows, its label mask and its `theta_topm`. So the moments ARE the identity of
-    the problem: two runs whose `(C, K, mu, sd, n_obs, n_pos)` agree bit for bit
-    are fitting the same design matrix in the same basis, and a checkpoint from
-    one is a valid warm start for the other; if any of it differs, the stored
-    numbers are the right SHAPE and the wrong MEANING (a different arm, a
-    different cohort, a re-readout at a different top-m), which under an
-    iteration cap ends somewhere meaningless rather than failing loudly.
+    Hashes only the EXACTLY-REPRODUCIBLE identity of the problem: `(C, K,
+    theta_topm)` plus the per-node observed/positive COUNTS. Counts are integer
+    sums, and integer addition is exact in float64 in any order — so `n_obs`/
+    `n_pos` come back bit-identical from every run over the same rows and mask,
+    and they are also exactly what distinguishes a different arm (labels change
+    `n_pos`), a different corpus/split (`n_obs`), or a different degenerate mask.
 
-    `n_obs`/`n_pos` ride along because they determine the degenerate mask, i.e.
-    which rows the solve zeroes — same moments with a different mask is still a
-    different problem.
-
-    Byte-level (`tobytes()` on the float64 arrays), not tolerance-based: the
-    moments pass is deterministic given the same rows, so exactness costs nothing
-    and a near-match is not a thing we want to reason about.
+    What is deliberately NOT hashed: the standardization moments `(mu, sd)`.
+    v1 hashed their bytes on the theory that the moments pass is deterministic —
+    and it is, in VALUE, but not in BITS: `treeAggregate` combines partials in
+    task-completion order, float addition is not associative, and the low-order
+    bits differ on every run. In production that made every cross-run
+    fingerprint a mismatch, which silently disabled the entire resume feature
+    (exp 0104, 2026-08-29: an iter-50 checkpoint from the identical solve was
+    rejected and 100 minutes were re-paid). The residual risk of not pinning the
+    basis is bounded by the solver's own contract: `x0` changes the PATH, never
+    the answer — a warm start whose basis drifted by float noise costs at most a
+    few extra iterations, while a byte-exact check costs the whole feature.
     """
     h = hashlib.sha256()
-    h.update(f"{_CKPT_VERSION}|C={int(C)}|K={int(K)}|".encode())
-    for arr in (mu, sd, n_obs, n_pos):
-        a = np.ascontiguousarray(arr, dtype=np.float64)
+    h.update(f"{_CKPT_VERSION}|C={int(C)}|K={int(K)}|topm={int(theta_topm)}|"
+             .encode())
+    for arr in (n_obs, n_pos):
+        a = np.rint(np.ascontiguousarray(arr, dtype=np.float64)).astype(np.int64)
         h.update(f"|{a.shape}|".encode())
         h.update(a.tobytes())
     return h.hexdigest()
@@ -1051,9 +1053,10 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
     ckpt_path = Path(checkpoint_path) if checkpoint_path is not None else None
     fingerprint = None
     if ckpt_path is not None:
-        # Derived AFTER the moments pass because the moments are what it is a
-        # fingerprint OF — the standardized basis this solve's iterate lives in.
-        fingerprint = _readout_ckpt_fingerprint(C, K, mu, sd, n_obs, n_pos)
+        # Derived AFTER the moments pass because the counts come from it —
+        # exact-integer sums, the reproducible identity of this arm's problem
+        # (see _readout_ckpt_fingerprint for why mu/sd bytes are NOT hashed).
+        fingerprint = _readout_ckpt_fingerprint(C, K, n_obs, n_pos, theta_topm)
         resumed = _read_readout_ckpt(ckpt_path, fingerprint)
         if resumed is not None:
             W_ck, b_ck, ck_iter = resumed
