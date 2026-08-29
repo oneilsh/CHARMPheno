@@ -484,6 +484,31 @@ next run resumes from max|grad|=603 rather than 5.56e4 — the checkpoint layer'
 real rescue. `spark_conf` now records the surviving memory geometry (12g/6g; the
 16 GB-worker alternative cores=2/8g/3g stays an override).
 
+**2026-08-29 — SMOKE READOUT LANDED: the first whole-Mondo numbers.** Clean exit after
+a 7,708s solve (500 passes, 496/3,057 converged at gtol, 0 stalled, max|grad| 286, 21
+line-search failures) on the all-primary cluster with the cores=2/8g/3g geometry — zero
+executor deaths, flat driver disk (the destroy fix, visibly working). Headline, DEV
+SMOKE numbers (30-iter fit, 60-iter readout, top-m=256, calibration off — NOT the
+record):
+
+- **unsup gated LDA (pc_topics_lr): macro AUC 0.6891 / AP 0.4745 over 2,106 nodes**
+- node-macro P@R 0.5/0.8/0.9 = 0.476/0.404/0.377; R@FDR 0.1/0.25/0.5 = 0.177/0.300/0.475
+- detection AUC 0.5000 (the known pre-existing constant-column artifact from the
+  degenerate root — fix queued, not new)
+- co-fit arm skipped (weight_y=0, as designed); results in `results_readout.json`.
+
+Read with care: this is all body systems at once vs 0103's cardiovascular 0.7584 —
+different node mix, dev-capped fit, unpriced top-m truncation — so the level is not yet
+interpretable against that reference. The three follow-ups that make it interpretable,
+in order: (1) the cardiovascular-subset comparison out of `results_readout.json`
+against 0103's per-node rows (same nodes, apples to apples); (2) the top-m pricing test
+(`gated-pc-readout ID=103 --readout-theta-topm 256` vs 0103's recorded full-K numbers)
+— decides whether `readout_theta_topm: 256` survives into the record run; (3) the
+record run itself (CHARM_DEV=0: 100-iter fit, 200-iter readout, calibration on).
+Operational footnote: the v1 checkpoint fingerprint printed a THIRD distinct value for
+the same problem across three runs — live confirmation of the treeAggregate
+combine-order nondeterminism that motivated fingerprint v2.
+
 **2026-08-21 — UNBLOCKED: the 0103 A/B gate PASSED** (macro |Δ| ≤ 1.1e-4 both arms; see
 0103's run log). Reference bar from 0103's full-row readout: unsup cardiovascular
 **0.7584 AUC / 0.5428 AP over 241 nodes**, pooled conditional ECE 0.0028 (isotonic →
