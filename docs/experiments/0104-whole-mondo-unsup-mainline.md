@@ -90,12 +90,15 @@ spark_conf:
   # presents upstream as "killed by external signal"). At K≈3,827 a tree-combine
   # task holds several ~117 MB (C,K) pickled partials at once; 4 concurrent tasks
   # against the 6g default heap (shared with the cached packed corpus) blow up
-  # thousands of stages in. 12g heap + 6g overhead survived 449 passes with ZERO
-  # executor deaths on 32 GB workers (08-29). Sized for 32 GB workers — on 16 GB
-  # workers use the run log's alternative (cores=2 + memory=8g + overhead=3g)
-  # via GPR_SPARK_CONF/CHARM_SPARK_CONF.
-  spark.executor.memory: 12g
-  spark.executor.memoryOverhead: 6g
+  # thousands of stages in. THIS config — 2 concurrent tasks against an 8g heap,
+  # 11g container — survived 449 passes / iter 50 with ZERO executor deaths
+  # (08-29), and is the ONLY one of the two candidates that fits the cluster:
+  # yarn.scheduler max container is 13,544 MB on these workers (the 12g+6g
+  # variant was refused at submit). On beefier workers a wider shape (cores=4 +
+  # memory=12g + overhead=6g) is worth re-trying via GPR_SPARK_CONF first.
+  spark.executor.cores: 2
+  spark.executor.memory: 8g
+  spark.executor.memoryOverhead: 3g
   # Dynamic allocation OFF, fixed executors. DA is confirmed enabled on the
   # cluster, and the 08-28 evening relaunch hardened the case that DA idle-release
   # IS the kill mechanism: containers were killed "on request" / "by external
