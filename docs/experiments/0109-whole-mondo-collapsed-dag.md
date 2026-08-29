@@ -1,0 +1,237 @@
+---
+id: 109
+slug: whole-mondo-collapsed-dag
+status: pending
+model_class: gated_pc
+cohort: population_mondo_all
+cohort_def: population_mondo_all
+disease: rare_priority
+# THE STRUCTURAL-DEFECT FIX RUN. Byte-for-byte 0104's front matter with ONE knob added:
+# dag_collapse. Everything else — corpus inputs, windowing, vocab, head params, seed,
+# spark_conf — is copied verbatim so the two runs differ in the LABEL DAG and nothing
+# else, and 0104's recorded numbers are a legitimate control.
+#
+# What the knob does: after the Mondo hierarchy is powered and reduced, repeatedly
+# SPLICE OUT every class node with exactly one kept child (wiring its parents straight
+# to that child) and DROP every class node left with none, to fixpoint. Terminals (the
+# 2,513 powered anchors) and the root are never removed, so the label CONTENT is
+# unchanged; only the abstract scaffolding between anchors shrinks.
+#
+# Why it should matter: 0104's readout banner reads "3,057 fittable nodes, 763
+# degenerate (constant fallback)" at C=3,820, and the degenerate set is exactly
+# {root} u {only-children}. Mondo is a multi-axis DAG; `reduce_to_anchor_hierarchy`
+# gives each node its single NEAREST superset cover as parent, so overlapping covers
+# "steal" terminals from one another and leave class nodes holding a single child.
+# Under label_mask_mode: closure such a node is observed only on the rows its one child
+# covers, so its observed train cell is single-class, its readout column is a constant
+# fallback, and (0109 part B) that constant column pinned detection AUC at 0.5000.
+# Predicted after the collapse: exactly ONE degenerate node, the root.
+dag_collapse: true
+readout_mode: distributed
+readout_theta_topm: 256
+weight_y: 0.0
+weight_y_warmup_iters: 0
+skip_unsup_gated: true
+dag_source: mondo
+min_positives: 100
+mondo_version: 2026-06-02
+mondo_cache_dir: data/mondo
+extra_domains: measurement,drug
+label_mask_mode: closure
+localize_head: true
+head_support: path_cousins_kids
+head_intercept: true
+head_standardize: true
+doc_concentration: 0.5
+head_lr: 1.0
+person_mod: 1
+prior_obs_days: 0
+doc_min_length: 10
+min_n: 0
+holdout_frac: 0.2
+vocab_size: 5000
+min_df: 20
+min_patient_count: 20
+window_mode: lookback
+lookback_days: 1825
+label_window_days: 365
+strip_mode: both
+n_bg: 8
+tpn: 1
+optimize_doc_concentration: true
+head_optimizer: newton
+head_newton_ridge: 0.05
+head_l2: 0.01
+grad_cavi_iters: 15
+topic_trust: 0.05
+max_iter: 100
+subsampling_rate: 0.1
+tau0: 64.0
+kappa: 0.51
+cavi_max_iter: 100
+cavi_tol: 0.001
+with_dag_head: false
+baseline_max_iter: 100
+min_label_count: 20
+eval_every: 0
+num_partitions: 96
+seed: 42
+cache_uri: hdfs:///user/dataproc/charm/case_finding_cache
+# COPIED VERBATIM FROM 0104. This block encodes a week of cluster forensics (run log
+# 08-26 through 08-29: the "kill swarms" were executor JVM heap OOMs self-masked by
+# Dataproc's -XX:OnOutOfMemoryError='kill %p'), and it is the ONLY geometry that has
+# survived a full whole-Mondo solve. Do not re-derive it; do not trim it.
+spark_conf:
+  # THE week-of-kill-swarms root cause (run log 08-29): executor JVM heap OOM,
+  # self-masked by Dataproc's -XX:OnOutOfMemoryError='kill %p' (every heap OOM
+  # presents upstream as "killed by external signal"). At K≈3,827 a tree-combine
+  # task holds several ~117 MB (C,K) pickled partials at once; 4 concurrent tasks
+  # against the 6g default heap (shared with the cached packed corpus) blow up
+  # thousands of stages in. THIS config — 2 concurrent tasks against an 8g heap,
+  # 11g container — survived 449 passes / iter 50 with ZERO executor deaths
+  # (08-29), and is the ONLY one of the two candidates that fits the cluster:
+  # yarn.scheduler max container is 13,544 MB on these workers (the 12g+6g
+  # variant was refused at submit). On beefier workers a wider shape (cores=4 +
+  # memory=12g + overhead=6g) is worth re-trying via GPR_SPARK_CONF first.
+  spark.executor.cores: 2
+  spark.executor.memory: 8g
+  spark.executor.memoryOverhead: 3g
+  # Dynamic allocation OFF, fixed executors. DA is confirmed enabled on the
+  # cluster, and the 08-28 evening relaunch hardened the case that DA idle-release
+  # IS the kill mechanism: containers were killed "on request" / "by external
+  # signal" on PRIMARY workers (w-2 here; w-0/w-1 in earlier waves) — hostnames
+  # GCP cannot preempt — right after the driver-side reconstruct/transform gap
+  # where every executor idles past DA's 60s timeout, and the kill/task-launch
+  # races then feed excludeOnFailure until the scheduler starves (stage 3, 4 min
+  # in). A minExecutors=8 floor did NOT stop it. A long batch solve wants a
+  # deterministic executor set anyway: DA off + an explicit instance count sized
+  # to the cluster (12 nodes x 1 executor of 4 cores/6g+4g). YARN grants what
+  # exists and holds the rest pending, so a smaller cluster still runs — adjust
+  # instances when the cluster shape changes. If kills persist on primaries even
+  # with DA off, the mechanism is platform-level (autoscaler/YARN), not Spark.
+  spark.dynamicAllocation.enabled: "false"
+  spark.executor.instances: 12
+  # Preemption-wave exclusion starvation (08-28 evening: the solve died 9,112s in
+  # when a retry of task 0 "cannot run anywhere due to node and executor
+  # excludeOnFailure" aborted the TaskSet). At the 1h default, every spot kill wave
+  # adds hosts to the app-level exclude list and none age out inside a multi-hour
+  # solve, so the schedulable set only shrinks. Dataproc secondary workers come back
+  # under the SAME hostnames, so an aged-out entry is a REUSABLE node, not a stale
+  # one — 10m is long enough to route around a genuinely bad host and short enough
+  # that a preemption wave's collateral is forgiven before the next wave lands.
+  spark.excludeOnFailure.timeout: 10m
+---
+
+# 0109 — Whole-Mondo on a collapsed DAG: paying off the 763 degenerate nodes
+
+**Why.** exp 0104 landed the first whole-Mondo numbers and, in the same banner, the
+diagnosis of a structural defect it could not fix: **`3,057 fittable nodes, 763
+degenerate (constant fallback)`** out of C=3,820. That is not a rare-node/small-cell
+problem — it is one fifth of the label space carrying no information at all, and the
+set has now been characterized exactly:
+
+> **the degenerate set is `{root} ∪ {class nodes with exactly one kept child}`.**
+
+The mechanism is construction, not data. Mondo is a multi-axis is-a DAG, and
+`anchor_hierarchy.reduce_to_anchor_hierarchy` assigns each kept node its single
+*nearest* superset cover as parent. When two class nodes have overlapping (not nested)
+terminal covers — A={t1,t2,t3}, B={t1,t2}, C={t2,t3} — the shared terminals are STOLEN
+by whichever cover sorts first, and C is left holding only {t3}. The flattening turns
+the DAG into a tree and strews it with class nodes that have exactly one kept child.
+Under `label_mask_mode: closure` such a node is observed only on the rows its one child
+covers, so within its own observed train set it is constant-1: the per-node readout
+cell is single-class, and the head emits a constant fallback column.
+
+Those 763 nodes cost three things: K topic-blocks that learn nothing, C readout rows
+that are fit and reported as degenerate, and — via the per-doc max — a **detection AUC
+pinned at exactly 0.5000** in every 0104 readout.
+
+**What changes.** Two independent fixes, one opt-in and one always-on.
+
+- **A. `dag_collapse: true` (this run's only knob).** After powering and reduction,
+  repeatedly splice out every class node with exactly one kept child (its parents wire
+  straight to that child) and drop every class node left with none, iterating to
+  fixpoint so a whole chain collapses. Terminals — the powered anchors patients
+  actually attest — are never spliced, so **no label content is lost**; the run's
+  positives per surviving node are identical. The root stays (one node, structural).
+  The DAG build prints its own receipt: how many nodes were spliced, how many childless
+  ones dropped, and the **predicted residual degenerate count, which should be 1**.
+- **B. constant columns excluded from the detection pool (always on, both DAG paths).**
+  A pre-existing EVAL bug, not a modeling change: the detection score is a per-doc max
+  over node columns, so a single constant column above the informative ones makes the
+  max constant and the AUC exactly chance. A constant column carries no per-document
+  information by construction, so excluding it cannot lose signal. **Ranking and
+  per-node metrics are untouched** — they score each column against its own labels and
+  already report a degenerate node as skipped.
+
+## Comparison protocol (this is the point of the run)
+
+Same corpus inputs, same fit knobs, same seed, same `spark_conf` — a collapsed label
+DAG and nothing else. 0104's recorded numbers are the control. Read, in order:
+
+1. **The DAG-build receipt.** `[mondo]   dag-collapse (splice-fixpoint-v1): spliced N
+   only-child class node(s), dropped M childless, in P pass(es); nodes 3820 -> ...;
+   predicted residual degenerate = 1`. Expect N+M ≈ 762 and a predicted residual of 1.
+2. **The readout banner: 763 → ~1.** The falsifiable claim. If the fittable count does
+   NOT rise to ≈ the new C−1, the "only-children are the degenerate set" account is
+   wrong and the remaining degenerate nodes must be enumerated before anything else in
+   this doc is believed.
+3. **Detection is no longer chance.** 0104: `detection (case vs bg) AUC=0.5000`. Here it
+   must be a real number, and the line now names how many constant columns it excluded
+   (post-collapse that count should be ~0, which is its own confirmation of item 2).
+4. **Macro AUC/AP ON SHARED NODES vs 0104.** Do NOT compare the headline macros
+   directly: 0104 macro'd over 2,106 scored nodes of a 3,820-node DAG and this run
+   macro's over a different node set, so a difference could be pure composition. Join
+   `results_readout.json`'s `per_node` rows on concept id, restrict to nodes present in
+   both, and compare macro AUC/AP on that intersection. Expectation: **flat to slightly
+   up**. The spliced nodes were carrying no information, but they were consuming topic
+   blocks (K shrinks by ~762 × tpn) and closure mask area, so the surviving nodes get a
+   slightly less diluted θ and a cleaner sibling contrast. A material DROP means the
+   scaffolding was doing latent work (plausible: a class node's topic block can act as a
+   shared basis for its subtree even when its own label is degenerate) — that would be a
+   real finding and an argument for splicing the LABEL row while keeping the topic
+   block, which this reduction deliberately does not attempt.
+5. **Conditional (`P(child | parent)`) metrics.** The collapse REMOVES DAG edges, so the
+   edge set the conditional readout scores changes: chains of one-child parents are
+   gone, and the surviving parents have their real children. Expect fewer edges, each
+   more meaningful; a rise in `cond_auc` here is the sharpening story the collapse is
+   supposed to help.
+6. **Cost.** K drops with C, so per-iteration fit cost and the readout's C·K L-BFGS state
+   both shrink ~20%. Any wall-clock number that does NOT improve is worth a look.
+
+## Cache / reproducibility notes
+
+`dag_collapse` is an **opt-in, versioned** corpus input. It is folded into the bundle
+cache key (with `dag_collapse_version` and the reduction module's source hash) **only
+when it is on**, so every collapse-OFF key — including exp 0104's cached record bundle —
+is byte-identical to what it was before this existed, and 0104 reproduces unchanged.
+This run therefore takes a cache MISS on its first launch and assembles its own bundle
+(~20 min of BigQuery), which is correct: it is a different corpus.
+
+The reduction lives in `analysis/cloud/mondo_collapse.py` rather than inside
+`mondo_dag.py` for exactly that reason — `compute_bundle_cache_key` folds
+`_module_source_hash(mondo_dag)`, so any edit to that file (a comment included) would
+move every Mondo key and orphan every cached bundle in every bucket.
+
+## Run
+
+```bash
+cd ~/repos/CHARMPheno && git pull origin claude/gated-conditional-voi && \
+  CHARM_DEV=1 CHARM_SPARK_CONF='spark.locality.wait=0s' make -C analysis/cloud exp ID=109  # smoke first
+CHARM_SPARK_CONF='spark.locality.wait=0s' make -C analysis/cloud exp ID=109
+make -C analysis/cloud report ID=109
+
+# Recovery re-readout on a SAVED fit. Fits from now on record every Mondo build input
+# INCLUDING dag_collapse, so no --dag-collapse flag is needed; it is here as the
+# override for a manifest that ever loses it (a wrong value MISSES the cache rather
+# than mis-scoring, and the drift gate catches a wrong rebuild).
+make -C analysis/cloud gated-pc-readout ID=109 GPR_ARGS="--dag-collapse on"
+```
+
+The front matter's `spark_conf:` is injected into both commands automatically — see
+0104's note; it is copied here verbatim and must not be retyped into
+`CHARM_SPARK_CONF` / `GPR_SPARK_CONF`.
+
+## Run log
+
+_(pending — nothing has been run)_

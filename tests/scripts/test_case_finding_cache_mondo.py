@@ -84,6 +84,64 @@ def test_multidomain_flag_alone_changes_the_key():
 _MD_BASE = dict(_SNOMED_BASE, multidomain=True, extra_domains=("drug",),
                 index_mode="population", mondo=True, mondo_version="2026-06-02",
                 mondo_branch="", min_positives=100)
+# The MONDO key with the exp-0109 collapse OFF, pinned the same way the SNOMED
+# keys above are and for the same reason: exp 0104's record bundle (~20 min of
+# BigQuery to rebuild) lives under it. It folds `_module_source_hash(mondo_dag)`,
+# so this hash is a deliberate TRIPWIRE — any edit to `analysis/cloud/mondo_dag.py`
+# moves it and orphans every cached Mondo bundle in every bucket. That may be the
+# right call (an actual hierarchy change SHOULD invalidate), but it must be a
+# decision: re-pin this only alongside a note saying why the caches were dropped.
+# It is also why the 0109 reduction lives in `mondo_collapse.py` instead.
+_MONDO_KEY_NO_COLLAPSE = "ca958995cc1cfb17"
+
+
+def test_mondo_key_with_collapse_off_is_byte_identical():
+    """exp 0109 is OPT-IN, so a spec that does not ask for the collapse must key
+    exactly where it keyed before the flag existed."""
+    k = ccache.compute_bundle_cache_key
+    assert k(**_MD_BASE) == _MONDO_KEY_NO_COLLAPSE
+    assert k(**_MD_BASE, dag_collapse=False) == _MONDO_KEY_NO_COLLAPSE
+    # ...and the version string is inert while the flag is off (nothing to name).
+    assert k(**_MD_BASE, dag_collapse=False,
+             dag_collapse_version="whatever") == _MONDO_KEY_NO_COLLAPSE
+
+
+def test_dag_collapse_on_is_a_different_corpus():
+    """The collapsed DAG has ~763 fewer label nodes at whole-Mondo — a different
+    C, a different K, different label/frontier columns. It cannot share a bundle."""
+    k = ccache.compute_bundle_cache_key
+    on = k(**_MD_BASE, dag_collapse=True, dag_collapse_version="splice-fixpoint-v1")
+    assert on != _MONDO_KEY_NO_COLLAPSE
+
+
+def test_dag_collapse_version_is_folded_into_the_key():
+    """A reduction whose OUTPUT changes must not be served a bundle built by the
+    old one; bumping the version string is the manual lever that guarantees it."""
+    k = ccache.compute_bundle_cache_key
+    v1 = k(**_MD_BASE, dag_collapse=True, dag_collapse_version="splice-fixpoint-v1")
+    v2 = k(**_MD_BASE, dag_collapse=True, dag_collapse_version="splice-fixpoint-v2")
+    assert v1 != v2
+
+
+def test_dag_collapse_does_not_leak_into_the_snomed_key():
+    """The reduction names Mondo CLASS nodes; the SNOMED path has none, and its
+    keys must stay frozen even if a caller passes the flag by accident."""
+    k = ccache.compute_bundle_cache_key
+    assert k(**_SNOMED_BASE, dag_collapse=True,
+             dag_collapse_version="splice-fixpoint-v1") == _SNOMED_KEY
+
+
+def test_multidomain_cache_key_threads_dag_collapse_from_the_spec():
+    """The spec -> key_extra -> compute_bundle_cache_key path (what the fit and the
+    re-readout both call), not just the raw key function."""
+    base = dict(_MONDO_SPEC)
+    off = gpc.multidomain_cache_key(base)
+    on = gpc.multidomain_cache_key(dict(base, dag_collapse=True))
+    assert off == gpc.multidomain_cache_key(dict(base, dag_collapse=False))
+    assert off != on
+    # a spec that predates the field behaves exactly like collapse OFF
+    legacy = {k_: v for k_, v in base.items() if k_ != "dag_collapse"}
+    assert gpc.multidomain_cache_key(legacy) == off
 
 
 @pytest.mark.parametrize("field,val", [
@@ -260,7 +318,7 @@ _MONDO_SPEC = {
     "label_window_days": 365, "label_mask_mode": "full", "emit_labels": True,
     "window_mode": "lookback", "prior_obs_days": 0, "window_days": 0,
     "mondo_version": "2026-06-02", "mondo_branch": "", "min_positives": 100,
-    "mondo_cache_dir": "data/mondo",
+    "mondo_cache_dir": "data/mondo", "dag_collapse": False,
 }
 
 
@@ -436,11 +494,32 @@ def test_readout_parses_the_rebuild_flags():
     a = gpr.build_parser().parse_args(["--run-dir", "/runs/0104-x"])
     assert a.no_rebuild is False and a.dag_source is None and a.billing is None
     assert a.cache_write == "on"
+    assert a.dag_collapse is None                  # tri-state: defer to the manifest
     b = gpr.build_parser().parse_args(
         ["--run-dir", "/runs/0104-x", "--no-rebuild", "--dag-source", "mondo",
-         "--billing", "proj", "--min-positives", "100"])
+         "--billing", "proj", "--min-positives", "100", "--dag-collapse", "on"])
     assert b.no_rebuild is True and b.dag_source == "mondo"
     assert b.billing == "proj" and b.min_positives == 100
+    assert b.dag_collapse == "on"
+
+
+def test_readout_reads_dag_collapse_from_the_manifest_and_lets_the_cli_win():
+    """Same manifest-default + CLI-override shape as every other Mondo build input:
+    a 0109 fit records `dag_collapse: true` and the re-readout rebuilds the SAME
+    collapsed DAG; a manifest predating the field means off."""
+    m = _mondo_manifest()
+    m["corpus_manifest"]["dag_collapse"] = True
+    assert gpr.corpus_spec_from_manifest(m)["dag_collapse"] is True
+    # the CLI override wins in both directions (a fit whose manifest lies/omits)
+    assert gpr.corpus_spec_from_manifest(m, dag_collapse=False)["dag_collapse"] is False
+    old = _mondo_manifest()
+    del old["corpus_manifest"]["dag_collapse"]
+    assert gpr.corpus_spec_from_manifest(old)["dag_collapse"] is False
+    assert gpr.corpus_spec_from_manifest(old, dag_collapse=True)["dag_collapse"] is True
+    # ...and it lands in the key, so a wrong value MISSES rather than mis-scores.
+    assert gpr.bundle_key_from_manifest(m) != gpr.bundle_key_from_manifest(old)
+    assert gpr.bundle_key_from_manifest(old) == gpr.bundle_key_from_manifest(
+        _mondo_manifest())
 
 
 def test_snomed_manifest_still_takes_the_single_domain_path():
