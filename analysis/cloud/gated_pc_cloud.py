@@ -149,17 +149,37 @@ def detection_readout(proba_DC, y_DC, recall_targets):
     probabilities and the foreground indicator = the root node's label (label[:,0]=1
     iff the doc has any attested disease node). Reports AUC/AP + precision@recall on
     that pooled signal — 'can we tell a rare-disease patient from a background one,
-    and how precise is the surfaced case list?'. Empty/degenerate -> skipped."""
+    and how precise is the surfaced case list?'. Empty/degenerate -> skipped.
+
+    CONSTANT COLUMNS ARE EXCLUDED FROM THE POOL — an EVAL bug fix, always on.
+    A node whose observed train cell is single-class gets a CONSTANT fallback
+    column from the readout head (763 of them at whole-Mondo, exp 0104). A
+    constant column contributes the same value to every document's max, so as soon
+    as one of them sits above the informative columns the per-doc max is constant
+    too and the AUC pins at exactly 0.5000 — which is what every 0104 readout
+    printed. The column carries no per-document information by construction, so
+    dropping it cannot lose signal; it can only stop one from being masked. Note
+    this touches the DETECTION pool only: the ranking and per-node metrics score
+    each column against its own labels and are deliberately left untouched (a
+    degenerate node is already reported there as skipped/degenerate)."""
     from sklearn.metrics import average_precision_score, roc_auc_score
     if proba_DC.shape[0] == 0 or proba_DC.shape[1] < 2:
         return {"skipped": "empty or single-node"}
     y = np.asarray(y_DC[:, 0], float)                       # root = any-disease
-    score = proba_DC[:, 1:].max(axis=1)                     # strongest disease node
+    disease = proba_DC[:, 1:]                               # node 0 is the root
+    informative = np.ptp(disease, axis=0) > 0                # non-constant columns
+    n_const = int(disease.shape[1] - informative.sum())
+    if not informative.any():
+        return {"skipped": "all disease-node scores are constant",
+                "n_constant_nodes": n_const}
+    score = disease[:, informative].max(axis=1)             # strongest disease node
     if len(np.unique(y)) < 2:
-        return {"skipped": "degenerate foreground indicator"}
+        return {"skipped": "degenerate foreground indicator",
+                "n_constant_nodes": n_const}
     return {"skipped": None, "prevalence": float(y.mean()),
             "auc": float(roc_auc_score(y, score)),
             "ap": float(average_precision_score(y, score)),
+            "n_constant_nodes": n_const,
             "par": precision_at_recall(y, score, recall_targets)}
 
 
@@ -216,8 +236,13 @@ def format_arm_readout(name, arm):
     else:
         dpar = " ".join(f"P@R{t:g}={('n/a' if v != v else f'{v:.3f}')}"
                         for t, v in sorted(det["par"].items()))
+        # The excluded-column count is printed rather than silently applied: at
+        # whole-Mondo it IS the degenerate-node count, so the line doubles as a
+        # read on how much of the label DAG is structurally inert.
+        nc = int(det.get("n_constant_nodes", 0) or 0)
+        const = f"  [{nc} constant node col(s) excluded]" if nc else ""
         lines.append(f"{name}: detection (case vs bg) AUC={det['auc']:.4f} "
-                     f"AP={det['ap']:.4f} prev={det['prevalence']:.3f}  {dpar}")
+                     f"AP={det['ap']:.4f} prev={det['prevalence']:.3f}  {dpar}{const}")
     return "\n".join("[driver]   " + ln for ln in lines)
 
 
@@ -1665,6 +1690,10 @@ def multidomain_corpus_spec(args, extra_domains) -> dict:
         "mondo_branch": (args.mondo_branch or "") if mondo else "",
         "min_positives": args.min_positives if mondo else 0,
         "mondo_cache_dir": args.mondo_cache_dir if mondo else "",
+        # exp 0109's splice-to-fixpoint DAG reduction. Mondo-only (it names class
+        # nodes of the Mondo hierarchy) and OFF by default, so an existing
+        # experiment's spec — and therefore its bundle key — is unchanged.
+        "dag_collapse": bool(args.dag_collapse) if mondo else False,
     }
 
 
@@ -1683,6 +1712,12 @@ def _multidomain_params(spec):
         key_extra.update(mondo=True, mondo_version=spec["mondo_version"],
                          mondo_branch=spec.get("mondo_branch") or "",
                          min_positives=spec["min_positives"])
+        # Folded ONLY when on: a collapse-OFF Mondo spec must key byte-identically
+        # to one written before exp 0109 existed (0104's cached bundle).
+        if spec.get("dag_collapse"):
+            from mondo_collapse import DAG_COLLAPSE_VERSION
+            key_extra.update(dag_collapse=True,
+                             dag_collapse_version=DAG_COLLAPSE_VERSION)
     return assembly, key_extra
 
 
@@ -1709,6 +1744,10 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
     `on_inputs(count_of=..., terminal_cids=..., reduced=...)` hands back the
     by-products (the diag-only probe's per-terminal +counts) — it is NOT called on a
     HIT, which is exactly why `per_node_head_report` tolerates an empty count_of.
+
+    `spec["dag_collapse"]` (exp 0109, default False) additionally puts the built
+    engine DAG through the splice-to-fixpoint reduction before assembly — a
+    DIFFERENT label DAG, hence a different cache key, hence its own bundle.
     """
     def _assemble_mondo(spark, **assembly_params):
         from charmpheno.omop.doc_spec import PatientCohortDocSpec
@@ -1730,6 +1769,17 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
             print(f"[mondo]   powered terminals={len(terminal_cids)}, "
                   f"class nodes={reduced['n_classes']}, "
                   f"branch={branch or 'ALL'}", flush=True)
+            if spec.get("dag_collapse"):
+                # exp 0109. Applied HERE — between the hierarchy build and the
+                # assembler — rather than inside `mondo_dag`, because that module's
+                # source hash is folded into every Mondo bundle key and editing it
+                # would orphan every cached bundle including 0104's (see
+                # mondo_collapse's module docstring). Terminals are untouched, so
+                # `climb_sdf` / `terminal_cids` stay exactly right.
+                from mondo_collapse import (collapse_engine_dag,
+                                            format_collapse_report)
+                before_dag, collapse_stats = collapse_engine_dag(before_dag)
+                print(format_collapse_report(collapse_stats), flush=True)
             if on_inputs is not None:
                 on_inputs(count_of=count_of, terminal_cids=terminal_cids,
                           reduced=reduced)
@@ -1824,6 +1874,17 @@ def parse_args(argv=None):
                         "(the K dial; exp 0088 used 100).")
     p.add_argument("--mondo-version", default="2026-06-02")
     p.add_argument("--mondo-cache-dir", default="data/mondo")
+    p.add_argument("--dag-collapse", action="store_true",
+                   help="mondo: SPLICE-TO-FIXPOINT the label DAG before assembly "
+                        "(exp 0109) — repeatedly remove every class node with "
+                        "exactly one kept child (wiring its parents to that child) "
+                        "and every class node left with none, until no such node "
+                        "remains. Terminals (the powered anchors) and the root are "
+                        "never removed. This is what kills the 763 degenerate "
+                        "'constant fallback' readout cells at whole-Mondo, which are "
+                        "exactly {root} u {only-children} under closure masking. OFF "
+                        "by default: it changes the corpus (and its cache key), so "
+                        "existing experiments reproduce byte-identically.")
     p.add_argument("--k", type=int, default=50,
                    help="K for the UNGATED --with-dag-head arm only; the gated arms "
                         "derive K from the layout (n_bg + nodes*tpn).")
@@ -2234,6 +2295,7 @@ def main() -> int:
                 "mondo_branch": (corpus_spec or {}).get("mondo_branch", ""),
                 "min_positives": (corpus_spec or {}).get("min_positives", 0),
                 "mondo_cache_dir": (corpus_spec or {}).get("mondo_cache_dir", ""),
+                "dag_collapse": (corpus_spec or {}).get("dag_collapse", False),
                 "domain_vocab_sizes": [len(vm) for vm in vocab_maps],
                 "int2cid": {str(i): c for i, c in bundle.int2cid.items()},
                 "name_by_id": {str(c): n for c, n in bundle.name_by_id.items()}},

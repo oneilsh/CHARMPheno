@@ -185,6 +185,51 @@ def test_mondo_dag_source_flags_thread(monkeypatch):
     assert parsed.min_positives == 100
 
 
+def test_dag_collapse_flag_threads(monkeypatch):
+    """exp 0109: `dag_collapse: true` front matter -> --dag-collapse -> the driver
+    parses it -> the corpus spec carries it (which is what forks the cache key).
+    Absent/false front matter must not emit the flag at all: exp 0104's record run
+    has to reproduce byte-identically."""
+    mod = _run_exp(monkeypatch)
+    eff = {**_base_eff(), "dag_source": "mondo", "min_positives": 100,
+           "window_mode": "lookback", "dag_collapse": True}
+    args = mod.build_gated_pc_args(eff, "/out")
+    assert "--dag-collapse" in args
+
+    assert "--dag-collapse" not in mod.build_gated_pc_args(_base_eff(), "/out")
+    assert "--dag-collapse" not in mod.build_gated_pc_args(
+        {**eff, "dag_collapse": False}, "/out")
+
+    cloud = str(Path(mod.__file__).resolve().parent.parent / "analysis" / "cloud")
+    if cloud not in sys.path:
+        sys.path.insert(0, cloud)
+    import gated_pc_cloud
+    parsed = gated_pc_cloud.parse_args(args)
+    assert parsed.dag_collapse is True
+    spec = gated_pc_cloud.multidomain_corpus_spec(parsed, ("drug",))
+    assert spec["dag_collapse"] is True
+    # ...and the default driver invocation still says off, on both DAG sources.
+    off = gated_pc_cloud.parse_args(mod.build_gated_pc_args(
+        {**eff, "dag_collapse": False}, "/out"))
+    assert off.dag_collapse is False
+    assert gated_pc_cloud.multidomain_corpus_spec(off, ("drug",))["dag_collapse"] \
+        is False
+
+
+def test_dag_collapse_is_mondo_only_in_the_spec(monkeypatch):
+    """The reduction names Mondo CLASS nodes; on the SNOMED path the spec pins it
+    False so a stray flag cannot split that cache."""
+    mod = _run_exp(monkeypatch)
+    cloud = str(Path(mod.__file__).resolve().parent.parent / "analysis" / "cloud")
+    if cloud not in sys.path:
+        sys.path.insert(0, cloud)
+    import gated_pc_cloud
+    parsed = gated_pc_cloud.parse_args(mod.build_gated_pc_args(
+        {**_base_eff(), "window_mode": "lookback", "dag_collapse": True}, "/out"))
+    assert parsed.dag_source == "snomed" and parsed.dag_collapse is True
+    assert gated_pc_cloud.multidomain_corpus_spec(parsed, ())["dag_collapse"] is False
+
+
 def test_localize_head_flag_threads(monkeypatch):
     """localize_head frontmatter -> --localize-head -> driver parses it -> the shim
     estimator carries localizeHead=True."""

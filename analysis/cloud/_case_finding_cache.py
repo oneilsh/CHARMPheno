@@ -51,7 +51,8 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
                              label_mask_mode="full", multidomain=False,
                              extra_domains=(), index_mode="disease", mondo=False,
                              mondo_version="", mondo_branch="",
-                             min_positives=0) -> str:
+                             min_positives=0, dag_collapse=False,
+                             dag_collapse_version="") -> str:
     """Stable 16-hex hash of the inputs that determine the assembled bundle.
 
     Folds cohort_defs_version() plus content hashes of condition_dag +
@@ -72,7 +73,9 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
     `multidomain=True` selects the MULTI-DOMAIN corpus identity (the
     `charmpheno.omop.multi_domain` assembler): the per-domain `extra_domains` and
     the `index_mode`, plus `mondo`/`mondo_version`/`mondo_branch`/`min_positives`
-    when the label DAG is the Mondo powered hierarchy. Those fields are folded in
+    when the label DAG is the Mondo powered hierarchy, plus `dag_collapse`
+    (+ `dag_collapse_version`) when that hierarchy is put through the exp-0109
+    splice-to-fixpoint reduction. Those fields are folded in
     ONLY on that path, exactly like `emit_labels` below, so every SNOMED key stays
     byte-identical and every existing cache entry stays valid — and the
     `multidomain` marker itself guarantees the new (vocab_maps) meta format can
@@ -147,6 +150,20 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
             payload["mondo_branch"] = str(mondo_branch or "")
             payload["min_positives"] = int(min_positives)
             payload["mondo_src"] = _module_source_hash(mondo_dag)
+            # exp 0109's splice-to-fixpoint DAG reduction: a DIFFERENT label DAG
+            # (763 fewer nodes at whole-Mondo), hence a different corpus. Folded
+            # ONLY when it is switched on — the same discipline as `mondo` itself
+            # — so every key from a collapse-OFF run (incl. exp 0104's cached
+            # record bundle) is byte-identical to what it was before this existed.
+            # That is also why the reduction lives in its own module: `mondo_src`
+            # would otherwise move every Mondo key on a comment edit.
+            if dag_collapse:
+                import mondo_collapse
+                payload["dag_collapse"] = True
+                # The version string is the citable record of WHICH reduction ran;
+                # the source hash is the guard that no one has to remember to bump.
+                payload["dag_collapse_version"] = str(dag_collapse_version)
+                payload["dag_collapse_src"] = _module_source_hash(mondo_collapse)
     s = json.dumps(payload, sort_keys=True)
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
 
@@ -260,8 +277,8 @@ def load_or_build_case_finding_bundle(spark, *, cache_uri=None, _assemble_fn=Non
 
     `_key_extra` are cache-key inputs that are NOT assembler kwargs — the
     multi-domain/Mondo identity markers (`multidomain`, `mondo`, `mondo_version`,
-    `mondo_branch`, `min_positives`) that name WHICH corpus this is without being
-    something the assembler is called with.
+    `mondo_branch`, `min_positives`, `dag_collapse`) that name WHICH corpus this is
+    without being something the assembler is called with.
     """
     from charmpheno.omop.case_finding_assembly import assemble_case_finding_corpus
     assemble = _assemble_fn or assemble_case_finding_corpus

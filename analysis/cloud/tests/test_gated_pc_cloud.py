@@ -170,6 +170,72 @@ def test_score_arm_separable_and_detection_shape():
     assert "ap" in arm["detection"] and set(arm["detection"]["par"]) == {0.5, 0.9}
 
 
+# --------------------------------------------------------------------------- #
+# detection: the constant-column artifact (exp 0109 part B)                    #
+# --------------------------------------------------------------------------- #
+def test_detection_excludes_constant_node_columns():
+    """A degenerate node's CONSTANT fallback column pinned detection AUC at exactly
+    0.5000 in every whole-Mondo readout (exp 0104): the per-doc score is a max over
+    node columns, so one constant column sitting above the informative ones makes
+    the max constant too. It carries no per-document information by construction,
+    so excluding it cannot lose signal — it can only stop one being masked."""
+    import numpy as np
+    from gated_pc_cloud import detection_readout
+    # node 0 = root (the foreground label); node 1 = informative; node 2 = constant
+    # HIGH (0.9), which is exactly what dominates the max.
+    y = np.array([[0., 0, 0], [0., 0, 0], [1., 1, 0], [1., 1, 0]])
+    proba = np.array([[0.1, 0.10, 0.9], [0.1, 0.20, 0.9],
+                      [0.9, 0.80, 0.9], [0.9, 0.85, 0.9]])
+    det = detection_readout(proba, y, [0.5])
+    assert det["skipped"] is None
+    assert det["n_constant_nodes"] == 1
+    assert det["auc"] == 1.0            # the informative column decides it
+    # the artifact this replaces: with the constant column in the pool the max is
+    # a flat 0.9 for every doc, and roc_auc_score on a constant score is 0.5000.
+    from sklearn.metrics import roc_auc_score
+    flat = proba[:, 1:].max(axis=1)
+    assert np.ptp(flat) == 0.0
+    assert roc_auc_score(y[:, 0], flat) == 0.5
+
+
+def test_detection_unchanged_when_no_column_is_constant():
+    """The fix is a no-op on a healthy readout — same score, same numbers."""
+    import numpy as np
+    from gated_pc_cloud import detection_readout
+    y = np.array([[0., 0, 0], [0., 0, 0], [1., 1, 0], [1., 0, 1]])
+    proba = np.array([[0.1, 0.2, 0.15], [0.3, 0.1, 0.25],
+                      [0.7, 0.9, 0.35], [0.8, 0.4, 0.95]])
+    det = detection_readout(proba, y, [0.5])
+    assert det["n_constant_nodes"] == 0
+    from sklearn.metrics import roc_auc_score
+    assert det["auc"] == roc_auc_score(y[:, 0], proba[:, 1:].max(axis=1))
+
+
+def test_detection_skips_when_every_disease_column_is_constant():
+    """Nothing to rank: say so rather than reporting a meaningless 0.5."""
+    import numpy as np
+    from gated_pc_cloud import detection_readout
+    y = np.array([[0., 0, 0], [1., 1, 0]])
+    proba = np.array([[0.5, 0.4, 0.6], [0.5, 0.4, 0.6]])
+    det = detection_readout(proba, y, [0.5])
+    assert det["skipped"] == "all disease-node scores are constant"
+    assert det["n_constant_nodes"] == 2
+
+
+def test_format_arm_readout_names_the_excluded_columns():
+    """Printed rather than silently applied: at whole-Mondo the count IS the
+    degenerate-node count, so the line doubles as a structural read."""
+    from gated_pc_cloud import format_arm_readout
+    arm = {"ranking": {"auc": 0.7, "ap": 0.5, "n_labels_scored": 3},
+           "pr": {"par": {0.5: 0.4}, "raf": {0.1: 0.2}},
+           "detection": {"skipped": None, "auc": 0.81, "ap": 0.6,
+                         "prevalence": 0.3, "n_constant_nodes": 763,
+                         "par": {0.5: 0.4}}}
+    assert "[763 constant node col(s) excluded]" in format_arm_readout("x", arm)
+    arm["detection"]["n_constant_nodes"] = 0
+    assert "constant node col" not in format_arm_readout("x", arm)
+
+
 def test_parse_args_surface_defaults_and_arms():
     from gated_pc_cloud import parse_args
     a = parse_args([
