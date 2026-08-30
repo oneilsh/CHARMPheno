@@ -34,6 +34,25 @@ from spark_vi.models.topic.spectral_init import (
 logger = logging.getLogger(__name__)
 
 
+def _destroy_broadcast(bcast) -> None:
+    """Fully release a broadcast: executor blocks, the driver block-manager copy,
+    AND the driver-local pickled temp file.
+
+    ``unpersist`` frees only the executor copies, so a broadcast that is merely
+    unpersisted (or never cleaned) leaves one driver-side pickle behind — the leak
+    class that filled the master's disk and killed a run with ENOSPC (exp 0104; see
+    ``core/runner._destroy_broadcast``). Cleanup must never outrank the work it
+    follows, so failures degrade to unpersist and a log line rather than raising."""
+    try:
+        bcast.destroy()
+    except Exception as exc:
+        try:
+            bcast.unpersist(blocking=False)
+        except Exception:
+            pass
+        logger.warning("broadcast destroy fell back to unpersist: %s", exc)
+
+
 ANCHOR_SCOPES = ("closure", "frontier")
 
 # Pseudo-count magnitude of a spectral lambda seed. Anchor recovery (Arora et al.
@@ -700,6 +719,11 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                     print(f"[effrank] sidecar write failed ({e})", flush=True)
     finally:
         group_rdd.unpersist(blocking=False)
+        # `lay_b` is held by `group_rdd`'s closure, so it can only go once that
+        # RDD is done — which is here: every pass above has returned and only a
+        # numpy beta leaves this function. Destroy (not unpersist) so the
+        # driver-local pickle goes too (exp 0104 ENOSPC leak class).
+        _destroy_broadcast(lay_b)
 
     beta = beta + 1e-9                                   # strictly positive λ
     return beta * float(scale)

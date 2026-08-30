@@ -25,6 +25,26 @@ from spark_vi.eval.topic.concentration import ConcentrationAcc
 from spark_vi.models.topic.stm import _stm_doc_inference, prior_topic_proportions
 
 
+def _destroy_broadcast(bcast) -> None:
+    """Fully release a broadcast: executor blocks, the driver block-manager copy,
+    AND the driver-local pickled temp file.
+
+    ``unpersist`` frees only the executor copies, so a per-call (or per-round)
+    broadcast leaks one driver-side pickle every time — the leak class that filled
+    the master's disk and killed a run with ENOSPC (exp 0104; see
+    ``core/runner._destroy_broadcast``, the same fix on the fit seam). Cleanup must
+    never outrank the work it follows, so failures degrade to unpersist and a log
+    line rather than raising."""
+    try:
+        bcast.destroy()
+    except Exception as exc:
+        try:
+            bcast.unpersist(blocking=False)
+        except Exception:
+            pass
+        log.warning("broadcast destroy fell back to unpersist: %s", exc)
+
+
 # Vocabulary size at/above which spectral_method="auto" routes from the dense
 # (exact V×V co-occurrence on the driver) path to the scalable random-projection
 # path. The dense matrix is V×V float64 = 8·V² bytes ≈ 0.8 GB at V=10,000; the
@@ -87,10 +107,16 @@ def corpus_mean_topic_proportions_rdd(cov_rdd, Gamma: np.ndarray, depth: int = 2
     def _combine(a, b):
         return a[0] + b[0], a[1] + b[1]
 
-    sum_vec, count = cov_rdd.mapPartitions(_local).treeReduce(_combine, depth=depth)
-    if count == 0:
-        raise ValueError("corpus_mean_topic_proportions_rdd: empty covariate RDD")
-    return sum_vec / count
+    try:
+        sum_vec, count = cov_rdd.mapPartitions(_local).treeReduce(_combine, depth=depth)
+        if count == 0:
+            raise ValueError("corpus_mean_topic_proportions_rdd: empty covariate RDD")
+        return sum_vec / count
+    finally:
+        # The treeReduce has returned, so nothing references the broadcast any
+        # more: destroy (not unpersist) to also free the driver-side pickle —
+        # the exp 0104 ENOSPC leak class.
+        _destroy_broadcast(bcast)
 
 
 def corpus_mean_topic_proportions_gated_rdd(
@@ -136,10 +162,18 @@ def corpus_mean_topic_proportions_gated_rdd(
     def _combine(a, b):
         return a[0] + b[0], a[1] + b[1]
 
-    sum_vec, count = cov_group_rdd.mapPartitions(_local).treeReduce(_combine, depth=depth)
-    if count == 0:
-        raise ValueError("corpus_mean_topic_proportions_gated_rdd: empty covariate RDD")
-    return sum_vec / count
+    try:
+        sum_vec, count = cov_group_rdd.mapPartitions(_local).treeReduce(
+            _combine, depth=depth)
+        if count == 0:
+            raise ValueError(
+                "corpus_mean_topic_proportions_gated_rdd: empty covariate RDD")
+        return sum_vec / count
+    finally:
+        # Destroy (not unpersist) once the treeReduce has returned — unpersist
+        # would leave the driver-side pickle behind (exp 0104 ENOSPC leak class).
+        _destroy_broadcast(g_bcast)
+        _destroy_broadcast(p_bcast)
 
 
 def _welford_update(n, mean, M2, eta_hat, allowed):
@@ -352,10 +386,17 @@ def corpus_eta_variance_gated_rdd(
         n_ab, mean_ab, M2_ab = _welford_combine(a[:3], b[:3])
         return n_ab, mean_ab, M2_ab, a[3] + b[3]
 
-    n, mean, M2, n_docs = doc_rdd.mapPartitions(_local).treeReduce(_combine, depth=depth)
-    if n_docs == 0:
-        raise ValueError("corpus_eta_variance_gated_rdd: empty document RDD")
-    return _welford_variance(n, M2, reference=reference)
+    try:
+        n, mean, M2, n_docs = doc_rdd.mapPartitions(_local).treeReduce(
+            _combine, depth=depth)
+        if n_docs == 0:
+            raise ValueError("corpus_eta_variance_gated_rdd: empty document RDD")
+        return _welford_variance(n, M2, reference=reference)
+    finally:
+        # Destroy (not unpersist) once the treeReduce has returned — unpersist
+        # would leave the driver-side pickle behind (exp 0104 ENOSPC leak class).
+        _destroy_broadcast(gp_bcast)
+        _destroy_broadcast(p_bcast)
 
 
 def _gated_mode_theta(eta_hat: np.ndarray, allowed: np.ndarray, K: int) -> np.ndarray:
@@ -486,12 +527,18 @@ def corpus_concentration_stm_rdd(
             acc.add(theta)
         return [acc]
 
-    acc = doc_rdd.mapPartitions(_local).treeReduce(
-        lambda a, b: a.combine(b), depth=depth
-    )
-    if acc.n == 0:
-        raise ValueError("corpus_concentration_stm_rdd: empty document RDD")
-    return acc.summary()
+    try:
+        acc = doc_rdd.mapPartitions(_local).treeReduce(
+            lambda a, b: a.combine(b), depth=depth
+        )
+        if acc.n == 0:
+            raise ValueError("corpus_concentration_stm_rdd: empty document RDD")
+        return acc.summary()
+    finally:
+        # Destroy (not unpersist) once the treeReduce has returned — unpersist
+        # would leave the driver-side pickle behind (exp 0104 ENOSPC leak class).
+        _destroy_broadcast(gp_bcast)
+        _destroy_broadcast(p_bcast)
 
 
 def corpus_theta_gated_rdd(
@@ -587,19 +634,25 @@ def corpus_theta_gated_rdd(
             )
             yield _gated_mode_theta(eta_hat, allowed, K)
 
-    theta_rows = sampled.mapPartitions(_local).collect()
-    n_sampled = len(theta_rows)
-    if n_sampled == 0:
-        # frac>0 but the Bernoulli draw emptied every partition (tiny corpus /
-        # tiny cap): fall back to the full corpus so we never return an empty
-        # histogram sample.
-        theta_rows = doc_rdd.mapPartitions(_local).collect()
+    try:
+        theta_rows = sampled.mapPartitions(_local).collect()
         n_sampled = len(theta_rows)
-    log.info(
-        "corpus_theta_gated_rdd: sampled N'=%d of N=%d docs (frac=%.4f, "
-        "cap=%d) for per-doc theta histogram.",
-        n_sampled, n_docs, frac, sample_cap)
-    return np.asarray(theta_rows, dtype=np.float64)
+        if n_sampled == 0:
+            # frac>0 but the Bernoulli draw emptied every partition (tiny corpus /
+            # tiny cap): fall back to the full corpus so we never return an empty
+            # histogram sample.
+            theta_rows = doc_rdd.mapPartitions(_local).collect()
+            n_sampled = len(theta_rows)
+        log.info(
+            "corpus_theta_gated_rdd: sampled N'=%d of N=%d docs (frac=%.4f, "
+            "cap=%d) for per-doc theta histogram.",
+            n_sampled, n_docs, frac, sample_cap)
+        return np.asarray(theta_rows, dtype=np.float64)
+    finally:
+        # Destroy (not unpersist) once the collect(s) have returned — unpersist
+        # would leave the driver-side pickle behind (exp 0104 ENOSPC leak class).
+        _destroy_broadcast(gp_bcast)
+        _destroy_broadcast(p_bcast)
 
 
 def _pool_scale(n, M2, nu_sum, nu_count, *, reference):
@@ -850,7 +903,7 @@ def corpus_eta_scale_gated_rdd(
 
             n, mean, M2, nu_sum, nu_count, n_docs = (
                 work_rdd.mapPartitions(_local).treeReduce(_combine, depth=depth))
-            c_bcast.destroy()
+            _destroy_broadcast(c_bcast)
             if n_docs == 0:
                 raise ValueError("corpus_eta_scale_gated_rdd: empty document RDD")
 
@@ -863,6 +916,11 @@ def corpus_eta_scale_gated_rdd(
         return float(c)
     finally:
         work_rdd.unpersist(blocking=False)
+        # The round loop is done, so nothing references these any more: destroy
+        # (not unpersist) also frees the driver-side pickle of each — the exp 0104
+        # ENOSPC leak class, and gp_bcast carries a full lambda.
+        _destroy_broadcast(gp_bcast)
+        _destroy_broadcast(p_bcast)
 
 
 def corpus_heldout_scale_sweep_gated(
@@ -1076,15 +1134,23 @@ def corpus_heldout_scale_sweep_gated_rdd(
         }
         return merged, n_a + n_b
 
-    acc, n_docs = (
-        doc_rdd.zipWithIndex().mapPartitions(_local).treeReduce(_combine, depth=depth)
-    )
-    if n_docs == 0:
-        raise ValueError("corpus_heldout_scale_sweep_gated_rdd: empty document RDD")
+    try:
+        acc, n_docs = (
+            doc_rdd.zipWithIndex().mapPartitions(_local)
+            .treeReduce(_combine, depth=depth)
+        )
+        if n_docs == 0:
+            raise ValueError("corpus_heldout_scale_sweep_gated_rdd: empty document RDD")
 
-    lls = {c: acc[c][0] / acc[c][1] for c in c_list}
-    argmax_c = max(lls, key=lls.get)
-    return {"lls": lls, "argmax_c": argmax_c, "n_docs": n_docs}
+        lls = {c: acc[c][0] / acc[c][1] for c in c_list}
+        argmax_c = max(lls, key=lls.get)
+        return {"lls": lls, "argmax_c": argmax_c, "n_docs": n_docs}
+    finally:
+        # Destroy (not unpersist) once the treeReduce has returned — unpersist
+        # would leave the driver-side pickle behind (exp 0104 ENOSPC leak class).
+        _destroy_broadcast(gp_bcast)
+        _destroy_broadcast(p_bcast)
+        _destroy_broadcast(c_bcast)
 
 
 def smooth_scale_log_quadratic(lls: dict, *, window_radius: int = 2) -> dict:

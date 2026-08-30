@@ -83,8 +83,18 @@ eventually cause OOM.
 
 **Impact:** Affects any model with large broadcast parameters during long training runs.
 
-**Mitigation:** Add `unpersist()` call in the training loop before creating each new
-broadcast. Standard PySpark practice — just needs to be in the framework code.
+**Mitigation:** DESTROY (not merely unpersist) the prior broadcast in the training
+loop before creating each new one — `unpersist()` frees executor copies only, while
+the driver-local pickled temp file and the driver block-manager copy survive until
+`destroy()`. That gap is its own failure mode at scale: exp 0104's whole-Mondo
+record fit (~355MB of λ per iteration × 100 iterations) filled the master's disk
+and died on ENOSPC from `sc.broadcast` itself. Implemented as
+`_destroy_broadcast` (destroy → unpersist fallback → log, never raises) in
+`core/runner.py` and mirrored at every per-iteration/per-call broadcast site
+(readout kernels, STM, coherence, spectral init); broadcasts held by a returned
+RDD's lineage (transform-style) are the one class that must NOT be destroyed and
+are commented as such at each site. Guarded by tests/test_broadcast_lifecycle.py,
+which asserts exact destroy counts on both fit() terminal branches.
 
 ### Robbins-Monro schedule assumes stochastic updates
 

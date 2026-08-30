@@ -9,6 +9,7 @@ docs/superpowers/specs/2026-05-11-topic-coherence-evaluation-design.md.
 """
 from __future__ import annotations
 
+import logging
 import math
 from itertools import combinations
 from typing import TYPE_CHECKING
@@ -21,6 +22,27 @@ if TYPE_CHECKING:
     from pyspark import RDD
 
     from spark_vi.models.topic.types import BOWDocument
+
+log = logging.getLogger(__name__)
+
+
+def _destroy_broadcast(bcast) -> None:
+    """Fully release a broadcast: executor blocks, the driver block-manager copy,
+    AND the driver-local pickled temp file.
+
+    ``unpersist`` frees only the executor copies, so a per-call broadcast leaks one
+    driver-side pickle every time — the leak class that filled the master's disk and
+    killed a run with ENOSPC (exp 0104; see ``core/runner._destroy_broadcast``).
+    Cleanup must never outrank the work it follows, so failures degrade to unpersist
+    and a log line rather than raising."""
+    try:
+        bcast.destroy()
+    except Exception as exc:
+        try:
+            bcast.unpersist(blocking=False)
+        except Exception:
+            pass
+        log.warning("broadcast destroy fell back to unpersist: %s", exc)
 
 
 def _npmi_pair(p_i: float, p_j: float, p_ij: float) -> float:
@@ -141,7 +163,9 @@ def _compute_doc_freqs(
                 yield (iw, 1)
 
     counts = bow_rdd.flatMap(_emit_terms).reduceByKey(lambda a, b: a + b).collectAsMap()
-    interest_b.unpersist(blocking=False)
+    # destroy, not unpersist: the collect has returned, and unpersist would leave
+    # the driver-side pickle behind (exp 0104 ENOSPC leak class).
+    _destroy_broadcast(interest_b)
     return dict(counts)
 
 
@@ -165,7 +189,9 @@ def _compute_pair_freqs(
             yield ((a, b), 1)
 
     counts = bow_rdd.flatMap(_emit_pairs).reduceByKey(lambda a, b: a + b).collectAsMap()
-    interest_b.unpersist(blocking=False)
+    # destroy, not unpersist: the collect has returned, and unpersist would leave
+    # the driver-side pickle behind (exp 0104 ENOSPC leak class).
+    _destroy_broadcast(interest_b)
     return dict(counts)
 
 

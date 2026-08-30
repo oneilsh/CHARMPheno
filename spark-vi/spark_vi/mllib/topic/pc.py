@@ -1009,6 +1009,9 @@ class OnlinePCLDAModel(_OnlinePCLDAParams, _PersistableModel, Model):
         if float(self.getOrDefault("weightY")) != 0.0:
             from spark_vi.models.topic.pc import _predict_proba_np
             w_CK = self._result.global_params["w_CK"]
+            # Same lifetime rule as `bcast` above: the probability UDF's closure
+            # holds these three, so they live as long as the returned DataFrame
+            # (ContextCleaner reclaims them on GC) — do NOT unpersist or destroy.
             wbcast = sc.broadcast(w_CK)
             # Per-node intercept (head_intercept). Zeros when off, so the prediction is
             # unchanged for legacy heads.

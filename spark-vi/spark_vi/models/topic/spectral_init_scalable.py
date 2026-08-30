@@ -48,11 +48,34 @@ Domain-agnostic: integer token ids only, no OMOP/EHR vocabulary.
 """
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 
 import numpy as np
 from scipy.optimize import nnls
+
+log = logging.getLogger(__name__)
+
+
+def _destroy_broadcast(bcast) -> None:
+    """Fully release a broadcast: executor blocks, the driver block-manager copy,
+    AND the driver-local pickled temp file.
+
+    ``unpersist`` frees only the executor copies, so a per-pass broadcast leaks one
+    driver-side pickle every time — the leak class that filled the master's disk and
+    killed a run with ENOSPC (exp 0104; see ``core/runner._destroy_broadcast``). This
+    matters here because the gated init calls the pass below once per node. Cleanup
+    must never outrank the work it follows, so failures degrade to unpersist and a
+    log line rather than raising."""
+    try:
+        bcast.destroy()
+    except Exception as exc:
+        try:
+            bcast.unpersist(blocking=False)
+        except Exception:
+            pass
+        log.warning("broadcast destroy fell back to unpersist: %s", exc)
 
 
 def default_projection_dim(K: int, V: int, target_dim: int = 1000) -> int:
@@ -214,14 +237,20 @@ def projected_cooccurrence_rdd(
             merged_pw, merged_df, a[6] + b[6],
         )
 
-    (pooled, group_QR, p_w, df_w,
-     group_p_w, group_df_w, _n) = rdd.mapPartitions(_local).treeReduce(
-        _combine, depth=depth
-    )
-    return ProjectedCoocResult(
-        pooled_QR=pooled, group_QR=group_QR, p_w=p_w, df_w=df_w,
-        group_p_w=group_p_w, group_df_w=group_df_w,
-    )
+    try:
+        (pooled, group_QR, p_w, df_w,
+         group_p_w, group_df_w, _n) = rdd.mapPartitions(_local).treeReduce(
+            _combine, depth=depth
+        )
+        return ProjectedCoocResult(
+            pooled_QR=pooled, group_QR=group_QR, p_w=p_w, df_w=df_w,
+            group_p_w=group_p_w, group_df_w=group_df_w,
+        )
+    finally:
+        # The treeReduce has returned, so nothing references the broadcast any
+        # more: destroy (not unpersist) to also free the driver-side pickle —
+        # the exp 0104 ENOSPC leak class, once per node-level pass.
+        _destroy_broadcast(p_bcast)
 
 
 def _row_normalize_projected(QR: np.ndarray, p_w: np.ndarray) -> np.ndarray:

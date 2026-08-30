@@ -1,9 +1,13 @@
-"""Ensure VIRunner unpersists prior broadcasts (prevents OOM in long runs).
+"""Ensure VIRunner DESTROYS prior broadcasts (prevents OOM and driver-disk leaks).
 
 Strategy: wrap each broadcast in a transparent proxy that records its own
-unpersist() calls. The runner sees and uses real Spark broadcasts; the wrapper
-only adds an observation side-channel. We then assert the exact unpersist
-count for each terminal branch (max-iterations vs convergence) of fit().
+destroy()/unpersist() calls. The runner sees and uses real Spark broadcasts; the
+wrapper only adds an observation side-channel. We then assert the exact DESTROY
+count for each terminal branch (max-iterations vs convergence) of fit() —
+destroy, not unpersist, because unpersist frees executor copies only and leaves
+the driver-local pickled temp file behind (one lambda-sized pickle per fit
+iteration: the exp 0104 ENOSPC leak). The proxy implements BOTH methods so
+_destroy_broadcast's primary path is what gets exercised, not its fallback.
 
 See docs/architecture/RISKS_AND_MITIGATIONS.md §Broadcast lifecycle for the
 failure mode this guards against.
@@ -25,6 +29,7 @@ def _run_with_broadcast_tracking(spark, cfg):
     # delegate to the original. Without this, _wrapping_broadcast would call
     # the patched method recursively.
     real_broadcast = spark.sparkContext.broadcast
+    destroy_calls = []
     unpersist_calls = []
 
     class _WrappedBcast:
@@ -41,9 +46,22 @@ def _run_with_broadcast_tracking(spark, cfg):
         def value(self):
             return self._inner.value
 
+        # The tracking lists record JVM broadcast IDS, never the Broadcast
+        # objects themselves. This class is defined locally, so cloudpickle
+        # serializes it INTO every task closure together with its closure cells
+        # — and a captured list of real Broadcast objects re-registers each of
+        # them for shipment with every later task. An unpersisted broadcast can
+        # be lazily re-served then; a DESTROYED one cannot, and the job dies
+        # with "Attempted to use Broadcast(N) after it was destroyed" — a pure
+        # harness artifact (a minimal no-proxy probe of the same destroy
+        # lifecycle passes), which this comment exists to keep dead.
         def unpersist(self, blocking=False):
-            unpersist_calls.append(self._inner)
+            unpersist_calls.append(self._inner._jbroadcast.id())
             return self._inner.unpersist(blocking=blocking)
+
+        def destroy(self, blocking=False):
+            destroy_calls.append(self._inner._jbroadcast.id())
+            return self._inner.destroy(blocking)
 
     def _wrapping_broadcast(value):
         inner = real_broadcast(value)
@@ -53,11 +71,11 @@ def _run_with_broadcast_tracking(spark, cfg):
     with patch.object(spark.sparkContext, "broadcast", side_effect=_wrapping_broadcast):
         result = runner.fit(rdd)
 
-    return result, unpersist_calls
+    return result, destroy_calls, unpersist_calls
 
 
 def test_vi_runner_unpersists_prior_broadcasts_max_iterations_path(spark):
-    """Full-loop path: max_iterations=4 with tight tol produces exactly 4 unpersist calls.
+    """Full-loop path: max_iterations=4 with tight tol produces exactly 4 destroy calls.
 
     Counting math: each iteration creates one broadcast (4 total). The runner's
     "unpersist the *previous* one at the start of cleanup" pattern produces 3
@@ -72,18 +90,20 @@ def test_vi_runner_unpersists_prior_broadcasts_max_iterations_path(spark):
     from spark_vi.core import VIConfig
 
     cfg = VIConfig(max_iterations=4, convergence_tol=1e-10)
-    result, unpersist_calls = _run_with_broadcast_tracking(spark, cfg)
+    result, destroy_calls, unpersist_calls = _run_with_broadcast_tracking(spark, cfg)
 
     assert result.converged is False
     assert result.n_iterations == 4
-    assert len(unpersist_calls) == 4, (
-        "Expected 3 mid-loop swaps + 1 final cleanup = 4 unpersists on the "
-        f"max-iterations path; got {len(unpersist_calls)}"
+    assert len(destroy_calls) == 4, (
+        "Expected 3 mid-loop swaps + 1 final cleanup = 4 DESTROYS on the "
+        f"max-iterations path; got {len(destroy_calls)}"
     )
+    # destroy is the primary path; the unpersist fallback must not have fired.
+    assert not unpersist_calls, "destroy fell back to unpersist unexpectedly"
 
 
 def test_vi_runner_unpersists_prior_broadcasts_convergence_path(spark):
-    """Early-stop path: wide tol converges on iteration 2 with exactly 2 unpersist calls.
+    """Early-stop path: wide tol converges on iteration 2 with exactly 2 destroy calls.
 
     Counterpart to the max-iterations test above: the convergence-return
     branch is a *separate* return site in runner.fit() and must independently
@@ -96,14 +116,15 @@ def test_vi_runner_unpersists_prior_broadcasts_convergence_path(spark):
     from spark_vi.core import VIConfig
 
     cfg = VIConfig(max_iterations=100, convergence_tol=1e10)
-    result, unpersist_calls = _run_with_broadcast_tracking(spark, cfg)
+    result, destroy_calls, unpersist_calls = _run_with_broadcast_tracking(spark, cfg)
 
     assert result.converged is True
     assert result.n_iterations == 2
-    assert len(unpersist_calls) == 2, (
-        "Expected 1 mid-loop swap + 1 final cleanup = 2 unpersists on the "
-        f"convergence path; got {len(unpersist_calls)}"
+    assert len(destroy_calls) == 2, (
+        "Expected 1 mid-loop swap + 1 final cleanup = 2 DESTROYS on the "
+        f"convergence path; got {len(destroy_calls)}"
     )
+    assert not unpersist_calls, "destroy fell back to unpersist unexpectedly"
 
 
 def test_vi_runner_transform_does_not_eagerly_unpersist_its_broadcast(spark):
@@ -137,6 +158,7 @@ def test_vi_runner_transform_does_not_eagerly_unpersist_its_broadcast(spark):
     runner = VIRunner(_ToyModel())
 
     real_broadcast = spark.sparkContext.broadcast
+    destroy_calls = []
     unpersist_calls = []
 
     class _WrappedBcast:
@@ -145,9 +167,22 @@ def test_vi_runner_transform_does_not_eagerly_unpersist_its_broadcast(spark):
         @property
         def value(self):
             return self._inner.value
+        # The tracking lists record JVM broadcast IDS, never the Broadcast
+        # objects themselves. This class is defined locally, so cloudpickle
+        # serializes it INTO every task closure together with its closure cells
+        # — and a captured list of real Broadcast objects re-registers each of
+        # them for shipment with every later task. An unpersisted broadcast can
+        # be lazily re-served then; a DESTROYED one cannot, and the job dies
+        # with "Attempted to use Broadcast(N) after it was destroyed" — a pure
+        # harness artifact (a minimal no-proxy probe of the same destroy
+        # lifecycle passes), which this comment exists to keep dead.
         def unpersist(self, blocking=False):
-            unpersist_calls.append(self._inner)
+            unpersist_calls.append(self._inner._jbroadcast.id())
             return self._inner.unpersist(blocking=blocking)
+
+        def destroy(self, blocking=False):
+            destroy_calls.append(self._inner._jbroadcast.id())
+            return self._inner.destroy(blocking)
 
     def _wrapping_broadcast(value):
         return _WrappedBcast(real_broadcast(value))

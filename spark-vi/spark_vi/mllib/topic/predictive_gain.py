@@ -57,6 +57,25 @@ from spark_vi.models.topic.stm import _stm_doc_inference, _stm_doc_newton_polish
 log = logging.getLogger(__name__)
 
 
+def _destroy_broadcast(bcast) -> None:
+    """Fully release a broadcast: executor blocks, the driver block-manager copy,
+    AND the driver-local pickled temp file.
+
+    ``unpersist`` frees only the executor copies, so a per-call broadcast leaks one
+    driver-side pickle every time — the leak class that filled the master's disk and
+    killed a run with ENOSPC (exp 0104; see ``core/runner._destroy_broadcast``).
+    Cleanup must never outrank the work it follows, so failures degrade to unpersist
+    and a log line rather than raising."""
+    try:
+        bcast.destroy()
+    except Exception as exc:
+        try:
+            bcast.unpersist(blocking=False)
+        except Exception:
+            pass
+        log.warning("broadcast destroy fell back to unpersist: %s", exc)
+
+
 def _smoothed_predictive_loglik(
     theta, beta_prob, held_idx, held_cnt, *, marginal, eps,
 ) -> float:
@@ -1104,14 +1123,22 @@ def corpus_predictive_gain_gated_rdd(
             )
         return [acc]
 
-    acc = (
-        doc_rdd.zipWithIndex().mapPartitions(_local)
-        .treeReduce(_combine_pred_gain_acc, depth=depth)
-    )
-    if acc.n_docs == 0:
-        raise ValueError("corpus_predictive_gain_gated_rdd: empty document RDD")
+    try:
+        acc = (
+            doc_rdd.zipWithIndex().mapPartitions(_local)
+            .treeReduce(_combine_pred_gain_acc, depth=depth)
+        )
+        if acc.n_docs == 0:
+            raise ValueError("corpus_predictive_gain_gated_rdd: empty document RDD")
 
-    return _finalize_pred_gain(acc, bin_edges)
+        return _finalize_pred_gain(acc, bin_edges)
+    finally:
+        # The treeReduce has returned, so nothing references these any more:
+        # destroy (not unpersist) also frees the driver-side pickle of each —
+        # the exp 0104 ENOSPC leak class.
+        _destroy_broadcast(gp_bcast)
+        _destroy_broadcast(p_bcast)
+        _destroy_broadcast(marg_bcast)
 
 
 def predictive_gain_downdate_audit(
