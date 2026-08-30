@@ -80,6 +80,26 @@ def _agg_depth(global_params: dict) -> int:
     return 3 if _nbytes(global_params) > _AGG_DEPTH_THRESHOLD_BYTES else 2
 
 
+def _destroy_broadcast(bcast) -> None:
+    """Fully release a per-iteration broadcast: executor blocks, the driver
+    block-manager copy, AND the driver-local pickled temp file.
+
+    ``unpersist`` frees only the executor copies; the other two survive until
+    ``destroy`` and accumulate at one λ-sized pickle per fit iteration — which at
+    whole-Mondo scale (~355 MB each) filled the master's disk over a 100-iteration
+    fit and killed the run's post-fit readout with ENOSPC (exp 0104, 2026-08-30).
+    Cleanup must never outrank the fit itself, so failures degrade to unpersist
+    and a log line rather than raising."""
+    try:
+        bcast.destroy()
+    except Exception as exc:
+        try:
+            bcast.unpersist(blocking=False)
+        except Exception:
+            pass
+        log.warning("broadcast destroy fell back to unpersist: %s", exc)
+
+
 def _fmt_diagnostic(value: object) -> str:
     """Compact formatter for one iteration_diagnostics value.
 
@@ -402,10 +422,22 @@ class VIRunner:
                 )
                 save_result(interim, cfg.checkpoint_dir)
 
-            # Unpersist the *previous* broadcast so we don't leak them.
+            # DESTROY the *previous* broadcast so we don't leak it — and destroy,
+            # not unpersist, because unpersist frees the EXECUTOR copies only.
+            # pyspark writes every broadcast's pickle to a temp file on the
+            # DRIVER's local disk and keeps a driver block-manager copy, and both
+            # survive until destroy(). At whole-Mondo scale that is ~355 MB of λ
+            # per fit iteration: exp 0104's 100-iteration record fit (2026-08-30)
+            # leaked the master's whole disk and its post-fit readout died on
+            # `[Errno 28] No space left on device` from `sc.broadcast` itself —
+            # the same lifecycle bug already fixed on the readout side
+            # (analysis/cloud/distributed_readout._destroy_broadcast). Destroy is
+            # safe here for the same reason the deferred-unpersist was: iteration
+            # t's aggregate has already RETURNED before iteration t+1 reaches
+            # this line, so nothing references the prior broadcast any more.
             # See RISKS_AND_MITIGATIONS.md §Broadcast lifecycle.
             if prior_bcast is not None:
-                prior_bcast.unpersist(blocking=False)
+                _destroy_broadcast(prior_bcast)
             prior_bcast = bcast
 
             # Free the cached batch RDD before the next iteration's sample.
@@ -425,8 +457,8 @@ class VIRunner:
                     and model.has_converged(elbo_trace, cfg.convergence_tol)):
                 converged = True
                 log.info("Converged at iteration %d (ELBO=%.6f)", step + 1, elbo)
-                # One-more unpersist for the final broadcast.
-                prior_bcast.unpersist(blocking=False)
+                # One-more destroy for the final broadcast.
+                _destroy_broadcast(prior_bcast)
                 prior_bcast = None
                 result = VIResult(
                     global_params=global_params,
@@ -445,7 +477,7 @@ class VIRunner:
 
         # Hit max_iterations without convergence.
         if prior_bcast is not None:
-            prior_bcast.unpersist(blocking=False)
+            _destroy_broadcast(prior_bcast)
         result = VIResult(
             global_params=global_params,
             elbo_trace=elbo_trace,
