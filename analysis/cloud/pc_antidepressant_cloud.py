@@ -533,6 +533,9 @@ def _anp_theta_df(model, df, grad_cavi_iters,
     lam = gp["lambda"]
     alpha = np.asarray(gp["alpha"], dtype=np.float64)
     eb = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+    # Broadcast lifetime is the returned DataFrame's: the UDF closure holds `bc`,
+    # so do NOT eagerly unpersist/destroy it here (see VIRunner.transform);
+    # ContextCleaner reclaims it when that DataFrame is garbage-collected.
     bc = df.sparkSession.sparkContext.broadcast(
         {"eb": eb, "alpha": alpha, "K": int(eb.shape[0]), "n": int(grad_cavi_iters)})
 

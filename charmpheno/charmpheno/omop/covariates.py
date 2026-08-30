@@ -193,6 +193,9 @@ def build_patient_covariate_df(
 
     # Apply the spec per partition. ModelSpec is small (factor mappings);
     # serializing it into the closure is fine for a few-KB object.
+    # Broadcast lifetime is the returned DataFrame's: `_apply_partition`'s closure
+    # holds it, so do NOT eagerly unpersist/destroy (see VIRunner.transform);
+    # ContextCleaner reclaims it when that DataFrame is garbage-collected.
     spec_broadcast = projected.sparkSession.sparkContext.broadcast(model_spec)
     cat_set = list(categorical_cols)
     cont_set = list(continuous_cols)
