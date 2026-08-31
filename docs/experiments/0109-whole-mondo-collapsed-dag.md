@@ -253,6 +253,36 @@ diagnostic's prediction of 1. Two facts fall out immediately:
    OBSERVED support is empty, not just when the sibling set is) is the candidate v2
    of the reduction if it holds.
 
+**2026-08-31 — RESIDUAL DEGENERACY SOLVED: subsumed category-anchors.** Two rounds of
+the sibling-support diagnostic (v1 by child support, v2 by sibling support — each
+refuted its predecessor with perfect bookkeeping: 620 = 1 root + 619 all-positive,
+`n_pos == n_obs` EXACTLY on every one, siblings fully supported) forced a read of the
+actual mechanisms, which chain as:
+
+1. `powered_anchor_climb` attests EVERY powered ancestor of a coded concept
+   (`concept_ancestor` unrestricted by depth) — a "Graves disease" doc attests both
+   the Graves anchor and the "Disorder of thyroid gland" anchor above it.
+2. `reduce_to_anchor_hierarchy` nests anchors under CLASS covers only, so a powered
+   category-anchor and its own powered specific descendants land as SIBLINGS under
+   the same class node.
+3. `label_mask_mode: closure` observes a node only where it is positive or a SIBLING
+   of a positive — so a category-anchor is co-attested (fact 1) on every doc that
+   activates any of its "siblings" (fact 2) and is NEVER observed as a negative:
+   all-positive cell, constant fallback.
+
+Full decomposition of 0104's 763: 1 root + 143 structural only-children (this exp's
+splice removed exactly those) + 619 subsumed category-anchors. The remedy for the 619
+is a DAG-BUILD change, not a splice: nest anchor-under-anchor (make specific anchors
+children of their category anchors per the same subsumption the climb already uses),
+so a category-anchor's siblings become OTHER categories — which do fire without it —
+and its cell gets real negatives. Payoff is not cosmetic: those 619 are common,
+clinically meaningful category labels ("neoplasm of breast", "urinary tract
+infectious disease", "disorder of thyroid gland") that currently return constants;
+nesting makes them genuinely scoreable heads. Design note for v3: this also restores
+real DAG depth that the class-cover-only nesting flattened away, so K, the gate, and
+the conditional readout all see a better hierarchy — it is the principled fix the
+splice was the down payment on.
+
 The run then died at readout solve iteration ~55-60 (961 passes, 441/3,057 converged,
 max|grad| 281) on the SAME driver-disk ENOSPC from `sc.broadcast` — with both destroy
 fixes verifiably active (no fallback warnings in 961 passes, and pyspark 3.5's
