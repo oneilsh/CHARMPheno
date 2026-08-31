@@ -13,21 +13,19 @@ own cached bundle:
      (n_obs, n_pos) — the same quantities the readout's moments pass derives,
      minus the θ moments it doesn't need;
   2. the readout's exact degeneracy rule ((n_obs<=0)|(n_pos<=0)|(n_pos>=n_obs));
-  3. each degenerate node bucketed by what the bundle's own `parent_int`
-     children map says about it:
-       root                      — structural, stays degenerate by design;
-       leaf                      — a terminal with a degenerate cell (its own
-                                   story: no positives, or no negatives, in the
-                                   train split);
-       class ≤1 supported child  — HYPOTHESIS-CONSISTENT (an observational
-                                   only-child: at most one child has any train
-                                   positives);
-       class ≥2 supported chn    — UNEXPLAINED (a third mechanism; named in the
-                                   output for eyeballing).
+  3. each degenerate node bucketed by SIBLING support (see
+     `classify_degenerates` — v2 of this diagnostic; v1 bucketed by CHILD
+     support and its own first production run refuted it): root / no_pos
+     (split-or-label starvation, a separate story) / all-positive with no
+     supported sibling (the unified cohort-collapse mechanism) / all-positive
+     DESPITE a supported sibling (genuinely unexplained, named).
 
-If the ≥2-supported bucket is ~empty, the hypothesis holds and the data-aware
-collapse (splice on observed sibling support, not graph structure) is justified
-as the reduction's v2. If it is large, there is another mechanism to find first.
+If the with-supported-sibling bucket is ~empty, one mechanism explains every
+all-positive degenerate — cohort == own closure because no sibling contributes
+observed rows — and the data-aware reduction (v2 of the collapse) has its spec.
+The first production run's arithmetic already leans that way: 763 (exp 0104) =
+1 root + 143 structural only-children (spliced) + 606 leaves + 13 all-positive
+classes, and the 13 all had n_pos == n_obs exactly.
 
 Bundle located exactly like gated_pc_readout: recompute the cache key from the
 run's manifest and REQUIRE a HIT (a diagnostic should never pay a rebuild — run
@@ -46,12 +44,34 @@ import json
 
 
 def classify_degenerates(n_obs, n_pos, parent_int, C):
-    """Bucket every degenerate node by the sibling-support hypothesis.
+    """Bucket every degenerate node by SIBLING support (v2 of this diagnostic).
+
+    v1 bucketed by CHILD support and its first production run refuted itself:
+    the 13 "unexplained" all-positive classes all had fully-supported children —
+    because degeneracy does not run through a node's children at all. Under
+    closure masking a node's observed cohort comes from its PARENT's closure,
+    so its cell is all-positive exactly when no SIBLING contributes observed
+    rows: the cohort collapses to the node's own closure, where everyone is
+    positive by construction. (The smoking gun in that run: a degenerate child
+    whose n_obs equaled its parent's almost exactly — its cohort WAS the
+    parent's closure.) The structural only-children the splice removed are the
+    special case with no siblings at all; this test covers the general case,
+    leaves included — a terminal with unsupported siblings degenerates by the
+    same mechanism as a class.
 
     Pure function of the counts and the parent map so it is unit-testable
-    without Spark. Returns ``(buckets, per_node)`` where `buckets` maps bucket
-    name -> sorted engine ids and `per_node` maps engine id ->
-    ``(n_children, n_supported_children)`` for the class-node buckets.
+    without Spark. Returns ``(buckets, per_node)``: buckets map name -> sorted
+    engine ids; per_node maps engine id -> (n_siblings, n_supported_siblings).
+    Buckets:
+      root              — structural, stays degenerate by design;
+      no_pos            — zero observed train positives (a different story:
+                          the split, or labels, starved the node — NOT the
+                          cohort-collapse mechanism);
+      allpos_no_sibling_support — all-positive with NO supported sibling under
+                          any parent: the unified observational-only-child
+                          mechanism, hypothesis-CONSISTENT;
+      allpos_with_supported_sibling — all-positive DESPITE a supported sibling:
+                          genuinely unexplained, named in the output.
     """
     n_obs = np.asarray(n_obs, float)
     n_pos = np.asarray(n_pos, float)
@@ -67,8 +87,8 @@ def classify_degenerates(n_obs, n_pos, parent_int, C):
             if 0 <= int(p) < C:
                 children[int(p)].append(c)
 
-    buckets = {"root": [], "leaf": [], "class_le1_supported": [],
-               "class_ge2_supported": []}
+    buckets = {"root": [], "no_pos": [], "allpos_no_sibling_support": [],
+               "allpos_with_supported_sibling": []}
     per_node = {}
     for c in range(C):
         if not degenerate[c]:
@@ -76,14 +96,15 @@ def classify_degenerates(n_obs, n_pos, parent_int, C):
         if c in roots:
             buckets["root"].append(c)
             continue
-        kids = children[c]
-        if not kids:
-            buckets["leaf"].append(c)
+        if n_pos[c] <= 0 or n_obs[c] <= 0:
+            buckets["no_pos"].append(c)
             continue
-        supported = [k for k in kids if n_pos[k] > 0]
-        per_node[c] = (len(kids), len(supported))
-        key = ("class_le1_supported" if len(supported) <= 1
-               else "class_ge2_supported")
+        siblings = {k for p in parent_int.get(c, [])
+                    for k in children.get(int(p), []) if k != c}
+        supported = [k for k in sorted(siblings) if n_pos[k] > 0]
+        per_node[c] = (len(siblings), len(supported))
+        key = ("allpos_no_sibling_support" if not supported
+               else "allpos_with_supported_sibling")
         buckets[key].append(c)
     return buckets, per_node
 
@@ -146,26 +167,31 @@ def main(argv=None) -> int:
         n_deg = sum(len(v) for v in buckets.values())
         print(f"[diag] degenerate nodes on the TRAIN split: {n_deg}/{C} "
               "(compare against the readout banner's count)", flush=True)
-        for k in ("root", "leaf", "class_le1_supported", "class_ge2_supported"):
+        for k in ("root", "no_pos", "allpos_no_sibling_support",
+                  "allpos_with_supported_sibling"):
             print(f"[diag]   {k}: {len(buckets[k])}", flush=True)
-        print("[diag] hypothesis-consistent = root + leaf + class_le1_supported; "
-              "class_ge2_supported is the UNEXPLAINED bucket.", flush=True)
+        print("[diag] the cohort-collapse mechanism = allpos_no_sibling_support "
+              "(+ root); allpos_with_supported_sibling is UNEXPLAINED; no_pos is "
+              "a separate split/label starvation story.", flush=True)
 
         def _name(c):
             cid = bundle.int2cid.get(c, c)
             return f"{cid} {bundle.name_by_id.get(cid, '?')}"
 
-        for c in buckets["class_ge2_supported"][:20]:
+        for c in buckets["allpos_with_supported_sibling"][:20]:
             nk, ns = per_node[c]
-            print(f"[diag]   UNEXPLAINED {_name(c)}: {ns}/{nk} children "
+            print(f"[diag]   UNEXPLAINED {_name(c)}: {ns}/{nk} siblings "
                   f"supported, n_obs={n_obs[c]:.0f} n_pos={n_pos[c]:.0f}",
                   flush=True)
-        # A few consistent examples too, so the pattern is eyeball-checkable.
-        for c in buckets["class_le1_supported"][:5]:
+        # A few consistent + no_pos examples so the patterns are eyeball-checkable.
+        for c in buckets["allpos_no_sibling_support"][:5]:
             nk, ns = per_node[c]
-            print(f"[diag]   consistent {_name(c)}: {ns}/{nk} children "
+            print(f"[diag]   consistent {_name(c)}: {ns}/{nk} siblings "
                   f"supported, n_obs={n_obs[c]:.0f} n_pos={n_pos[c]:.0f}",
                   flush=True)
+        for c in buckets["no_pos"][:5]:
+            print(f"[diag]   no_pos {_name(c)}: n_obs={n_obs[c]:.0f} "
+                  f"n_pos={n_pos[c]:.0f}", flush=True)
     return 0
 
 
