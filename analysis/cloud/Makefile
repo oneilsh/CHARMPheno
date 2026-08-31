@@ -490,6 +490,30 @@ gated-pc-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	    $(if $(GPR_DOC_MIN_LENGTH),--doc-min-length $(GPR_DOC_MIN_LENGTH),) \
 	    $(GPR_ARGS)
 
+# Sibling-support diagnostic for residual degenerate nodes (exp 0109): one pass
+# over the cached bundle's train labels, then buckets every degenerate node by
+# whether its children have any observed support. Requires the bundle to be a
+# cache HIT (run the fit or gated-pc-readout first). Example:
+#   make diag-sibling-support ID=109
+diag-sibling-support: zip cluster-overlay $(WORKSPACE_ENV)
+	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
+	. ./$(WORKSPACE_ENV) && \
+	PYTHONPATH=$(REPO_ROOT):$$PYTHONPATH spark-submit \
+	    --master yarn \
+	    --deploy-mode client \
+	    --driver-memory 4g \
+	    --conf spark.executor.cores=2 \
+	    --conf spark.executor.memory=4g \
+	    --conf spark.executor.memoryOverhead=2g \
+	    --conf spark.task.maxFailures=8 \
+	    --conf spark.excludeOnFailure.enabled=true \
+	    --conf spark.dynamicAllocation.enabled=false \
+	    --conf spark.executor.instances=12 \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/distributed_readout.py \
+	    $(REPO_ROOT)/analysis/cloud/diag_sibling_support.py \
+	    --run-dir "$(RUNS_DIR)/$(shell printf '%04d' $(ID))-*" \
+	    $(if $(GPR_CACHE_URI),--cache-uri $(GPR_CACHE_URI),)
+
 # Print summary.md for an experiment (copy/paste back to chat)
 summary:
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
