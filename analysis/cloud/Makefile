@@ -454,6 +454,13 @@ lr-readout: zip cluster-overlay $(WORKSPACE_ENV)
 # recorded readout_max_iter):
 #   make gated-pc-readout ID=104 GPR_ARGS="--readout-max-iter 60"
 GPR_SPARK_CONF     ?=
+# Driver JVM heap for the readout submit. 8g is comfortable on a 32GB master; on
+# a 16GB master the 8g JVM + the Mondo TSV download/parse (a rebuild's driver-side
+# pandas work) + JupyterLab together trip the HOST OOM killer (exp 0109, 08-31:
+# `Killed` / exit 137 mid-download). The readout's big arrays are PYTHON-side
+# (L-BFGS history, lean eval), not JVM heap, so 4g is safe there:
+#   make gated-pc-readout ID=109 GPR_DRIVER_MEMORY=4g
+GPR_DRIVER_MEMORY  ?= 8g
 GPR_CACHE_URI      ?= hdfs:///user/dataproc/charm/case_finding_cache
 GPR_DOC_MIN_LENGTH ?=
 # The run-dir is passed as a QUOTED glob so the shell does NOT pre-expand it (the
@@ -474,7 +481,7 @@ gated-pc-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	PYTHONPATH=$(REPO_ROOT):$$PYTHONPATH spark-submit \
 	    --master yarn \
 	    --deploy-mode client \
-	    --driver-memory 8g \
+	    --driver-memory $(GPR_DRIVER_MEMORY) \
 	    --conf spark.executor.cores=4 \
 	    --conf spark.executor.memory=6g \
 	    --conf spark.executor.memoryOverhead=2g \
