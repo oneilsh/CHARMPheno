@@ -283,6 +283,25 @@ real DAG depth that the class-cover-only nesting flattened away, so K, the gate,
 the conditional readout all see a better hierarchy — it is the principled fix the
 splice was the down payment on.
 
+The mechanism and fix, in one figure (anchors ● are coded+powered, class covers ▢
+are abstract):
+
+```
+ TODAY (anchors nest under class covers only):        THE FIX (nest anchor under anchor):
+
+        ▢ endocrine disorder                              ▢ endocrine disorder
+   ┌───────┬────────┬───────────┐                     ┌─────────┴──────────┐
+ ●thyroid ●Graves ●hypothyr. ●parathyr.        ●thyroid disorder    ●parathyr.
+   ╰── category sits BESIDE its ──╯                ┌─────┴──────┐          ⇧ real
+       own specifics (siblings)                 ●Graves ●hypothyr.      negatives
+
+ climb: a code attests EVERY powered ancestor → firing any "sibling" of the
+ category auto-fires the category → closure masking (negatives come only from
+ siblings) can NEVER observe it as a negative → n_obs == n_pos → constant head.
+ Nesting makes the category's siblings OTHER categories (which do fire without
+ it) and the specifics' siblings their co-specifics (the conditional contrast).
+```
+
 The run then died at readout solve iteration ~55-60 (961 passes, 441/3,057 converged,
 max|grad| 281) on the SAME driver-disk ENOSPC from `sc.broadcast` — with both destroy
 fixes verifiably active (no fallback warnings in 961 passes, and pyspark 3.5's
