@@ -509,6 +509,17 @@ Operational footnote: the v1 checkpoint fingerprint printed a THIRD distinct val
 the same problem across three runs — live confirmation of the treeAggregate
 combine-order nondeterminism that motivated fingerprint v2.
 
+**2026-08-31 — RECORD READOUT LANDED (via crash + checkpoint-resume + 10-iter polish):
+macro AUC 0.6978 / AP 0.4845 over 2,106 nodes.** The full run's numbers, assembled
+across three invocations of the same solve (180 iterations before the broadcast-leak
+ENOSPC, 30 on the first resume, 10 on the polish — cumulative ~220 vs the 200-iteration
+record budget; every resume via the v2 checkpoint, answers path-independent per the
+solver's x0 contract). vs the 60-iteration smoke (0.6891/0.4745): +0.0087 AUC from the
+full fit (100 vs 30 SVI iterations) plus the deeper solve — the same smoke-to-record
+gap 0103 showed. This is the pre-collapse BASELINE exp 0109 measures against.
+Remaining 0104 open items: cardiovascular-subset comparison vs 0103's per-node rows,
+and the top-m pricing test.
+
 **2026-08-21 — UNBLOCKED: the 0103 A/B gate PASSED** (macro |Δ| ≤ 1.1e-4 both arms; see
 0103's run log). Reference bar from 0103's full-row readout: unsup cardiovascular
 **0.7584 AUC / 0.5428 AP over 241 nodes**, pooled conditional ECE 0.0028 (isotonic →
