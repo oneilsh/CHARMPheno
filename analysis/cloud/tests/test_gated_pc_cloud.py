@@ -515,9 +515,10 @@ def _fake_info(C, K):
 
 
 def test_diag_sibling_support_classification_buckets():
-    """The 0109 residual-degeneracy diagnostic's pure core: root/leaf/class
-    bucketing with the observed-sibling-support split. Engine ids: 0 root;
-    1 (class, kids 3,4), 2 (class, kids 5,6), 3..6 leaves."""
+    """The 0109 residual-degeneracy diagnostic's pure core (v2: SIBLING support,
+    the relation degeneracy actually runs through — v1 tested children and its
+    first production run refuted it). Engine ids: 0 root; classes 1,2 under
+    root; leaves 3,4 under 1; leaves 5,6 under 2."""
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -526,15 +527,17 @@ def test_diag_sibling_support_classification_buckets():
     C = 7
     #        root  c1   c2  l3  l4  l5  l6
     n_obs = [100., 50., 40., 30., 20., 25., 15.]
-    # root all-pos (degenerate); c1 all-pos with only ONE supported child
-    # (l4 has no positives) -> hypothesis-consistent; c2 all-pos with BOTH
-    # children supported -> unexplained; l4 zero-pos leaf (degenerate).
-    n_pos = [100., 50., 40., 30., 0., 20., 10.]
+    # root all-pos; c1 all-pos with a SUPPORTED sibling (c2, which itself has
+    # real contrast: 30/40) -> unexplained; l3 all-pos whose only sibling l4
+    # has no positives -> cohort-collapse (consistent); l4 zero-pos -> the
+    # separate no_pos story.
+    n_pos = [100., 50., 30., 30., 0., 20., 10.]
     buckets, per_node = classify_degenerates(n_obs, n_pos, parent_int, C)
     assert buckets["root"] == [0]
-    assert buckets["leaf"] == [3, 4]          # l3 all-pos, l4 zero-pos
-    assert buckets["class_le1_supported"] == [1]
-    assert buckets["class_ge2_supported"] == [2]
-    assert per_node[1] == (2, 1) and per_node[2] == (2, 2)
-    # Non-degenerate nodes never bucketed: l5/l6 have both classes observed.
-    assert 5 not in per_node and 6 not in per_node
+    assert buckets["no_pos"] == [4]
+    assert buckets["allpos_no_sibling_support"] == [3]
+    assert buckets["allpos_with_supported_sibling"] == [1]
+    assert per_node[3] == (1, 0)              # one sibling (l4), unsupported
+    assert per_node[1] == (1, 1)              # sibling c2 is supported
+    # Non-degenerate nodes never bucketed: c2, l5, l6 have real contrast.
+    assert 2 not in per_node and 5 not in per_node and 6 not in per_node
