@@ -234,4 +234,32 @@ The front matter's `spark_conf:` is injected into both commands automatically �
 
 ## Run log
 
-_(pending — nothing has been run)_
+**2026-08-30/31 — smoke attempt 1: the collapse RAN and its prediction was REFUTED —
+the structural theory explains 143 of the 763 degenerates, not 762.** The fit
+completed (30 dev iterations, early-saved) and the banner read: **C=3,820 → 3,677
+(143 nodes removed), fittable 3,057 (unchanged), degenerate 763 → 620** — against the
+diagnostic's prediction of 1. Two facts fall out immediately:
+
+1. Every node the splice removed was degenerate (fittable count identical), so the
+   reduction did exactly what it says on nodes that ARE structural only-children /
+   childless classes — there were just far fewer of them than the "{root} ∪
+   only-children exactly" characterization claimed.
+2. The remaining **619 non-root degenerates are OBSERVATIONAL, not structural**: the
+   leading hypothesis is a multi-child class node whose siblings contribute no
+   observed rows — an only-child *in the data* even though not in the graph (under
+   closure masking its observed cell is then single-class exactly as if the siblings
+   did not exist). Sibling-support analysis of the 620 (from the saved fit's manifest
+   + bundle) is the next diagnostic; a data-aware collapse (splice when the sibling
+   OBSERVED support is empty, not just when the sibling set is) is the candidate v2
+   of the reduction if it holds.
+
+The run then died at readout solve iteration ~55-60 (961 passes, 441/3,057 converged,
+max|grad| 281) on the SAME driver-disk ENOSPC from `sc.broadcast` — with both destroy
+fixes verifiably active (no fallback warnings in 961 passes, and pyspark 3.5's
+`destroy()` confirmed to unlink the temp file). ADR 0047's mechanism is therefore
+incomplete: something else consumes ~100 GB of master disk across a ~19k-second
+fit+readout. The next recovery runs with a per-minute disk watcher (df + du over the
+Spark temp dir) to catch the growth live instead of post-hoc; the fit is early-saved
+and the solve checkpointed at iteration ~50 (v2 fingerprint), so the recovery resumes
+rather than re-paying. Notable solver observation for the record: the collapsed DAG's
+line search works measurably harder (961 passes by iter ~55 vs 0104's ~500 by 60).
