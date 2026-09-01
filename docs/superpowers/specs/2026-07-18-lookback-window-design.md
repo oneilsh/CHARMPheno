@@ -23,6 +23,16 @@ contains zero DAG-node codes. Two consequences:
 1. **Leakage-free by construction.** The disease codes are temporally excluded
    from the features, so the `strip_mode` machinery becomes a no-op (kept, but it
    strips nothing).
+   **CAVEAT (2026-09-01): this holds for `index_mode="disease"` ONLY.** The
+   whole-Mondo mainline (exps 0104+) uses `index_mode="population"` — a random
+   event-anchored index with no disease semantics — under which the premise
+   ("no disease code exists before it") is void: a chronic patient's pre-index
+   window routinely contains codes for the very conditions labeled post-index,
+   and the strip is only a partial backstop (it removes DAG-node/anchor ids,
+   not the descendant codes attestation climbs from). Availability is still
+   clean (features strictly pre-index), but per-node metrics blend tracking
+   with prediction. See `docs/reports/2026-09-01-temporal-eval-program-audit.md`
+   §E6 and `docs/superpowers/specs/2026-09-01-incident-episode-eval-program.md`.
 2. **The label must come from a separate window.** Today the frontier (which
    subtype[s]) is read from in-window node codes; a pre-index window has none. So
    the subtype/comorbid label is read from a forward **label window**
