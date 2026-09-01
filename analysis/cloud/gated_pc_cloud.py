@@ -1130,9 +1130,16 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
 
         every = max(1, int(checkpoint_every))
 
+        # Window state for the heartbeat: per-iteration RATES (s/iter, passes/
+        # iter, newly converged) read the solve's health far better than the
+        # cumulative totals alone — a line search going pathological shows up as
+        # passes/iter climbing within two heartbeats instead of a slowly bending
+        # cumulative curve. `_prev` holds the totals at the last PRINTED line.
+        _prev = {"iter": 0, "passes": 0, "conv": 0, "t": t0}
+
         def _progress(p, _t0=t0, _tag=tag, _ndeg=int(degenerate.sum()),
                       _nfit=int(keep.sum()), _path=ckpt_path, _fp=fingerprint,
-                      _every=every):
+                      _every=every, _prev=_prev):
             if _path is not None and p["iter"] % _every == 0:
                 # BEFORE the logging gate, not after it: the two cadences are
                 # independent (log every 5th iteration, checkpoint every 10th by
@@ -1149,13 +1156,21 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
             # to the nodes still searching: a deep line search shows up as extra
             # passes over FEW nodes, which reads very differently from extra
             # passes over all C.
+            now = time.time()
+            conv = max(0, p["n_converged"] - _ndeg)
+            d_iter = max(1, p["iter"] - _prev["iter"])
+            d_pass = p["n_stats_calls"] - _prev["passes"]
             print(f"[driver]   {_tag}batched L-BFGS iter {p['iter']}: "
-                  f"{p['n_stats_calls']} data passes "
+                  f"{(now - _prev['t']) / d_iter:.1f}s/iter, "
+                  f"{d_pass / d_iter:.1f} passes/iter "
                   f"(avg {p['n_node_evals'] / max(p['n_stats_calls'], 1):.0f} "
                   f"nodes/pass), "
-                  f"{max(0, p['n_converged'] - _ndeg)}/{_nfit} converged, "
+                  f"{conv}/{_nfit} converged (+{conv - _prev['conv']}), "
                   f"{p['n_active']} active, max|grad|={p['max_grad_inf_norm']:.3g}, "
-                  f"{time.time() - _t0:.0f}s elapsed", flush=True)
+                  f"{p['n_stats_calls']} passes/{now - _t0:.0f}s total",
+                  flush=True)
+            _prev.update(iter=p["iter"], passes=p["n_stats_calls"], conv=conv,
+                         t=now)
 
         W_std, b_std, info = solve_batched_lr(
             _fittable_stats, C, K, l2=l2, max_iter=max_iter, history=history,
