@@ -60,6 +60,7 @@ from pathlib import Path
 import numpy as np
 
 from _driver_common import _phase, configure_logging, make_spark_session
+from disk_telemetry import start_disk_telemetry
 from gated_pc_cloud import (
     _DRIVER_READOUT_MAX_C, _collect_head_proba, _collect_lean_proba,
     _collect_theta_labels, _dump_partial_results, distributed_score_arm,
@@ -633,6 +634,17 @@ def main(argv=None) -> int:
     cache_uri = args.cache_uri or cm.get("cache_uri")
 
     with make_spark_session(app_name="gated-pc-readout") as spark:
+        # Driver-disk telemetry, IN-BAND (see disk_telemetry's docstring): this
+        # is the solve that keeps dying of ENOSPC from `sc.broadcast` with every
+        # ADR 0047 destroy fix active, and the two local `diskwatch` loops that
+        # were supposed to catch leak #2 both died with their cluster. Printing
+        # from inside the driver puts the disk history in the persisted job log
+        # and in driver_log.md, where it survives the machine.
+        start_disk_telemetry(
+            extra_dirs=[d for d in spark.sparkContext.getConf()
+                        .get("spark.local.dir", "").split(",") if d],
+            log=lambda msg: print(f"[readout] {msg}", flush=True))
+
         from _case_finding_cache import try_load
 
         with _phase("reload cached bundle"):

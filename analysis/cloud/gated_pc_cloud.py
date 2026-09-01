@@ -48,6 +48,7 @@ from pathlib import Path
 import numpy as np
 
 from _driver_common import _phase, configure_logging, make_spark_session
+from disk_telemetry import start_disk_telemetry
 # TOP-LEVEL module name on purpose: the distributed readout's partition kernels
 # reach the executors inside `mapPartitions` closures, which cloudpickle serializes
 # by MODULE REFERENCE — so the name the driver imports must be the name executors
@@ -2052,6 +2053,15 @@ def main() -> int:
     extra_domains = tuple(d for d in args.extra_domains.split(",") if d)
     corpus_spec = None
     with make_spark_session(app_name="gated-pc-fit") as spark:
+        # Driver-disk telemetry, IN-BAND (see disk_telemetry's docstring): the
+        # fit phase is the other half of the ~100 GB that ADR 0047's destroy
+        # fixes do not account for, and a watcher writing to the master's local
+        # disk dies with the cluster. Printing from the driver puts the disk
+        # history in the persisted job log and in driver_log.md.
+        start_disk_telemetry(
+            extra_dirs=[d for d in spark.sparkContext.getConf()
+                        .get("spark.local.dir", "").split(",") if d],
+            log=lambda msg: print(f"[driver] {msg}", flush=True))
         if args.dag_source == "mondo" or extra_domains:
             # MULTI-DOMAIN corpus (per-domain vocabularies, features_0..N-1), in
             # either of its two flavours, both CACHED through the same seam:
