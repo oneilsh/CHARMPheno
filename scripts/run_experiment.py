@@ -1276,6 +1276,13 @@ def build_spark_submit_cmd(
         # in a package zip; the rest of `analysis/` stays driver-side, reached via
         # PYTHONPATH=REPO_ROOT in client mode.
         repo_root / "analysis" / "cloud" / "distributed_readout.py",
+        # The pre-index closure post-pass (E1) attaches its column via a UDF whose
+        # functions cloudpickle serializes by MODULE REFERENCE, same as the readout
+        # kernels above — the executors must `import preindex_closure` when they
+        # unpickle it (exp 0110's first record attempt died of exactly this: the
+        # bundle cache write, the first action to touch the column, failed with
+        # ModuleNotFoundError on every executor). Numpy-only leaf, rides bare.
+        repo_root / "analysis" / "cloud" / "preindex_closure.py",
     ]
     overlay = cluster_overlay_path(repo_root)
     if overlay.exists():
