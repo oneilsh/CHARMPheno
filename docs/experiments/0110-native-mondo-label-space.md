@@ -1,7 +1,7 @@
 ---
 id: 110
 slug: native-mondo-label-space
-status: planned
+status: pending
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -422,3 +422,63 @@ so the native path could not have honoured the flag anyway (the splice is intrin
 that build). **The smoke's numbers are therefore mainline-comparable to 0104/0109 as
 designed** — the crash cost the secondary head arm only, and the gated_pc arm above it
 is a legitimate reading.
+
+**2026-09-01 — build receipts, dev-smoke numbers, and the degeneracy verdict.**
+(The smoke fit preceded the diag because the protocol's steps ran as one chained
+command — harmless, the diag is a corpus property and the cache was hot; the record
+run should keep the diag-first order.)
+
+**Build receipts (native DAG, 83.2 s):** 31,016 standard codes → 8,894 Mondo terms;
+6,032 with closure support; **2,984 clear min_positives=100**; induced Hasse 2,985
+nodes (1,378 multi-parent); splice removed 256 thin-chain + 15 childless in 2 passes
+→ **C=2,714 (1,277 multi-parent, 47%)**; 2,501 directly coded, so 483 kept terms
+carry no direct codes — "directly coded" is a node property now, as designed.
+Builder's structural prediction: residual degenerate = 1. Corpus:
+V=(5,000 cond + 5,000 meas + 1,601 drug), **K=2,721** (8 bg + 2,713×1 tpn). C and K
+SHRANK vs 0109 (3,677/3,684): the growth worry never materialized — the old space's
+1,306 class covers were the bulk. The 0104/0109 memory geometry now has slack.
+
+**Dev smoke (30-iter fit, 60-iter readout budget, weightY=0.0 on the fit banner):**
+
+| 60-iter readout budget | macro AUC | macro AP | scored | detection AUC | constant cols |
+|---|---|---|---|---|---|
+| 0109 smoke (C=3,677) | 0.6894 | 0.4747 | 2,106 | 0.5622 | 619 |
+| **0110 smoke (C=2,714, native)** | **0.7288** | **0.3975** | **1,855** | **0.6203** | **176** |
+
+Comparison-protocol discipline applies: DIFFERENT node sets, so the macro delta is
+directional, not a verdict — the shared-node-set comparison comes from the two runs'
+per-node rows. The AP drop is composition: the native space scores deep rare nodes
+(marginal AP at depth 7 ≈ 0.03) the old space never surfaced. Solver conditioning
+transformed: 292 passes for 60 iters (≈4.9 passes/iter vs 15–25 deep-phase on
+0104/0109), 6 line-search failures, 1 stalled, ~44 s/iter at 20 executors.
+First-ever real multi-parent conditional readout: pooled ECE 0.0235, cond-AUC
+0.65–0.77 by depth, top-1 beats majority broadly at depths 2–3 (immune 0.688 vs
+0.369; connective tissue 0.548 vs 0.356), with the tool's own caveat that per-node
+ECE (mean 0.132) ≫ pooled.
+
+**Degeneracy verdict (`diag-sibling-support`, train split): 177/2,714 — root 1,
+no_pos 0, allpos_no_sibling_support 167, allpos_with_supported_sibling 9.** The
+trajectory, honestly booked: **763 → 620 → 177**, and the TRAP CLASS the arc chased
+— subsumed siblings — went **619 → 9**. The builder's "residual = 1" held for the
+mechanism it modeled and missed two residue classes it never modeled:
+
+- **The 9 are tie-map twins, not the old trap.** The giveaway is IDENTICAL n_obs
+  between sibling pairs (bilateral/unilateral renal agenesis both 113;
+  adolescent/juvenile idiopathic scoliosis both 56): `reduce_tie_map` keeps tie
+  LEAVES, so a code tied between sibling terms attests both, they co-fire on every
+  doc, and neither is ever observed negative against the other.
+- **The 167 (0/0 siblings) are the only-child class in a new costume.** The native
+  splice protects TERMINALS, and directly-coded nodes are terminal — so a
+  directly-coded only-child (esophageal disorder, galactorrhea, `human disease` as
+  the lone depth-1 node) survives the splice and is then observed only when it
+  fires under sibling-only closure masking. 0109's splice never met this class:
+  the old space's only-children were abstract covers, never terminal-protected.
+
+**The principled fix for the 167 is NOT another splice patch**: an only-child's
+missing negatives are exactly "parent fires without the child" — the D5
+local-negative definition in the incident-episode eval spec
+(`docs/superpowers/specs/2026-09-01-incident-episode-eval-program.md`). The masking
+rule and the eval program converge on the same repair; it is a train-time masking
+change and stays deferred with it. Residual constant-head rate: **6.5% of C**, vs
+16.9% (0109) and 20% (0104). `no_pos: 0` — closure-support powering leaves nothing
+label-starved.
