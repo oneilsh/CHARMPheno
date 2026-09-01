@@ -123,6 +123,18 @@ spark_conf:
   # one — 10m is long enough to route around a genuinely bad host and short enough
   # that a preemption wave's collateral is forgiven before the next wave lands.
   spark.excludeOnFailure.timeout: 10m
+  # Driver-disk leak #2 mitigation (0109 run log, 08-31/09-01): a second ENOSPC
+  # consumer survives every ADR 0047 destroy fix — ~100 GB of master disk over a
+  # few hours with the Python broadcasts provably released. The suspect is
+  # ContextCleaner-gated JVM-side driver state (torrent-broadcast pieces for task
+  # binaries, shuffle metadata), which Spark frees only when the DRIVER JVM
+  # garbage-collects, and a large mostly-idle driver heap may never trigger a GC
+  # across a multi-hour solve. A forced periodic GC bounds the backlog at a cost
+  # of one full GC per interval on an idle heap. Evidence pending: the in-band
+  # disk telemetry (analysis/cloud/disk_telemetry.py) now prints one
+  # `disk_telemetry:` line every 120s into the persisted job log, so the next run
+  # says whether this is the mechanism or only a partial mitigation.
+  spark.cleaner.periodicGC.interval: "5min"
 ---
 
 # 0104 — Whole-Mondo unsupervised mainline: the first all-body-system gate + readout
