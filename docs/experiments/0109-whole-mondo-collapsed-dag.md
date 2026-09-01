@@ -1,7 +1,7 @@
 ---
 id: 109
 slug: whole-mondo-collapsed-dag
-status: pending
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -383,3 +383,27 @@ detection stays a diagnostics line.
 The record-budget continuation (readout_max_iter 200) is back in flight from the
 iteration-50 checkpoint with telemetry and periodic GC active; its numbers, against
 0104's record 0.6978/0.4845, close this experiment.
+
+**2026-09-01 (final) — the continuation was STOPPED DELIBERATELY; the 60-iter smoke
+tie above is this experiment's final result.** Rationale: the smoke-vs-smoke tie on
+an identical 2,106-node scored population already delivers the experiment's entire
+claim (the splice is metrics-neutral on surviving nodes and removes only
+never-scoreable ones), and the structural numbers (763 → 620, splice removed exactly
+the 143 structural only-children) are the trajectory input the native-label program
+needs. A deeper-budget rerun of the same tie decides nothing: exp 0110's acceptance
+protocol takes 0104's RECORD (0.6978/0.4845) as the deep-budget control, and this
+experiment's role in that protocol is structural, not metric. Cluster time goes to
+0110 instead.
+
+Two operational findings from the final restart, recorded here because they came out
+of this run: (1) checkpoint resume across a deliberate kill + relaunch worked again
+(483/3,057 converged at resumed iteration 1); (2) scaling the fixed-instance geometry
+from 8 to 20 executors (`GPR_SPARK_CONF="spark.executor.instances=20"` overriding the
+front matter's 12) dropped the solve from ~60 s/pass to ~15 s/pass — the map stage
+dominates and scales nearly linearly; note the front matter's `executor.instances`
+caps utilization regardless of cluster size, so match instances to workers when
+resizing. And the run's in-band disk telemetry is what localized driver-disk leak #2
+(pyspark auto-broadcast of the dense treeAggregate zero — one ~100 MB closure file
+per pass in `pyspark-*`, `blockmgr` flat), closed in ADR 0047's 2026-09-01 addendum;
+runs from e6209c7 onward carry the sentinel-zero fix and should show a FLAT
+`disk_telemetry:` line.
