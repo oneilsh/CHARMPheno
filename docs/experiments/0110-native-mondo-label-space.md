@@ -383,6 +383,22 @@ make -C analysis/cloud diag-sibling-support ID=110
 #   -> expect root: 1, allpos_no_sibling_support ~ 0,
 #              allpos_with_supported_sibling = 0, and a NAMED thin-chain residue
 
+# 2b. THE INCIDENT-ELIGIBILITY CENSUS (E-census) — the GO/NO-GO gate for the
+#    incident evaluation program. Also a CORPUS property, also before any record
+#    fit, also a cache HIT (step 1's bundle carries E1's `preindexClosure` column
+#    because this run's front matter sets `preindex_closure: true`).
+make -C analysis/cloud diag-incident-census ID=110
+#   -> prints the count of nodes clearing 20/20 on BOTH incident classes against
+#      the spec's ~300 bar, the C2.1 population (train-degenerate heads that
+#      acquire incident negatives), and the constant-head fate breakdown; writes
+#      incident_census.json into the run dir.
+#   -> RECORD THE COUNTS AND THE GO/NO-GO CALL IN THE RUN LOG BELOW. The tool
+#      reports; the human decides. On NO-GO the incident macro is not a
+#      deliverable, E2/E3/E4 are not built, and that run-log entry is the
+#      program's terminal record for them. Given 0109's root prevalence 0.9609
+#      this is a live outcome, not a formality — and the numbers are recorded as
+#      a finding either way.
+
 # 3. The 30-iter dev smoke proper (only if step 2 clears): drop `diag_only` from the
 #    front matter and re-run. The bundle is a HIT now, so this is fit + readout only.
 CHARM_DEV=1 CHARM_SPARK_CONF='spark.locality.wait=0s' make -C analysis/cloud exp ID=110
