@@ -384,5 +384,41 @@ The front matter's `spark_conf:` is injected into both commands automatically �
 
 ## Run log
 
-*(empty — `status: planned`. First entry should be the two build receipts from step 1
-and the `diag-sibling-support` buckets from step 2, before any fit is launched.)*
+**2026-09-01 — smoke attempt 1: the gated_pc arm LANDED IN FULL, then the driver died
+asking an unsupervised fit for its co-fit head.** Everything through the headline was
+clean: fit, distributed readout over 1,855 nodes, detection, and the
+conditional-sharpening table all printed. The driver then raised
+`[UNRESOLVED_COLUMN.WITH_SUGGESTION] ... probability` out of the co-fit-head block —
+`_collect_lean_proba(test_scored, C, score_col="probability")`. Root cause is a config
+contract, not a corrupt frame (the SAME `test_scored` had just served the gated_pc arm's
+collect on `topicDistribution`): `OnlinePCLDAModel._transform` appends `probability`
+ONLY when `weightY != 0`, and the whole-Mondo mainline — 0104, 0109 and this run alike —
+fits at `weight_y: 0`. There is no co-fit head at weight_y=0; its weights are at the
+zero seed and `predictProbability` refuses outright for exactly that reason.
+
+Why this run and not 0104/0109, which share the front matter: the block has been
+unguarded since `c938c5b` (2026-08-20), and `a7f724d` (08-21) fixed precisely this crash
+in the RE-READOUT tool (`gated_pc_readout`) while leaving the fit driver's copy
+unconditional. 0104's numbers came out of that re-readout ("co-fit arm skipped
+(weight_y=0, as designed)"), and 0109 never reached the block — both of its readouts
+died earlier on the driver-disk ENOSPC. **This was the first run whose readout survived
+far enough inside the fit driver to reach the line.** Nothing in `fc679e6`/`96d871b`
+changed the block or a guard on it.
+
+Fixed (same commit as this entry): the driver skips the co-fit head arm on the same two
+witnesses as the re-readout tool — `weight_y == 0` or no `probability` column — with a
+printed SKIP line. And `_retry_spark_action` now fails FAST on `AnalysisException`: a
+schema error is decided during query analysis before a task is submitted, so the
+60/120/240s of backoff this run spent on it was guaranteed waste that also dressed a
+code bug up as cluster trouble.
+
+**Front-matter audit (same day): 0110 vs 0109 differ ONLY in `id` / `slug` / `status` /
+`dag_source` / `dag_collapse`.** Every model and corpus knob — `weight_y: 0.0`,
+`readout_theta_topm`, head params, window, vocab, mask, seed, and the whole `spark_conf`
+block — is byte-identical, and 0104's differs from 0109's only by `dag_collapse`. The
+dropped `dag_collapse: true` is a no-op rather than a silent change of intent:
+`multidomain_corpus_spec` pins `dag_collapse` to False whenever `dag_source != "mondo"`,
+so the native path could not have honoured the flag anyway (the splice is intrinsic to
+that build). **The smoke's numbers are therefore mainline-comparable to 0104/0109 as
+designed** — the crash cost the secondary head arm only, and the gated_pc arm above it
+is a legitimate reading.

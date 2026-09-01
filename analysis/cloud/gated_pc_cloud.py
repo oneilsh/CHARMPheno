@@ -2585,28 +2585,50 @@ def main() -> int:
             # `probability` column is already the per-doc (C,) P(node) — so the
             # distributed variant is just the LEAN collector over that column,
             # float32/uint8 instead of three float64 (D,C) arrays.
-            if readout_mode == "distributed":
-                hp, hy, hm, _ = _collect_lean_proba(
-                    test_scored, C, score_col="probability")
+            #
+            # THERE IS NO CO-FIT HEAD AT weight_y=0, and that is the scaled-back
+            # mainline (exps 0104/0109/0110): `OnlinePCLDAModel._transform` appends
+            # `probability` only when weightY != 0 (spark_vi/mllib/topic/pc.py), and
+            # `predictProbability` refuses outright there — the head sits at its zero
+            # seed, so sigmoid(0)=0.5 for every doc and every node. Asking for the
+            # column anyway raised an AnalysisException that killed exp 0110 AFTER the
+            # expensive pc_topics_lr arm had already printed. Same guard, same two
+            # witnesses (the config fact and the column itself) as the re-readout tool
+            # `gated_pc_readout.run_readout`, which fixed this on its own path in
+            # a7f724d while this one kept the unconditional call.
+            _head_wy = float(getattr(args, "weight_y", 0.0) or 0.0)
+            _head_col = "probability" in test_scored.columns
+            if _head_wy == 0.0 or not _head_col:
+                print(f"[driver]   co-fit head readout + conditional SKIPPED "
+                      f"(weight_y={_head_wy:g}, probability column "
+                      f"{'present' if _head_col else 'absent'}): an unsupervised fit "
+                      "has no co-fit head to read out — its transform appends no "
+                      "probability column and the head is at its zero seed (P=0.5 "
+                      "everywhere)", flush=True)
             else:
-                hp, hy, hm = _collect_head_proba(
-                    test_scored, C, sample_frac=_sf, seed=_sd)
-            results["gated_pc_head"] = readout_from_proba(
-                hp, hy, hm, C, recall_targets=rt, fdr_targets=ft,
-                min_count=args.min_label_count)
-            print(format_arm_readout("gated_pc (co-fit head)",
-                                     results["gated_pc_head"]), flush=True)
-            # Conditional readout on the CO-FIT HEAD proba too — the UNIFIED-model
-            # P(child|parent): a single model emitting calibrated conditional
-            # posteriors with no post-hoc fit. At 41-anchor scale the ridge (head_l2)
-            # bounds the head AND it is well-calibrated (exp 0082: co-fit ECE ~0.010,
-            # competitive with the two-stage readout LR above), so this is the primary
-            # VOI-ready readout; the head-independent pc_topics_lr is the reference.
-            results["gated_pc_head_conditional"] = _conditional(
-                hp, hy, hm, "gated_pc co-fit head")
-            print(f"[driver]   co-fit head |w_CK|max="
-                  f"{float(np.abs(pc_model.headWeights()).max()):.4g} "
-                  f"(head_l2={args.head_l2})", flush=True)
+                if readout_mode == "distributed":
+                    hp, hy, hm, _ = _collect_lean_proba(
+                        test_scored, C, score_col="probability")
+                else:
+                    hp, hy, hm = _collect_head_proba(
+                        test_scored, C, sample_frac=_sf, seed=_sd)
+                results["gated_pc_head"] = readout_from_proba(
+                    hp, hy, hm, C, recall_targets=rt, fdr_targets=ft,
+                    min_count=args.min_label_count)
+                print(format_arm_readout("gated_pc (co-fit head)",
+                                         results["gated_pc_head"]), flush=True)
+                # Conditional readout on the CO-FIT HEAD proba too — the UNIFIED-model
+                # P(child|parent): a single model emitting calibrated conditional
+                # posteriors with no post-hoc fit. At 41-anchor scale the ridge
+                # (head_l2) bounds the head AND it is well-calibrated (exp 0082: co-fit
+                # ECE ~0.010, competitive with the two-stage readout LR above), so this
+                # is the primary VOI-ready readout; the head-independent pc_topics_lr
+                # is the reference.
+                results["gated_pc_head_conditional"] = _conditional(
+                    hp, hy, hm, "gated_pc co-fit head")
+                print(f"[driver]   co-fit head |w_CK|max="
+                      f"{float(np.abs(pc_model.headWeights()).max()):.4g} "
+                      f"(head_l2={args.head_l2})", flush=True)
             # HEAD-FORMULATION LADDER: step the co-fit head's EXACT formulation toward
             # the sklearn oracle ONE factor at a time, on the SAME frozen gated θ +
             # closure mask, so we read off WHICH difference (convergence / ridge type /

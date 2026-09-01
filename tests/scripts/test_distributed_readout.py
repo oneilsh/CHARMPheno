@@ -604,6 +604,53 @@ def test_retry_spark_action_does_not_retry_non_spark_exceptions(no_sleep):
     assert no_sleep == []
 
 
+def test_retry_spark_action_fails_fast_on_an_analysis_exception(no_sleep, capsys):
+    """A schema error is decided during query ANALYSIS, on the driver, before a
+    task is submitted — so it is identical on every attempt and the backoff is
+    pure waste. Exp 0110 lost 60+120+240s to
+    `UNRESOLVED_COLUMN.WITH_SUGGESTION ... probability` before surfacing a fact
+    that was true from the first millisecond. `AnalysisException` subclasses
+    `PySparkException`, so it IS in the retryable tuple and has to be excluded by
+    type, not by luck."""
+    from pyspark.errors import AnalysisException, PySparkException
+
+    assert issubclass(AnalysisException, PySparkException)   # why the guard exists
+    n = []
+
+    def _fn():
+        n.append(1)
+        raise AnalysisException(
+            "[UNRESOLVED_COLUMN.WITH_SUGGESTION] A column or function parameter "
+            "with name `probability` cannot be resolved.")
+
+    with pytest.raises(AnalysisException, match="probability"):
+        dr._retry_spark_action(_fn, attempts=4, base_sleep_s=60, label="lean eval collect")
+    assert len(n) == 1                            # one attempt, not four
+    assert no_sleep == []                         # and not one second of backoff
+    out = capsys.readouterr().out
+    assert "failing fast" in out
+    assert "retrying in" not in out
+    assert "lean eval collect" in out             # the label still names the pass
+
+
+def test_retry_spark_action_still_retries_other_pyspark_exceptions(no_sleep):
+    """The fail-fast exclusion is by TYPE and must not widen: a plain
+    `PySparkException` is how the SQL paths report a JVM JOB failure (the
+    preemption-wave case this wrapper exists for), and it keeps the full budget."""
+    from pyspark.errors import PySparkException
+    calls = []
+
+    def _fn():
+        calls.append(1)
+        if len(calls) <= 2:
+            raise PySparkException("Job aborted due to stage failure")
+        return "ok"
+
+    assert dr._retry_spark_action(_fn, attempts=4, base_sleep_s=60) == "ok"
+    assert len(calls) == 3
+    assert no_sleep == [60.0, 120.0]
+
+
 def test_retry_spark_action_first_line_survives_a_dead_gateway():
     """`str(Py4JJavaError)` calls back into the JVM for the stack trace, so on the
     one path that matters — the gateway itself died — it raises. The logger must
