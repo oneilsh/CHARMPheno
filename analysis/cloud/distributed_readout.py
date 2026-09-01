@@ -1045,20 +1045,31 @@ def masked_moments(scored_df, C, K, *, topic_col="topicDistribution",
             return [_sparse_moments_kernel(_row_sparse(rows, *_cols, _m), _C, _K)]
         return [_moments_kernel(_row_triples(rows, *_cols), _C, _K)]
 
+    # None-sentinel zero, same reason as SparkStatsFn's pass zero: a dense
+    # zeroValue ((C,K)×2 ≈ 217 MB here) rides the task closure, which pyspark
+    # auto-broadcasts over ~1 MB into an internal broadcast whose pickled temp
+    # file nothing ever unlinks. One-time per readout rather than per-pass, but
+    # the same leak class — keep every treeAggregate closure under the threshold.
     def _combine(a, b):
+        if a is None:
+            return b
+        if b is None:
+            return a
         return (a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3])
 
-    zero = (np.zeros((C, K)), np.zeros((C, K)), np.zeros(C), np.zeros(C))
     # Retried: the moments pass is a pure sum over a lineage-recomputable
     # projection, and losing it to a preemption wave costs the whole fit (it is
     # the standardization every later pass is expressed in). `.rdd` is taken
     # inside the closure — `javaToPython` can run jobs of its own on an
     # unmaterialized frame (see theta_topm_coverage).
-    sum_theta, sum_theta_sq, n_obs, n_pos = _retry_spark_action(
+    out = _retry_spark_action(
         lambda: scored_df.select(topic_col, label_col, mask_col)
         .rdd.mapPartitions(_local).treeAggregate(
-            zero, _combine, _combine, depth=int(depth)),
+            None, _combine, _combine, depth=int(depth)),
         label="masked moments")
+    sum_theta, sum_theta_sq, n_obs, n_pos = (
+        (np.zeros((C, K)), np.zeros((C, K)), np.zeros(C), np.zeros(C))
+        if out is None else out)
     mu, sd = moments_to_mu_sd(sum_theta, sum_theta_sq, n_obs, eps=eps)
     return mu, sd, n_obs, n_pos
 
@@ -1150,10 +1161,22 @@ class SparkStatsFn:
         sc = self._rdd.context
         C, K = self.C, self.K
 
+        # The treeAggregate zero is a None SENTINEL, not a dense (C,K) tuple.
+        # zeroValue is pickled into the task closure, and pyspark AUTO-BROADCASTS
+        # any closure over ~1 MB — an internal broadcast no destroy() of ours ever
+        # reaches, whose pickled temp file sits under the app's pyspark-* dir
+        # until context shutdown. A dense zero here is ~108 MB of closure per
+        # pass: exp 0109's 2026-09-01 telemetry showed exactly one such file per
+        # pass accumulating (leak #2 in ADR 0047's addendum) while blockmgr-*
+        # stayed flat (periodicGC cleans the JVM half, nothing cleans the file).
         def _combine(a, b):
+            if a is None:
+                return b
+            if b is None:
+                return a
             return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
 
-        zero = (np.zeros(C), np.zeros((C, K)), np.zeros(C))
+        zero = None
 
         def _pass(_m=self._topm):
             # The broadcast is created INSIDE the retried closure. A retry is here
@@ -1198,10 +1221,15 @@ class SparkStatsFn:
         # multi-hour solve is overwhelmingly likely to be inside this action when
         # a preemption wave lands — which is exactly how exp 0104 lost 9,112s of
         # solve on 2026-08-28.
-        loss, g_raw, s = _retry_spark_action(
+        out = _retry_spark_action(
             _pass,
             label=f"stats pass ({'all' if keep is None else int(keep.sum())}/{C} "
                   "nodes)")
+        # None only if every partition was empty — the cached projection is
+        # materialized non-empty in __init__, so this is belt-and-braces for the
+        # sentinel zero, not a reachable state in a real solve.
+        loss, g_raw, s = ((np.zeros(C), np.zeros((C, K)), np.zeros(C))
+                          if out is None else out)
         gW_std = self._fold_grad(g_raw, s, self.mu, self.sd)
         return loss, gW_std, s
 

@@ -116,3 +116,38 @@ conclusion, so it is recorded here.
   unrelated missing symbol (pre-existing, likely a main-branch fork casualty), so
   its converted site cannot be exercised until the branch reconciliation restores
   it — flagged there, not fixed here.
+
+## Addendum (2026-09-01): leak #2 — pyspark AUTO-broadcast of large task closures
+
+The destroy discipline above closed leak #1 and runs still died of driver-disk
+ENOSPC (exp 0109, 08-31 and 09-01, ~100 GB over a multi-hour readout). In-band
+disk telemetry on the 09-01 recovery localized the growth: all of it inside the
+app's `spark-*/pyspark-*` temp dir, ~one ~100 MB file per L-BFGS data pass, with
+`blockmgr-*` flat and our explicit-broadcast count at zero — so NOT a broadcast
+we created, and NOT JVM state (`spark.cleaner.periodicGC.interval=5min` was
+active and doing its job).
+
+**Mechanism.** pyspark pickles each job's task closure; any closure over ~1 MB
+(`PythonUtils.getBroadcastThreshold`) is silently wrapped in an INTERNAL
+`sc.broadcast` of the pickled command. That broadcast is invisible to caller
+code: no handle is returned, so no `destroy()` of ours can ever reach it, and
+its driver-side pickle file under `pyspark-*` is unlinked only at context
+shutdown. The offender was the `treeAggregate` ZERO VALUE in the per-pass stats
+seam (`distributed_readout.SparkStatsFn.__call__`): a dense
+`(np.zeros(C), np.zeros((C,K)), np.zeros(C))` tuple ≈ 108 MB pickled into every
+pass's closure. The explicit parameter broadcast right next to it was destroyed
+per pass, exactly per this ADR — the leak was its closure-borne twin.
+
+**Fix (07d9d47 follow-up).** treeAggregate zeros are now a `None` sentinel with
+identity handling in the combiner; partials are allocated executor-side by the
+partition kernels, and the driver substitutes zeros only in the (unreachable in
+practice) empty-corpus case. Applied to the per-pass stats seam and the one-time
+`masked_moments` zero (~217 MB). Small zeros (coverage, diagnostics) stay as-is
+— they sit under the auto-broadcast threshold.
+
+**Doctrine extension.** The lifecycle rule now has a closure clause: NOTHING
+ARRAY-SHAPED RIDES A TASK CLOSURE. Ship parameters via an explicit broadcast
+(destroyed per this ADR); ship reduction identities as sentinels; keep every
+pickled closure under the 1 MB auto-broadcast threshold. A `disk_telemetry:`
+line whose `pyspark-*` dir grows linearly in passes is the signature of a
+violation.
