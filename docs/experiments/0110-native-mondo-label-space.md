@@ -37,7 +37,28 @@ disease: rare_priority
 # support >= direct support, and mid-level Mondo terms carrying no code of their own
 # now qualify. The build prints both receipts before any fit. Do not size the cluster
 # off 0104's C=3,820 / K=3,827 without reading them.
+#
+# PRE-INDEX CLOSURE (E1, `preindex_closure: true`). The corpus additionally carries
+# a per-document sparse `R_d` column: the closure of what the patient already
+# carried BEFORE the index — the label definition evaluated on the FEATURE window
+# instead of the label window, over the same kept-node DAG and the same provider.
+# It is what makes incident eligibility (`c ∉ R_d`, spec D2) computable at eval
+# time, and it is a CORPUS property: computed once at build time, stored with the
+# corpus, reused byte-identically by every run compared against this one, with
+# nothing a fit produces entering it. The immediate consumer is the E-census
+# GO/NO-GO probe (`make diag-incident-census`), which must run on THIS corpus
+# before any incident metric is built.
+#
+# IT MOVES THIS RUN'S BUNDLE CACHE KEY. The flag folds into the key only when on
+# (the `dag_collapse` discipline), so 0104's and 0109's keys — and every
+# flag-off key — are byte-identical; but a 0110 bundle built before this line was
+# added is under a DIFFERENT key and will not be found. That is the intended
+# trade: the census is a property of 0110's corpus and has to be measured on the
+# corpus the record run reports, so the column ships WITH that corpus rather than
+# in a second, separately-keyed one. Cost is one extra full-history condition scan
+# plus one attestation pass at build time; a cache HIT pays nothing.
 dag_source: mondo_native
+preindex_closure: true
 readout_mode: distributed
 readout_theta_topm: 256
 weight_y: 0.0

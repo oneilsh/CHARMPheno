@@ -322,3 +322,70 @@ def test_localize_head_flag_threads(monkeypatch):
     import gated_pc_cloud
     parsed = gated_pc_cloud.parse_args(on)
     assert parsed.localize_head is True
+
+
+def test_preindex_closure_flag_threads(monkeypatch):
+    """E1: `preindex_closure: true` front matter -> --preindex-closure -> the
+    driver parses it -> the corpus spec carries it (which is what forks the cache
+    key, so a bundle WITH the column can never be served for one without).
+
+    Absent/false front matter must not emit the flag at all: every existing
+    experiment, 0104's and 0109's record runs included, has to keep reproducing
+    byte-identically."""
+    mod = _run_exp(monkeypatch)
+    eff = {**_base_eff(), "dag_source": "mondo_native", "min_positives": 100,
+           "window_mode": "lookback", "preindex_closure": True}
+    args = mod.build_gated_pc_args(eff, "/out")
+    assert "--preindex-closure" in args
+
+    assert "--preindex-closure" not in mod.build_gated_pc_args(_base_eff(), "/out")
+    assert "--preindex-closure" not in mod.build_gated_pc_args(
+        {**eff, "preindex_closure": False}, "/out")
+
+    cloud = str(Path(mod.__file__).resolve().parent.parent / "analysis" / "cloud")
+    if cloud not in sys.path:
+        sys.path.insert(0, cloud)
+    import gated_pc_cloud
+    parsed = gated_pc_cloud.parse_args(args)
+    assert parsed.preindex_closure is True
+    spec = gated_pc_cloud.multidomain_corpus_spec(parsed, ("drug",))
+    assert spec["preindex_closure"] is True
+    # ...and it lands in the KEY, which is the whole point of the fork.
+    off_spec = dict(spec, preindex_closure=False)
+    assert (gated_pc_cloud.multidomain_cache_key(spec)
+            != gated_pc_cloud.multidomain_cache_key(off_spec))
+
+    off = gated_pc_cloud.parse_args(mod.build_gated_pc_args(
+        {**eff, "preindex_closure": False}, "/out"))
+    assert off.preindex_closure is False
+    assert gated_pc_cloud.multidomain_corpus_spec(
+        off, ("drug",))["preindex_closure"] is False
+
+
+def test_preindex_closure_is_mondo_only_in_the_spec(monkeypatch):
+    """The column is built by re-running the MONDO attestation provider over the
+    feature window, and only the Mondo paths construct one driver-side — so on the
+    SNOMED path the spec pins it False and a stray flag cannot split that cache."""
+    mod = _run_exp(monkeypatch)
+    cloud = str(Path(mod.__file__).resolve().parent.parent / "analysis" / "cloud")
+    if cloud not in sys.path:
+        sys.path.insert(0, cloud)
+    import gated_pc_cloud
+    parsed = gated_pc_cloud.parse_args(mod.build_gated_pc_args(
+        {**_base_eff(), "window_mode": "lookback", "preindex_closure": True},
+        "/out"))
+    assert parsed.dag_source == "snomed" and parsed.preindex_closure is True
+    assert gated_pc_cloud.multidomain_corpus_spec(
+        parsed, ())["preindex_closure"] is False
+
+
+def test_the_0110_front_matter_asks_for_the_preindex_column():
+    """The census (E-census) is a property of 0110's CORPUS and has to be measured
+    on the corpus the record run reports — so the flag lives in 0110's own front
+    matter, not in an ad-hoc second bundle. This is the wiring's end: front matter
+    -> CLI -> spec -> key -> the column the census reads."""
+    import re
+    doc = (Path(__file__).resolve().parents[2] / "docs" / "experiments"
+           / "0110-native-mondo-label-space.md").read_text()
+    front = doc.split("---")[1]
+    assert re.search(r"^preindex_closure:\s*true\s*$", front, re.M)

@@ -75,7 +75,9 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
                              min_positives=0, dag_collapse=False,
                              dag_collapse_version="", mondo_native=False,
                              mondo_native_version="",
-                             doc_spec=DEFAULT_DOC_SPEC) -> str:
+                             doc_spec=DEFAULT_DOC_SPEC,
+                             preindex_closure=False,
+                             preindex_closure_version="") -> str:
     """Stable 16-hex hash of the inputs that determine the assembled bundle.
 
     Folds cohort_defs_version() plus content hashes of condition_dag +
@@ -115,6 +117,10 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
     when it differs from today's constant, so every existing key is byte-identical
     while a future doc-unit change (an `EpisodeDocSpec`, say) can no longer land a
     different corpus under the same key.
+
+    `preindex_closure` (+ `preindex_closure_version` and the module's source hash)
+    marks a bundle that carries E1's per-document pre-index closure column. Mondo
+    path only, folded ONLY when on — the `dag_collapse` discipline.
     """
     from charmpheno.omop import condition_dag, case_finding_assembly
     from charmpheno.omop.cohorts import cohort_defs_version
@@ -222,6 +228,22 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
                 payload["mondo_usage_core_src"] = _module_source_hash(
                     mondo_usage_core)
                 payload["native_collapse_src"] = _module_source_hash(mondo_collapse)
+            # E1's pre-index closure column: a per-document sparse `R_d` (what the
+            # doc already carried BEFORE its index) written into the cached
+            # bundle. A bundle with the column is a DIFFERENT artifact from one
+            # without — a readout can ask for the column and a diagnostic can
+            # refuse a bundle that lacks it — so it is corpus identity. Folded
+            # ONLY when the flag is on, for exactly the reason `dag_collapse` and
+            # `mondo_native` are: 0104's, 0109's and every flag-off 0110 key must
+            # stay byte-identical, and the four hashes pinned in
+            # tests/scripts/test_case_finding_cache_mondo.py are the tripwire that
+            # proves they did. The module is NEW, so its source hash is free to
+            # move — it only ever appears on keys that asked for it.
+            if preindex_closure:
+                import preindex_closure as _preindex
+                payload["preindex_closure"] = True
+                payload["preindex_closure_version"] = str(preindex_closure_version)
+                payload["preindex_closure_src"] = _module_source_hash(_preindex)
     s = json.dumps(payload, sort_keys=True)
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
 
@@ -246,6 +268,17 @@ def _meta_dict(bundle) -> dict:
         meta["vocab_map"] = {str(c): i for c, i in bundle.vocab_map.items()}
     else:
         meta["vocab_maps"] = [{str(c): i for c, i in vm.items()} for vm in vocab_maps]
+    # E1's WITNESS (R1.4). The pre-index closure column rides in the parquet, and
+    # the parquet writes take the frames as they are — so without this a
+    # mixed-vintage cache dir would hand a readout a bundle WITHOUT the column and
+    # die at `select` with a Spark column error, which names neither the cause nor
+    # the fix. Recording it here (and restoring it below) is what lets
+    # `preindex_closure.require_preindex_closure` refuse such a bundle by name.
+    # Written ONLY when the bundle has one, so every existing entry's meta is
+    # byte-identical and `_restore_meta` stays backward-compatible.
+    witness = getattr(bundle, "preindex_closure", None)
+    if witness:
+        meta["preindex_closure"] = dict(witness)
     return meta
 
 
@@ -263,6 +296,11 @@ def _restore_meta(meta: dict) -> dict:
                              for vm in meta["vocab_maps"]]
     else:                                    # single-domain (incl. every old entry)
         out["vocab_map"] = {int(c): int(i) for c, i in meta["vocab_map"].items()}
+    # E1's witness, absent from every entry written before it existed — which is
+    # exactly what "this bundle has no pre-index column" means, so the absence is
+    # the correct reading, not a compatibility hole.
+    if "preindex_closure" in meta:
+        out["preindex_closure"] = dict(meta["preindex_closure"])
     return out
 
 
@@ -303,9 +341,19 @@ def try_load(spark, cache_uri, key) -> Optional["CaseFindingBundle"]:
                   ledger=meta["ledger"])
     if "vocab_maps" in meta:
         from charmpheno.omop.multi_domain import MultiDomainBundle
-        return MultiDomainBundle(vocab_maps=meta["vocab_maps"], **common)
-    from charmpheno.omop.case_finding_assembly import CaseFindingBundle
-    return CaseFindingBundle(vocab_map=meta["vocab_map"], **common)
+        bundle = MultiDomainBundle(vocab_maps=meta["vocab_maps"], **common)
+    else:
+        from charmpheno.omop.case_finding_assembly import CaseFindingBundle
+        bundle = CaseFindingBundle(vocab_map=meta["vocab_map"], **common)
+    # E1's witness rides as an ATTRIBUTE, not a dataclass field: both bundle
+    # dataclasses live in source-hashed modules that may not be edited (a field
+    # would move `assembly_src`/`multi_domain_src` and orphan every cached bundle
+    # in the repo). Consumers read it through
+    # `preindex_closure.bundle_preindex_witness`, which defaults to None — so a
+    # bundle from before this existed answers "no column", correctly.
+    if "preindex_closure" in meta:
+        bundle.preindex_closure = meta["preindex_closure"]
+    return bundle
 
 
 # Assembly kwargs that are ALSO cache-key inputs. `extra_domains` / `index_mode`
