@@ -183,6 +183,43 @@ def _bcast_files(dirs):
     return n
 
 
+def _quick_used_bytes(dirs):
+    """Total used bytes across the watched dirs' DISTINCT filesystems.
+
+    The cheap (statvfs-only) measurement the quiet-mode gate reads every
+    interval; the expensive `du` line only runs when this says something moved.
+    """
+    total = 0
+    seen_dev = set()
+    for d in dirs:
+        try:
+            dev = os.stat(d).st_dev
+        except OSError:
+            continue
+        if dev in seen_dev:
+            continue
+        seen_dev.add(dev)
+        vfs = os.statvfs(d)
+        total += (vfs.f_blocks - vfs.f_bfree) * vfs.f_frsize
+    return total
+
+
+def _should_print(prev_used, used, ticks_since_print, growth_mb,
+                  heartbeat_every):
+    """The quiet-mode gate, as a pure function so it is testable.
+
+    Print when: no baseline yet (first tick), the measurement itself failed
+    (fail OPEN — an anomaly must surface, not be gated away), used space moved
+    by >= `growth_mb` since the last PRINTED line, or `heartbeat_every` ticks
+    passed silently (so a reader can still tell the watcher is alive and flat).
+    """
+    if prev_used is None or used is None:
+        return True
+    if abs(used - prev_used) >= growth_mb * (1 << 20):
+        return True
+    return ticks_since_print >= heartbeat_every
+
+
 def _tick(dirs, log):
     """Emit ONE telemetry line for `dirs`. Never raises.
 
@@ -208,13 +245,23 @@ def _tick(dirs, log):
                 f"{first_line}")
 
 
-def start_disk_telemetry(extra_dirs=(), interval_s=120, log=None):
+def start_disk_telemetry(extra_dirs=(), interval_s=120, log=None,
+                         growth_mb=512, heartbeat_every=15):
     """Start the daemon ticker and return its Thread.
 
-    Always on, no CLI flag: it is ~1 line per 2 minutes, and the whole reason
-    it exists is that the run which needed it was never the run someone
-    remembered to enable it for. Daemon so it never holds the driver open past
-    `main`.
+    Always on, no CLI flag: the whole reason it exists is that the run which
+    needed it was never the run someone remembered to enable it for. Daemon so
+    it never holds the driver open past `main`.
+
+    QUIET BY DEFAULT (2026-09-01, after leak #2 was caught and fixed): a
+    healthy run's disk line is flat, and a flat line every 2 minutes is log
+    noise that makes the interesting lines harder to copy out of a paste. The
+    ticker still MEASURES every `interval_s` (statvfs only — cheap), but only
+    PRINTS the full line when used space moved by >= `growth_mb` since the
+    last printed line, on a measurement failure (fail open), or as an
+    every-`heartbeat_every`-ticks liveness line (default 15 x 120s = one line
+    per ~30 quiet minutes). A recurrence of the leak class therefore still
+    hits the log within one interval of its first half-gigabyte.
 
     `extra_dirs` is for the live Spark conf's ``spark.local.dir`` (the drivers
     pass it right after the session exists) — the conf value wins over the
@@ -224,14 +271,26 @@ def start_disk_telemetry(extra_dirs=(), interval_s=120, log=None):
         log = _default_log
     dirs = resolve_dirs(extra_dirs)
     log(f"disk_telemetry: watching {' '.join(dirs) or '(none)'} "
-        f"every {int(interval_s)}s")
+        f"every {int(interval_s)}s (prints on >={int(growth_mb)}M movement "
+        f"or every {int(heartbeat_every)} quiet ticks)")
 
     def _loop():
+        # Tick FIRST: the launch-time baseline is what every later line is
+        # read against, and a run that dies in its first two minutes still
+        # leaves one measurement behind.
+        prev_used = None
+        since = heartbeat_every
         while True:
-            # Tick FIRST: the launch-time baseline is what every later line is
-            # read against, and a run that dies in its first two minutes still
-            # leaves one measurement behind.
-            _tick(dirs, log)
+            try:
+                used = _quick_used_bytes(dirs)
+            except Exception:
+                used = None
+            since += 1
+            if _should_print(prev_used, used, since, growth_mb,
+                             heartbeat_every):
+                _tick(dirs, log)
+                prev_used = used
+                since = 0
             time.sleep(interval_s)
 
     thread = threading.Thread(target=_loop, name="disk-telemetry", daemon=True)

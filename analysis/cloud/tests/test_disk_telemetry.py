@@ -137,3 +137,33 @@ def test_start_disk_telemetry_returns_daemon_thread_and_announces(tmp_path):
     assert lines[0].startswith("disk_telemetry: watching ")
     assert str(d) in lines[0]
     assert "every 3600s" in lines[0]
+
+
+def test_should_print_gate():
+    """Quiet-mode gate: first tick, failure, big movement, and heartbeat print;
+    small movement inside the heartbeat window stays silent."""
+    from disk_telemetry import _should_print
+    mb = 1 << 20
+    assert _should_print(None, 100 * mb, 1, growth_mb=512, heartbeat_every=15)
+    assert _should_print(100 * mb, None, 1, growth_mb=512, heartbeat_every=15)
+    assert _should_print(100 * mb, 700 * mb, 1, growth_mb=512,
+                         heartbeat_every=15)
+    assert _should_print(700 * mb, 100 * mb, 1, growth_mb=512,
+                         heartbeat_every=15)          # shrinkage counts too
+    assert _should_print(100 * mb, 101 * mb, 15, growth_mb=512,
+                         heartbeat_every=15)          # liveness heartbeat
+    assert not _should_print(100 * mb, 101 * mb, 3, growth_mb=512,
+                             heartbeat_every=15)
+
+
+def test_quick_used_bytes_skips_missing_and_dedupes(tmp_path):
+    """statvfs total over distinct filesystems; vanished dirs skipped."""
+    from disk_telemetry import _quick_used_bytes
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    one = _quick_used_bytes([str(a)])
+    both = _quick_used_bytes([str(a), str(b), str(tmp_path / "gone")])
+    assert one > 0
+    assert both == one                    # same st_dev: counted once
