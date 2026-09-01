@@ -490,7 +490,7 @@ gated-pc-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	    --conf spark.excludeOnFailure.enabled=true \
 	    $$EXP_CONF_FLAGS \
 	    $(foreach kv,$(GPR_SPARK_CONF),--conf $(kv)) \
-	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/distributed_readout.py \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/distributed_readout.py,$(REPO_ROOT)/analysis/cloud/preindex_closure.py \
 	    $(REPO_ROOT)/analysis/cloud/gated_pc_readout.py \
 	    --run-dir "$(GPR_RUN_DIR)" \
 	    --cache-uri $(GPR_CACHE_URI) \
