@@ -1650,6 +1650,15 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
 # --------------------------------------------------------------------------- #
 # Multi-domain / Mondo corpus seam (shared by the fit and gated_pc_readout).   #
 # --------------------------------------------------------------------------- #
+# The `dag_source` values that route through the Mondo branch of the multi-domain
+# assembler: a POPULATION index, `min_n=0` (the DAG arrives already powered) and
+# the Mondo build inputs folded into the key. `mondo` is exp 0088/0104's powered
+# ANCHOR hierarchy (`mondo_dag`, OMOP-concept-id nodes); `mondo_native` is exp
+# 0110's native Mondo label space (`mondo_native_dag`, Mondo-term-id nodes).
+# `gated_pc_readout` imports this rather than re-listing it, so the fit's routing
+# and the re-readout's key routing cannot drift apart.
+_MONDO_DAG_SOURCES = ("mondo", "mondo_native")
+
 # The multi-domain assembler's kwargs, derived from a corpus SPEC — the dict the
 # fit writes into `manifest["corpus_manifest"]` and the re-readout reads back out.
 # One derivation, two callers, so a re-readout's cache key cannot drift from the
@@ -1669,8 +1678,20 @@ def multidomain_corpus_spec(args, extra_domains) -> dict:
     scratch needs, in one dict — including `billing` and the Mondo build inputs,
     which a post-hoc rebuild cannot invent. `min_n` is the EFFECTIVE value handed
     to the assembler (0 on the Mondo path: that DAG is already powered), not the
-    CLI default, because the key folds what was used."""
-    mondo = args.dag_source == "mondo"
+    CLI default, because the key folds what was used.
+
+    `dag_source` has two Mondo flavours and they share every build input
+    (`mondo_version` / `mondo_branch` / `min_positives` / `mondo_cache_dir`) and
+    every assembler setting (population index, min_n=0 because the DAG arrives
+    already powered):
+      `mondo`         exp 0088/0104's powered ANCHOR hierarchy (mondo_dag), keyed
+                      on OMOP concept ids, optionally spliced by `dag_collapse`;
+      `mondo_native`  exp 0110's native label space (mondo_native_dag), keyed on
+                      Mondo term ids, with the splice intrinsic to the build.
+    `dag_collapse` is pinned False on the native path: its reduction is not an
+    option there, it is part of the construction, so exposing the flag would only
+    let a run ask for it twice."""
+    mondo = args.dag_source in _MONDO_DAG_SOURCES
     return {
         "dag_source": args.dag_source,
         "disease": args.disease, "cdr": args.cdr, "billing": args.billing,
@@ -1694,7 +1715,8 @@ def multidomain_corpus_spec(args, extra_domains) -> dict:
         # exp 0109's splice-to-fixpoint DAG reduction. Mondo-only (it names class
         # nodes of the Mondo hierarchy) and OFF by default, so an existing
         # experiment's spec — and therefore its bundle key — is unchanged.
-        "dag_collapse": bool(args.dag_collapse) if mondo else False,
+        "dag_collapse": bool(args.dag_collapse)
+                        if args.dag_source == "mondo" else False,
     }
 
 
@@ -1703,8 +1725,15 @@ def _multidomain_params(spec):
 
     `key_extra` carries the identity markers that are NOT assembler kwargs — the
     `multidomain` / `mondo` flags and the Mondo build inputs — which is what folds
-    them into the cache key without changing any SNOMED key."""
-    mondo = str(spec.get("dag_source", "snomed")) == "mondo"
+    them into the cache key without changing any SNOMED key.
+
+    Both Mondo flavours fold the same build inputs; `mondo_native` additionally
+    folds its own marker + version, and (in `compute_bundle_cache_key`) the source
+    hashes of the two NEW modules it is built from. Everything native is folded
+    ONLY when it is selected, so a `dag_source=mondo` key — exp 0104's and 0109's
+    — is byte-identical to what it was before exp 0110 existed."""
+    dag_source = str(spec.get("dag_source", "snomed"))
+    mondo = dag_source in _MONDO_DAG_SOURCES
     assembly = {k: spec[k] for k in _SPEC_ASSEMBLY_KEYS}
     assembly["extra_domains"] = tuple(spec.get("extra_domains") or ())
     assembly["emit_labels"] = True
@@ -1719,6 +1748,10 @@ def _multidomain_params(spec):
             from mondo_collapse import DAG_COLLAPSE_VERSION
             key_extra.update(dag_collapse=True,
                              dag_collapse_version=DAG_COLLAPSE_VERSION)
+        if dag_source == "mondo_native":
+            from mondo_native_dag import MONDO_NATIVE_VERSION
+            key_extra.update(mondo_native=True,
+                             mondo_native_version=MONDO_NATIVE_VERSION)
     return assembly, key_extra
 
 
@@ -1749,7 +1782,51 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
     `spec["dag_collapse"]` (exp 0109, default False) additionally puts the built
     engine DAG through the splice-to-fixpoint reduction before assembly — a
     DIFFERENT label DAG, hence a different cache key, hence its own bundle.
+
+    `spec["dag_source"] == "mondo_native"` (exp 0110) swaps the whole front end:
+    `mondo_native_dag` builds the label DAG out of Mondo's own is-a graph
+    (closure-support powering, induced Hasse, splice) and hands back a per-code
+    attestation map instead of a SNOMED climb frame. Same seam, same caching, same
+    `min_n=0` contract — only the DAG and the provider differ, which is exactly
+    what the `before_dag` / `attested_provider` override pair exists for.
     """
+    native = str(spec.get("dag_source", "snomed")) == "mondo_native"
+
+    def _assemble_mondo_native(spark, **assembly_params):
+        from charmpheno.omop.doc_spec import PatientCohortDocSpec
+        from charmpheno.omop.multi_domain import (
+            assemble_multidomain_case_finding_corpus)
+        from mondo_native_dag import (
+            build_mondo_native_fit_inputs, format_native_build_report,
+            format_native_powering_report, make_mondo_native_attested_provider)
+        build = _build_inputs or build_mondo_native_fit_inputs
+        assemble = _assemble or assemble_multidomain_case_finding_corpus
+        branch = spec.get("mondo_branch") or ""
+        with _phase(f"build native Mondo label DAG (branch={branch or 'ALL'})"):
+            before_dag, code_map_sdf, kept_cids, support_of, stats = build(
+                spark, cdr=spec["cdr"], billing=spec["billing"],
+                mondo_version=spec["mondo_version"],
+                mondo_cache_dir=spec.get("mondo_cache_dir") or "data/mondo",
+                min_positives=spec["min_positives"],
+                branch_root=(branch or None))
+            provider = make_mondo_native_attested_provider(
+                code_map_sdf, doc_spec=PatientCohortDocSpec())
+            # BOTH lines before any fit: C and K are expected to GROW here
+            # (closure support >= direct support), and the plan says measure,
+            # do not guess.
+            print(format_native_powering_report(stats), flush=True)
+            print(format_native_build_report(stats), flush=True)
+            if on_inputs is not None:
+                # Same by-products contract as the anchor path, in the native id
+                # space: `count_of` is the per-node CLOSURE support (what
+                # per_node_head_report annotates each head with) and
+                # `terminal_cids` the final node set.
+                on_inputs(count_of=support_of, terminal_cids=kept_cids,
+                          reduced={"n_classes": stats["n_final_nodes"]
+                                   - stats["n_coded_kept"], "native": stats})
+        return assemble(spark, before_dag=before_dag, attested_provider=provider,
+                        **assembly_params)
+
     def _assemble_mondo(spark, **assembly_params):
         from charmpheno.omop.doc_spec import PatientCohortDocSpec
         from charmpheno.omop.multi_domain import (
@@ -1787,7 +1864,7 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
         return assemble(spark, before_dag=before_dag, attested_provider=provider,
                         **assembly_params)
 
-    return _assemble_mondo
+    return _assemble_mondo_native if native else _assemble_mondo
 
 
 def multidomain_load_or_build(spark, spec, *, cache_uri=None, on_inputs=None,
@@ -1861,11 +1938,17 @@ def parse_args(argv=None):
                         "siblings, default); 'path_cousins' (also the siblings of every ancestor "
                         "on the root-path); 'path_cousins_kids' (also v's own children's blocks, "
                         "the subtype signal). All bounded; exact Newton kept.")
-    p.add_argument("--dag-source", choices=["snomed", "mondo"], default="snomed",
+    p.add_argument("--dag-source", choices=["snomed", "mondo", "mondo_native"],
+                   default="snomed",
                    help="snomed (default): the disease's SNOMED anchor forest via "
                         "concept_ancestor. mondo: the whole-Mondo powered hierarchy "
                         "(exp 0088) with a POPULATION index + SNOMED-climb attestation "
-                        "(routes through the multi-domain assembler).")
+                        "(routes through the multi-domain assembler). mondo_native: "
+                        "exp 0110's NATIVE Mondo label space — labels are Mondo terms "
+                        "powered by is-a CLOSURE support, the DAG is Mondo's own "
+                        "hierarchy transitively reduced over the kept set, and a doc "
+                        "attests the most-specific terms its codes map/climb to. "
+                        "--dag-collapse does not apply (the splice is intrinsic).")
     p.add_argument("--mondo-branch", default="",
                    help="mondo: restrict to one body-system Mondo subtree (e.g. "
                         "MONDO:0004995 = cardiovascular disorder) — the Step-A template. "
@@ -2062,7 +2145,7 @@ def main() -> int:
             extra_dirs=[d for d in spark.sparkContext.getConf()
                         .get("spark.local.dir", "").split(",") if d],
             log=lambda msg: print(f"[driver] {msg}", flush=True))
-        if args.dag_source == "mondo" or extra_domains:
+        if args.dag_source in _MONDO_DAG_SOURCES or extra_domains:
             # MULTI-DOMAIN corpus (per-domain vocabularies, features_0..N-1), in
             # either of its two flavours, both CACHED through the same seam:
             #   dag_source=mondo — the label DAG is the whole-Mondo powered
@@ -2077,7 +2160,7 @@ def main() -> int:
             # condition-defined and does not window a second domain).
             if args.window_mode != "lookback":
                 raise ValueError(
-                    f"--dag-source mondo / --extra-domains requires "
+                    f"--dag-source {args.dag_source} / --extra-domains requires "
                     f"--window-mode lookback (got {args.window_mode})")
             corpus_spec = multidomain_corpus_spec(args, extra_domains)
 
@@ -2086,7 +2169,8 @@ def main() -> int:
                 # gracefully without these (per_node_head_report).
                 args._count_of = count_of
 
-            label = "MONDO" if args.dag_source == "mondo" else "MULTI-DOMAIN"
+            label = (args.dag_source.upper()
+                     if args.dag_source in _MONDO_DAG_SOURCES else "MULTI-DOMAIN")
             with _phase(f"assemble {label} corpus (cached, cond + "
                         f"{list(extra_domains)})"):
                 bundle = multidomain_load_or_build(

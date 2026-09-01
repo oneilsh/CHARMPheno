@@ -144,6 +144,111 @@ def test_multidomain_cache_key_threads_dag_collapse_from_the_spec():
     assert gpc.multidomain_cache_key(legacy) == off
 
 
+# --------------------------------------------------------------------------- #
+# exp 0110: the NATIVE Mondo label space is its own corpus, and folds only when  #
+# it is selected — the same discipline `dag_collapse` follows.                   #
+# --------------------------------------------------------------------------- #
+def test_mondo_native_is_a_different_corpus_from_the_anchor_hierarchy():
+    """Different attestation (frontier, not every powered ancestor), different
+    powering (closure support, not terminal counts) and a different label DAG
+    (Mondo's own hierarchy, Mondo ids) — so a different C, a different K and
+    different label/frontier columns. It cannot share a bundle with exp 0104's."""
+    k = ccache.compute_bundle_cache_key
+    native = k(**_MD_BASE, mondo_native=True,
+               mondo_native_version="native-mondo-v1")
+    assert native != _MONDO_KEY_NO_COLLAPSE
+    assert native != k(**_MD_BASE, dag_collapse=True,
+                       dag_collapse_version="splice-fixpoint-v1")
+
+
+def test_mondo_native_off_leaves_every_existing_key_byte_identical():
+    """The compatibility half. `mondo_native=False` (and an inert version string)
+    must reproduce the pinned hashes exactly, on both the Mondo and SNOMED paths —
+    which is what keeps exp 0104's and 0109's cached bundles findable."""
+    k = ccache.compute_bundle_cache_key
+    assert k(**_MD_BASE, mondo_native=False) == _MONDO_KEY_NO_COLLAPSE
+    assert k(**_MD_BASE, mondo_native=False,
+             mondo_native_version="whatever") == _MONDO_KEY_NO_COLLAPSE
+    assert k(**_SNOMED_BASE, mondo_native=True,
+             mondo_native_version="native-mondo-v1") == _SNOMED_KEY
+
+
+def test_mondo_native_version_is_folded_into_the_key():
+    """The manual lever: a build whose OUTPUT changes bumps the version, and a
+    bundle from the old construction can never be served to the new one."""
+    k = ccache.compute_bundle_cache_key
+    v1 = k(**_MD_BASE, mondo_native=True, mondo_native_version="native-mondo-v1")
+    v2 = k(**_MD_BASE, mondo_native=True, mondo_native_version="native-mondo-v2")
+    assert v1 != v2
+
+
+def test_mondo_native_key_threads_from_the_spec():
+    """The spec -> key_extra -> compute_bundle_cache_key path the fit and the
+    re-readout both call, and the marker that routes it: a mondo_native spec must
+    NOT be keyed as a SNOMED corpus (that is a guaranteed MISS plus a ~20-minute
+    rebuild of the wrong thing)."""
+    native_spec = dict(_MONDO_SPEC, dag_source="mondo_native")
+    assert gpr.spec_is_multidomain(native_spec)
+    key = gpc.multidomain_cache_key(native_spec)
+    assert key != gpc.multidomain_cache_key(_MONDO_SPEC)
+    # and it is stable under the flag exp 0109 owns, which the native path pins off
+    assert key == gpc.multidomain_cache_key(
+        dict(native_spec, dag_collapse=False))
+
+
+def test_mondo_native_folds_its_own_module_sources():
+    """Auto-invalidation, the discipline `dag_src`/`mondo_src` give every other
+    path: an edit to either NEW module changes the key, so a stale native bundle
+    can never be served. Checked by monkeypatching the hash helper rather than by
+    pinning a hash, because these modules are expected to keep changing."""
+    import mondo_native_dag
+    import mondo_usage_core
+
+    k = ccache.compute_bundle_cache_key
+    base = k(**_MD_BASE, mondo_native=True,
+             mondo_native_version="native-mondo-v1")
+    real = ccache._module_source_hash
+    for target in (mondo_native_dag, mondo_usage_core):
+        ccache._module_source_hash = (
+            lambda m, _t=target: "moved" if m is _t else real(m))
+        try:
+            moved = k(**_MD_BASE, mondo_native=True,
+                      mondo_native_version="native-mondo-v1")
+        finally:
+            ccache._module_source_hash = real
+        assert moved != base, f"{target.__name__} is not folded into the key"
+
+
+def test_native_spec_mismatch_catches_a_contradicting_override():
+    """A native fit records `dag_source: mondo_native`; its int2cid values are
+    plain ints, so `mondo_spec_mismatch`'s `MONDO:`-prefix witness cannot see it
+    and the manifest field is the witness instead."""
+    m = {"corpus_manifest": {"dag_source": "mondo_native"}}
+    assert gpr.native_spec_mismatch({"dag_source": "snomed"}, m)
+    assert gpr.native_spec_mismatch({"dag_source": "mondo"}, m)
+    assert not gpr.native_spec_mismatch({"dag_source": "mondo_native"}, m)
+    # a non-native fit is none of this function's business
+    assert not gpr.native_spec_mismatch(
+        {"dag_source": "snomed"}, {"corpus_manifest": {"dag_source": "mondo"}})
+
+
+def test_readout_recovers_a_native_spec_from_the_manifest():
+    """The recovery template: the re-readout reads `dag_source` back, keeps the
+    Mondo build inputs, pins `dag_collapse` off (the splice is intrinsic to the
+    native build, so asking for it again would double-apply), and recomputes the
+    fit's own key."""
+    m = _mondo_manifest()
+    m["dag_source"] = m["corpus_manifest"]["dag_source"] = "mondo_native"
+    m["corpus_manifest"]["dag_collapse"] = True     # a stale/incoherent field
+    spec = gpr.corpus_spec_from_manifest(m)
+    assert spec["dag_source"] == "mondo_native"
+    assert spec["dag_collapse"] is False
+    assert spec["index_mode"] == "population" and spec["min_n"] == 0
+    assert spec["min_positives"] == 100
+    assert (gpr.bundle_key_from_manifest(m)
+            == gpc.multidomain_cache_key(spec))
+
+
 @pytest.mark.parametrize("field,val", [
     ("extra_domains", ("drug", "procedure")),
     ("index_mode", "disease"),

@@ -62,10 +62,11 @@ import numpy as np
 from _driver_common import _phase, configure_logging, make_spark_session
 from disk_telemetry import start_disk_telemetry
 from gated_pc_cloud import (
-    _DRIVER_READOUT_MAX_C, _collect_head_proba, _collect_lean_proba,
-    _collect_theta_labels, _dump_partial_results, distributed_score_arm,
-    format_arm_readout, multidomain_cache_key, multidomain_load_or_build,
-    readout_ab_report, readout_from_proba, resolve_readout_mode, score_arm,
+    _DRIVER_READOUT_MAX_C, _MONDO_DAG_SOURCES, _collect_head_proba,
+    _collect_lean_proba, _collect_theta_labels, _dump_partial_results,
+    distributed_score_arm, format_arm_readout, multidomain_cache_key,
+    multidomain_load_or_build, readout_ab_report, readout_from_proba,
+    resolve_readout_mode, score_arm,
 )
 
 # What the batched solve got before fits recorded their own cap. Runs older than
@@ -132,12 +133,15 @@ def build_parser() -> argparse.ArgumentParser:
     # the cache rather than mis-scoring).
     p.add_argument("--billing", default=None,
                    help="Billing project for a rebuild (default: the manifest's).")
-    p.add_argument("--dag-source", choices=["snomed", "mondo"], default=None,
+    p.add_argument("--dag-source", choices=["snomed", "mondo", "mondo_native"],
+                   default=None,
                    help="The fit's --dag-source. Default: the manifest's, which for "
                         "runs predating this field is absent — so a MONDO run from "
                         "before it was recorded must pass --dag-source mondo, or it "
                         "keys (and would rebuild) as the disease-anchored SNOMED "
-                        "corpus instead.")
+                        "corpus instead. Every exp-0110 (mondo_native) run records "
+                        "it, so an override there can only contradict the manifest "
+                        "and is rejected (exit 2).")
     p.add_argument("--cache-write", choices=["on", "off"], default="on",
                    help="write a rebuilt bundle through to --cache-uri (default on, "
                         "so the next readout of this run is a HIT). 'off' keeps the "
@@ -274,7 +278,9 @@ def corpus_spec_from_manifest(manifest: dict, *, doc_min_length=None, billing=No
             "Pass --doc-min-length (the fit's value) or --bundle-path.")
     dag_source = str(dag_source if dag_source is not None
                      else _pick("dag_source", "snomed"))
-    mondo = dag_source == "mondo"
+    # Both Mondo flavours (exp 0088/0104's anchor hierarchy and exp 0110's native
+    # label space) share the population index, min_n=0 and the Mondo build inputs.
+    mondo = dag_source in _MONDO_DAG_SOURCES
     extra_domains = list(_pick("extra_domains", []) or [])
     spec = {
         "dag_source": dag_source,
@@ -311,17 +317,42 @@ def corpus_spec_from_manifest(manifest: dict, *, doc_min_length=None, billing=No
                             else _pick("mondo_cache_dir", "data/mondo")),
         # exp 0109. Defaults to False, which is what EVERY manifest written before
         # the flag existed means — so an old run still recomputes its own key.
-        "dag_collapse": bool(dag_collapse if dag_collapse is not None
-                             else _pick("dag_collapse", False)),
+        # On the exp-0110 native path the splice is intrinsic to the build, so the
+        # flag is pinned False there and cannot double-apply (this mirrors
+        # `gated_pc_cloud.multidomain_corpus_spec`, which is what wrote the field).
+        "dag_collapse": (False if dag_source == "mondo_native" else
+                         bool(dag_collapse if dag_collapse is not None
+                              else _pick("dag_collapse", False))),
     }
     return spec
 
 
 def spec_is_multidomain(spec) -> bool:
-    """True when the corpus came from the multi-domain assembler (Mondo, or plain
-    extra domains) — the two flavours whose cache key carries the extra fold."""
-    return (str(spec.get("dag_source", "snomed")) == "mondo"
+    """True when the corpus came from the multi-domain assembler (either Mondo
+    flavour, or plain extra domains) — the shapes whose cache key carries the
+    extra fold. Missing `mondo_native` here would recompute a SNOMED key for an
+    exp-0110 run, i.e. a guaranteed MISS followed by a ~20-minute rebuild of the
+    wrong corpus, which is exactly the failure `mondo_spec_mismatch` was written
+    for after exp 0104's fresh-cluster recovery."""
+    return (str(spec.get("dag_source", "snomed")) in _MONDO_DAG_SOURCES
             or bool(spec.get("extra_domains")))
+
+
+def native_spec_mismatch(spec, manifest) -> bool:
+    """True when the SAVED FIT is an exp-0110 native run but the rebuild spec
+    resolved to something else.
+
+    The sibling of `mondo_spec_mismatch` for the native label space, and it needs
+    its own witness: a native fit's `int2cid` values are plain ints (the Mondo
+    curie's numeric part — see `mondo_native_dag`'s docstring on why they cannot
+    be curie strings), so the `MONDO:`-prefix test cannot see it. The manifest's
+    own `corpus_manifest.dag_source` is the witness instead, which every native
+    run records; the only way to reach here is a CLI override that contradicts
+    it, and silently rebuilding a DIFFERENT label space under a wrong key is worth
+    an exit 2 rather than a drift-gate failure 20 minutes later."""
+    cm = manifest.get("corpus_manifest") or {}
+    saved = str(cm.get("dag_source") or manifest.get("dag_source") or "")
+    return saved == "mondo_native" and str(spec.get("dag_source")) != "mondo_native"
 
 
 def mondo_spec_mismatch(spec, manifest) -> bool:
@@ -659,6 +690,14 @@ def main(argv=None) -> int:
                     return 1
                 spec = corpus_spec_from_manifest(
                     manifest, doc_min_length=args.doc_min_length, **spec_over)
+                if native_spec_mismatch(spec, manifest):
+                    print("[readout] ERROR: the saved fit is an exp-0110 NATIVE "
+                          "Mondo run (corpus_manifest.dag_source=mondo_native), "
+                          "but the rebuild spec resolved dag_source="
+                          f"{spec['dag_source']!r} — that keys, and on the MISS "
+                          "rebuilds, a different label space. Drop the override, "
+                          "or pass --dag-source mondo_native.", flush=True)
+                    return 2
                 if mondo_spec_mismatch(spec, manifest):
                     print("[readout] ERROR: the saved fit's label space is MONDO "
                           "ids, but the rebuild spec resolved dag_source="

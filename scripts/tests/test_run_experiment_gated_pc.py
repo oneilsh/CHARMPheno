@@ -230,6 +230,84 @@ def test_dag_collapse_is_mondo_only_in_the_spec(monkeypatch):
     assert gated_pc_cloud.multidomain_corpus_spec(parsed, ())["dag_collapse"] is False
 
 
+def test_mondo_native_dag_source_threads_end_to_end(monkeypatch):
+    """exp 0110: `dag_source: mondo_native` front matter -> --dag-source ->
+    the driver parses it -> the corpus spec routes it through the Mondo branch of
+    the multi-domain assembler (population index, min_n=0, the Mondo build inputs
+    kept) with `dag_collapse` pinned OFF, because the native build applies the
+    splice itself and asking again would double-apply it."""
+    mod = _run_exp(monkeypatch)
+    eff = {**_base_eff(), "dag_source": "mondo_native", "min_positives": 100,
+           "mondo_version": "2026-06-02", "window_mode": "lookback",
+           "label_mask_mode": "closure", "localize_head": True}
+    args = mod.build_gated_pc_args(eff, "/out")
+    assert args[args.index("--dag-source") + 1] == "mondo_native"
+
+    cloud = str(Path(mod.__file__).resolve().parent.parent / "analysis" / "cloud")
+    if cloud not in sys.path:
+        sys.path.insert(0, cloud)
+    import gated_pc_cloud
+    parsed = gated_pc_cloud.parse_args(args)
+    assert parsed.dag_source == "mondo_native"
+    spec = gated_pc_cloud.multidomain_corpus_spec(parsed, ("drug",))
+    assert spec["dag_source"] == "mondo_native"
+    assert spec["index_mode"] == "population" and spec["min_n"] == 0
+    assert spec["min_positives"] == 100 and spec["mondo_version"] == "2026-06-02"
+    assert spec["dag_collapse"] is False
+
+    # ...even when the flag is explicitly asked for: it is not an option here.
+    with_flag = gated_pc_cloud.parse_args(mod.build_gated_pc_args(
+        {**eff, "dag_collapse": True}, "/out"))
+    assert with_flag.dag_collapse is True
+    assert gated_pc_cloud.multidomain_corpus_spec(
+        with_flag, ("drug",))["dag_collapse"] is False
+
+
+def test_mondo_native_selects_the_native_assembler(monkeypatch):
+    """The dispatch itself: `mondo_assemble_fn` must hand back the NATIVE closure
+    for a native spec and the anchor-hierarchy one otherwise. Checked through the
+    seam (a fake builder), since the real one is minutes of BigQuery."""
+    mod = _run_exp(monkeypatch)
+    cloud = str(Path(mod.__file__).resolve().parent.parent / "analysis" / "cloud")
+    if cloud not in sys.path:
+        sys.path.insert(0, cloud)
+    import gated_pc_cloud
+
+    seen = {}
+
+    def _fake_assemble(spark, *, before_dag, attested_provider, **kw):
+        seen["dag"] = before_dag
+        return "bundle"
+
+    class _Dag:
+        names = {-1: "root"}
+
+        def nodes(self):
+            return {-1, 4995}
+
+    def _fake_native_build(spark, **kw):
+        seen["native_kw"] = kw
+        return (_Dag(), None, {4995}, {4995: 400},
+                {"version": "native-mondo-v1", "n_kept": 1, "n_coded_kept": 1,
+                 "n_hasse_nodes": 1, "n_hasse_multi_parent": 0,
+                 "n_final_nodes": 1, "n_final_multi_parent": 0,
+                 "min_positives": 100, "n_codes_resolved": 2, "n_coded_terms": 1,
+                 "n_terms_with_any_support": 3, "n_powered": 1,
+                 "min_support_kept": 400, "n_codes_attesting": 2, "branch": "",
+                 "collapse": {"spliced": 0, "dropped_childless": 0, "passes": 0,
+                              "predicted_degenerate": 1}})
+
+    spec = {"dag_source": "mondo_native", "cdr": "p.d", "billing": "bp",
+            "mondo_version": "2026-06-02", "mondo_cache_dir": "data/mondo",
+            "min_positives": 100, "mondo_branch": ""}
+    fn = gated_pc_cloud.mondo_assemble_fn(
+        spec, _build_inputs=_fake_native_build, _assemble=_fake_assemble)
+    assert fn(None) == "bundle"
+    assert seen["native_kw"]["min_positives"] == 100
+    assert seen["native_kw"]["branch_root"] is None
+    assert 4995 in seen["dag"].nodes()          # Mondo term ids, not OMOP cids
+
+
 def test_localize_head_flag_threads(monkeypatch):
     """localize_head frontmatter -> --localize-head -> driver parses it -> the shim
     estimator carries localizeHead=True."""
