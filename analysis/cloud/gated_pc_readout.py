@@ -163,6 +163,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "so a wrong value misses the cache and would rebuild a "
                         "different corpus (the drift gate catches it). Default: the "
                         "manifest's, else off — every fit predating the flag.")
+    p.add_argument("--preindex-closure", choices=["on", "off"], default=None,
+                   help="mondo runs: whether the fit's corpus carries E1's "
+                        "pre-index closure column (--preindex-closure). It is a "
+                        "cache-KEY input and it changes what a rebuild produces, "
+                        "so a wrong value misses the cache and would rebuild a "
+                        "different bundle. Default: the manifest's, else off — "
+                        "every fit predating the flag.")
     p.add_argument("--recall-targets", default="0.5,0.8,0.9")
     p.add_argument("--fdr-targets", default="0.1,0.25,0.5")
     p.add_argument("--min-label-count", type=int, default=None,
@@ -250,7 +257,7 @@ _SNOMED_KEY_KEYS = (
 def corpus_spec_from_manifest(manifest: dict, *, doc_min_length=None, billing=None,
                               dag_source=None, mondo_version=None, mondo_branch=None,
                               min_positives=None, mondo_cache_dir=None,
-                              dag_collapse=None) -> dict:
+                              dag_collapse=None, preindex_closure=None) -> dict:
     """The corpus SPEC a gated_pc manifest describes — key inputs + rebuild inputs.
 
     The current driver writes this dict into `corpus_manifest` verbatim, so for any
@@ -337,6 +344,15 @@ def corpus_spec_from_manifest(manifest: dict, *, doc_min_length=None, billing=No
         # override: unlike the Mondo build inputs, the doc unit is not something a
         # rebuild can be told to differ on, because the assembler hard-codes it.
         "doc_spec": str(_pick("doc_spec", DEFAULT_DOC_SPEC)),
+        # E1 (exp E-census onward). Mondo-only, defaults to False — what every
+        # manifest written before the flag existed means — and the CLI wins in
+        # both directions for a fit whose manifest omits or contradicts it, the
+        # same tri-state shape `dag_collapse` uses. It is a cache-key input, so a
+        # wrong value MISSES the cache rather than mis-scoring.
+        "preindex_closure": (bool(preindex_closure
+                                  if preindex_closure is not None
+                                  else _pick("preindex_closure", False))
+                             if mondo else False),
     }
     return spec
 
@@ -676,7 +692,9 @@ def main(argv=None) -> int:
                      min_positives=args.min_positives,
                      mondo_cache_dir=args.mondo_cache_dir,
                      dag_collapse=(None if args.dag_collapse is None
-                                   else args.dag_collapse == "on"))
+                                   else args.dag_collapse == "on"),
+                     preindex_closure=(None if args.preindex_closure is None
+                                       else args.preindex_closure == "on"))
     # The fit records the cache root it used, so a recovery command need not
     # remember it; an explicit --cache-uri still wins.
     cm = manifest.get("corpus_manifest") or {}
@@ -778,7 +796,8 @@ def main(argv=None) -> int:
                       f"index_mode={spec['index_mode']} min_n={spec['min_n']} "
                       f"mondo_branch={spec['mondo_branch'] or 'ALL'} "
                       f"min_positives={spec['min_positives']} "
-                      f"dag_collapse={spec['dag_collapse']}", flush=True)
+                      f"dag_collapse={spec['dag_collapse']} "
+                      f"preindex_closure={spec['preindex_closure']}", flush=True)
                 bundle = rebuild_bundle(
                     spark, spec,
                     cache_uri=(cache_uri if args.cache_write == "on" else None))

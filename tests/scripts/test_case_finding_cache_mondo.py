@@ -296,6 +296,124 @@ def test_single_domain_key_still_requires_the_forward_window_knobs():
 
 
 # --------------------------------------------------------------------------- #
+# E1: the pre-index closure column is corpus identity, folded ONLY when on — the  #
+# same discipline `dag_collapse` and `mondo_native` follow, and the flag-off half  #
+# is what keeps every cached bundle in every bucket findable.                     #
+# --------------------------------------------------------------------------- #
+def test_preindex_closure_off_leaves_all_four_pinned_hashes_byte_identical():
+    """The compatibility half, and the acceptance criterion of the whole WP: a
+    spec that does not ask for the column keys exactly where it keyed before the
+    flag existed — explicitly off, and with an inert version string."""
+    k = ccache.compute_bundle_cache_key
+    assert k(**_MD_BASE, preindex_closure=False) == _MONDO_KEY_NO_COLLAPSE
+    assert k(**_MD_BASE, preindex_closure=False,
+             preindex_closure_version="whatever") == _MONDO_KEY_NO_COLLAPSE
+    assert k(**_SNOMED_BASE, preindex_closure=False) == _SNOMED_KEY
+    assert k(**_SNOMED_BASE, emit_labels=True, label_mask_mode="closure",
+             preindex_closure=False) == _SNOMED_LABELED_KEY
+    assert k(**dict(_SNOMED_BASE, window_mode="lookback", strip_mode="both",
+                    lookback_days=730, label_window_days=180),
+             preindex_closure=False) == _SNOMED_LOOKBACK_KEY
+
+
+def test_preindex_closure_on_is_a_different_bundle():
+    """A bundle carrying `R_d` is a different ARTIFACT: a readout can ask for the
+    column and a diagnostic refuses a bundle that lacks it, so the two cannot
+    share a cache entry."""
+    k = ccache.compute_bundle_cache_key
+    on = k(**_MD_BASE, preindex_closure=True,
+           preindex_closure_version="preindex-closure-v1")
+    assert on != _MONDO_KEY_NO_COLLAPSE
+    assert on != k(**_MD_BASE, mondo_native=True,
+                   mondo_native_version="native-mondo-v1")
+
+
+def test_preindex_closure_version_is_folded_into_the_key():
+    """A primitive whose OUTPUT changes must not be served a bundle built by the
+    old one; the version string is the manual lever that guarantees it."""
+    k = ccache.compute_bundle_cache_key
+    v1 = k(**_MD_BASE, preindex_closure=True, preindex_closure_version="v1")
+    v2 = k(**_MD_BASE, preindex_closure=True, preindex_closure_version="v2")
+    assert v1 != v2
+
+
+def test_preindex_closure_does_not_leak_into_the_snomed_key():
+    """The column is built by re-running a MONDO provider over the feature window;
+    the SNOMED path has none, and its keys stay frozen even if a caller passes the
+    flag by accident."""
+    k = ccache.compute_bundle_cache_key
+    assert k(**_SNOMED_BASE, preindex_closure=True,
+             preindex_closure_version="preindex-closure-v1") == _SNOMED_KEY
+
+
+def test_preindex_closure_folds_its_module_source():
+    """Auto-invalidation, the discipline every other folded module gets: an edit to
+    `preindex_closure.py` changes the key, so a bundle built by an older closure
+    rule can never be served to a newer one. Checked by monkeypatching the hash
+    helper — the module is expected to keep changing."""
+    import preindex_closure as pic
+
+    k = ccache.compute_bundle_cache_key
+    base = k(**_MD_BASE, preindex_closure=True,
+             preindex_closure_version="preindex-closure-v1")
+    real = ccache._module_source_hash
+    ccache._module_source_hash = (
+        lambda m, _t=pic: "moved" if m is _t else real(m))
+    try:
+        moved = k(**_MD_BASE, preindex_closure=True,
+                  preindex_closure_version="preindex-closure-v1")
+    finally:
+        ccache._module_source_hash = real
+    assert moved != base
+    # ...and with the flag OFF the module's hash is not consulted at all, so the
+    # pinned key cannot move when this module is edited.
+    ccache._module_source_hash = (
+        lambda m, _t=pic: "moved" if m is _t else real(m))
+    try:
+        assert k(**_MD_BASE) == _MONDO_KEY_NO_COLLAPSE
+    finally:
+        ccache._module_source_hash = real
+
+
+def test_preindex_closure_threads_from_the_spec():
+    """spec -> key_extra -> compute_bundle_cache_key, the path the fit and the
+    re-readout both take; and a spec predating the field behaves exactly like off."""
+    base = dict(_MONDO_SPEC, dag_source="mondo_native")
+    off = gpc.multidomain_cache_key(base)
+    on = gpc.multidomain_cache_key(dict(base, preindex_closure=True))
+    assert off == gpc.multidomain_cache_key(dict(base, preindex_closure=False))
+    assert off != on
+    legacy = {k_: v for k_, v in base.items() if k_ != "preindex_closure"}
+    assert gpc.multidomain_cache_key(legacy) == off
+
+
+def test_readout_reads_preindex_closure_from_the_manifest_and_lets_the_cli_win():
+    """The recovery half of the thread, same tri-state shape as `dag_collapse`: a
+    wrong value MISSES the cache (and would rebuild a different bundle) rather
+    than silently scoring against a corpus without the column."""
+    m = _mondo_manifest()
+    m["dag_source"] = m["corpus_manifest"]["dag_source"] = "mondo_native"
+    m["corpus_manifest"]["preindex_closure"] = True
+    assert gpr.corpus_spec_from_manifest(m)["preindex_closure"] is True
+    assert gpr.corpus_spec_from_manifest(
+        m, preindex_closure=False)["preindex_closure"] is False
+    old = _mondo_manifest()
+    old["dag_source"] = old["corpus_manifest"]["dag_source"] = "mondo_native"
+    assert gpr.corpus_spec_from_manifest(old)["preindex_closure"] is False
+    assert gpr.corpus_spec_from_manifest(
+        old, preindex_closure=True)["preindex_closure"] is True
+    assert gpr.bundle_key_from_manifest(m) != gpr.bundle_key_from_manifest(old)
+
+
+def test_readout_parses_the_preindex_closure_flag():
+    a = gpr.build_parser().parse_args(["--run-dir", "/runs/0110-x"])
+    assert a.preindex_closure is None               # tri-state: defer to manifest
+    b = gpr.build_parser().parse_args(
+        ["--run-dir", "/runs/0110-x", "--preindex-closure", "on"])
+    assert b.preindex_closure == "on"
+
+
+# --------------------------------------------------------------------------- #
 # The DOC-SPEC hole (audit seam 4 / R5.3): the doc unit is hard-coded in the      #
 # assembler and in the driver's provider construction and was absent from every   #
 # cache key, so a driver-side doc-unit change would have produced a DIFFERENT     #
@@ -439,6 +557,28 @@ def test_multidomain_bundle_round_trips_through_the_cache(spark, tmp_path):
 
 
 @pytest.mark.slow
+def test_the_preindex_witness_round_trips_through_save_and_try_load(spark,
+                                                                    tmp_path):
+    """R1.4 end to end. The extra parquet column would otherwise ride SILENTLY —
+    `_meta_dict` records only the DAG maps + vocab — so a mixed-vintage cache dir
+    would hand a readout a bundle without it and die at `select`. A bundle with
+    the witness comes back with it; one without comes back saying so, which is the
+    correct reading for every entry written before this existed."""
+    import preindex_closure as pic
+
+    bundle = _md_bundle(spark)
+    uri = f"file://{tmp_path}/cache-witness"
+    ccache.save(spark, bundle, uri, "nowitness")
+    assert pic.bundle_preindex_witness(
+        ccache.try_load(spark, uri, "nowitness")) is None
+
+    bundle.preindex_closure = pic.preindex_witness()
+    ccache.save(spark, bundle, uri, "witness")
+    loaded = ccache.try_load(spark, uri, "witness")
+    assert pic.bundle_preindex_witness(loaded) == pic.preindex_witness()
+
+
+@pytest.mark.slow
 def test_single_domain_bundle_round_trip_is_unchanged(spark, tmp_path):
     """The old shape still writes the old meta (`vocab_map`, no `vocab_maps`) and
     still comes back a CaseFindingBundle — nothing about an existing entry moved."""
@@ -491,7 +631,7 @@ _MONDO_SPEC = {
     "window_mode": "lookback", "prior_obs_days": 0, "window_days": 0,
     "mondo_version": "2026-06-02", "mondo_branch": "", "min_positives": 100,
     "mondo_cache_dir": "data/mondo", "dag_collapse": False,
-    "doc_spec": "patient_cohort",
+    "doc_spec": "patient_cohort", "preindex_closure": False,
 }
 
 
@@ -556,6 +696,54 @@ def test_mondo_load_or_build_misses_once_then_hits(spark, tmp_path, capsys):
     assert b2.parent_int == _PARENT_INT
     assert {r["person_id"] for r in b2.train_df.collect()} == \
         {r["person_id"] for r in built.train_df.collect()}
+
+
+@pytest.mark.parametrize("flag,expected", [(True, 1), (False, 0)])
+def test_the_assemble_seam_runs_the_preindex_post_pass_only_when_asked(
+        monkeypatch, flag, expected):
+    """R1.1's placement: the pre-index column is a DRIVER-LEVEL post-pass applied
+    between the assembler's return and the cache write — the `dag_collapse` seam,
+    for the same reason (editing `multi_domain`/`case_finding_assembly` would move
+    their source hashes and orphan every cached bundle in the repo). So the seam
+    must call it after `assemble`, with the corpus's own window/sample, and must
+    not call it at all when the flag is off."""
+    import mondo_native_dag as mnd
+    import preindex_closure as pic
+
+    built = object()
+    seen = {}
+
+    def _fake_attach(spark_, bundle, **kw):
+        seen.update(kw)
+        seen["bundle"] = bundle
+        return bundle
+
+    monkeypatch.setattr(pic, "attach_preindex_closure_to_bundle", _fake_attach)
+    monkeypatch.setattr(pic, "format_preindex_report", lambda b, **kw: "ok")
+    monkeypatch.setattr(mnd, "format_native_build_report", lambda s: "build")
+    monkeypatch.setattr(mnd, "format_native_powering_report", lambda s: "power")
+
+    spec = dict(_MONDO_SPEC, dag_source="mondo_native", preindex_closure=flag)
+    assembly, _ = gpc._multidomain_params(spec)
+    fn = gpc.mondo_assemble_fn(
+        spec, _build_inputs=lambda spark_, **kw: (_FakeDag(), object(), set(), {},
+                                                  {"n_final_nodes": 1,
+                                                   "n_coded_kept": 1}),
+        _assemble=lambda spark_, **kw: built)
+    out = fn(None, **assembly)
+
+    assert out is built
+    if expected:
+        # every window/sample input comes from the corpus's OWN assembly kwargs,
+        # so the re-derived index cannot drift from the one the corpus was built on
+        assert seen["bundle"] is built
+        assert seen["person_mod"] == spec["person_mod"]
+        assert seen["lookback_days"] == spec["lookback_days"]
+        assert seen["label_window_days"] == spec["label_window_days"]
+        assert seen["n_bg"] == spec["n_bg"] and seen["tpn"] == spec["tpn"]
+        assert seen["index_mode"] == "population"
+    else:
+        assert seen == {}
 
 
 def test_head_starvation_probe_degrades_without_the_power_counts():

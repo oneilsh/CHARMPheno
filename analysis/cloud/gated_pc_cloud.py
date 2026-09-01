@@ -1764,6 +1764,12 @@ def multidomain_corpus_spec(args, extra_domains) -> dict:
         # recomputes the fit's own key. Today it is a constant; the point is that
         # when it stops being one, the key moves with it.
         "doc_spec": doc_spec_identity(),
+        # E1's pre-index closure column. Mondo-only — it is built by re-running
+        # the SAME attestation provider on the feature window, and only the Mondo
+        # paths construct one driver-side — and OFF by default, so an existing
+        # experiment's spec (and therefore its bundle key) is unchanged.
+        "preindex_closure": (bool(getattr(args, "preindex_closure", False))
+                             if mondo else False),
     }
 
 
@@ -1803,6 +1809,13 @@ def _multidomain_params(spec):
             from mondo_native_dag import MONDO_NATIVE_VERSION
             key_extra.update(mondo_native=True,
                              mondo_native_version=MONDO_NATIVE_VERSION)
+        # E1. Folded ONLY when on (R1.2): a bundle carrying the pre-index column
+        # is a different artifact, but a spec that does not ask for it must key
+        # byte-identically to one written before this existed.
+        if spec.get("preindex_closure"):
+            from preindex_closure import PREINDEX_CLOSURE_VERSION
+            key_extra.update(preindex_closure=True,
+                             preindex_closure_version=PREINDEX_CLOSURE_VERSION)
     return assembly, key_extra
 
 
@@ -1840,8 +1853,42 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
     attestation map instead of a SNOMED climb frame. Same seam, same caching, same
     `min_n=0` contract — only the DAG and the provider differ, which is exactly
     what the `before_dag` / `attested_provider` override pair exists for.
+
+    `spec["preindex_closure"]` (E1, default False) adds a POST-PASS on the
+    assembled bundle: `preindex_closure.attach_preindex_closure_to_bundle` re-runs
+    the same provider over the same DAG on the FEATURE window and writes the
+    per-document sparse `R_d` column plus its witness. Placed here — between the
+    assembler's return and the cache write — rather than inside `multi_domain`,
+    because THAT module's source hash is folded into every multi-domain bundle key
+    and editing it would orphan every cached bundle including 0104's record. Same
+    reasoning, same seam, same discipline as `dag_collapse` above.
     """
     native = str(spec.get("dag_source", "snomed")) == "mondo_native"
+
+    def _with_preindex(spark, bundle, *, before_dag, provider, assembly_params):
+        """The E1 post-pass, or the bundle untouched when the flag is off.
+
+        Everything it needs about the corpus comes from `assembly_params` (the
+        exact kwargs the assembler was just called with, so the window and the
+        sample cannot drift from the corpus) and from the BUNDLE (`parent_int` /
+        `cid2int` / `int2cid` — the POST-PRUNE internals, per R1.3, never from
+        assembler internals the driver does not hold)."""
+        if not spec.get("preindex_closure"):
+            return bundle
+        from preindex_closure import (attach_preindex_closure_to_bundle,
+                                      format_preindex_report)
+        with _phase("pre-index closure (E1): re-derive the feature window"):
+            bundle = attach_preindex_closure_to_bundle(
+                spark, bundle, before_dag=before_dag, attested_provider=provider,
+                cdr=spec["cdr"], billing=spec["billing"],
+                person_mod=assembly_params["person_mod"],
+                lookback_days=assembly_params["lookback_days"],
+                label_window_days=assembly_params["label_window_days"],
+                n_bg=assembly_params["n_bg"], tpn=assembly_params["tpn"],
+                index_mode=assembly_params.get("index_mode", "population"),
+                disease=assembly_params.get("disease", "rare6"))
+            print(format_preindex_report(bundle), flush=True)
+        return bundle
 
     def _assemble_mondo_native(spark, **assembly_params):
         from charmpheno.omop.doc_spec import PatientCohortDocSpec
@@ -1875,8 +1922,10 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
                 on_inputs(count_of=support_of, terminal_cids=kept_cids,
                           reduced={"n_classes": stats["n_final_nodes"]
                                    - stats["n_coded_kept"], "native": stats})
-        return assemble(spark, before_dag=before_dag, attested_provider=provider,
-                        **assembly_params)
+        bundle = assemble(spark, before_dag=before_dag,
+                          attested_provider=provider, **assembly_params)
+        return _with_preindex(spark, bundle, before_dag=before_dag,
+                              provider=provider, assembly_params=assembly_params)
 
     def _assemble_mondo(spark, **assembly_params):
         from charmpheno.omop.doc_spec import PatientCohortDocSpec
@@ -1912,8 +1961,10 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
             if on_inputs is not None:
                 on_inputs(count_of=count_of, terminal_cids=terminal_cids,
                           reduced=reduced)
-        return assemble(spark, before_dag=before_dag, attested_provider=provider,
-                        **assembly_params)
+        bundle = assemble(spark, before_dag=before_dag,
+                          attested_provider=provider, **assembly_params)
+        return _with_preindex(spark, bundle, before_dag=before_dag,
+                              provider=provider, assembly_params=assembly_params)
 
     return _assemble_mondo_native if native else _assemble_mondo
 
@@ -2020,6 +2071,21 @@ def parse_args(argv=None):
                         "exactly {root} u {only-children} under closure masking. OFF "
                         "by default: it changes the corpus (and its cache key), so "
                         "existing experiments reproduce byte-identically.")
+    p.add_argument("--preindex-closure", action="store_true",
+                   help="mondo: also compute E1's PRE-INDEX CLOSURE column — per "
+                        "document, the sparse engine-id closure of what the "
+                        "patient already carried BEFORE the index, i.e. the label "
+                        "definition evaluated on the FEATURE window instead of the "
+                        "label window (preindex_closure.py). It is what makes "
+                        "incident eligibility (c NOT IN R_d) computable at eval "
+                        "time, and it is a CORPUS property: computed once, stored "
+                        "with the corpus, reused byte-identically by every run "
+                        "being compared, with nothing a fit produces entering it. "
+                        "Costs one extra full-history condition scan + one "
+                        "attestation pass at BUILD time only (a cache HIT pays "
+                        "nothing). OFF by default: it changes the bundle (and its "
+                        "cache key), so existing experiments reproduce "
+                        "byte-identically.")
     p.add_argument("--k", type=int, default=50,
                    help="K for the UNGATED --with-dag-head arm only; the gated arms "
                         "derive K from the layout (n_bg + nodes*tpn).")
@@ -2451,6 +2517,12 @@ def main() -> int:
                 # recomputes the fit's own key.
                 "doc_spec": ((corpus_spec or {}).get("doc_spec")
                              or doc_spec_identity()),
+                # E1: whether this run's corpus carries the pre-index closure
+                # column. A cache-key input, so a re-readout that reads it back
+                # lands on the fit's own bundle — and the WITNESS the census and
+                # every incident readout check before touching the column.
+                "preindex_closure": (corpus_spec or {}).get(
+                    "preindex_closure", False),
                 "domain_vocab_sizes": [len(vm) for vm in vocab_maps],
                 "int2cid": {str(i): c for i, c in bundle.int2cid.items()},
                 "name_by_id": {str(c): n for c, n in bundle.name_by_id.items()}},
