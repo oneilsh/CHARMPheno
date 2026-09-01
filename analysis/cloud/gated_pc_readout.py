@@ -234,6 +234,11 @@ def resolve_run_dir(pattern):
 # The single-domain assembler's kwargs that are also cache-key inputs (billing is
 # an assembly input only). Kept next to the spec builder so "what the key needs"
 # and "what a rebuild needs" cannot drift apart.
+#
+# `doc_spec` is NOT here for the same reason it is not in
+# `gated_pc_cloud._SPEC_ASSEMBLY_KEYS`: these names are forwarded to the
+# assembler (`rebuild_bundle` below), which takes no doc-spec kwarg. It is
+# key-only, and is passed explicitly at each of the two sites that need it.
 _SNOMED_KEY_KEYS = (
     "source_table", "person_mod", "vocab_size", "min_df", "min_patient_count",
     "doc_min_length", "prior_obs_days", "window_days", "disease", "min_n",
@@ -254,6 +259,8 @@ def corpus_spec_from_manifest(manifest: dict, *, doc_min_length=None, billing=No
     `corpus_manifest` -> top level -> a documented default, and the CLI overrides
     supply what neither has. Raises KeyError naming the field when a required one is
     missing everywhere."""
+    from _case_finding_cache import DEFAULT_DOC_SPEC
+
     cm = manifest.get("corpus_manifest", {})
 
     _MISSING = object()
@@ -323,6 +330,13 @@ def corpus_spec_from_manifest(manifest: dict, *, doc_min_length=None, billing=No
         "dag_collapse": (False if dag_source == "mondo_native" else
                          bool(dag_collapse if dag_collapse is not None
                               else _pick("dag_collapse", False))),
+        # The DOC UNIT (R5.3 / audit seam 4). A cache-key input as of this
+        # change, and the default is what EVERY manifest written before the field
+        # existed means — every corpus in the repo was assembled under it — so an
+        # old run still recomputes its own byte-identical key. There is no CLI
+        # override: unlike the Mondo build inputs, the doc unit is not something a
+        # rebuild can be told to differ on, because the assembler hard-codes it.
+        "doc_spec": str(_pick("doc_spec", DEFAULT_DOC_SPEC)),
     }
     return spec
 
@@ -387,7 +401,8 @@ def bundle_key_from_manifest(manifest: dict, *, doc_min_length=None, **spec_over
                                      **spec_over)
     if spec_is_multidomain(spec):
         return multidomain_cache_key(spec)
-    return compute_bundle_cache_key(**{k: spec[k] for k in _SNOMED_KEY_KEYS})
+    return compute_bundle_cache_key(doc_spec=spec["doc_spec"],
+                                    **{k: spec[k] for k in _SNOMED_KEY_KEYS})
 
 
 def rebuild_bundle(spark, spec, *, cache_uri=None):
@@ -403,7 +418,10 @@ def rebuild_bundle(spark, spec, *, cache_uri=None):
     from _case_finding_cache import load_or_build_case_finding_bundle
     params = {k: spec[k] for k in _SNOMED_KEY_KEYS}
     return load_or_build_case_finding_bundle(
-        spark, cache_uri=cache_uri, billing=spec["billing"], **params)
+        spark, cache_uri=cache_uri, billing=spec["billing"],
+        # key-only, exactly as the fit passes it (gated_pc_cloud's single-domain
+        # call site), so a rebuild lands under the key the fit stored under.
+        _key_extra={"doc_spec": spec["doc_spec"]}, **params)
 
 
 def lambda_vocab_sizes(global_params) -> list:

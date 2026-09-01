@@ -296,6 +296,73 @@ def test_single_domain_key_still_requires_the_forward_window_knobs():
 
 
 # --------------------------------------------------------------------------- #
+# The DOC-SPEC hole (audit seam 4 / R5.3): the doc unit is hard-coded in the      #
+# assembler and in the driver's provider construction and was absent from every   #
+# cache key, so a driver-side doc-unit change would have produced a DIFFERENT     #
+# corpus under a BYTE-IDENTICAL key. Folded now — but only when it differs from   #
+# today's constant, which is what keeps every hash above where it is.             #
+# --------------------------------------------------------------------------- #
+def test_doc_spec_default_leaves_all_four_pinned_hashes_byte_identical():
+    """The deliverable of the fix. Passing today's doc spec EXPLICITLY must key
+    exactly where omitting it does, on every pinned hash — otherwise closing a
+    silent-wrongness hole would orphan every cached bundle in the repo."""
+    k = ccache.compute_bundle_cache_key
+    d = ccache.DEFAULT_DOC_SPEC
+    assert k(**_SNOMED_BASE, doc_spec=d) == _SNOMED_KEY
+    assert k(**_SNOMED_BASE, emit_labels=True, label_mask_mode="closure",
+             doc_spec=d) == _SNOMED_LABELED_KEY
+    assert k(**dict(_SNOMED_BASE, window_mode="lookback", strip_mode="both",
+                    lookback_days=730, label_window_days=180),
+             doc_spec=d) == _SNOMED_LOOKBACK_KEY
+    assert k(**_MD_BASE, doc_spec=d) == _MONDO_KEY_NO_COLLAPSE
+
+
+def test_a_different_doc_spec_moves_the_key_on_both_paths():
+    """The hole itself: an episode/patient-year corpus is a DIFFERENT corpus (a
+    different doc unit means different documents, a different vocabulary, and
+    different base rates) and must never be served a patient-cohort bundle."""
+    k = ccache.compute_bundle_cache_key
+    assert k(**_SNOMED_BASE, doc_spec="patient_year") != _SNOMED_KEY
+    assert k(**_MD_BASE, doc_spec="episode") != _MONDO_KEY_NO_COLLAPSE
+    # ...and two different non-default units do not alias onto each other either.
+    assert (k(**_MD_BASE, doc_spec="episode")
+            != k(**_MD_BASE, doc_spec="patient_year"))
+
+
+def test_doc_spec_identity_is_read_off_the_class_the_driver_builds():
+    """The token is derived, not written down, so swapping the driver's doc spec
+    moves the key without anyone remembering to bump a string."""
+    from charmpheno.omop.doc_spec import PatientCohortDocSpec
+    assert gpc.doc_spec_identity() == PatientCohortDocSpec().name
+    assert gpc.doc_spec_identity() == ccache.DEFAULT_DOC_SPEC
+
+
+def test_doc_spec_threads_from_the_spec_and_a_legacy_spec_means_the_default():
+    """spec -> key_extra -> compute_bundle_cache_key, the path the fit and the
+    re-readout both take; and a spec written before the field existed keys
+    byte-identically to one carrying today's value (the `dag_collapse` legacy
+    pattern at :143)."""
+    base = dict(_MONDO_SPEC)
+    legacy = {k_: v for k_, v in base.items() if k_ != "doc_spec"}
+    assert gpc.multidomain_cache_key(legacy) == gpc.multidomain_cache_key(
+        dict(base, doc_spec=ccache.DEFAULT_DOC_SPEC))
+    assert (gpc.multidomain_cache_key(dict(base, doc_spec="episode"))
+            != gpc.multidomain_cache_key(legacy))
+
+
+def test_readout_recovers_the_doc_spec_from_the_manifest():
+    """Manifest -> spec -> key, on both the multi-domain and single-domain routes.
+    A manifest predating the field means the default (every corpus in the repo was
+    assembled under it), so an old run still recomputes its own key."""
+    m = _mondo_manifest()
+    assert gpr.corpus_spec_from_manifest(m)["doc_spec"] == ccache.DEFAULT_DOC_SPEC
+    m["corpus_manifest"]["doc_spec"] = "episode"
+    assert gpr.corpus_spec_from_manifest(m)["doc_spec"] == "episode"
+    assert gpr.bundle_key_from_manifest(m) != gpr.bundle_key_from_manifest(
+        _mondo_manifest())
+
+
+# --------------------------------------------------------------------------- #
 # Cache format: a multi-domain bundle round-trips.                             #
 # --------------------------------------------------------------------------- #
 _VOCAB_MAPS = [{101: 0, 102: 1, 103: 2, 104: 3}, {201: 0, 202: 1, 203: 2}]
@@ -424,6 +491,7 @@ _MONDO_SPEC = {
     "window_mode": "lookback", "prior_obs_days": 0, "window_days": 0,
     "mondo_version": "2026-06-02", "mondo_branch": "", "min_positives": 100,
     "mondo_cache_dir": "data/mondo", "dag_collapse": False,
+    "doc_spec": "patient_cohort",
 }
 
 
