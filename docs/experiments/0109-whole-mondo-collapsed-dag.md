@@ -352,3 +352,34 @@ resumes from it rather than re-paying the first 50 iterations — now with the t
 and the periodic GC in force. What to read off the next attempt: whether the
 `disk_telemetry:` used-G series climbs monotonically, and which top-level entry the
 growth is under.
+
+**2026-09-01 — the smoke numbers existed all along: a 60-iteration arm COMPLETED on
+08-31 at 20:19 and dumped `results_readout.json` before the higher-budget
+continuation started (and died).** The run dir's timestamps reconstruct it: arm
+completes → results written 20:19, checkpoint deleted on completion → continuation
+relaunches, writes a fresh iteration-50 checkpoint at 01:09, ENOSPCs at ~55. The
+completed arm is the dev-smoke readout, budget-matched to 0104's 60-iteration smoke:
+
+| 60-iter solve budget | macro AUC | macro AP | scored | skipped |
+|---|---|---|---|---|
+| 0104 smoke (C=3,820) | 0.6891 | 0.4745 | 2,106 | 1,714 |
+| **0109 smoke (C=3,677, spliced)** | **0.6894** | **0.4747** | **2,106** | **1,571** |
+
+A statistical tie on an IDENTICAL scored population — the splice's report card, and
+the intended one: it removed only structurally-degenerate nodes (never scoreable),
+so surviving-node metrics are unchanged while the DAG drops 143 nodes. The
+arithmetic self-checks close: skipped 1,571 = 3,677 − 2,106, and detection reports
+`n_constant_nodes: 619` — exactly the subsumed-category-anchor count from the
+decomposition above, counted independently by the constant-column exclusion.
+
+Detection is also the FIRST REAL detection number for the whole-Mondo corpus (0104
+recorded the pre-fix 0.5000 artifact): **AUC 0.5622 / AP 0.9658 at prevalence
+0.9609**, pooled over the 3,058 non-constant nodes. Read it with the prevalence in
+view — 96% of docs attest something in a 3,677-node ontology, so AP is ceiling-high
+trivially and AUC barely clears chance; per-doc "any label" detection is a nearly
+degenerate task at this scale. The per-node ranking metrics are the meaningful axis;
+detection stays a diagnostics line.
+
+The record-budget continuation (readout_max_iter 200) is back in flight from the
+iteration-50 checkpoint with telemetry and periodic GC active; its numbers, against
+0104's record 0.6978/0.4845, close this experiment.
