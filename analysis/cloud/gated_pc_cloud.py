@@ -1678,12 +1678,39 @@ _MONDO_DAG_SOURCES = ("mondo", "mondo_native")
 # fit writes into `manifest["corpus_manifest"]` and the re-readout reads back out.
 # One derivation, two callers, so a re-readout's cache key cannot drift from the
 # key the fit stored the bundle under.
+#
+# `doc_spec` is a corpus-identity field that is NOT in this tuple, on purpose:
+# every name here is forwarded to the assembler, and neither assembler accepts a
+# doc-spec argument (both hard-code `PatientCohortDocSpec` internally). It is a
+# key-only input and travels in `key_extra` instead — see `doc_spec_identity`.
 _SPEC_ASSEMBLY_KEYS = (
     "disease", "cdr", "billing", "person_mod", "min_n", "holdout_frac",
     "vocab_size", "min_df", "min_patient_count", "n_bg", "tpn", "doc_min_length",
     "strip_mode", "lookback_days", "label_window_days", "label_mask_mode",
     "index_mode",
 )
+
+
+def doc_spec_identity() -> str:
+    """The DOC-UNIT identity token this driver's corpora are assembled under.
+
+    Read off the class rather than written down, so that swapping the driver's
+    doc spec (the `EpisodeDocSpec` of exp 0111, say) moves the token — and
+    therefore the bundle cache key — without anyone having to remember to. That
+    is the whole content of the fix: `doc_spec` is hard-coded in two places
+    (`multi_domain.py:408`, and the provider construction in `mondo_assemble_fn`
+    below) and was absent from every cache key, so a driver-side doc-unit change
+    would have produced a DIFFERENT corpus under a BYTE-IDENTICAL key — silent
+    cache poisoning, not a rebuild cost (audit seam 4; spec R5.3, which requires
+    this closed before any doc-unit work starts).
+
+    `min_doc_length`, the spec's only other identity-bearing parameter, is
+    already folded into the key as `doc_min_length`, so the class name is the
+    whole remaining identity. `compute_bundle_cache_key` folds this only when it
+    differs from `DEFAULT_DOC_SPEC`, which is why closing the hole moves no
+    existing key."""
+    from charmpheno.omop.doc_spec import PatientCohortDocSpec
+    return PatientCohortDocSpec().name
 
 
 def multidomain_corpus_spec(args, extra_domains) -> dict:
@@ -1732,6 +1759,11 @@ def multidomain_corpus_spec(args, extra_domains) -> dict:
         # experiment's spec — and therefore its bundle key — is unchanged.
         "dag_collapse": bool(args.dag_collapse)
                         if args.dag_source == "mondo" else False,
+        # The doc unit this corpus is assembled under — a cache-key input as of
+        # R5.3, recorded in the spec (and hence the manifest) so a re-readout
+        # recomputes the fit's own key. Today it is a constant; the point is that
+        # when it stops being one, the key moves with it.
+        "doc_spec": doc_spec_identity(),
     }
 
 
@@ -1752,7 +1784,11 @@ def _multidomain_params(spec):
     assembly = {k: spec[k] for k in _SPEC_ASSEMBLY_KEYS}
     assembly["extra_domains"] = tuple(spec.get("extra_domains") or ())
     assembly["emit_labels"] = True
-    key_extra = {"multidomain": True}
+    # `doc_spec` is a key-only identity (the assembler builds its own spec and
+    # takes no such kwarg), so it rides key_extra. A spec written before the field
+    # existed defaults to today's constant and therefore keys byte-identically.
+    key_extra = {"multidomain": True,
+                 "doc_spec": str(spec.get("doc_spec") or doc_spec_identity())}
     if mondo:
         key_extra.update(mondo=True, mondo_version=spec["mondo_version"],
                          mondo_branch=spec.get("mondo_branch") or "",
@@ -2199,6 +2235,11 @@ def main() -> int:
             with _phase("assemble corpus (cached, emit_labels)"):
                 bundle = load_or_build_case_finding_bundle(
                     spark, cache_uri=args.cache_uri,
+                    # key-ONLY input (the assembler builds its own doc spec):
+                    # closes the doc-spec cache-key hole on the single-domain
+                    # path too. Today's value is the fold's default, so every
+                    # SNOMED key is byte-identical.
+                    _key_extra={"doc_spec": doc_spec_identity()},
                     cdr=args.cdr, billing=args.billing, source_table=args.source_table,
                     person_mod=args.person_mod, vocab_size=args.vocab_size,
                     min_df=args.min_df, min_patient_count=args.min_patient_count,
@@ -2405,6 +2446,11 @@ def main() -> int:
                 "min_positives": (corpus_spec or {}).get("min_positives", 0),
                 "mondo_cache_dir": (corpus_spec or {}).get("mondo_cache_dir", ""),
                 "dag_collapse": (corpus_spec or {}).get("dag_collapse", False),
+                # The doc unit (R5.3). Recorded on BOTH paths — the single-domain
+                # assembler hard-codes the same spec — so a re-readout of either
+                # recomputes the fit's own key.
+                "doc_spec": ((corpus_spec or {}).get("doc_spec")
+                             or doc_spec_identity()),
                 "domain_vocab_sizes": [len(vm) for vm in vocab_maps],
                 "int2cid": {str(i): c for i, c in bundle.int2cid.items()},
                 "name_by_id": {str(c): n for c, n in bundle.name_by_id.items()}},

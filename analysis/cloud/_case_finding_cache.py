@@ -41,6 +41,27 @@ def _module_source_hash(module) -> str:
         return "src-unavailable"
 
 
+# The DOC-UNIT identity every assembler in the repo currently builds: both
+# `case_finding_assembly.assemble_case_finding_corpus:640` and
+# `multi_domain.assemble_multidomain_case_finding_corpus:408` construct
+# `PatientCohortDocSpec(min_doc_length=doc_min_length)`, and the Mondo providers
+# are handed a `PatientCohortDocSpec()` driver-side (gated_pc_cloud). The token is
+# the spec's `name` field — its class identity; the only other identity-bearing
+# parameter, `min_doc_length`, is ALREADY folded as `doc_min_length`.
+#
+# Why a DEFAULT and a fold-when-it-differs rather than an unconditional payload
+# field: the doc spec was absent from every key ever computed, so folding it
+# unconditionally would move every key in the repo — including the four hashes
+# pinned in tests/scripts/test_case_finding_cache_mondo.py — for a change that
+# alters no corpus. Folding only a NON-default value leaves today's keys
+# byte-identical while making tomorrow's doc-unit change visible, which is the
+# whole point: the driver-side doc spec is hard-coded, so changing it alone would
+# otherwise poison the cache under a byte-identical key (audit seam 4 / R5.3).
+# This is the same "fold only when it is on" discipline `emit_labels`, `mondo`,
+# `dag_collapse` and `mondo_native` already follow.
+DEFAULT_DOC_SPEC = "patient_cohort"
+
+
 def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_df,
                              min_patient_count, doc_min_length, prior_obs_days=None,
                              window_days=None, disease, min_n, holdout_frac,
@@ -53,7 +74,8 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
                              mondo_version="", mondo_branch="",
                              min_positives=0, dag_collapse=False,
                              dag_collapse_version="", mondo_native=False,
-                             mondo_native_version="") -> str:
+                             mondo_native_version="",
+                             doc_spec=DEFAULT_DOC_SPEC) -> str:
     """Stable 16-hex hash of the inputs that determine the assembled bundle.
 
     Folds cohort_defs_version() plus content hashes of condition_dag +
@@ -88,6 +110,11 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
     single-domain key and IGNORED (pinned to null) for the multi-domain one: that
     assembler is lookback-only and reads none of the three, so leaving them in
     would let a knob nobody consulted split the cache.
+
+    `doc_spec` is the DOC-UNIT identity (see `DEFAULT_DOC_SPEC`). It is folded ONLY
+    when it differs from today's constant, so every existing key is byte-identical
+    while a future doc-unit change (an `EpisodeDocSpec`, say) can no longer land a
+    different corpus under the same key.
     """
     from charmpheno.omop import condition_dag, case_finding_assembly
     from charmpheno.omop.cohorts import cohort_defs_version
@@ -116,6 +143,14 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
         "assembly_src": _module_source_hash(case_finding_assembly),
         "v": 4,
     }
+    # The doc unit. Every corpus in the repo was assembled under
+    # DEFAULT_DOC_SPEC, and none of their keys names it, so folding the default
+    # would orphan all of them for no semantic change; folding anything ELSE is
+    # what closes the silent-poisoning hole (audit seam 4). Same discipline as
+    # `emit_labels` below — a field appears in the payload only when it says
+    # something the payload does not already say.
+    if str(doc_spec) != DEFAULT_DOC_SPEC:
+        payload["doc_spec"] = str(doc_spec)
     # Only fold the Gated-PC label columns into the key when they are requested,
     # so the default (emit_labels=False) path keeps its existing key and existing
     # dag-placement caches stay valid; a labeled bundle gets a distinct key.
@@ -277,6 +312,13 @@ def try_load(spark, cache_uri, key) -> Optional["CaseFindingBundle"]:
 # are multi-domain-only assembler params; compute_bundle_cache_key ignores them
 # unless multidomain=True is folded in (via `_key_extra`), so listing them here
 # cannot touch a SNOMED key.
+#
+# `doc_spec` is deliberately NOT here. Every name in this tuple is forwarded to
+# the assembler (`assemble(spark, **assembly_params)` below), and NEITHER
+# assembler takes a `doc_spec` kwarg — both construct `PatientCohortDocSpec`
+# themselves inside a source-hashed module this branch may not edit. It is a
+# key-ONLY input and therefore rides `_key_extra`, the channel that exists for
+# exactly that (`multidomain`, `mondo`, `dag_collapse`, ... are all key-only too).
 _KEY_PARAM_NAMES = (
     "source_table", "person_mod", "vocab_size", "min_df",
     "min_patient_count", "doc_min_length", "prior_obs_days", "window_days",
