@@ -833,6 +833,39 @@ def _spark_job_failure_types():
     return tuple(types)
 
 
+def _spark_deterministic_failure_types():
+    """The Spark failure types a retry can NEVER fix, so they must fail FAST.
+
+    `AnalysisException` is raised while the query is being ANALYZED, on the
+    driver, before a single task is submitted: an unresolved column, a type
+    mismatch, a missing table. It is a pure function of the plan and the schema,
+    both of which a backoff sleep leaves untouched — so the sleep is guaranteed
+    waste and the eventual re-raise is the same exception. Exp 0110 paid for
+    this: a `_collect_lean_proba(..., score_col="probability")` against an
+    UNSUPERVISED transform (no such column) burned 60+120+240s of backoff before
+    surfacing the schema error that was true from the first millisecond.
+
+    It is a SUBCLASS of `PySparkException` (pyspark 3.4+), which is exactly why
+    the retryable tuple above catches it, and why this exclusion has to be named
+    explicitly rather than left to the "retry any Spark job failure" default —
+    that default is right about JOB failures (which are about the cluster) and
+    wrong about ANALYSIS failures (which are about our code). Resolved lazily and
+    defensively like everything else here: an empty tuple degrades to the old
+    "retry it" behaviour, never to a crash on import.
+    """
+    types = []
+    try:
+        from pyspark.errors import AnalysisException
+        types.append(AnalysisException)
+    except Exception:                            # pragma: no cover - old pyspark
+        try:
+            from pyspark.sql.utils import AnalysisException  # pyspark < 3.4
+            types.append(AnalysisException)
+        except Exception:                        # pragma: no cover - no pyspark
+            pass
+    return tuple(types)
+
+
 def _error_first_line(exc):
     """First line of a Spark exception, safely.
 
@@ -903,15 +936,20 @@ def _retry_spark_action(fn, *, attempts=4, base_sleep_s=60, label=""):
     10m instead of the 1h default.) The sleeps are sized for that: 60s, 120s,
     240s.
 
-    Retries on ANY Spark job failure rather than pattern-matching the abort
+    Retries on ANY Spark JOB failure rather than pattern-matching the abort
     message on purpose. The phrasings that matter here (excludeOnFailure aborts,
     `FetchFailed`, `ExecutorLostFailure`, "Killed by external signal") vary by
     Spark version and by which layer noticed first, and a missed pattern costs
-    hours of solve. The cost of the opposite error — retrying a deterministic
-    bug — is bounded at ~7 minutes of sleeping before the same exception is
-    re-raised with its traceback intact, which is a trade this path should always
-    take. Non-Spark exceptions (our own `ValueError`s, `KeyboardInterrupt`)
-    propagate on the first raise.
+    hours of solve. Non-Spark exceptions (our own `ValueError`s,
+    `KeyboardInterrupt`) propagate on the first raise.
+
+    The ONE Spark failure that is excluded by TYPE is `AnalysisException` (see
+    `_spark_deterministic_failure_types`): it is decided during query analysis on
+    the driver, before any task is submitted, so it cannot become a success on
+    attempt 2 — the sleeps are pure waste and the log lines actively mislead by
+    dressing a schema bug as cluster trouble. Exp 0110 spent 60+120+240s that way
+    on a column that did not exist. Every other Spark job failure keeps the full
+    retry budget.
 
     `label` is prefixed to the log lines so a failure in a multi-hour solve says
     WHICH pass died.
@@ -946,11 +984,20 @@ def _retry_spark_action(fn, *, attempts=4, base_sleep_s=60, label=""):
 
     attempts = max(1, int(attempts))
     retryable = _spark_job_failure_types()
+    deterministic = _spark_deterministic_failure_types()
     tag = f"{label}: " if label else ""
     for k in range(attempts):
         try:
             return fn()
         except retryable as exc:
+            if deterministic and isinstance(exc, deterministic):
+                # Schema/analysis error: decided on the driver before any task
+                # ran, and identical on every attempt. Fail on the first raise
+                # instead of sleeping 60+120+240s to re-learn it (exp 0110).
+                print(f"[driver]   {tag}spark action FAILED with a SCHEMA/ANALYSIS "
+                      "error, which is DETERMINISTIC — no retry can fix it, so "
+                      f"failing fast: {_error_first_line(exc)}", flush=True)
+                raise
             if _context_is_dead():
                 print(f"[driver]   {tag}spark action FAILED and the SparkContext "
                       "has STOPPED (application-level failure — YARN failed or "
