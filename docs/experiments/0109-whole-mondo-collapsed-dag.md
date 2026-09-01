@@ -120,6 +120,18 @@ spark_conf:
   # one — 10m is long enough to route around a genuinely bad host and short enough
   # that a preemption wave's collateral is forgiven before the next wave lands.
   spark.excludeOnFailure.timeout: 10m
+  # Driver-disk leak #2 mitigation (0109 run log, 08-31/09-01): a second ENOSPC
+  # consumer survives every ADR 0047 destroy fix — ~100 GB of master disk over a
+  # few hours with the Python broadcasts provably released. The suspect is
+  # ContextCleaner-gated JVM-side driver state (torrent-broadcast pieces for task
+  # binaries, shuffle metadata), which Spark frees only when the DRIVER JVM
+  # garbage-collects, and a large mostly-idle driver heap may never trigger a GC
+  # across a multi-hour solve. A forced periodic GC bounds the backlog at a cost
+  # of one full GC per interval on an idle heap. Evidence pending: the in-band
+  # disk telemetry (analysis/cloud/disk_telemetry.py) now prints one
+  # `disk_telemetry:` line every 120s into the persisted job log, so the next run
+  # says whether this is the mechanism or only a partial mitigation.
+  spark.cleaner.periodicGC.interval: "5min"
 ---
 
 # 0109 — Whole-Mondo on a collapsed DAG: paying off the 763 degenerate nodes
@@ -312,3 +324,31 @@ Spark temp dir) to catch the growth live instead of post-hoc; the fit is early-s
 and the solve checkpointed at iteration ~50 (v2 fingerprint), so the recovery resumes
 rather than re-paying. Notable solver observation for the record: the collapsed DAG's
 line search works measurably harder (961 passes by iter ~55 vs 0104's ~500 by 60).
+
+**2026-09-01 — recovery readout died of the SAME driver-disk ENOSPC, and the second
+autopsy was lost too. Leak #2 is recurrent, and the watcher moves in-band.** The
+recovery re-readout reached solver iteration ~55 (~14.2 ks elapsed, 441/3,057
+converged) and took the ENOSPC from `sc.broadcast` again, with every ADR 0047 destroy
+fix active — the same signature as 08-31, so leak #2 is reproducible and not a
+one-off. The cluster then timed out overnight, and the `nohup diskwatch` loop that was
+supposed to catch the growth wrote to the master's local `~`: it died with the
+machine, unread. That is the SECOND lost autopsy by the same mechanism, and it is why
+the disk watcher is no longer a shell loop.
+
+The watcher is now IN-BAND (`analysis/cloud/disk_telemetry.py`, started by both
+`gated_pc_cloud` and `gated_pc_readout` right after the SparkSession exists): one
+`disk_telemetry:` line to driver stdout every 120 s, carrying per-filesystem
+used/avail and the six biggest top-level entries of each watched dir, which is what
+separates JVM block-manager state (`blockmgr-*`) from Python broadcast temp files
+(`spark-*/pyspark-*`) from log growth. Dataproc persists job driver stdout to the
+staging bucket, so it rides the run log automatically and cannot die with the cluster.
+Shipping alongside it, from the JVM-side hypothesis: `spark.cleaner.periodicGC.interval:
+"5min"` in the front matter (ContextCleaner frees torrent-broadcast pieces and shuffle
+metadata only on driver GC, which a large idle heap never triggers).
+
+The run dir is on the bucket-mounted `RUNS_DIR` and is expected to still hold the
+iteration-50 solver checkpoint, so `make -C analysis/cloud gated-pc-readout ID=109`
+resumes from it rather than re-paying the first 50 iterations — now with the telemetry
+and the periodic GC in force. What to read off the next attempt: whether the
+`disk_telemetry:` used-G series climbs monotonically, and which top-level entry the
+growth is under.

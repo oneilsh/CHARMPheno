@@ -58,9 +58,19 @@ A week of run deaths, each initially misattributed, all closed. ADR 0047 +
 
 **One infra mystery OPEN:** the 08-31 0109 smoke died of driver-disk ENOSPC WITH
 all destroy fixes verifiably active (pyspark's `destroy()` confirmed to unlink the
-temp file). ~100 GB consumed over ~19 ks by something ADR 0047 doesn't cover. A
-`diskwatch` loop (df + du over spark tmp/tmp/var-log, 60 s cadence) should run
-alongside every long job until caught — the in-flight 0109 readout has one.
+temp file). ~100 GB consumed over ~19 ks by something ADR 0047 doesn't cover, and
+the 09-01 recovery readout died the same way at solver iter ~55 — recurrent, not a
+one-off. The watcher is now IN-BAND: `analysis/cloud/disk_telemetry.py`, started by
+both gated_pc drivers right after the SparkSession exists, prints one
+`disk_telemetry:` line (per-filesystem used/avail + the six biggest top-level
+entries per watched dir + a `broadcast*` file count) to driver stdout every 120 s.
+The `nohup diskwatch` loop it replaces is superseded because local logs die with the
+cluster — twice now the master was torn down before its `~/diskwatch.log` was read —
+whereas Dataproc persists job driver stdout to the staging bucket. Mitigation
+shipping alongside, on the JVM-side hypothesis (ContextCleaner frees task-binary
+broadcast pieces and shuffle metadata only on driver GC, which a large idle heap
+never triggers): `spark.cleaner.periodicGC.interval: "5min"` in 0104/0109 front
+matter.
 
 ## 4. The approved plan: native Mondo label space
 
@@ -93,11 +103,13 @@ full before building; the short form:
 ## 5. Open threads, in priority order
 
 1. **0109 smoke readout in flight** — collect its macro + detection lines and the
-   diskwatch tail; record in 0109's run log; that closes the splice report card.
+   `disk_telemetry:` tail; record in 0109's run log; that closes the splice
+   report card.
 2. **0110 port + experiment** (plan §4/§7) — agent-buildable; waiting on nothing
    but a "go" (direction already approved; the port itself was not explicitly
    green-lit as tonight's work).
-3. **Driver-disk leak #2** — catch with diskwatch (see §3); fix; ADR 0047 addendum.
+3. **Driver-disk leak #2** — catch with the in-band telemetry (see §3); fix; ADR
+   0047 addendum.
 4. **Top-m pricing test** — `gated-pc-readout ID=103 --readout-theta-topm 256` vs
    0103's recorded full-K numbers; decides whether `readout_theta_topm: 256`
    stays in record configs (ΔAUC ≲ 1e-3 keeps it).
@@ -128,9 +140,12 @@ full before building; the short form:
   `GPR_DRIVER_MEMORY=4g` on 16 GB masters.
 - **Degeneracy diagnostic:** `make -C analysis/cloud diag-sibling-support ID=N`
   (needs a cache HIT; never rebuilds).
-- **Diskwatch:** `nohup bash -c 'while true; do echo "$(date +%H:%M:%S) $(df -h
-  --output=used,avail / | tail -1) sparkTmp=$(du -sm /hadoop/spark/tmp 2>/dev/null
-  | cut -f1)M"; sleep 60; done' > ~/diskwatch.log 2>&1 &`
+- **Diskwatch:** nothing to start — it is in-band and always on. Both gated_pc
+  drivers run `analysis/cloud/disk_telemetry.py`, one line per 120 s to driver
+  stdout; read it with `grep disk_telemetry: <run>/driver_log.md` (or the
+  persisted job log). The old `nohup ... > ~/diskwatch.log` loop is retired: a
+  local log dies with the cluster, and twice the master was torn down before
+  anyone read it.
 - **Cluster shape that works:** 8+ non-preemptible n2-standard-4 workers,
   n2-standard-8 master (16 GB masters OOM-kill the driver during Mondo downloads
   at the default 8g JVM), no spots needed. `spark_conf` in front matter handles
