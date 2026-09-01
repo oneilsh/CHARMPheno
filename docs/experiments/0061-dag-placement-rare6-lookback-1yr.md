@@ -57,6 +57,11 @@ to prevent the label-defining conditions from leaking into the feature bag
 within a single shared window (a post-hoc strip). In `lookback` mode the
 feature and label frames are disjoint by construction (pre-index vs
 post-index), so there is nothing to strip — leakage-free by construction.
+(2026-09-01 NOTE: true for THIS experiment's `index_mode="disease"` — the
+index precedes the first disease code by definition. It does NOT carry to the
+whole-Mondo mainline's `index_mode="population"` random index, where prior
+codes of labeled chronic conditions sit in the lookback; see the 2026-09-01
+incident-episode eval program spec.)
 Likewise the "at least a year of prior observation" gate that `prior_obs_days`
 implements in forward mode is intrinsic to the lookback index table itself
 (`case_finding_index_table` only emits an index date once the ≥1yr-prior
