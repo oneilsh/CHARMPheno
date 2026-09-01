@@ -1,7 +1,7 @@
 ---
 id: 104
 slug: whole-mondo-unsup-mainline
-status: pending
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
