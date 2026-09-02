@@ -470,7 +470,66 @@ def _dag_children_and_depth(parent_int, C):
     return children, depth
 
 
-def conditional_readout(proba, y, mask, parent_int, C, *, min_count=10):
+# The All-of-Us disclosure floor (`analysis/pc/evaluate.py:76-78`). It is an EGRESS
+# rule, not a statistical dial: a cell with fewer than 20 of either class does not
+# leave the workspace, in a printed table or in a JSON. Kept structurally separate
+# from `min_count` (which decides what is COMPUTED) and from `min_positives` (a
+# model-internal powering dial) — conflating publishing floors with model dials is
+# the mistake the 0110 plan calls out by name.
+EGRESS_MIN_COUNT = 20
+
+# The two D6 strata, by whether the document already carried the PARENT before its
+# index. Reported, never gating (spec D6, corrected explicitly by Shawn): requiring
+# a pre-index P starves the cells, and "no P / gains c" is a legitimate positive —
+# it tests DE NOVO specific prediction, the harder and more interesting half.
+STRATUM_P_KNOWN = "P known pre-index (P in R_d)"
+STRATUM_P_UNKNOWN = "P not known pre-index (P not in R_d)"
+
+
+def _suppressed(n_pos, n_neg, floor=EGRESS_MIN_COUNT):
+    """The egress record for a cell too small to disclose — counts REMOVED.
+
+    R3.5: stratified cell tables are a disclosure surface. A suppressed cell says
+    that it was suppressed and which floor it failed; it does not say by how much,
+    because "n_pos=3" is exactly the number that may not leave."""
+    return {"suppressed": f"<{int(floor)}",
+            "reason": f"either class below the egress floor of {int(floor)}"}
+
+
+def _p_strata(rows, yc, sc, p, elig, egress_min_count):
+    """One edge's cell, split by the D6 stratum, with the egress floor applied.
+
+    `elig[d, p] is False` means the document ALREADY CARRIED the parent before its
+    index — "P known pre-index". Its complement is the *de novo* half: the document
+    reaches P and c in the same label window. Both are legitimate; the first is the
+    subtyping question ("has a <parent>, which <child>?") asked of a patient whose
+    parent diagnosis is on the record, the second asks the model to find the
+    specific node with no parent context at all, and they do not have the same
+    difficulty.
+
+    A stratum that fails `egress_min_count` on EITHER class reports as suppressed
+    with no counts (R3.5) — stratifying halves each cell, so most edges are expected
+    to land here, and that is a fact about the corpus, not a failure of the code."""
+    from sklearn.metrics import average_precision_score, roc_auc_score
+    known = ~elig[rows, p]
+    out = {}
+    for name, sel in ((STRATUM_P_KNOWN, known), (STRATUM_P_UNKNOWN, ~known)):
+        ys, ps = yc[sel], sc[sel]
+        n_pos, n_neg = int(ys.sum()), int(len(ys) - ys.sum())
+        if n_pos < egress_min_count or n_neg < egress_min_count:
+            out[name] = _suppressed(n_pos, n_neg, egress_min_count)
+            continue
+        out[name] = {
+            "n_pos": n_pos, "n_neg": n_neg, "prev": float(ys.mean()),
+            "cond_auc": float(roc_auc_score(ys, ps)),
+            "cond_ap": float(average_precision_score(ys, ps)),
+            "ece": _ece(ys, ps, n_bins=5),
+        }
+    return out
+
+
+def conditional_readout(proba, y, mask, parent_int, C, *, min_count=10,
+                        eligibility=None, egress_min_count=EGRESS_MIN_COUNT):
     """Conditional 'sharpening' metrics — P(child | parent-cohort), the clinician's
     'this patient has a <parent>; which <child>?' task (vs de-novo detection).
 
@@ -495,9 +554,46 @@ def conditional_readout(proba, y, mask, parent_int, C, *, min_count=10):
     mask-mode-independent (closure membership), so an all-ones eval mask fixes the
     cohort/negative sets identically across full- and closure-mask runs — otherwise
     the closure mask silently makes the conditional eval an easier sibling-only
-    contrast and cross-run numbers are not comparable (exp 0079, Trap 3). Pure numpy."""
+    contrast and cross-run numbers are not comparable (exp 0079, Trap 3). Pure numpy.
+
+    INCIDENT-LOCAL CELLS (spec E3 / plan WP5), via ``eligibility``
+    -------------------------------------------------------------
+    ``eligibility`` is E1's `(D, C)` array `elig[d,c] = c ∉ R_d` (spec D2). Passing
+    it turns each cell into its D5 form — the SAME local-negative construction,
+    intersected with incident eligibility for the CHILD:
+
+      * positives: in P's cohort, eligible for c, gains `closure(c)`;
+      * negatives: in P's cohort, eligible for c, gains a SIBLING under P (or P and
+        nothing more specific), does not gain `closure(c)`.
+
+    and additionally reports every edge SPLIT BY THE D6 STRATUM — whether the
+    document already carried the PARENT pre-index (`P ∈ R_d`) or not.
+
+    **The stratum is reported, never gating, and neither is the parent's own
+    eligibility.** The plan's phrasing ("intersect eligibility with the cohort
+    construction") is deliberately NOT read as `elig[:, p]` here: restricting the
+    parent cohort to documents incident-eligible for P would BE the pre-index-P gate
+    D6 forbids in as many words, and would delete the "no P / gains c" positives
+    that are the harder and more interesting half of the question. So eligibility
+    enters at the CHILD row selection (which is exactly D5's clause (i)) and the
+    parent's eligibility enters only as the stratum key.
+
+    ``eligibility=None`` (the default) reproduces this function's pre-E3 output
+    NUMERICALLY EXACTLY — no strata, no suppression, no changed floor. That is the
+    regression that protects the 0104/0109/0110 conditional comparison, and it is
+    asserted in `tests/scripts/test_incident_conditional.py`.
+
+    ``egress_min_count`` (R3.5) is the EGRESS floor, applied only on the incident
+    path: any pooled cell or stratum with either class below it is emitted as
+    `{"suppressed": "<20"}` with its counts REMOVED, in the printed table and in the
+    results dict alike. It is deliberately a separate argument from ``min_count``
+    (what gets computed) — publishing floors and model-internal dials stay
+    structurally separate."""
     from sklearn.metrics import average_precision_score, roc_auc_score
     children, depth = _dag_children_and_depth(parent_int, C)
+    incident = eligibility is not None
+    elig = (np.asarray(eligibility).astype(bool) if incident
+            else np.ones_like(np.asarray(mask), dtype=bool))
     edges, parents = [], []
     pooled_y, pooled_p = [], []                          # for a single ECE over all edges
     for p in range(C):
@@ -509,7 +605,10 @@ def conditional_readout(proba, y, mask, parent_int, C, *, min_count=10):
             continue
         scored_kids = []
         for c in kids:
-            rows = cohort[mask[cohort, c] == 1]
+            sel = mask[cohort, c] == 1
+            if incident:
+                sel = sel & elig[cohort, c]              # D5 clause (i)
+            rows = cohort[sel]
             yc = y[rows, c]
             n_pos, n_neg = int(yc.sum()), int(len(yc) - yc.sum())
             if n_pos < max(min_count, 1) or n_neg < max(min_count, 1):
@@ -517,10 +616,12 @@ def conditional_readout(proba, y, mask, parent_int, C, *, min_count=10):
             sc = proba[rows, c]
             # marginal (de-novo) AP: child vs ALL observed docs — the sharpening bar.
             mrows = np.where(mask[:, c] == 1)[0]
+            if incident:
+                mrows = mrows[elig[mrows, c]]
             my = y[mrows, c]
             marg_ap = (float(average_precision_score(my, proba[mrows, c]))
                        if 0 < my.sum() < len(my) else None)
-            edges.append({
+            edge = {
                 "parent": p, "child": c, "depth": depth[p], "cohort": int(len(cohort)),
                 "n_pos": n_pos, "prev": float(yc.mean()),
                 "cond_auc": float(roc_auc_score(yc, sc)),
@@ -530,7 +631,22 @@ def conditional_readout(proba, y, mask, parent_int, C, *, min_count=10):
                 # per-node miscalibration can't hide inside the pooled ECE (which
                 # averages an over- against an under-confident node). Fewer bins (5)
                 # because per-node cohorts are small (n_pos,n_neg >= min_count each).
-                "ece": _ece(yc, sc, n_bins=5)})
+                "ece": _ece(yc, sc, n_bins=5)}
+            if incident:
+                # D6: the SAME cell, split by whether the document already carried
+                # the PARENT. Reported, never gating — and the two strata routinely
+                # have materially different AUCs, so pooling them into one unlabeled
+                # number is the thing the spec forbids.
+                edge["strata"] = _p_strata(
+                    rows, yc, sc, p, elig, egress_min_count)
+                # R3.5: the POOLED cell is a disclosure surface too.
+                if n_pos < egress_min_count or n_neg < egress_min_count:
+                    edge = {k: edge[k] for k in ("parent", "child", "depth")}
+                    edge.update(_suppressed(n_pos, n_neg, egress_min_count))
+                    edges.append(edge)
+                    continue
+                edge["n_neg"] = n_neg
+            edges.append(edge)
             scored_kids.append(c)
             pooled_y.append(yc); pooled_p.append(sc)
         if len(scored_kids) >= 2:
@@ -567,7 +683,75 @@ def conditional_readout(proba, y, mask, parent_int, C, *, min_count=10):
         node_ece = {"mean": float(np.mean(vals)), "max": float(worst[0]),
                     "worst_parent": int(worst[1]), "worst_child": int(worst[2]),
                     "n_nodes": len(node_eces)}
-    return {"edges": edges, "parents": parents, "ece": ece, "node_ece": node_ece}
+    out = {"edges": edges, "parents": parents, "ece": ece, "node_ece": node_ece}
+    if incident:
+        # Only the incident variant gains keys, so the prevalent block's shape (and
+        # every reader of it) is exactly what it was.
+        out["incident"] = _incident_conditional_summary(edges, egress_min_count,
+                                                        min_count)
+    return out
+
+
+def _incident_conditional_summary(edges, egress_min_count, min_count):
+    """The E3 block's own header: R2.2's edge-set discipline, R3.2's ordering, the
+    D7 naming rule and the §8 tags — carried in the JSON, not just in a log line.
+
+    Per R3.3 the surviving-EDGE SETS are reported, not only the averages: pooled,
+    P-known and P-unknown survive different edges, and a pooled-vs-stratum delta
+    computed across different edge sets is the same non-comparison C2.2 names on the
+    marginal axis."""
+    def _mean(vals):
+        vals = [v for v in vals if v is not None]
+        return float(np.mean(vals)) if vals else None
+
+    scored = [e for e in edges if e.get("cond_auc") is not None]
+    out = {
+        "naming": INCIDENT_NAMING,
+        "tags": {"arm": "incident", "node_set": "surviving edges (reported below)",
+                 "cell_type": "conditional-pooled + conditional-stratum(P known / "
+                              "P unknown)",
+                 "claim_type": "discrimination"},
+        "cell_definition": ("D5 local negative for P->c: eligible for c (D2), gains "
+                            "a sibling under P or P-but-nothing-more-specific, does "
+                            "not gain closure(c)"),
+        "stratum_definition": ("D6: P in R_d vs P not in R_d — REPORTED, NEVER "
+                               "GATING; 'no P / gains c' is a legitimate positive "
+                               "(de novo specific prediction)"),
+        "egress_min_count": int(egress_min_count),
+        "min_count": int(min_count),
+        "egress_note": (f"cells with either class < {int(egress_min_count)} are "
+                        "SUPPRESSED with their counts removed, here and in every "
+                        "printed table (All-of-Us disclosure floor)"),
+        "n_edges_emitted": len(edges),
+        "n_edges_suppressed": sum(1 for e in edges if e.get("suppressed")),
+        "pooled": {"n_edges": len(scored),
+                   "cond_auc": _mean([e["cond_auc"] for e in scored]),
+                   "cond_ap": _mean([e["cond_ap"] for e in scored])},
+    }
+    for name in (STRATUM_P_KNOWN, STRATUM_P_UNKNOWN):
+        surviving = [e for e in scored
+                     if (e.get("strata", {}).get(name, {}).get("cond_auc")
+                         is not None)]
+        out.setdefault("strata", {})[name] = {
+            "n_edges": len(surviving),
+            "edge_set": [[int(e["parent"]), int(e["child"])] for e in surviving],
+            "cond_auc": _mean([e["strata"][name]["cond_auc"] for e in surviving]),
+            "cond_ap": _mean([e["strata"][name]["cond_ap"] for e in surviving]),
+        }
+    # The both-strata edge set: the only set on which the two strata's AUCs are a
+    # comparison rather than two different averages (R2.2 discipline, R3.3).
+    both = [e for e in scored
+            if all(e.get("strata", {}).get(n, {}).get("cond_auc") is not None
+                   for n in (STRATUM_P_KNOWN, STRATUM_P_UNKNOWN))]
+    out["strata_shared_edge_set"] = {
+        "n_edges": len(both),
+        "edge_set": [[int(e["parent"]), int(e["child"])] for e in both],
+        STRATUM_P_KNOWN: _mean([e["strata"][STRATUM_P_KNOWN]["cond_auc"]
+                                for e in both]),
+        STRATUM_P_UNKNOWN: _mean([e["strata"][STRATUM_P_UNKNOWN]["cond_auc"]
+                                  for e in both]),
+    }
+    return out
 
 
 def _ece(y, p, n_bins=10):
@@ -622,7 +806,10 @@ def format_conditional_readout(cond, int2cid, name_by_id):
     majority-class baseline and balanced accuracy, sorted by depth then top-1-minus-
     majority (the honest lift). A pooled ECE reports calibration. Eval is
     mask-independent (full-closure cohorts) — see conditional_readout."""
-    edges, parents = cond["edges"], cond["parents"]
+    # SUPPRESSED edges (incident variant, R3.5) carry no metrics — only the fact
+    # that they were suppressed — so every consumer below filters on `cond_auc`.
+    edges = [e for e in cond["edges"] if e.get("cond_auc") is not None]
+    parents = cond["parents"]
     if not edges:
         return "[conditional sharpening]  no parent->child edges met min_count"
 
@@ -669,6 +856,43 @@ def format_conditional_readout(cond, int2cid, name_by_id):
             f"top1={p['top1']:.3f} (majority={p['majority']:.3f}){ba}  "
             f"(n={p['n']}, {p['n_children']} children)")
     return "\n".join(lines)
+
+
+def format_incident_conditional(cond) -> str:
+    """Render the INCIDENT conditional block: pooled first, strata second (R3.2).
+
+    Every printed number here is a count of EDGES or an average over them — never a
+    cell count — so the table is disclosable as printed; the suppressed cells are
+    counted, not shown (R3.5)."""
+    inc = (cond or {}).get("incident")
+    if not inc:
+        return "[incident conditional]  no incident block (eligibility not threaded)"
+    s = inc["strata"]
+    sh = inc["strata_shared_edge_set"]
+
+    def _row(name, d, key="cond_auc"):
+        v = d.get(key) if d else None
+        n = d.get("n_edges") if d else 0
+        return f"    {name:<34} cond_AUC={_f(v)}  (over {n} edges)"
+
+    return "\n".join([
+        f"[incident conditional]  {inc['naming']}",
+        "  arm=incident · cell=conditional · claim=DISCRIMINATION",
+        f"  cell: {inc['cell_definition']}",
+        f"  stratum: {inc['stratum_definition']}",
+        "  POOLED FIRST (primary), strata second:",
+        _row("pooled (both strata)", inc["pooled"]),
+        _row(STRATUM_P_KNOWN, s[STRATUM_P_KNOWN]),
+        _row(STRATUM_P_UNKNOWN, s[STRATUM_P_UNKNOWN]),
+        "  ...and on the SHARED edge set, where the two strata ARE a comparison "
+        f"({sh['n_edges']} edges): "
+        f"P-known={_f(sh[STRATUM_P_KNOWN]).strip()}  "
+        f"P-unknown={_f(sh[STRATUM_P_UNKNOWN]).strip()}",
+        f"  edges emitted={inc['n_edges_emitted']}, of which SUPPRESSED "
+        f"(<{inc['egress_min_count']} on a class, counts withheld)="
+        f"{inc['n_edges_suppressed']}",
+        f"  EGRESS: {inc['egress_note']}",
+    ])
 
 
 def _f(v):
@@ -2706,6 +2930,40 @@ def main() -> int:
                 flush=True)
             return cond
 
+        def _incident_conditional(proba_te, y_te, elig_te, label):
+            """The E3 twin of `_conditional`: the same cells, incident-local.
+
+            THE `_ones` CONVENTION IS BROKEN HERE, DELIBERATELY, AND ONLY HERE.
+
+            The rule it protects (`conditional_readout`'s docstring, exp 0079 Trap
+            3): pass the FULL-closure observation mask — all-ones — so the
+            cohort/negative sets are fixed identically across full- and
+            closure-mask runs; a run-dependent eval mask silently turns the
+            conditional eval into an easier sibling-only contrast and cross-run
+            numbers stop being comparable. That rule is UNTOUCHED above: the
+            prevalent conditional readout still passes `np.ones_like(y_te)`, and
+            this call passes it too.
+
+            What is new is a THIRD array — `eligibility` — which restricts the
+            cells. It is a genuine departure from "the eval sees everything", so it
+            is stated rather than slipped in, and here is why cross-run
+            comparability survives it (spec R2.3): incident eligibility is a pure
+            function of `(bundle, R_d)` — spec D2 — computed once per CORPUS by E1,
+            stored with the corpus, and reused byte-identically by every run being
+            compared. No prediction, threshold or degeneracy set of THIS run enters
+            it; structurally, the readout has no code path that could construct
+            one. Trap 3's failure was an eval mask that moved with the RUN. This one
+            moves with the corpus, which is the same thing the labels do.
+            """
+            cond = conditional_readout(proba_te, y_te, np.ones_like(y_te),
+                                       bundle.parent_int, C,
+                                       min_count=args.min_label_count,
+                                       eligibility=elig_te)
+            print(format_incident_conditional(cond).replace(
+                "[incident conditional]", f"[incident conditional: {label}]"),
+                flush=True)
+            return cond
+
         # Every manifest field the FIT determines, built once and reused by both
         # saves below — the early fit-only write and the final authoritative one.
         # Keeping it in one dict is what makes "the same manifest, plus results"
@@ -2875,6 +3133,13 @@ def main() -> int:
             # Conditional 'sharpening' readout: P(child | parent-cohort) by DAG depth.
             results["gated_pc_conditional"] = _conditional(
                 proba_gp, y_te, m_te, "gated_pc")
+            # E3/WP5: the same cells, incident-local, with the D6 P-stratum. An
+            # ADDITION beside the prevalent block above, never a replacement — the
+            # prevalent conditional numbers are what 0104/0109 are compared on.
+            if elig_te is not None:
+                results["gated_pc_incident_conditional"] = _incident_conditional(
+                    proba_gp, y_te, elig_te, "gated_pc")
+                _dump_partial_results(out, results)
             # ORACLE LOCALIZED readout (A-vs-B diagnostic for the co-fit head): the
             # BEST-POSSIBLE per-node logistic fit on EXACTLY the co-fit head's topic
             # support (allowed_with_siblings) — same hypothesis class as the localized
