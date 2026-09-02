@@ -594,6 +594,45 @@ build-conversion-sidecar: zip cluster-overlay $(WORKSPACE_ENV)
 	    $(if $(GPR_SIDECAR_URI),--sidecar-uri $(GPR_SIDECAR_URI),) \
 	    $(GPR_ARGS)
 
+# FUTURE-CONVERSION analysis (spec E4 / plan WP6, unit ii) — PU channel 1 as a
+# LOWER BOUND. Among the documents scored INCIDENT NEGATIVE for node c, the
+# fraction whose first attestation of closure(c) lands 1y/2y/3y AFTER the label
+# window, with denominators gated on observation_period_end_date at each horizon
+# (so the denominators SHRINK with the horizon — that is the right-censoring gate
+# working, not a bug). Reported overall and by model-score decile; the decile
+# profile doubles as case-finding validation (a top decile converting materially
+# above the bottom means the model is finding future cases among its own
+# negatives). Per-node table -> conversion_analysis.json (WORKSPACE-INTERNAL, many
+# cells under 20); the banner carries only pooled rates and counts of nodes.
+#
+# Requires, and refuses by name with distinct exit codes: a bundle cache HIT (2),
+# E1's pre-index closure witness (3), the E4 sidecar witness + a sidecar HIT (4 —
+# run `make build-conversion-sidecar ID=N` first), and a scoreable saved fit (5).
+# `--deciles off` (via GPR_ARGS) skips the readout solve and reports the overall
+# table only. Example:
+#   make diag-conversion-analysis ID=110
+#   make diag-conversion-analysis ID=110 GPR_ARGS="--deciles off"
+diag-conversion-analysis: zip cluster-overlay $(WORKSPACE_ENV)
+	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
+	. ./$(WORKSPACE_ENV) && \
+	PYTHONPATH=$(REPO_ROOT):$$PYTHONPATH spark-submit \
+	    --master yarn \
+	    --deploy-mode client \
+	    --driver-memory $(GPR_DRIVER_MEMORY) \
+	    --conf spark.executor.cores=4 \
+	    --conf spark.executor.memory=6g \
+	    --conf spark.executor.memoryOverhead=2g \
+	    --conf spark.python.worker.memory=2g \
+	    --conf spark.task.maxFailures=8 \
+	    --conf spark.excludeOnFailure.enabled=true \
+	    $(foreach kv,$(GPR_SPARK_CONF),--conf $(kv)) \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/distributed_readout.py,$(REPO_ROOT)/analysis/cloud/preindex_closure.py,$(REPO_ROOT)/analysis/cloud/conversion_sidecar.py,$(REPO_ROOT)/analysis/cloud/conversion_analysis.py \
+	    $(REPO_ROOT)/analysis/cloud/conversion_analysis.py \
+	    --run-dir "$(RUNS_DIR)/$(shell printf '%04d' $(ID))-*" \
+	    $(if $(GPR_CACHE_URI),--cache-uri $(GPR_CACHE_URI),) \
+	    $(if $(GPR_SIDECAR_URI),--sidecar-uri $(GPR_SIDECAR_URI),) \
+	    $(GPR_ARGS)
+
 # Print summary.md for an experiment (copy/paste back to chat)
 summary:
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
