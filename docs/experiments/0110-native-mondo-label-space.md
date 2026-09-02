@@ -1,7 +1,7 @@
 ---
 id: 110
 slug: native-mondo-label-space
-status: pending
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -519,3 +519,50 @@ rule and the eval program converge on the same repair; it is a train-time maskin
 change and stays deferred with it. Residual constant-head rate: **6.5% of C**, vs
 16.9% (0109) and 20% (0104). `no_pos: 0` — closure-support powering leaves nothing
 label-starved.
+
+**2026-09-02 — RECORD RUN LANDED; census GO; experiment closed.** (First record
+attempt died executor-side on a missing `--py-files` entry for
+`preindex_closure.py` — the module's UDF pickles by reference; fixed in 9f7f002
+and shipped on the fit and readout-recovery submits. The relaunch went
+end-to-end.)
+
+**Record numbers (full budgets, 20 executors, fit total 36,337 s ≈ 10.1 h):**
+
+| record budget | macro AUC | macro AP | scored | detection AUC | constant cols |
+|---|---|---|---|---|---|
+| 0104 record (C=3,820, anchor space) | 0.6978 | 0.4845 | 2,106 | (pre-fix artifact) | 619 |
+| **0110 record (C=2,714, native)** | **0.7350** | **0.4074** | **1,855** | **0.6475** | **176** |
+
+P@R0.5/0.8/0.9 = 0.397/0.285/0.253; R@FDR0.1/0.25/0.5 = 0.144/0.259/0.401.
+Smoke→record gap small (+0.006 AUC, +0.010 AP over the 60-iter smoke) — the
+solver was already near its answer at smoke budget, consistent with the improved
+conditioning. Node sets differ across the spaces (and across id SYSTEMS — OMOP
+anchors vs Mondo terms), so the macro delta is directional; the shared-node
+comparison per §Comparison protocol requires the xref mapping and is the one
+analysis still owed.
+
+Conditional sharpening (held-out isotonic): pooled ECE raw 0.0508 → **calibrated
+0.0176**; cond-AUC 0.67–0.78 by depth; top-1 beats majority at essentially every
+mid-depth parent (immune 0.695 vs 0.369, syndromic 0.667 vs 0.451). Per-node ECE
+mean 0.132 ≫ pooled — the tool's own pooling-flatters caveat stands. The per-node
+domain λ-mass table is the first look at multi-domain attribution in the native
+space: some heads are drug-dominated (cystitis 0.977 drug — antibiotic signature),
+others near-pure condition (postsurgical hypothyroidism 1.000).
+
+**Solver note for the optimization backlog:** the CALIBRATION solve (75% split,
+warm-started) consumed ~8 h of the 10 — full 200 iterations, 5,884 passes,
+2,734 line-search failures, 328 stalled nodes, deep-phase ~30 passes/iter over
+~96 nodes/pass. The line-search backtrack cap (offered, never requested) and
+ship-only-searching-rows partials are now the dominant wall-clock lever.
+
+**Diag (record corpus): identical to the smoke — 177 = 1 root + 167
+splice-protected only-children + 9 tie-map twins; no_pos 0.** Reproduced under
+the new bundle key with the preindexClosure column present.
+
+**CENSUS (E-census): GO.** 2,222/2,714 nodes clear min_count=20 on BOTH incident
+classes (bar ~300); positives-only 157, negatives-only 285, neither 50, zero
+nodes without eligible docs. **C2.1 population = 0**: every train-degenerate head
+stays all-positive under incident eligibility (still-all-positive 177 /
+acquired-negatives 0), so the forced-0.5 macro-inflation channel is EMPTY on this
+corpus — the R2.1 constant-column guard ships anyway as belt-and-braces.
+Decision recorded: **GO — E2/E3/E4 (WP4/WP5/WP6) proceed.**
