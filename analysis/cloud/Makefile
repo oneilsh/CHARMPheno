@@ -429,6 +429,11 @@ lr-readout: zip cluster-overlay $(WORKSPACE_ENV)
 # readout. PYTHONPATH=REPO_ROOT so the driver imports analysis.pc (the scorer),
 # which is not in any --py-files zip (client mode: the master has the repo).
 #
+# Under --readout-mode distributed it also PERSISTS the fitted readout heads to
+# the run dir (readout_heads_gated_pc.npz) — the raw-θ scoring params that
+# `diag-conversion-analysis --deciles on` scores from without a re-fit. Run this
+# once on a pre-existing fit (e.g. 0110) to write that sidecar.
+#
 # The bundle cache-uri and (for OLDER runs whose manifest omits it) doc-min-length
 # are overridable; a run whose manifest already records doc_min_length + emit_labels
 # (current driver) needs neither. If the key still misses, pass GPR_ARGS="--bundle-path
@@ -608,10 +613,17 @@ build-conversion-sidecar: zip cluster-overlay $(WORKSPACE_ENV)
 # Requires, and refuses by name with distinct exit codes: a bundle cache HIT (2),
 # E1's pre-index closure witness (3), the E4 sidecar witness + a sidecar HIT (4 —
 # run `make build-conversion-sidecar ID=N` first), and a scoreable saved fit (5).
-# `--deciles off` (via GPR_ARGS) skips the readout solve and reports the overall
-# table only. Example:
-#   make diag-conversion-analysis ID=110
-#   make diag-conversion-analysis ID=110 GPR_ARGS="--deciles off"
+# `--deciles off` (the DEFAULT) reports the overall table only. `--deciles on`
+# now SCORES the test split from the run's SAVED readout heads
+# (readout_heads_gated_pc.npz — one distributed mapPartitions, NO re-fit; the
+# re-fit was the disk cascade that took the cluster down on 0110), so it is cheap
+# and disk-safe. It needs that npz, which every readout fit under current code
+# persists; for a pre-existing fit run `make gated-pc-readout ID=N` ONCE to
+# persist it (an absent npz falls back to the overall table, never a re-fit).
+# Example:
+#   make diag-conversion-analysis ID=110                       # overall table
+#   make gated-pc-readout ID=110                               # persists the heads
+#   make diag-conversion-analysis ID=110 GPR_ARGS="--deciles on"  # + score deciles
 diag-conversion-analysis: zip cluster-overlay $(WORKSPACE_ENV)
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	. ./$(WORKSPACE_ENV) && \

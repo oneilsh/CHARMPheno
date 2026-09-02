@@ -1414,6 +1414,146 @@ def _read_readout_ckpt(path, fingerprint):
         return None
 
 
+# --------------------------------------------------------------------------- #
+# Persisted readout HEADS (the fitted per-node scoring params, saved for reuse) #
+# --------------------------------------------------------------------------- #
+# Distinct from the SOLVER checkpoint above: the checkpoint is a mid-solve
+# resume point that is DELETED once the solve lands, whereas this is the
+# COMPLETED fit's raw-θ scoring params, kept beside the run's other record files.
+# It exists so a later scoring-only consumer (conversion_analysis --deciles on)
+# can turn each doc's θ into per-node proba with ONE mapPartitions, instead of
+# re-running the whole batched readout solve just to get per-doc scores — the
+# re-fit that filled the worker local disks and cascaded ~12 nodes dead on 0110.
+_HEADS_VERSION = "readout-heads-v1"
+
+
+def _readout_heads_path(run_dir, label):
+    """Path of the persisted heads npz for arm `label` in `run_dir`.
+
+    Keyed by `label` for the same reason the solver checkpoint is
+    (`readout_heads_gated_pc.npz`, `..._unsup_gated.npz`, `..._dag_head.npz`): a
+    run fits several arms into one dir and each is a different scoring model."""
+    return Path(run_dir) / f"readout_heads_{label or 'arm'}.npz"
+
+
+def _readout_heads_fingerprint(C, K, theta_topm, label, degenerate):
+    """Identity of a fitted arm's heads — the arm shape plus its fittable mask.
+
+    Mirrors `_readout_ckpt_fingerprint`'s doctrine: hash only the
+    exactly-reproducible integers, never the standardization moments' float bits
+    (which `treeAggregate` combines in nondeterministic order). `degenerate` is a
+    bool mask derived from integer observed/positive COUNTS, so it is bit-stable
+    across runs of the same arm/corpus and is a compact signature of them."""
+    h = hashlib.sha256()
+    h.update(f"{_HEADS_VERSION}|label={label or 'arm'}|C={int(C)}|K={int(K)}|"
+             f"topm={int(theta_topm)}|".encode())
+    d = np.ascontiguousarray(np.asarray(degenerate, dtype=bool))
+    h.update(f"|{d.shape}|".encode())
+    h.update(d.tobytes())
+    return h.hexdigest()
+
+
+def _write_readout_heads(run_dir, label, V, b_raw, const, degenerate, C, K,
+                         theta_topm):
+    """Persist a COMPLETED readout fit's raw-θ scoring params to the run dir.
+
+    Everything a scoring pass needs to turn a doc's θ into per-node proba —
+    `(V, b_raw)` (raw-θ, so no scaler travels), plus the `degenerate`/`const`
+    oracle fallback and the truncation width `theta_topm` the coefficients belong
+    to. Written as a small npz (~60 MB at 0110 scale: C×K×8) beside the fit's
+    other record files, once the solve has RETURNED.
+
+    Additive: it changes no existing number. Written only when the arm has a
+    durable run dir (`distributed_score_arm`'s `checkpoint_dir`), which is exactly
+    the fit driver's readout path and `gated_pc_readout`'s recovery path — never
+    the row-SAMPLED A/B fit or the calibration sub-fit, which have no business
+    owning this file. Atomic (tmp + replace) for the same gcsfuse torn-file reason
+    as `_write_readout_ckpt`; failures are swallowed and reported, because the
+    fit's own results are the record and a missing sidecar only means
+    `conversion_analysis --deciles on` asks for a one-time re-readout. Returns
+    True on success.
+
+    NOTE: pre-existing fits (e.g. 0110's) predate this file and lack it until a
+    readout is re-run under this code — `make gated-pc-readout ID=<n>` once."""
+    path = _readout_heads_path(run_dir, label)
+    tmp = path.with_name(path.name + ".tmp")
+    fp = _readout_heads_fingerprint(C, K, theta_topm, label, degenerate)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(tmp, "wb") as fh:
+            # File OBJECT, not a name: np.savez appends `.npz` to a str path,
+            # which would make the tmp name (and thus the rename) a guess.
+            np.savez(fh,
+                     version=np.str_(_HEADS_VERSION),
+                     label=np.str_(label or "arm"),
+                     V=np.ascontiguousarray(V, dtype=np.float64),
+                     b_raw=np.ascontiguousarray(b_raw, dtype=np.float64),
+                     const=np.ascontiguousarray(const, dtype=np.float64),
+                     degenerate=np.ascontiguousarray(degenerate, dtype=bool),
+                     C=np.int64(int(C)), K=np.int64(int(K)),
+                     theta_topm=np.int64(int(theta_topm)),
+                     fingerprint=np.str_(fp))
+        tmp.replace(path)
+        print(f"[driver]   wrote readout heads {path.name} "
+              f"(C={int(C)} K={int(K)} topm={int(theta_topm)}) — "
+              "conversion_analysis --deciles on scores from this, no re-fit",
+              flush=True)
+        return True
+    except Exception as exc:                         # pragma: no cover - I/O failure
+        print(f"[driver]   readout heads write FAILED ({exc}); the fit is "
+              "unaffected, but conversion_analysis --deciles on will need a "
+              "re-readout to persist them", flush=True)
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+
+
+def _read_readout_heads(run_dir, label, *, C=None, K=None, theta_topm=None):
+    """Load persisted readout heads for `label`, or None with a printed reason.
+
+    Returns `(V, b_raw, const, degenerate, C, K, theta_topm)` — the exact tuple a
+    scoring pass (`_collect_lean_proba`) consumes — when a heads npz is present,
+    readable, of a known version, and (where the caller passes them) consistent
+    with the manifest's `C`/`K`/`theta_topm`. Any miss returns None so the caller
+    can degrade to the overall (non-decile) deliverable, NEVER fall back to a
+    re-fit. `K=None`/`theta_topm=None` skip that particular consistency check (an
+    old manifest may not record K); the V-shape check against the STORED C/K still
+    runs regardless."""
+    path = _readout_heads_path(run_dir, label)
+    if not path.exists():
+        return None
+    try:
+        with np.load(path, allow_pickle=False) as z:
+            ver = str(z["version"].item())
+            if ver != _HEADS_VERSION:
+                print(f"[driver]   readout heads {path.name} IGNORED: version "
+                      f"{ver!r} != {_HEADS_VERSION!r}", flush=True)
+                return None
+            gC, gK, gm = int(z["C"]), int(z["K"]), int(z["theta_topm"])
+            V = np.asarray(z["V"], dtype=np.float64)
+            b_raw = np.asarray(z["b_raw"], dtype=np.float64)
+            const = np.asarray(z["const"], dtype=np.float64)
+            degenerate = np.asarray(z["degenerate"], dtype=bool)
+    except Exception as exc:
+        print(f"[driver]   readout heads {path.name} UNREADABLE ({exc})",
+              flush=True)
+        return None
+    for name, want, got in (("C", C, gC), ("K", K, gK),
+                            ("theta_topm", theta_topm, gm)):
+        if want is not None and int(want) != got:
+            print(f"[driver]   readout heads {path.name} IGNORED: {name}={got} "
+                  f"!= manifest {name}={int(want)} — a different arm/run",
+                  flush=True)
+            return None
+    if V.shape != (gC, gK):
+        print(f"[driver]   readout heads {path.name} IGNORED: V shape {V.shape} "
+              f"!= (C={gC}, K={gK})", flush=True)
+        return None
+    return V, b_raw, const, degenerate, gC, gK, gm
+
+
 def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
                        max_iter=_READOUT_MAX_ITER, history=6, label="", depth=None,
                        warm_start=None, theta_topm=0, checkpoint_path=None,
@@ -1716,6 +1856,17 @@ def distributed_score_arm(train_scored, test_scored, C, K, *, recall_targets,
         depth=depth, label=label, warm_start=warm_start, theta_topm=theta_topm,
         checkpoint_path=ckpt_path, checkpoint_every=checkpoint_every,
         topic_col=topic_col, label_col=label_col, mask_col=mask_col)
+    if checkpoint_dir is not None:
+        # PART 1 keystone: the COMPLETED fit's raw-θ scoring params are the record
+        # that conversion_analysis --deciles on scores from (one mapPartitions),
+        # instead of re-running this whole solve just to get per-doc scores. Both
+        # readout paths that have a run dir — the fit driver's and
+        # `gated_pc_readout`'s recovery — reach the fit through here with a
+        # `checkpoint_dir`, so this one site persists for both; the sampled A/B
+        # fit and the calibration sub-fit (no checkpoint_dir) are correctly
+        # excluded. Additive.
+        _write_readout_heads(checkpoint_dir, label, V, b_raw, const, degenerate,
+                             C, K, theta_topm)
     proba, y_te, m_te, persons, elig = _collect_lean_proba(
         test_scored, C, V, b_raw, degenerate=degenerate, const=const,
         score_col=topic_col, label_col=label_col, mask_col=mask_col, id_col=id_col,
