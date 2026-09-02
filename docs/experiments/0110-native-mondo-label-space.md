@@ -592,3 +592,51 @@ incidence. The score-decile enrichment that WOULD distinguish them (R4.8: do the
 model's top-scoring negatives convert materially above its bottom-scoring ones?)
 is pending the `--deciles on` run, which needs the persisted readout heads from a
 readout under commit 10bdf1d (`make gated-pc-readout ID=110`).
+
+**2026-09-02 (cont.) — E2 incident metrics + E4 decile validation: the eval program's payoff.**
+(Both off the saved fit; the readout persisted `readout_heads_gated_pc.npz`, so
+the deciles scored with no re-fit and no disk death — the 10bdf1d/6bbd9ad fix
+working.)
+
+**Tracking vs prediction (spec E2 / D7 — a PREVALENT-fit model on an INCIDENT
+cohort; discrimination, never prospective). On the SAME 1,599 shared nodes:**
+
+| arm / node set | AUC | AP | nodes |
+|---|---|---|---|
+| prevalent / full | 0.7350 | 0.4074 | 1855 |
+| prevalent / shared | 0.7412 | 0.4361 | 1599 |
+| **incident / shared** | **0.6741** | **0.2429** | 1599 |
+
+Excluding prior carriers of closure(c) from both classes — leaving only genuine
+new-onset — costs **~0.067 AUC**: that much of the prevalent headline was
+tracking (autocorrelated re-coding of an already-known condition). The true
+forward-prediction signal is 0.6741, well above chance. AP nearly halves
+(0.436→0.243) because incident cohorts are far lower-prevalence once prior
+carriers leave, and AP is prevalence-sensitive where AUC is not. Skipped columns
+(counted separately, never summed): degenerate 192, small (<20 incident) 923,
+**CONSTANT 0** — the census-predicted-empty C2.1 population confirmed; R2.1's
+constant-column guard is present and correctly fired zero times.
+
+**Case-finding validation (spec E4/R4.8): decile-stratified conversion of
+incident negatives — MONOTONIC, top ≈3× bottom, at every horizon.**
+
+| horizon | d0 | … | d9 | top−bottom |
+|---|---|---|---|---|
+| 365d  | 0.006 | ↗ | 0.020 | +0.0140 (3.3×) |
+| 730d  | 0.011 | ↗ | 0.036 | +0.0241 (3.3×) |
+| 1095d | 0.017 | ↗ | 0.049 | +0.0323 (2.9×) |
+
+The PU floor (0.96%/1.77%/2.53% pooled, prior entry) could not, alone, be
+distinguished from background incidence. This decile gradient distinguishes it:
+background incidence would be FLAT across deciles; instead the model's own
+"negatives" convert to the real diagnosis at a rate climbing monotonically with
+the score it gave them. The label-noise channel is concentrated exactly where the
+model points — the contamination IS the model surfacing not-yet-diagnosed cases.
+Prospective-within-retrospective case-finding validation, no chart review. At 3y a
+top-decile "negative" carries ~1-in-20 future-diagnosis odds vs ~1-in-60 at the
+bottom.
+
+**The incident-episode eval program (audit → spec → plan → E1..E4) is complete
+and delivered on the 0110 native corpus.** E5 (episode-anchored sampling) remains
+0111, deferred by design. Still owed to the record: the shared-node comparison
+against 0104's anchor-space record (needs the OMOP↔Mondo xref to align id systems).
