@@ -663,6 +663,90 @@ def test_retry_spark_action_first_line_survives_a_dead_gateway():
     assert dr._error_first_line(_job_abort("line one\nline two")) == "line one"
 
 
+# The bad-node / node-unhealthy DISK cascade (exp 0110): a full worker local disk
+# marks the NodeManager unhealthy and SIGTERMs its containers ("Container from a
+# bad node", exit 143). Unlike spot preemption it does NOT self-heal on a backoff,
+# and re-running a shuffle-heavy pass feeds the cascade — so it must fail fast.
+_BAD_NODE_MSG = (
+    "Job aborted due to stage failure: Task 0 in stage 12.0 failed 8 times, most "
+    "recent failure: Lost task 0.7 in stage 12.0 (TID 341) (worker-3 executor 5): "
+    "ExecutorLostFailure (executor 5 exited caused by one of the running tasks) "
+    "Reason: Container from a bad node: container_1234_0005_01_000006 on host: "
+    "worker-3. Exit status: 143.")
+_UNHEALTHY_MSG = (
+    "ExecutorLostFailure (executor 9 exited) Reason: Container marked as failed. "
+    "Diagnostics: Container released on a *lost* node. Node worker-7 is marked "
+    "UNHEALTHY: 1/1 local-dirs have errors.")
+# Ordinary spot preemption: a transient ExecutorLostFailure with NEITHER needle.
+# It keeps the full retry budget — the whole reason the wrapper exists.
+_PREEMPTION_MSG = (
+    "Aborting TaskSet 3258.0 because task 0 (partition 0) cannot run anywhere due "
+    "to node and executor excludeOnFailure. ExecutorLostFailure Reason: Container "
+    "released on a lost node. Killed by external signal.")
+
+
+def test_is_bad_node_failure_predicate():
+    """The heuristic matches the two DISK-cascade needles and NOT plain
+    preemption. 'lost node' (spot preemption) is deliberately not a needle — a
+    false positive there would strip the retry budget from the case this whole
+    wrapper exists for."""
+    assert dr._is_bad_node_failure(_job_abort(_BAD_NODE_MSG)) is True
+    assert dr._is_bad_node_failure(_job_abort(_UNHEALTHY_MSG)) is True
+    assert dr._is_bad_node_failure(_job_abort(_PREEMPTION_MSG)) is False
+    # Walks the cause chain, and a hostile __str__ degrades to no-match, never a
+    # raise (the gateway may be the thing that died).
+    wrapped = RuntimeError("outer")
+    wrapped.__cause__ = _job_abort(_BAD_NODE_MSG)
+    assert dr._is_bad_node_failure(wrapped) is True
+
+    class _Hostile(Exception):
+        def __str__(self):
+            raise RuntimeError("gateway is gone")
+
+    assert dr._is_bad_node_failure(_Hostile()) is False
+
+
+def test_retry_spark_action_fails_fast_on_a_bad_node_cascade(no_sleep, capsys):
+    """A bad-node / node-unhealthy failure is a DISK/health cascade that a backoff
+    cannot heal and a retry would only feed (exp 0110: ~12 nodes dead over an
+    hour). It fails fast on the first raise — no 60+120+240s of backoff — exactly
+    like the schema and dead-context cases."""
+    err = _job_abort(_BAD_NODE_MSG)
+    n = []
+
+    def _fn():
+        n.append(1)
+        raise err
+
+    with pytest.raises(Exception) as excinfo:
+        dr._retry_spark_action(_fn, attempts=4, base_sleep_s=60, label="masked moments")
+    assert excinfo.value is err
+    assert len(n) == 1                            # one attempt, not four
+    assert no_sleep == []                         # and not one second of backoff
+    out = capsys.readouterr().out
+    assert "BAD NODE" in out
+    assert "retrying in" not in out
+    assert "masked moments" in out                # the label still names the pass
+
+
+def test_retry_spark_action_still_retries_plain_preemption(no_sleep, capsys):
+    """The bad-node exclusion must NOT widen onto ordinary spot preemption: a
+    transient ExecutorLostFailure without the disk-cascade signature is precisely
+    what a fresh job + a short backoff recovers, so it keeps the full budget."""
+    calls = []
+
+    def _fn():
+        calls.append(1)
+        if len(calls) <= 2:
+            raise _job_abort(_PREEMPTION_MSG)
+        return "ok"
+
+    assert dr._retry_spark_action(_fn, attempts=4, base_sleep_s=60) == "ok"
+    assert len(calls) == 3
+    assert no_sleep == [60.0, 120.0]              # full doubling backoff, as before
+    assert "BAD NODE" not in capsys.readouterr().out
+
+
 # --------------------------------------------------------------------------- #
 # Local-Spark round trip (thin wiring; AGENTS.md: local Spark => @slow).       #
 # --------------------------------------------------------------------------- #
