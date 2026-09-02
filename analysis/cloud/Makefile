@@ -620,10 +620,32 @@ build-conversion-sidecar: zip cluster-overlay $(WORKSPACE_ENV)
 # and disk-safe. It needs that npz, which every readout fit under current code
 # persists; for a pre-existing fit run `make gated-pc-readout ID=N` ONCE to
 # persist it (an absent npz falls back to the overall table, never a re-fit).
+#
+# 0111 SCOUTING FLAGS (forwarded through GPR_ARGS, both reuse 0110's SAVED fit +
+# SAVED sidecar — NO re-fit, NO corpus re-assembly):
+#   --by-depth on|off (DEFAULT on — it is FREE): also reports the R4.8 decile
+#     case-finding table broken out by DAG DEPTH (depth = DagLayout.depth over the
+#     bundle's parent map). Individual depths where each carries >= --min-count
+#     incident-negative nodes, else shallow 1-3 / mid 4-6 / deep 7+ bands; the
+#     banding chosen and why is printed. Bucket-level pooled rates + counts-of-
+#     nodes only — same egress as the overall pooled output.
+#   --horizon-eval on|off (DEFAULT off — one extra SCORING pass, so opt-in): for
+#     each window W in --horizon-days builds a LONGER-WINDOW incident label from
+#     the sidecar (label_W=1 iff first attestation of closure(c) in [index,
+#     index+W); eligibility unchanged per D2; right-censored through index+W as the
+#     conversion denominator is) and reports macro AUC/AP on the SHARED node set
+#     scoreable at ALL horizons (R2.2) + each horizon's own full set, plus macro
+#     AUC by depth-bucket x horizon. RISING AUC with W = the 1y label under-credits
+#     the model's skill (motivates a re-fit); flat = signal already captured. A
+#     DISCRIMINATION measurement of a PREVALENT/1y-FIT model vs longer-horizon
+#     incident labels (D7/C2.4), NOT a prospective estimate. Needs the persisted
+#     heads npz (like --deciles on); absent, it prints the one-time re-readout fix
+#     and is SKIPPED (never a re-fit) — the overall + depth tables still run.
 # Example:
-#   make diag-conversion-analysis ID=110                       # overall table
+#   make diag-conversion-analysis ID=110                       # overall + depth
 #   make gated-pc-readout ID=110                               # persists the heads
 #   make diag-conversion-analysis ID=110 GPR_ARGS="--deciles on"  # + score deciles
+#   make diag-conversion-analysis ID=110 GPR_ARGS="--horizon-eval on"  # + sweep
 diag-conversion-analysis: zip cluster-overlay $(WORKSPACE_ENV)
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	. ./$(WORKSPACE_ENV) && \

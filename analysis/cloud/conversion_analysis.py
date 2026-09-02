@@ -266,6 +266,323 @@ def format_conversion_report(pooled, meta) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# DEPTH STRATIFICATION (0111 scouting analysis 1).                              #
+#                                                                              #
+# A re-aggregation of the SAME per-node conversion the tool already computes,   #
+# bucketed by DAG DEPTH. Depth is read off the bundle's parent map through      #
+# `DagLayout.depth` (spark-vi/spark_vi/models/topic/dag_placement.py:38), the   #
+# longest root->node path; nothing new is scored. Egress is the pooled path's   #
+# exactly: only bucket-level pooled rates and counts-of-nodes leave, and only   #
+# cells that clear the disclosure floor contribute to a pooled figure.          #
+# --------------------------------------------------------------------------- #
+# The fallback bands, used when individual depths are too thin to pool alone.
+# `deep` is open-ended; the shallowest band also absorbs the root (depth 0).
+DEPTH_BANDS = (("shallow(1-3)", 1, 3), ("mid(4-6)", 4, 6), ("deep(7+)", 7, 10**9))
+
+
+def node_depths(lay, C):
+    """Depth per engine label node `0..C-1` (root = 0), from the bundle's parent map.
+
+    `lay` is the same `DagLayout(bundle.parent_int, ...)` the closure fold already
+    builds; `lay.depth(c)` is the longest root->c path (memoized, cycle-guarded).
+    No Spark, no new scan — the parent structure is already in the driver."""
+    return np.array([int(lay.depth(int(c))) for c in range(int(C))], dtype=int)
+
+
+def depth_histogram(depths, nodes):
+    """`{depth: n_nodes}` over `nodes` (the engine ids that HAVE incident negatives).
+
+    Bucketing is decided from the histogram of the nodes that actually reach the
+    table, not from the whole DAG: a depth with no incident-negative node cannot
+    contribute a pooled cell and must not create an empty bucket."""
+    hist = {}
+    for c in nodes:
+        d = int(depths[int(c)])
+        hist[d] = hist.get(d, 0) + 1
+    return dict(sorted(hist.items()))
+
+
+def choose_depth_banding(hist, min_nodes_per_bucket=EGRESS_MIN_COUNT):
+    """`(mode, buckets, reason)` — per-depth if the histogram supports it, else bands.
+
+    `buckets` is a list of `(label, lo, hi)` INCLUSIVE depth ranges. Individual
+    depths are used only when every populated depth carries at least
+    `min_nodes_per_bucket` incident-negative nodes — otherwise a "per-depth" pooled
+    rate at a deep level would be one or two nodes wearing a bucket's name, which is
+    both noisy and an egress hazard. When that fails we fall back to the three fixed
+    bands (shallow 1-3 / mid 4-6 / deep 7+), keeping only the bands the histogram
+    actually populates. The reason string is printed so the choice is auditable."""
+    populated = {int(d): int(n) for d, n in hist.items()}
+    non_root = {d: n for d, n in populated.items() if d >= 1}
+    if non_root and min(non_root.values()) >= int(min_nodes_per_bucket):
+        # Root (depth 0), if present, rides as its own bucket in per-depth mode.
+        buckets = [(f"d={d}", d, d) for d in sorted(populated)]
+        reason = (f"per-depth: every populated depth carries >= "
+                  f"{int(min_nodes_per_bucket)} incident-negative nodes "
+                  f"(thinnest depth has {min(non_root.values())})")
+        return "per_depth", buckets, reason
+    buckets = []
+    for label, lo, hi in DEPTH_BANDS:
+        b_lo = 0 if label == DEPTH_BANDS[0][0] else lo   # shallowest absorbs root
+        n = sum(v for d, v in populated.items() if b_lo <= d <= hi)
+        if n:
+            buckets.append((label, b_lo, hi))
+    thin = sorted(d for d, n in non_root.items() if n < int(min_nodes_per_bucket))
+    reason = (f"banded (shallow 1-3 / mid 4-6 / deep 7+; root folds into shallow): "
+              f"depths {thin} have < {int(min_nodes_per_bucket)} incident-negative "
+              f"nodes each, too thin to pool as their own bucket")
+    return "banded", buckets, reason
+
+
+def pool_by_depth(per_node, node_depth, buckets, min_count=EGRESS_MIN_COUNT):
+    """Re-pool the per-node conversion table into depth buckets.
+
+    Each bucket is the `pool_tables` of the nodes whose depth falls in its inclusive
+    range — same pooling-over-cells, same disclosure floor, same decile profile and
+    top-minus-bottom spread. `n_nodes` / `n_observed` in each pooled horizon are the
+    bucket's disclosable node count and its pooled negative denominator."""
+    out = {}
+    for label, lo, hi in buckets:
+        sub = {c: t for c, t in per_node.items()
+               if lo <= int(node_depth[int(c)]) <= hi}
+        out[label] = {"depth_range": [int(lo), int(hi)],
+                      "n_nodes_in_bucket": len(sub),
+                      "pooled": pool_tables(sub, min_count=min_count)}
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# EVAL-SIDE HORIZON SWEEP (0111 scouting analysis 2).                           #
+#                                                                              #
+# "Is the 1y-trained model under-credited by the 1y label?" — asked WITHOUT a   #
+# re-fit. The persisted heads score the test split (the `--deciles on` path);   #
+# for each window W the sidecar yields a LONGER-WINDOW incident label, and the   #
+# macro AUC/AP is measured on it. Rising AUC with W = skill the 1y label does    #
+# not credit; flat = signal already captured. This is a DISCRIMINATION           #
+# measurement of a PREVALENT/1y-FIT model against longer-horizon incident        #
+# labels (D7 / C2.4), not a prospective estimate — the header says so.           #
+# --------------------------------------------------------------------------- #
+HORIZON_NAMING = (
+    "a PREVALENT/1y-FIT model evaluated against LONGER-HORIZON INCIDENT labels "
+    "(spec D7 / audit C2.4): the heads are standardized and fit on each node's own "
+    "observed TRAIN rows under the 1y prevalent mask, so this is a DISCRIMINATION "
+    "measurement (macro AUC/AP), NOT a prospective incidence estimate and NOT a "
+    "calibration statement.")
+HORIZON_INTERP = (
+    "RISING macro AUC as the window W widens = the model's skill is UNDER-CREDITED "
+    "by the 1y label (it already ranks future converters it was never trained to "
+    "name), which MOTIVATES a re-fit experiment on a wider label; FLAT AUC across W "
+    "= the 1y label already captures the discriminable signal.")
+
+
+def incident_label_at_horizon(first_col, index_day, obs_day, W):
+    """`(positive, observed)` boolean arrays for one node at window `W`.
+
+    Widens ONLY the post-index window that turns an eligible cell positive
+    (eligibility — `c ∉ R_d`, spec D2 — is applied by the caller, upstream):
+
+      * OBSERVED (the right-censoring gate, R4.4) — `obs_day >= index + W`, the same
+        follow-up clause `conversion_counts` applies, measured from the INDEX because
+        the label window this sweep varies begins at the index. A person not observed
+        through `index + W` leaves the denominator; a first-attestation past their
+        own observation end therefore cannot count (it fails this gate), which is the
+        boundary the fixtures pin.
+      * POSITIVE — observed AND first-attestation-of-closure(c) in `[index, index+W)`.
+        Half-open: an attestation exactly at `index + W` belongs to the NEXT window,
+        never this one, so the windows nest without double-counting.
+
+    `first_col` may be non-finite ("never attested anywhere"), a non-positive at
+    every W. Both arrays are aligned to the passed (already eligibility-filtered)
+    rows; `positive` is gated on `observed`, so `positive[observed]` /
+    `scores[observed]` is the clean (label, score) pair for one node's AUC."""
+    first = np.asarray(first_col, dtype=float)
+    idx = np.asarray(index_day, dtype=float)
+    oe = np.asarray(obs_day, dtype=float)
+    W = float(W)
+    observed = np.isfinite(idx) & (oe >= idx + W)
+    positive = (observed & np.isfinite(first)
+                & (first >= idx) & (first < idx + W))
+    return positive, observed
+
+
+def _macro_auc(per_node, nodes):
+    """Macro AUC/AP over an EXPLICIT node list (R2.2), with pooled +/- totals.
+
+    Mirrors `gated_pc_cloud._macro_over`: averaging over a passed-in node set rather
+    than over whatever each horizon happened to score is the whole of R2.2 — a delta
+    across different node sets is not a comparison. Only scored nodes (AUC not None)
+    count; `n_pos_total`/`n_neg_total` are pooled cell counts, workspace-internal."""
+    nodes = [c for c in nodes
+             if c in per_node and per_node[c].get("auc") is not None]
+    aucs = [per_node[c]["auc"] for c in nodes]
+    aps = [per_node[c]["ap"] for c in nodes if per_node[c].get("ap") is not None]
+    return {"auc": float(np.mean(aucs)) if aucs else None,
+            "ap": float(np.mean(aps)) if aps else None,
+            "n_nodes": len(nodes),
+            "n_pos_total": int(sum(int(per_node[c].get("n_pos", 0))
+                                   for c in nodes)),
+            "n_neg_total": int(sum(int(per_node[c].get("n_neg", 0))
+                                   for c in nodes))}
+
+
+def horizon_macro(per_horizon_per_node, horizons):
+    """Full-set and SHARED-set macro AUC/AP per horizon (R2.2 comparability).
+
+    `per_horizon_per_node[W]` maps node -> a `_score_label` record. For each W the
+    FULL set is the nodes scored at W; the SHARED set is the nodes scored at EVERY
+    horizon — the only set on which a cross-horizon AUC delta is a comparison rather
+    than a change of population. Both are reported: shared is the honest headline,
+    full is what each horizon can say on its own."""
+    horizons = [int(W) for W in horizons]
+    scored = {W: {c for c, r in per_horizon_per_node.get(W, {}).items()
+                  if r.get("auc") is not None} for W in horizons}
+    shared = (set.intersection(*[scored[W] for W in horizons])
+              if horizons else set())
+    out = {"shared_node_set_size": len(shared),
+           "shared_node_set": sorted(int(c) for c in shared), "horizons": {}}
+    for W in horizons:
+        pn = per_horizon_per_node.get(W, {})
+        out["horizons"][W] = {
+            "full": _macro_auc(pn, sorted(scored[W])),
+            "shared": _macro_auc(pn, sorted(shared)),
+            "full_node_set_size": len(scored[W])}
+    return out
+
+
+def horizon_macro_by_depth(per_horizon_per_node, horizons, node_depth, buckets):
+    """Macro AUC by depth-bucket x horizon — Analysis 1's buckets over the sweep.
+
+    Cheap re-aggregation: for each bucket, macro over the nodes scored at that
+    horizon that fall in the bucket's depth range. Full-set per bucket (the shared
+    intersection within a bucket would often be empty at deep levels)."""
+    horizons = [int(W) for W in horizons]
+    out = {}
+    for label, lo, hi in buckets:
+        out[label] = {"depth_range": [int(lo), int(hi)], "horizons": {}}
+        for W in horizons:
+            pn = per_horizon_per_node.get(W, {})
+            nodes = sorted(c for c in pn
+                           if lo <= int(node_depth[int(c)]) <= hi
+                           and pn[c].get("auc") is not None)
+            out[label]["horizons"][W] = _macro_auc(pn, nodes)
+    return out
+
+
+def compute_horizon_eval(first_mat, index_day, obs_day, elig, proba, *,
+                         horizons, node_depth, buckets, min_count=EGRESS_MIN_COUNT):
+    """Score every eligible node at every window W and pool (driver-side, no Spark).
+
+    Pure driver numpy over arrays the tool already holds: the persisted-head scores
+    `proba`, the eligibility matrix `elig` (`c ∉ R_d`, D2), and the sidecar's
+    first-attestation / index / obs-end arrays. Per node, restrict to eligible rows,
+    build the horizon label + censoring gate with `incident_label_at_horizon`, and
+    score the observed cells with the SAME `_score_label` the prevalent/incident
+    readouts use (constant-column guard on, R2.1; small-column floor at `min_count`,
+    R2.2). No new Spark job, no re-fit."""
+    from analysis.pc.evaluate import _score_label
+    C = int(first_mat.shape[1])
+    elig = np.asarray(elig)
+    horizons = [int(W) for W in horizons]
+    per_h = {W: {} for W in horizons}
+    for c in range(C):
+        rows = np.flatnonzero(elig[:, c].astype(bool))
+        if rows.size == 0:
+            continue
+        fc = np.asarray(first_mat[rows, c], dtype=float)
+        idx = index_day[rows]
+        oe = obs_day[rows]
+        sc = np.asarray(proba[rows, c], dtype=float)
+        for W in horizons:
+            pos, obsv = incident_label_at_horizon(fc, idx, oe, W)
+            if not obsv.any():
+                continue
+            per_h[W][c] = _score_label(pos[obsv], sc[obsv],
+                                       min_count=int(min_count), skip_constant=True)
+    macro = horizon_macro(per_h, horizons)
+    by_depth = horizon_macro_by_depth(per_h, horizons, node_depth, buckets)
+    return {
+        "naming": HORIZON_NAMING, "interpretation": HORIZON_INTERP,
+        "macro": macro, "by_depth": by_depth,
+        "per_horizon_per_node": {
+            str(W): {str(c): r for c, r in per_h[W].items()} for W in horizons},
+    }
+
+
+def format_depth_report(by_depth, banding, horizons) -> list:
+    """Banner lines for the depth-stratified decile profile (Analysis 1).
+
+    Disclosable content only: bucket-level pooled conversion rate, the d0..d9 decile
+    profile, top-minus-bottom, and counts OF NODES / of pooled negatives — nothing
+    per-node, nothing under the floor (those never entered the pooled figure)."""
+    lines = [
+        "[conversion] --- DEPTH-STRATIFIED decile profile (0111 scouting): the "
+        "R4.8 case-finding table, broken out by DAG depth ---",
+        f"[conversion]   banding = {banding.get('mode')}: {banding.get('reason')}",
+        f"[conversion]   depth histogram (nodes with incident negatives): "
+        f"{banding.get('histogram')}",
+    ]
+    for label, block in by_depth.items():
+        lines.append(f"[conversion]   [{label}]  n_nodes_in_bucket="
+                     f"{block['n_nodes_in_bucket']}")
+        for h in horizons:
+            p = block["pooled"].get(h)
+            if p is None:
+                continue
+            rate = "n/a" if p["rate"] is None else f"{p['rate']:.4f}"
+            cells = "  ".join(("  n/a" if c["rate"] is None else f"{c['rate']:.3f}")
+                              for c in p["deciles"])
+            tb = ("n/a" if p["top_minus_bottom"] is None
+                  else f"{p['top_minus_bottom']:+.4f}")
+            lines.append(
+                f"[conversion]     {h:>5}d  nodes={p['n_nodes']:>4}  "
+                f"negs(obs)={p['n_observed']:>8}  rate={rate}")
+            lines.append(f"[conversion]     {h:>5}d  d0..d9: {cells}   "
+                         f"(top-bottom={tb})")
+    return lines
+
+
+def format_horizon_report(horizon_eval, horizons) -> list:
+    """Banner lines for the horizon sweep (Analysis 2) — macro AUC/AP only."""
+    if horizon_eval is None:
+        return []
+    macro = horizon_eval["macro"]
+    lines = [
+        "[conversion] --- EVAL-SIDE HORIZON SWEEP (0111 scouting): does a wider "
+        "label credit more of the 1y-fit model's skill? ---",
+        f"[conversion]   claim type: {HORIZON_NAMING}",
+        f"[conversion]   read it as: {HORIZON_INTERP}",
+        f"[conversion]   SHARED node set (scoreable at ALL horizons, R2.2): "
+        f"{macro['shared_node_set_size']} nodes — a cross-horizon delta is a "
+        "comparison ONLY on this set",
+        "[conversion]   horizon    shared_AUC  shared_AP  shared_nodes   "
+        "full_AUC  full_AP  full_nodes",
+    ]
+    for W in horizons:
+        hb = macro["horizons"].get(int(W))
+        if hb is None:
+            continue
+        s, f = hb["shared"], hb["full"]
+        sa = "n/a" if s["auc"] is None else f"{s['auc']:.4f}"
+        sp = "n/a" if s["ap"] is None else f"{s['ap']:.4f}"
+        fa = "n/a" if f["auc"] is None else f"{f['auc']:.4f}"
+        fp = "n/a" if f["ap"] is None else f"{f['ap']:.4f}"
+        lines.append(
+            f"[conversion]   {W:>5}d    {sa:>10}  {sp:>9}  {s['n_nodes']:>11}   "
+            f"{fa:>8}  {fp:>7}  {f['n_nodes']:>10}")
+    lines.append("[conversion]   macro AUC by depth-bucket x horizon "
+                 "(full set per bucket):")
+    for label, block in horizon_eval["by_depth"].items():
+        cells = "  ".join(
+            (f"{W}d="
+             + ("n/a" if block['horizons'][int(W)]['auc'] is None
+                else f"{block['horizons'][int(W)]['auc']:.4f}")
+             + f"(n={block['horizons'][int(W)]['n_nodes']})")
+            for W in horizons if int(W) in block["horizons"])
+        lines.append(f"[conversion]     [{label}]  {cells}")
+    return lines
+
+
+# --------------------------------------------------------------------------- #
 # The driver.                                                                  #
 # --------------------------------------------------------------------------- #
 def _to_ordinals(series):
@@ -395,6 +712,36 @@ def main(argv=None) -> int:
                         "it is absent. 'off' (default) reports the overall table "
                         "only. NB: 'on' used to RE-FIT all heads from scratch — "
                         "the disk-killer that took the cluster down on 0110.")
+    p.add_argument("--by-depth", choices=("on", "off"), default="on",
+                   help="DEPTH-STRATIFIED decile profile (0111 scouting analysis "
+                        "1). 'on' (default — it is FREE, a pure re-aggregation of "
+                        "the per-node conversion the tool already computes, plus a "
+                        "DagLayout depth lookup: no new Spark work) also reports the "
+                        "R4.8 case-finding decile table broken out by DAG depth "
+                        "(individual depths where each carries >= --min-count "
+                        "incident-negative nodes, else shallow 1-3 / mid 4-6 / deep "
+                        "7+ bands; the banding used and why is printed). Bucket-level "
+                        "pooled rates + counts-of-nodes only, same egress as the "
+                        "overall pooled output. 'off' skips it.")
+    p.add_argument("--horizon-eval", choices=("on", "off"), default="off",
+                   help="EVAL-SIDE HORIZON SWEEP (0111 scouting analysis 2). 'off' "
+                        "(default) skips it. 'on' does ONE extra scoring pass (the "
+                        "SAME persisted-head path as --deciles on — NO re-fit) and, "
+                        "for each window W in --horizon-days, builds a LONGER-WINDOW "
+                        "incident label from the sidecar (label_W=1 iff first "
+                        "attestation of closure(c) in [index, index+W); eligibility "
+                        "unchanged per D2; right-censored through index+W exactly as "
+                        "the conversion denominator is) and reports macro AUC/AP on "
+                        "the SHARED node set scoreable at all horizons (R2.2) and on "
+                        "each horizon's own full set, plus macro AUC by depth-bucket "
+                        "x horizon. RISING AUC with W = the 1y label under-credits "
+                        "the model's skill (motivates a re-fit); flat = signal "
+                        "already captured. This is a DISCRIMINATION measurement of a "
+                        "PREVALENT/1y-FIT model vs longer-horizon incident labels "
+                        "(D7/C2.4), not a prospective estimate. Needs the persisted "
+                        "heads npz; if absent it prints the one-time re-readout fix "
+                        "and is SKIPPED (never a re-fit) — the overall + depth "
+                        "tables still run.")
     p.add_argument("--min-count", type=int, default=EGRESS_MIN_COUNT)
     p.add_argument("--out", default=None)
     args = p.parse_args(argv)
@@ -447,6 +794,13 @@ def main(argv=None) -> int:
                 return 4
 
         deciles_scored = False
+        horizon_scored = False
+        # Both the decile split and the horizon sweep need per-document SCORES from
+        # the persisted heads; the horizon sweep additionally needs them for its
+        # extra pass. Either flag being on triggers the SAME (no-re-fit) scoring
+        # collect, and an absent npz falls back identically for both — never a
+        # re-fit (the disk cascade fixed in 10bdf1d).
+        want_scores = (args.deciles == "on") or (args.horizon_eval == "on")
         with _phase("score the test split (for the incident mask and the deciles)"):
             from gated_pc_cloud import (_collect_lean_proba, _read_readout_heads,
                                         incident_eval_mask)
@@ -456,12 +810,13 @@ def main(argv=None) -> int:
             except (FileNotFoundError, KeyError) as exc:
                 print(f"[conversion] ERROR: no scoreable saved fit in {run_dir} "
                       f"({exc}). The incident mask needs the corpus only, but the "
-                      "score deciles need the fit; re-run with --deciles off if "
-                      "the fit is gone.", flush=True)
+                      "score deciles/horizon-eval need the fit; re-run with "
+                      "--deciles off --horizon-eval off if the fit is gone.",
+                      flush=True)
                 return 5
             test_scored = model.transform(bundle.test_df).cache()
             proba = None
-            if args.deciles == "on":
+            if want_scores:
                 # SCORE from the SAVED readout heads — never re-fit. The re-fit
                 # (a full batched readout solve, run purely to get per-doc scores)
                 # is what filled the worker local disks and cascaded the cluster
@@ -469,7 +824,8 @@ def main(argv=None) -> int:
                 # `distributed_score_arm` now persists at the end of every readout
                 # fit; if they are ABSENT (an old fit predating that code) we do
                 # NOT fall back to a re-fit — we print the fix and produce the
-                # OVERALL table only, which is the primary deliverable.
+                # OVERALL (+ depth) table only, which is the primary deliverable,
+                # and the horizon sweep is SKIPPED.
                 heads = _read_readout_heads(
                     run_dir, "gated_pc", C=C,
                     K=(int(manifest.get("K") or 0) or None),
@@ -477,11 +833,13 @@ def main(argv=None) -> int:
                 if heads is None:
                     print(f"[conversion] no persisted readout heads in {run_dir} "
                           "(readout_heads_gated_pc.npz absent) — the score deciles "
-                          "need them, and this analysis NEVER re-fits (the re-fit "
-                          "is the disk-killer that took the cluster down on 0110). "
-                          "Re-run `make gated-pc-readout ID=<n>` ONCE under current "
-                          "code to persist them, or pass --deciles off. Producing "
-                          "the OVERALL conversion table only.", flush=True)
+                          "and the horizon sweep need them, and this analysis NEVER "
+                          "re-fits (the re-fit is the disk-killer that took the "
+                          "cluster down on 0110). Re-run `make gated-pc-readout "
+                          "ID=<n>` ONCE under current code to persist them, or pass "
+                          "--deciles off --horizon-eval off. Producing the OVERALL "
+                          "(+ depth) conversion table only; horizon sweep skipped.",
+                          flush=True)
                     y_te, m_te, persons, elig = _collect_labels_and_eligibility(
                         test_scored, C, preindex_col)
                 else:
@@ -494,7 +852,8 @@ def main(argv=None) -> int:
                     proba, y_te, m_te, persons, elig = _collect_lean_proba(
                         test_scored, C, V, b_raw, degenerate=degenerate,
                         const=const, theta_topm=_hm, elig_col=preindex_col)
-                    deciles_scored = True
+                    deciles_scored = (args.deciles == "on")
+                    horizon_scored = (args.horizon_eval == "on")
             else:
                 # No scores wanted, so no solve: collect only what the INCIDENT
                 # MASK needs. Deliberately not `_collect_lean_proba` — that packs a
@@ -564,12 +923,45 @@ def main(argv=None) -> int:
                 # would copy the whole (D, C) float32 matrix to float64 once per
                 # node, which at C≈2,700 is the difference between a diagnostic
                 # and an OOM.
-                scores = (None if proba is None
+                scores = (None if (proba is None or not deciles_scored)
                           else proba[rows_c, c].astype(float))
                 per_node[c] = node_conversion_table(co, scores,
                                                     min_count=args.min_count)
 
         pooled = pool_tables(per_node, min_count=args.min_count)
+
+        # 0111 scouting: depth stratification (free) and the horizon sweep (opt-in).
+        # Both reuse `lay` (already built) and the arrays already in the driver — no
+        # new Spark job. Depth is read straight off the bundle's parent map.
+        node_depth = node_depths(lay, C)
+        by_depth = None
+        banding = None
+        if args.by_depth == "on":
+            hist = depth_histogram(node_depth, list(per_node))
+            mode, buckets, reason = choose_depth_banding(
+                hist, min_nodes_per_bucket=args.min_count)
+            banding = {"mode": mode, "reason": reason, "histogram": hist,
+                       "buckets": [[lbl, int(lo), int(hi)]
+                                   for lbl, lo, hi in buckets]}
+            by_depth = pool_by_depth(per_node, node_depth, buckets,
+                                     min_count=args.min_count)
+        horizon_eval = None
+        if horizon_scored:
+            with _phase("horizon sweep: longer-window incident labels, no re-fit"):
+                # Buckets for the depth-stratified AUC: reuse Analysis 1's banding
+                # if it was computed, else derive one over the same node set so the
+                # sweep stands on its own with --by-depth off.
+                if banding is not None:
+                    hz_buckets = [(b[0], int(b[1]), int(b[2]))
+                                  for b in banding["buckets"]]
+                else:
+                    _, hz_buckets, _ = choose_depth_banding(
+                        depth_histogram(node_depth, list(per_node)),
+                        min_nodes_per_bucket=args.min_count)
+                horizon_eval = compute_horizon_eval(
+                    first_mat, index_day, obs_day, elig, proba,
+                    horizons=horizons, node_depth=node_depth,
+                    buckets=hz_buckets, min_count=args.min_count)
         meta = {
             "arm": "gated_pc (pc_topics_lr)",
             "claim": "PU channel 1 contamination FLOOR (discrimination-adjacent; "
@@ -582,6 +974,15 @@ def main(argv=None) -> int:
             "min_count": int(args.min_count),
             "deciles": args.deciles,
             "deciles_scored": bool(deciles_scored),
+            "by_depth": args.by_depth,
+            "depth_banding": banding,
+            "depth_source": ("DagLayout.depth(c) over bundle.parent_int "
+                             "(dag_placement.py:38) — longest root->node path; "
+                             "no new Spark work"),
+            "horizon_eval": args.horizon_eval,
+            "horizon_scored": bool(horizon_scored),
+            "horizon_naming": HORIZON_NAMING,
+            "horizon_interpretation": HORIZON_INTERP,
             "bundle_key": key,
             "sidecar_key": witness.get("key"),
             "preindex_col": preindex_col,
@@ -595,17 +996,29 @@ def main(argv=None) -> int:
                              "conversion is expected to be high across the board. "
                              "That is a finding, not a failure."),
         }
-        print(format_conversion_report(pooled, meta), flush=True)
+        banner = [format_conversion_report(pooled, meta)]
+        if by_depth is not None:
+            banner += format_depth_report(by_depth, banding, horizons)
+        if horizon_eval is not None:
+            banner += format_horizon_report(horizon_eval, horizons)
+        print("\n".join(banner), flush=True)
         out_path = args.out or str(run_dir / "conversion_analysis.json")
         with open(out_path, "w") as fh:
             json.dump({"meta": meta, "pooled": pooled,
+                       "by_depth": by_depth,
+                       "horizon_eval": horizon_eval,
                        "per_node": {str(c): t for c, t in per_node.items()},
+                       "node_depth": {str(c): int(node_depth[c])
+                                      for c in per_node},
                        "int2cid": {str(i): int(cid)
                                    for i, cid in bundle.int2cid.items()},
                        "egress_note": (
-                           "per_node cells are NOT disclosable (counts < 20 leave "
-                           "the workspace never); only `pooled` and the "
-                           "counts-of-nodes in `meta` are.")}, fh, indent=2)
+                           "per_node cells and horizon_eval.per_horizon_per_node "
+                           "cells are NOT disclosable (counts < 20 leave the "
+                           "workspace never); only `pooled`, `by_depth[*].pooled`, "
+                           "`horizon_eval.macro`/`.by_depth` (rates + counts-of-"
+                           "nodes), and the counts-of-nodes in `meta` are.")},
+                      fh, indent=2)
         print(f"[conversion] wrote {out_path}", flush=True)
     return 0
 

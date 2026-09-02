@@ -269,3 +269,143 @@ def test_every_table_carries_the_PU_LOWER_BOUND_language():
     assert "right-censoring" in text
     assert "EGRESS" in text
     assert "prospective" in ca.LOWER_BOUND_NOTE or "not a prospective" in text
+
+
+# --------------------------------------------------------------------------- #
+# 5. DEPTH STRATIFICATION (0111 scouting analysis 1).                          #
+# --------------------------------------------------------------------------- #
+def _lay(parent, C):
+    from spark_vi.models.topic.dag_placement import DagLayout
+    return DagLayout(parent, n_bg=0, tpn=1)
+
+
+def test_node_depths_reads_the_longest_root_path_off_the_parent_map():
+    """Depth is `DagLayout.depth` over the bundle's parent map — the LONGEST root
+    path, so a diamond takes its deeper arm. 0 is the root (depth 0)."""
+    # 0<-1,2 ; 1<-3 ; {2,3}<-4  => 4's longest path is 0-1-3-4 = depth 3
+    lay = _lay({1: 0, 2: 0, 3: 1, 4: [2, 3]}, 5)
+    assert list(ca.node_depths(lay, 5)) == [0, 1, 1, 2, 3]
+
+
+def test_per_depth_banding_when_every_depth_has_enough_nodes():
+    depths = np.array([0, 1, 1, 1, 2, 2, 2])          # nodes 0..6
+    hist = ca.depth_histogram(depths, [1, 2, 3, 4, 5, 6])
+    assert hist == {1: 3, 2: 3}
+    mode, buckets, reason = ca.choose_depth_banding(hist, min_nodes_per_bucket=3)
+    assert mode == "per_depth"
+    assert buckets == [("d=1", 1, 1), ("d=2", 2, 2)]
+    assert "per-depth" in reason
+
+
+def test_thin_depths_fall_back_to_bands_and_the_root_folds_into_shallow():
+    depths = np.array([0, 1, 1, 4, 8])                 # nodes 0..4
+    hist = ca.depth_histogram(depths, [0, 1, 2, 3, 4])
+    assert hist == {0: 1, 1: 2, 4: 1, 8: 1}
+    mode, buckets, reason = ca.choose_depth_banding(hist, min_nodes_per_bucket=5)
+    assert mode == "banded"
+    assert buckets == [("shallow(1-3)", 0, 3), ("mid(4-6)", 4, 6),
+                       ("deep(7+)", 7, 10 ** 9)]        # shallow absorbs root
+    assert "too thin" in reason
+
+
+def test_pool_by_depth_reaggregates_the_same_per_node_conversion_no_new_scoring():
+    """Analysis 1 is a RE-AGGREGATION: each bucket is `pool_tables` of its nodes,
+    same disclosure floor, and a node under the floor never enters a bucket rate."""
+    conv = ca.conversion_counts(np.array([500.0] * 40), np.zeros(40),
+                                np.full(40, 10_000.0), LW, horizons=(365,))
+    noconv = ca.conversion_counts(np.full(40, np.nan), np.zeros(40),
+                                  np.full(40, 10_000.0), LW, horizons=(365,))
+    small = ca.conversion_counts(np.array([500.0] * 5), np.zeros(5),
+                                 np.full(5, 10_000.0), LW, horizons=(365,))
+    per_node = {5: ca.node_conversion_table(conv),       # depth 1, disclosable
+                9: ca.node_conversion_table(noconv),      # depth 4, disclosable
+                7: ca.node_conversion_table(small)}       # depth 1, under floor
+    depths = np.zeros(10, dtype=int)
+    depths[5], depths[7], depths[9] = 1, 1, 4
+    buckets = [("shallow(1-3)", 1, 3), ("mid(4-6)", 4, 6)]
+    bd = ca.pool_by_depth(per_node, depths, buckets, min_count=ca.EGRESS_MIN_COUNT)
+    assert bd["shallow(1-3)"]["n_nodes_in_bucket"] == 2      # nodes 5 and 7
+    assert bd["shallow(1-3)"]["pooled"][365]["n_nodes"] == 1  # only 5 disclosable
+    assert bd["shallow(1-3)"]["pooled"][365]["rate"] == 1.0
+    assert bd["mid(4-6)"]["pooled"][365]["rate"] == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# 6. EVAL-SIDE HORIZON SWEEP (0111 scouting analysis 2).                       #
+# --------------------------------------------------------------------------- #
+def test_incident_label_widens_the_post_index_window_and_is_half_open():
+    """label_W = 1 iff first-attestation in [index, index+W): the window opens at
+    the INDEX and is closed-open, so a wider W turns later converters positive and
+    the boundary at index+W belongs to the next window, never this one."""
+    first = np.array([100.0, 365.0, 400.0, np.nan])
+    index = np.zeros(4)
+    obs = np.full(4, 10_000.0)
+    pos, obsv = ca.incident_label_at_horizon(first, index, obs, 365)
+    assert obsv.all()
+    assert list(pos) == [True, False, False, False]   # 365 excluded (half-open)
+    pos2, _ = ca.incident_label_at_horizon(first, index, obs, 730)
+    assert list(pos2) == [True, True, True, False]     # 365 and 400 now inside
+
+
+def test_horizon_right_censoring_excludes_a_conversion_just_past_obs_end():
+    """The gate the task pins: an attestation that falls JUST AFTER the person's
+    observation end must NOT count — the cell is censored (not observed through
+    index+W), so it leaves the denominator rather than becoming a phantom
+    positive."""
+    # observed only to 350, but index+W = 365 -> not observed; attests at 360
+    pos, obsv = ca.incident_label_at_horizon(
+        np.array([360.0]), np.array([0.0]), np.array([350.0]), 365)
+    assert not obsv.any() and not pos.any()
+    # observed exactly through index+W (>=) counts; attestation inside the window
+    pos2, obsv2 = ca.incident_label_at_horizon(
+        np.array([300.0]), np.array([0.0]), np.array([365.0]), 365)
+    assert obsv2.all() and pos2.all()
+
+
+def _rec(auc, ap=0.5, npos=30, nneg=30, skipped=None):
+    return {"auc": auc, "ap": ap, "n_pos": npos, "n_neg": nneg, "skipped": skipped}
+
+
+def test_horizon_macro_shared_set_is_the_intersection_scored_at_every_horizon():
+    """R2.2: a cross-horizon AUC delta is a comparison ONLY on the nodes scoreable
+    at EVERY horizon. Node 0 is; node 1 drops out at 1095; node 2 is skipped at
+    730 — so the shared set is {0}, and its AUC rises 0.6 -> 0.7 -> 0.8."""
+    per_h = {
+        365: {0: _rec(0.6), 1: _rec(0.55), 2: _rec(0.5)},
+        730: {0: _rec(0.7), 1: _rec(0.6), 2: _rec(None, None, skipped="small")},
+        1095: {0: _rec(0.8), 1: _rec(None, None, skipped="small")},
+    }
+    macro = ca.horizon_macro(per_h, [365, 730, 1095])
+    assert macro["shared_node_set"] == [0]
+    assert macro["shared_node_set_size"] == 1
+    assert macro["horizons"][365]["shared"]["auc"] == pytest.approx(0.6)
+    assert macro["horizons"][730]["shared"]["auc"] == pytest.approx(0.7)
+    assert macro["horizons"][1095]["shared"]["auc"] == pytest.approx(0.8)
+    # the FULL set at 365 keeps every scored node (2's 0.5 is a real AUC, not a skip)
+    assert macro["horizons"][365]["full"]["n_nodes"] == 3
+    assert macro["horizons"][1095]["full"]["n_nodes"] == 1
+
+
+def test_horizon_macro_by_depth_buckets_the_full_set_per_horizon():
+    per_h = {365: {0: _rec(0.6), 1: _rec(0.8)},
+             730: {0: _rec(0.65), 1: _rec(0.85)}}
+    depths = np.array([2, 5])                    # node 0 shallow, node 1 mid
+    buckets = [("shallow(1-3)", 1, 3), ("mid(4-6)", 4, 6)]
+    bd = ca.horizon_macro_by_depth(per_h, [365, 730], depths, buckets)
+    assert bd["shallow(1-3)"]["horizons"][365]["auc"] == pytest.approx(0.6)
+    assert bd["shallow(1-3)"]["horizons"][365]["n_nodes"] == 1
+    assert bd["mid(4-6)"]["horizons"][730]["auc"] == pytest.approx(0.85)
+
+
+def test_horizon_report_states_the_claim_type_and_the_rising_auc_reading():
+    """The header must name the claim type honestly (D7/C2.4: discrimination, not a
+    prospective estimate) and state the rising-AUC interpretation."""
+    per_h = {365: {0: _rec(0.6)}, 730: {0: _rec(0.7)}, 1095: {0: _rec(0.8)}}
+    he = {"macro": ca.horizon_macro(per_h, [365, 730, 1095]),
+          "by_depth": ca.horizon_macro_by_depth(
+              per_h, [365, 730, 1095], np.array([2]), [("shallow(1-3)", 1, 3)])}
+    text = "\n".join(ca.format_horizon_report(he, [365, 730, 1095]))
+    assert "PREVALENT/1y-FIT" in text and "DISCRIMINATION" in text
+    assert "NOT a prospective" in text
+    assert "UNDER-CREDITED" in text and "re-fit" in text
+    assert "SHARED node set" in text
