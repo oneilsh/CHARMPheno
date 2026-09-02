@@ -558,6 +558,42 @@ diag-incident-census: zip cluster-overlay $(WORKSPACE_ENV)
 	    $(if $(GPR_CACHE_URI),--cache-uri $(GPR_CACHE_URI),) \
 	    $(GPR_ARGS)
 
+# Build the E4 FIRST-ATTESTATION SIDECAR for a finished run's corpus (spec E4 /
+# plan WP6, unit i). One full-history `condition_era` scan joined to the label
+# code map, aggregated to `(person_id, node_cid) -> min(condition_era_start_date)`
+# — the ONLY artifact in the repo carrying a POST-label-window date (windowing
+# discards them; the cached bundle holds BOW vectors, not events). Writes two
+# parquets under its OWN cache key (never the bundle key, so a bundle-key move
+# does not orphan it): the per-(person, node) first-attestation frame and a
+# per-person index/observation-end frame, plus conversion_sidecar.json in the run
+# dir as the witness `diag-conversion-analysis` requires.
+#
+# It REBUILDS the Mondo label front end (minutes of BigQuery) because the code map
+# is a by-product of the miss-only assemble closure and a cached corpus has none
+# in hand — which is exactly why the result is cached rather than recomputed per
+# analysis (ADR 0025's separate-rebuild-target pattern). A second run is a HIT and
+# does nothing; --force rebuilds.
+#
+# Cluster-only (BigQuery). Example:
+#   make build-conversion-sidecar ID=110
+build-conversion-sidecar: zip cluster-overlay $(WORKSPACE_ENV)
+	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
+	. ./$(WORKSPACE_ENV) && \
+	PYTHONPATH=$(REPO_ROOT):$$PYTHONPATH spark-submit \
+	    --master yarn \
+	    --deploy-mode client \
+	    --driver-memory 8g \
+	    --conf spark.executor.cores=4 \
+	    --conf spark.executor.memory=6g \
+	    --conf spark.executor.memoryOverhead=2g \
+	    --conf spark.task.maxFailures=8 \
+	    --conf spark.excludeOnFailure.enabled=true \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/distributed_readout.py,$(REPO_ROOT)/analysis/cloud/preindex_closure.py,$(REPO_ROOT)/analysis/cloud/conversion_sidecar.py \
+	    $(REPO_ROOT)/analysis/cloud/conversion_sidecar.py \
+	    --run-dir "$(RUNS_DIR)/$(shell printf '%04d' $(ID))-*" \
+	    $(if $(GPR_SIDECAR_URI),--sidecar-uri $(GPR_SIDECAR_URI),) \
+	    $(GPR_ARGS)
+
 # Print summary.md for an experiment (copy/paste back to chat)
 summary:
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
