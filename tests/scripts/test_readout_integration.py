@@ -113,13 +113,15 @@ def _make_arrays(seed=0):
     return Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te
 
 
-def _make_df(spark, Pi, y, mask, offset=0, parts=3, proba=None):
+def _make_df(spark, Pi, y, mask, offset=0, parts=3, proba=None, preindex=None):
     """The frame a supervised `OnlinePCLDAModel.transform` produces. `proba` appends
     the co-fit head's `probability` column; leaving it None is the weightY=0 shape,
-    where that column genuinely does not exist."""
+    where that column genuinely does not exist. `preindex` appends E1's sparse
+    `preindexClosure` (`array<int>` of the engine ids the doc already carried before
+    its index), which is what the incident arm's fourth CSR run reads."""
     from pyspark.ml.linalg import VectorUDT, Vectors
-    from pyspark.sql.types import (ArrayType, DoubleType, LongType, StructField,
-                                   StructType)
+    from pyspark.sql.types import (ArrayType, DoubleType, IntegerType, LongType,
+                                   StructField, StructType)
     fields = [
         StructField("person_id", LongType(), False),
         StructField("topicDistribution", VectorUDT(), False),
@@ -128,9 +130,14 @@ def _make_df(spark, Pi, y, mask, offset=0, parts=3, proba=None):
     ]
     if proba is not None:
         fields.append(StructField("probability", VectorUDT(), False))
+    if preindex is not None:
+        fields.append(StructField("preindexClosure", ArrayType(IntegerType()),
+                                  False))
     rows = [tuple([int(offset + d), Vectors.dense(Pi[d]),
                    [float(v) for v in y[d]], [float(v) for v in mask[d]]]
-                  + ([Vectors.dense(proba[d])] if proba is not None else []))
+                  + ([Vectors.dense(proba[d])] if proba is not None else [])
+                  + ([[int(v) for v in preindex[d]]] if preindex is not None
+                     else []))
             for d in range(Pi.shape[0])]
     return spark.createDataFrame(rows, StructType(fields)).repartition(parts)
 
@@ -271,7 +278,7 @@ def test_warm_started_calibration_fit_matches_the_cold_one(spark, capsys):
     assert np.array_equal(cold[3], warm[3]), "same rows must give the same mask"
 
     def _proba(fit, max_iter=None):
-        p, y, m, _ = gpc._collect_lean_proba(
+        p, y, m, _, _ = gpc._collect_lean_proba(
             test_df, C, fit[0], fit[1], degenerate=fit[3], const=fit[2])
         return p, gpc.readout_from_proba(p, y, m, C, recall_targets=RECALL_TARGETS,
                                          fdr_targets=FDR_TARGETS, min_count=0)
@@ -461,7 +468,7 @@ def test_lean_head_proba_collect_matches_driver_collect(spark):
         [(int(d), Vectors.dense(p[d]), [float(v) for v in y[d]],
           [float(v) for v in m[d]]) for d in range(40)], schema).repartition(3)
 
-    lean_p, lean_y, lean_m, persons = gpc._collect_lean_proba(
+    lean_p, lean_y, lean_m, persons, _ = gpc._collect_lean_proba(
         df, C, score_col="probability")
     order = np.argsort(np.asarray(persons))
     assert lean_p.dtype == np.float32
@@ -532,10 +539,61 @@ class TestReReadoutBothModes:
         own results_partial.json."""
         dist, _, out = both
         got = json.loads((out / "results_readout.json").read_text())
+        # FLAG-OFF (spec E2 acceptance): a corpus without E1's column produces
+        # exactly the two arms it always did — no incident block, no changed
+        # numbers. This is the regression that protects the 0104/0109 controls.
         assert set(got) == {"gated_pc", "gated_pc_head"} == set(dist)
         assert got["gated_pc"]["ranking"]["auc"] == pytest.approx(
             dist["gated_pc"]["ranking"]["auc"])
         assert not (out / "results_partial.json").exists()
+
+
+@pytest.mark.slow
+def test_re_readout_emits_the_incident_block_from_a_saved_fit(spark, tmp_path,
+                                                              capsys):
+    """WP4's actual delivery route: `gated_pc_readout` over a corpus carrying E1's
+    column produces `gated_pc_incident` beside the prevalent arms, with no re-fit.
+
+    Also the flag-off half of the acceptance, on the SAME frames: dropping
+    `elig_col` leaves the prevalent numbers byte-identical, so the incident arm is
+    provably an addition rather than a perturbation.
+    """
+    Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te = _make_arrays(seed=5)
+    rng = np.random.default_rng(6)
+    # Prior carriers: a third of the docs already carried node 3 pre-index, so the
+    # incident arm scores a strictly smaller (and different) cohort there.
+    pre_tr = [[3] if d % 3 == 0 else [] for d in range(D_TR)]
+    pre_te = [[3] if d % 3 == 0 else [] for d in range(D_TE)]
+    train_df = _make_df(spark, Pi_tr, y_tr, m_tr, proba=rng.random((D_TR, C)),
+                        preindex=pre_tr)
+    test_df = _make_df(spark, Pi_te, y_te, m_te, offset=10_000,
+                       proba=rng.random((D_TE, C)), preindex=pre_te)
+    manifest = {"C": C, "K": K, "weight_y": 1.0}
+    out = tmp_path / "run"
+    out.mkdir()
+    on = gpr.run_readout(train_df, test_df, manifest,
+                         recall_targets=RECALL_TARGETS, fdr_targets=FDR_TARGETS,
+                         min_count=0, readout_mode="distributed", out_dir=out,
+                         elig_col="preindexClosure")
+    off = gpr.run_readout(train_df, test_df, manifest,
+                          recall_targets=RECALL_TARGETS, fdr_targets=FDR_TARGETS,
+                          min_count=0, readout_mode="distributed")
+    block = on["gated_pc_incident"]
+    assert "gated_pc_incident" not in off
+    # the prevalent arm is untouched by the extra CSR run
+    assert on["gated_pc"]["ranking"]["auc"] == pytest.approx(
+        off["gated_pc"]["ranking"]["auc"], abs=2e-3)
+    # ...and it landed on disk, where the recovery path needs it
+    got = json.loads((out / "results_readout.json").read_text())
+    assert set(got) == {"gated_pc", "gated_pc_head", "gated_pc_incident"}
+    assert "PREVALENT-FIT" in got["gated_pc_incident"]["naming"]
+    assert set(block["macros"]) == {"prevalent_full", "prevalent_shared",
+                                    "incident_full", "incident_shared"}
+    # eligibility really did bite: node 3's prior carriers left both classes
+    assert block["eligibility"]["n_eligible_cells"] < D_TE * C
+    assert "constant_prediction_column" in block["skipped_by_reason"]
+    txt = capsys.readouterr().out
+    assert "INCIDENT" in txt or "incident readout" in txt
 
 
 @pytest.mark.slow
@@ -802,7 +860,7 @@ def test_densify_lean_blocks_handles_dense_mask_marker():
     blocks = [(np.array([7, 8], dtype=np.int64), P,
                np.array([0, 2], dtype=np.int32), np.array([0, 1, 2], dtype=np.int64),
                None, None)]
-    proba, y, mask, ids = gpc._densify_lean_blocks(blocks, 3)
+    proba, y, mask, ids, _elig = gpc._densify_lean_blocks(blocks, 3)
     assert np.array_equal(proba, P)
     assert np.array_equal(y, np.array([[1, 0, 0], [0, 0, 1]], dtype=np.uint8))
     assert np.array_equal(mask, np.ones((2, 3), dtype=np.uint8))

@@ -62,8 +62,23 @@ def _as_y_DC(y: np.ndarray) -> np.ndarray:
     return y
 
 
+# The three — and only three — reasons a label column is dropped from the macro.
+# They are COUNTED SEPARATELY and never summed (incident-eval spec §8, standing
+# rule 5): "how many nodes had no negatives", "how many were too small to
+# disclose" and "how many carry a constant prediction column" are three different
+# facts about a run, and a single `n_labels_skipped` hides all three.
+SKIP_DEGENERATE = "degenerate_test_column"
+SKIP_SMALL = "small_test_column"
+SKIP_CONSTANT = "constant_prediction_column"
+SKIP_CODES = (SKIP_DEGENERATE, SKIP_SMALL, SKIP_CONSTANT)
+
+
 def _score_label(
-    y_true: np.ndarray, proba: np.ndarray, min_count: int = 0
+    y_true: np.ndarray,
+    proba: np.ndarray,
+    min_count: int = 0,
+    *,
+    skip_constant: bool = False,
 ) -> dict[str, Any]:
     """ROC AUC + AP for one label column, or a skip record if it is unscoreable.
 
@@ -79,6 +94,25 @@ def _score_label(
     degenerate column is. The ``n_pos``/``n_neg`` are still recorded in the
     result (callers suppress them at display time via ``format_results_table``'s
     ``min_label_count`` handling); scoring simply refuses to compute an AUC.
+
+    ``skip_constant`` (incident-eval spec R2.1) adds the THIRD skip reason: a
+    column whose predictions are CONSTANT over the scored rows
+    (``np.ptp(proba) == 0``) carries no per-document information by construction,
+    and ``roc_auc_score`` returns exactly 0.5 for it — a number that looks like a
+    measurement and is not one. This is the ranking-axis twin of the guard
+    ``detection_readout`` has applied to its pooled max since exp 0104, and the
+    incident cohort is where it becomes load-bearing: a node whose TRAIN cell was
+    degenerate gets a constant fallback column, is all-positive under the
+    prevalent mask (hence already skipped as degenerate), but ACQUIRES negatives
+    under the incident mask when the prior carriers that made it all-positive
+    leave both classes. Without this guard those columns enter the macro at 0.5.
+
+    It defaults OFF because turning it on unconditionally would move every
+    recorded prevalent macro in the repo (exps 0104/0109/0110 are compared on
+    them); the incident arm passes ``skip_constant=True`` and reports the count
+    separately. Every skip record also carries a machine-readable ``skip_code``
+    from :data:`SKIP_CODES` beside the human sentence, which is what lets a caller
+    report three counts instead of one.
     """
     y_true = np.asarray(y_true, dtype=np.float64).ravel()
     proba = np.asarray(proba, dtype=np.float64).ravel()
@@ -92,6 +126,7 @@ def _score_label(
             "n_pos": n_pos,
             "n_neg": n_neg,
             "skipped": f"degenerate test column ({which}); AUC undefined",
+            "skip_code": SKIP_DEGENERATE,
         }
     if min_count > 0 and (n_pos < min_count or n_neg < min_count):
         return {
@@ -103,6 +138,21 @@ def _score_label(
                 f"small test column (min class < {min_count}); "
                 "AUC unreliable / count not disclosable — masked"
             ),
+            "skip_code": SKIP_SMALL,
+        }
+    # Checked AFTER the two count-based skips so the reasons stay disjoint and a
+    # single column is attributed to exactly one of them.
+    if skip_constant and proba.size and float(np.ptp(proba)) == 0.0:
+        return {
+            "auc": None,
+            "ap": None,
+            "n_pos": n_pos,
+            "n_neg": n_neg,
+            "skipped": (
+                "constant prediction column (no per-document information; "
+                "roc_auc_score would return exactly 0.5)"
+            ),
+            "skip_code": SKIP_CONSTANT,
         }
     return {
         "auc": float(roc_auc_score(y_true, proba)),
@@ -110,18 +160,31 @@ def _score_label(
         "n_pos": n_pos,
         "n_neg": n_neg,
         "skipped": None,
+        "skip_code": None,
     }
 
 
 def _macro(per_label: dict[int, dict[str, Any]]) -> dict[str, Any]:
-    """Macro-average AUC/AP over the labels that were scored (not skipped)."""
+    """Macro-average AUC/AP over the labels that were scored (not skipped).
+
+    ``skipped_by_reason`` breaks the skip total down by :data:`SKIP_CODES`. It is
+    additive (the existing keys are untouched, so every recorded number and every
+    reader of them is unaffected) and it exists because a lumped
+    ``n_labels_skipped`` cannot answer the question R2.1 raises: how many columns
+    did the constant guard catch?"""
     aucs = [d["auc"] for d in per_label.values() if d.get("skipped") is None]
     aps = [d["ap"] for d in per_label.values() if d.get("skipped") is None]
+    by_reason = {code: 0 for code in SKIP_CODES}
+    for d in per_label.values():
+        code = d.get("skip_code")
+        if code in by_reason:
+            by_reason[code] += 1
     return {
         "auc": float(np.mean(aucs)) if aucs else None,
         "ap": float(np.mean(aps)) if aps else None,
         "n_labels_scored": len(aucs),
         "n_labels_skipped": len(per_label) - len(aucs),
+        "skipped_by_reason": by_reason,
     }
 
 
@@ -225,6 +288,8 @@ def _bundle_masked(
     mask_te_DC: np.ndarray,
     C: int,
     min_count: int = 0,
+    *,
+    skip_constant: bool = False,
 ) -> dict[str, Any]:
     """Score each label column ONLY over its observed test cells, then macro it.
 
@@ -234,12 +299,18 @@ def _bundle_masked(
     cell, a single class among them, or (for ``min_count > 0``) fewer than
     ``min_count`` cells of either class is reported skipped and dropped from the
     macro-average.
+
+    ``skip_constant`` forwards R2.1's constant-column guard to :func:`_score_label`
+    — the guard is evaluated on the column RESTRICTED TO ITS SCORED ROWS, which is
+    the axis that matters: a column can be constant on one node's cohort and
+    informative on another's.
     """
     per_label: dict[int, dict[str, Any]] = {}
     for c in range(C):
         rows = np.where(mask_te_DC[:, c].astype(bool))[0]
         per_label[c] = _score_label(
-            y_te_DC[rows, c], proba_DC[rows, c], min_count=min_count
+            y_te_DC[rows, c], proba_DC[rows, c], min_count=min_count,
+            skip_constant=skip_constant,
         )
     return {"per_label": per_label, "macro": _macro(per_label)}
 
