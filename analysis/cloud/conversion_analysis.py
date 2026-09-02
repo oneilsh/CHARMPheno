@@ -59,9 +59,15 @@ WHAT IT NEEDS, AND REFUSES WITHOUT (diag discipline)
   * the E4 sidecar's witness + a sidecar HIT (exit 4) — `make
     build-conversion-sidecar ID=N` builds it. Nothing else in the repo carries a
     post-label-window date.
-  * the run's saved fit, for the score deciles (exit 5). Scoring re-runs the arm's
-    batched readout solve on the executors; `--deciles off` skips it and reports
-    the overall table only.
+  * the run's saved fit, to transform the test split (exit 5).
+  * for the score deciles (`--deciles on`), the run's PERSISTED readout heads
+    (`readout_heads_gated_pc.npz`, written by every readout fit under current
+    code). Scoring is one distributed mapPartitions over those saved params — it
+    NEVER re-fits (the re-fit was the disk cascade that killed the cluster on
+    0110). If the npz is absent (a fit predating that code) `--deciles on` does
+    NOT re-fit: it prints the one-time fix (`make gated-pc-readout ID=<n>`) and
+    produces the OVERALL table only. `--deciles off` (the default) skips scoring
+    entirely.
 
 EGRESS
 ------
@@ -378,10 +384,17 @@ def main(argv=None) -> int:
     p.add_argument("--sidecar-uri", default=None)
     p.add_argument("--horizon-days", default=",".join(
         str(h) for h in DEFAULT_HORIZON_DAYS))
-    p.add_argument("--deciles", choices=("on", "off"), default="on",
-                   help="'on' re-runs the arm's batched readout solve to get "
-                        "per-document scores (the expensive part); 'off' reports "
-                        "the overall table only.")
+    p.add_argument("--deciles", choices=("on", "off"), default="off",
+                   help="'on' SCORES the test split from the run's SAVED readout "
+                        "heads (readout_heads_gated_pc.npz — one distributed "
+                        "mapPartitions, NO re-fit) to get per-document scores for "
+                        "the decile split; it requires that npz, which every "
+                        "readout fit under current code persists (re-run `make "
+                        "gated-pc-readout ID=<n>` once for a pre-existing fit), "
+                        "and falls back to the overall table (never a re-fit) if "
+                        "it is absent. 'off' (default) reports the overall table "
+                        "only. NB: 'on' used to RE-FIT all heads from scratch — "
+                        "the disk-killer that took the cluster down on 0110.")
     p.add_argument("--min-count", type=int, default=EGRESS_MIN_COUNT)
     p.add_argument("--out", default=None)
     args = p.parse_args(argv)
@@ -433,8 +446,10 @@ def main(argv=None) -> int:
                       flush=True)
                 return 4
 
+        deciles_scored = False
         with _phase("score the test split (for the incident mask and the deciles)"):
-            from gated_pc_cloud import distributed_score_arm, incident_eval_mask
+            from gated_pc_cloud import (_collect_lean_proba, _read_readout_heads,
+                                        incident_eval_mask)
             from gated_pc_readout import reconstruct_model
             try:
                 model = reconstruct_model(run_dir, manifest)
@@ -445,27 +460,46 @@ def main(argv=None) -> int:
                       "the fit is gone.", flush=True)
                 return 5
             test_scored = model.transform(bundle.test_df).cache()
+            proba = None
             if args.deciles == "on":
-                train_scored = model.transform(bundle.train_df).cache()
-                K = int(manifest.get("K") or 0) or int(
-                    train_scored.select("topicDistribution").head()[0].size)
-                arm = distributed_score_arm(
-                    train_scored, test_scored, C, K,
-                    recall_targets=[0.9], fdr_targets=[0.5],
-                    min_count=int(manifest.get("min_label_count", 20)),
-                    label="gated_pc",
-                    max_iter=int(manifest.get("readout_max_iter") or 200),
-                    theta_topm=int(manifest.get("readout_theta_topm") or 0),
-                    elig_col=preindex_col)
-                proba, y_te, m_te, persons, elig = (
-                    arm[1], arm[2], arm[3], arm[4], arm[6])
-                train_scored.unpersist()
+                # SCORE from the SAVED readout heads — never re-fit. The re-fit
+                # (a full batched readout solve, run purely to get per-doc scores)
+                # is what filled the worker local disks and cascaded the cluster
+                # dead on 0110. `_read_readout_heads` loads the params
+                # `distributed_score_arm` now persists at the end of every readout
+                # fit; if they are ABSENT (an old fit predating that code) we do
+                # NOT fall back to a re-fit — we print the fix and produce the
+                # OVERALL table only, which is the primary deliverable.
+                heads = _read_readout_heads(
+                    run_dir, "gated_pc", C=C,
+                    K=(int(manifest.get("K") or 0) or None),
+                    theta_topm=int(manifest.get("readout_theta_topm") or 0))
+                if heads is None:
+                    print(f"[conversion] no persisted readout heads in {run_dir} "
+                          "(readout_heads_gated_pc.npz absent) — the score deciles "
+                          "need them, and this analysis NEVER re-fits (the re-fit "
+                          "is the disk-killer that took the cluster down on 0110). "
+                          "Re-run `make gated-pc-readout ID=<n>` ONCE under current "
+                          "code to persist them, or pass --deciles off. Producing "
+                          "the OVERALL conversion table only.", flush=True)
+                    y_te, m_te, persons, elig = _collect_labels_and_eligibility(
+                        test_scored, C, preindex_col)
+                else:
+                    V, b_raw, const, degenerate, _hC, _hK, _hm = heads
+                    # DISTRIBUTED scoring — the SAME lean kernel
+                    # `distributed_score_arm` uses internally, NOT the fitting
+                    # path: one mapPartitions over the test split, no moments pass,
+                    # no batched solve, no train split. `elig_col` rides the same
+                    # collect so the incident mask still gets E1's eligibility.
+                    proba, y_te, m_te, persons, elig = _collect_lean_proba(
+                        test_scored, C, V, b_raw, degenerate=degenerate,
+                        const=const, theta_topm=_hm, elig_col=preindex_col)
+                    deciles_scored = True
             else:
                 # No scores wanted, so no solve: collect only what the INCIDENT
                 # MASK needs. Deliberately not `_collect_lean_proba` — that packs a
                 # per-doc (C,) probability, and handing it raw θ (K,) would build a
                 # (D, K) array into a (D, C) destination.
-                proba = None
                 y_te, m_te, persons, elig = _collect_labels_and_eligibility(
                     test_scored, C, preindex_col)
             test_scored.unpersist()
@@ -547,6 +581,7 @@ def main(argv=None) -> int:
             "horizon_days": list(horizons),
             "min_count": int(args.min_count),
             "deciles": args.deciles,
+            "deciles_scored": bool(deciles_scored),
             "bundle_key": key,
             "sidecar_key": witness.get("key"),
             "preindex_col": preindex_col,

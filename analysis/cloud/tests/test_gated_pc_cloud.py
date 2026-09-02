@@ -383,6 +383,46 @@ def test_readout_ckpt_write_read_round_trip_and_rejections(tmp_path, capsys):
     assert "UNREADABLE" in capsys.readouterr().out
 
 
+def test_readout_heads_write_read_round_trip_and_rejections(tmp_path, capsys):
+    """The PERSISTED heads (Part 1): a completed fit's raw-θ scoring params,
+    written beside the run's record so conversion_analysis --deciles on scores
+    from them instead of re-fitting. Round trip returns the exact scoring tuple;
+    a read declines on absent, version mismatch, and a manifest C/K/theta_topm
+    that disagrees with the file — every miss is None so the consumer degrades to
+    the overall table rather than re-fitting."""
+    from gated_pc_cloud import _read_readout_heads, _write_readout_heads
+    C, K = 3, 4
+    V = np.arange(12.0).reshape(C, K)
+    b_raw = np.array([0.5, -1.5, 2.0])
+    const = np.array([0.0, 1.0, 0.0])
+    degenerate = np.array([False, True, False])
+
+    assert _read_readout_heads(tmp_path, "gated_pc") is None        # absent
+    assert _write_readout_heads(tmp_path, "gated_pc", V, b_raw, const,
+                                degenerate, C, K, theta_topm=0) is True
+    assert (tmp_path / "readout_heads_gated_pc.npz").exists()
+    assert not (tmp_path / "readout_heads_gated_pc.npz.tmp").exists()  # renamed away
+
+    got = _read_readout_heads(tmp_path, "gated_pc", C=C, K=K, theta_topm=0)
+    assert got is not None
+    gV, gb, gconst, gdeg, gC, gK, gm = got
+    assert np.array_equal(gV, V) and np.array_equal(gb, b_raw)
+    assert np.array_equal(gconst, const) and np.array_equal(gdeg, degenerate)
+    assert (gC, gK, gm) == (C, K, 0)
+
+    # A manifest whose C/K/theta_topm disagrees with the file is a different run.
+    assert _read_readout_heads(tmp_path, "gated_pc", C=C, K=K, theta_topm=64) is None
+    assert _read_readout_heads(tmp_path, "gated_pc", C=99, K=K, theta_topm=0) is None
+    assert "IGNORED" in capsys.readouterr().out
+    # K unknown in an old manifest (K=None) skips only that check; still loads.
+    assert _read_readout_heads(tmp_path, "gated_pc", C=C, K=None,
+                               theta_topm=0) is not None
+
+    (tmp_path / "readout_heads_gated_pc.npz").write_bytes(b"not an npz")
+    assert _read_readout_heads(tmp_path, "gated_pc") is None
+    assert "UNREADABLE" in capsys.readouterr().out
+
+
 def test_fit_readout_heads_checkpoint_survives_a_mid_solve_death(tmp_path, capsys,
                                                                 monkeypatch):
     """The end-to-end claim: a solve that dies mid-flight leaves a checkpoint the
