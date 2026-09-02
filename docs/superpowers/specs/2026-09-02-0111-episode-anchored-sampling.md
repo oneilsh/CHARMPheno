@@ -77,8 +77,8 @@ restated. New definitions:
 | Req | What | Disposition |
 |---|---|---|
 | R5.3 | doc-spec cache-key hole | **DONE** (`25acc62`, WP7): `doc_spec_identity()` travels in `key_extra`. The stated precondition for any doc-unit work is met. |
-| R5.9 | episode multiplier probe | **TOOL BUILT** (`diag_episode_probe.py`, `4e9bb33`); numbers pending. §4 turns them into decisions. |
-| R5.10 | prior-obs-gate kill rate probe | **TOOL BUILT** (same tool: three-way gate decomposition + first-vs-later kill); numbers pending. |
+| R5.9 | episode multiplier probe | **DONE** (`diag_episode_probe.py`, `4e9bb33`; results `2026-09-02-0111-episode-probe-results.md`). Gated ×8.55 (gap 90); cap 3 → ×2.66, cap 5 → ×3.98. Decisions in §4 resolved. |
+| R5.10 | prior-obs-gate kill rate probe | **DONE** (same run). Overall kill 19.8%; **first-episode kill 66.2% vs later 14.1%** — the anti-correlation, measured. Forces the incidence-definition fork (§4). |
 | R5.1 | `EpisodeDocSpec` | BUILD. Sanctioned extension point (ADR 0018); the "one class + manifest round-trip" claim is false under the ADR-0046 readout stack — R5.4–R5.7 are its real price. |
 | R5.2 | `index_date` passthrough in `cohorts.py` | BUILD — **the one-blast commit** (§3.2). |
 | R5.4 | int64 doc-key synthesis | BUILD. `_lean_eval_kernel` and its driver twin hard-code int64 ids; string doc_ids raise. Synthesize `doc_key = person_id * 2^k + episode_no` or equivalent, one definition shared by both sides. Hard break otherwise. |
@@ -135,8 +135,19 @@ restated. New definitions:
 
 ## 4. Pre-measurements and the decision rules they feed
 
-`make diag-episode-probe ID=110` (requires the 0110 sidecar witness; no fit,
-no cache impact) reports, per gap ∈ {60, 90}:
+**RESOLVED 2026-09-02** — probe run, `2026-09-02-0111-episode-probe-results.md`.
+Locked: **gap = 90d**, **cap = 3** (cap 5 fallback if the corpus census erodes
+node yield below ~1,800), **R5.8 distributed eval + distributed calibration
+apply wired as a plan precondition** (×2.66 sits at the no-headroom boundary and
+the calibration driver copy is the wall regardless of cap). Node yield PASSED
+R7.3 by a wide margin (2,583 nodes ≥20 gated episodes vs 0110's ~1,791
+scoreable / 923 starved). **One fork left open for Shawn:** the 66.2%
+first-episode kill makes the 365-day prior-obs gate an incidence-*definition*
+choice — keep 365d and report conditional capture (lean), vs relax it for the
+episode arm as a named sensitivity. The plan is not written until this is set.
+
+The rules that produced those decisions, `make diag-episode-probe ID=110`
+(requires the 0110 sidecar witness; no fit, no cache impact), per gap ∈ {60, 90}:
 
 | measurement | decides | rule |
 |---|---|---|
