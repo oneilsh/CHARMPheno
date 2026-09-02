@@ -566,3 +566,29 @@ stays all-positive under incident eligibility (still-all-positive 177 /
 acquired-negatives 0), so the forced-0.5 macro-inflation channel is EMPTY on this
 corpus — the R2.1 constant-column guard ships anyway as belt-and-braces.
 Decision recorded: **GO — E2/E3/E4 (WP4/WP5/WP6) proceed.**
+
+**2026-09-02 (cont.) — E4 future-conversion: the PU channel-1 FLOOR.**
+`diag-conversion-analysis ID=110 --deciles off`, over incident negatives (index
+had no prior attestation of closure(c); label window 365d):
+
+| horizon | nodes | incident negatives (obs) | later convert | rate |
+|---|---|---|---|---|
+| 365d  | 2394 | 13,876,314 | 132,824 | **0.0096** |
+| 730d  | 2354 | 10,910,423 | 193,419 | **0.0177** |
+| 1095d | 2320 |  8,539,451 | 216,189 | **0.0253** |
+
+A LOWER BOUND on PU channel 1 (label noise from a not-yet-made diagnosis);
+channels 2 (never diagnosed) and 3 (diagnosed in care this CDR can't see) stay
+unmeasured — read each rate as "at least this many of these negatives are
+wrong." The right-censoring gate on `observation_period_end_date` (R4.4) is
+visibly working: denominators shrink with the horizon. Interpretation: the floor
+is LOW, so the incident-negative labels are mostly clean and the incident metrics
+are not badly PU-deflated — the "negatives aren't really negatives" worry is
+bounded small on the measurable channel. CAVEAT: pooled across nodes weighted by
+negative count (common nodes dominate; per-node detail in the workspace-internal
+`conversion_analysis.json`), and this is a CONTAMINATION FLOOR, not case-finding
+validation — a pooled 0.96%/yr is not yet distinguished from background
+incidence. The score-decile enrichment that WOULD distinguish them (R4.8: do the
+model's top-scoring negatives convert materially above its bottom-scoring ones?)
+is pending the `--deciles on` run, which needs the persisted readout heads from a
+readout under commit 10bdf1d (`make gated-pc-readout ID=110`).
