@@ -976,6 +976,52 @@ def _destroy_broadcast(bcast):
               f"({_error_first_line(exc)})", flush=True)
 
 
+def _is_bad_node_failure(exc):
+    """True when a Spark job failure carries the YARN NODE-HEALTH / bad-node
+    cascade signature — a DISK/health failure a backoff sleep cannot heal.
+
+    The failure this names (exp 0110): a full worker local disk makes YARN mark
+    the NodeManager UNHEALTHY and SIGTERM its containers, which surface to the
+    driver as `ExecutorLostFailure ... Container from a bad node` (exit 143).
+    Unlike a spot-preemption `ExecutorLostFailure` — which self-heals on the 60s
+    backoff because YARN replaces the container and a fresh job resets the
+    per-taskset exclude lists — this one does NOT self-heal: the disk is still
+    full, and re-running a shuffle-heavy pass into a disk-pressured cluster is
+    what turned one bad node into ~12 dead ones over an hour. So it must fail
+    fast (like the schema and dead-context cases), not burn 60+120+240s of
+    backoff feeding the cascade.
+
+    HEURISTIC ON AN UNTRUSTED EXTERNAL STRING, so matched CONSERVATIVELY: only
+    two high-precision needles, `"bad node"` (the quoted container message) and
+    `"unhealthy"` (YARN's node-health verdict). A plain preemption
+    `ExecutorLostFailure` carries neither — its wording is "Killed by external
+    signal" / "Container released on a lost node" / "preempted", and "lost node"
+    is deliberately NOT matched. Anything this does not recognize defaults to the
+    OLD full-retry behaviour.
+
+    Scans the FULL message (the bad-node detail is deep in the JVM stack trace,
+    not the first line) across the exception's cause/context chain, each
+    `str(...)` guarded the same way `_error_first_line` is — the gateway may be
+    the thing that died, and a second exception here must not replace a
+    recoverable job abort with a driver crash."""
+    needles = ("bad node", "unhealthy")
+    seen = set()
+    cur = exc
+    for _ in range(8):                               # bound the chain walk
+        if cur is None or id(cur) in seen:
+            break
+        seen.add(id(cur))
+        try:
+            text = str(cur)
+        except Exception:                            # pragma: no cover - dead gateway
+            text = getattr(cur, "errmsg", "") or ""
+        low = str(text).lower()
+        if any(n in low for n in needles):
+            return True
+        cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+    return False
+
+
 def _retry_spark_action(fn, *, attempts=4, base_sleep_s=60, label=""):
     """Run one Spark ACTION, retrying a failed job after a backoff sleep.
 
@@ -1007,6 +1053,16 @@ def _retry_spark_action(fn, *, attempts=4, base_sleep_s=60, label=""):
     Spark version and by which layer noticed first, and a missed pattern costs
     hours of solve. Non-Spark exceptions (our own `ValueError`s,
     `KeyboardInterrupt`) propagate on the first raise.
+
+    The ONE message pattern that is excluded is the YARN node-health / bad-node
+    cascade (`_is_bad_node_failure`): a full worker local disk marks the node
+    UNHEALTHY and its containers surface as "Container from a bad node". That is
+    the OPPOSITE of spot preemption — it does NOT self-heal on a backoff (the
+    disk is still full), and re-running a shuffle-heavy pass into the
+    disk-pressured cluster is what cascaded ~12 nodes dead on exp 0110. It fails
+    fast. The match is deliberately narrow (two high-precision needles, "lost
+    node" NOT among them) so ordinary preemption keeps its full retry budget; see
+    `_is_bad_node_failure`.
 
     The ONE Spark failure that is excluded by TYPE is `AnalysisException` (see
     `_spark_deterministic_failure_types`): it is decided during query analysis on
@@ -1062,6 +1118,20 @@ def _retry_spark_action(fn, *, attempts=4, base_sleep_s=60, label=""):
                 print(f"[driver]   {tag}spark action FAILED with a SCHEMA/ANALYSIS "
                       "error, which is DETERMINISTIC — no retry can fix it, so "
                       f"failing fast: {_error_first_line(exc)}", flush=True)
+                raise
+            if _is_bad_node_failure(exc):
+                # A YARN node-health / bad-node cascade (a full local disk marking
+                # the node unhealthy), NOT spot preemption. It does not self-heal
+                # on a backoff — the disk is still full — and re-running this
+                # shuffle-heavy pass feeds the cascade (exp 0110: ~12 nodes dead
+                # over an hour). Fail fast like the dead-context case; the recovery
+                # is to rerun the command once the cluster is healthy again.
+                print(f"[driver]   {tag}spark action FAILED on a BAD NODE / "
+                      "node-unhealthy signature (a DISK/health cascade, not spot "
+                      "preemption). A backoff cannot heal a full disk and a retry "
+                      "would feed the cascade, so failing fast: rerun the command "
+                      "once YARN has recovered the nodes. Original error: "
+                      f"{_error_first_line(exc)}", flush=True)
                 raise
             if _context_is_dead():
                 print(f"[driver]   {tag}spark action FAILED and the SparkContext "
