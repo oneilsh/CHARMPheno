@@ -64,9 +64,9 @@ from disk_telemetry import start_disk_telemetry
 from gated_pc_cloud import (
     _DRIVER_READOUT_MAX_C, _MONDO_DAG_SOURCES, _collect_head_proba,
     _collect_lean_proba, _collect_theta_labels, _dump_partial_results,
-    distributed_score_arm, format_arm_readout, multidomain_cache_key,
-    multidomain_load_or_build, readout_ab_report, readout_from_proba,
-    resolve_readout_mode, score_arm,
+    distributed_score_arm, format_arm_readout, format_incident_readout,
+    incident_readout, multidomain_cache_key, multidomain_load_or_build,
+    readout_ab_report, readout_from_proba, resolve_readout_mode, score_arm,
 )
 
 # What the batched solve got before fits recorded their own cap. Runs older than
@@ -542,7 +542,7 @@ def reconstruct_model(run_dir: Path, manifest: dict):
 
 def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targets,
                 min_count, readout_mode="auto", ab_check=False, out_dir=None,
-                theta_topm=None, readout_max_iter=None):
+                theta_topm=None, readout_max_iter=None, elig_col=None):
     """Score both gated_pc arms off two already-TRANSFORMED splits. No argparse.
 
     The whole body of this tool that is worth testing: given the frames a finished
@@ -567,7 +567,15 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
     results_partial.json: that file belongs to the fit's own record. It is also
     where the SOLVER checkpoint goes (`readout_ckpt_gated_pc.npz`), so a recovery
     that dies mid-solve resumes rather than restarting; it is removed when the
-    solve completes."""
+    solve completes.
+
+    `elig_col` (E2/WP4) is E1's pre-index closure column name, resolved by the
+    CALLER from the bundle's witness (`main` does it; `None` means "this corpus has
+    none"). Given it, the pc_topics_lr arm's lean collect picks up a fourth CSR run
+    and this returns a `gated_pc_incident` block beside the prevalent one — which is
+    how the incident numbers are actually produced: a re-readout of a SAVED FIT, no
+    re-fit, warm bundle. Without it the incident arm is SKIPPED with a printed line
+    and every other number is byte-identical to what it was."""
     C = int(manifest["C"])
     mode = resolve_readout_mode(readout_mode, C)
     K = int(manifest.get("K") or 0)
@@ -594,6 +602,20 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
 
     results = {}
     dist = None
+    # E2/WP4. The eligibility column rides the LEAN collect, which only the
+    # distributed path performs, and only a corpus built with --preindex-closure
+    # carries it. Both misses print a line here rather than failing later: the
+    # incident arm is an ADDITION to this tool's output, never a precondition of it.
+    if elig_col is not None and mode != "distributed":
+        print(f"[readout]   INCIDENT arm (E2) SKIPPED: readout_mode resolved to "
+              f"{mode!r} and the eligibility column rides the LEAN (distributed) "
+              "collect. Re-run with --readout-mode distributed for the incident "
+              "block.", flush=True)
+        elig_col = None
+    elif elig_col is None:
+        print("[readout]   INCIDENT arm (E2) SKIPPED: this corpus carries no "
+              "pre-index closure witness (built without --preindex-closure). The "
+              "prevalent arms below are unaffected.", flush=True)
     if mode == "distributed":
         # No theta collect: the per-node LRs are fit on the executors and only the
         # lean test-split eval bundle comes back. theta_topm defaults to the
@@ -628,7 +650,7 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
             # iterations, because the next invocation finds the checkpoint next to
             # the manifest it already reads. `None` when no out_dir was given —
             # nowhere durable to put it.
-            checkpoint_dir=out_dir)
+            checkpoint_dir=out_dir, elig_col=elig_col)
         results["gated_pc"] = dist[0]
     else:
         Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(train_scored, C)
@@ -639,6 +661,19 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
     _dump(results)
     print(format_arm_readout("gated_pc (pc_topics_lr)", results["gated_pc"]),
           flush=True)
+    if dist is not None and dist[6] is not None:
+        # The second readout_from_proba call (E2): same proba, same labels, the
+        # incident eval mask. This is the cheap path the program actually uses —
+        # `make gated-pc-readout ID=110` against a warm bundle and a saved fit.
+        _inc = incident_readout(
+            dist[1], dist[2], dist[3], dist[6], C, recall_targets=recall_targets,
+            fdr_targets=fdr_targets, min_count=min_count,
+            prevalent=results["gated_pc"], arm_label="gated_pc (pc_topics_lr)")
+        if _inc is not None:
+            results["gated_pc_incident"] = _inc
+            _dump(results)
+            print(format_incident_readout(_inc).replace("[driver]", "[readout]"),
+                  flush=True)
     if ab:
         # Reuses the distributed result just computed, so the gate costs one extra
         # (driver-path) readout, not two.
@@ -662,7 +697,8 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
     if mode == "distributed":
         # No LR involved — `probability` IS the per-doc (C,) P(node) — so the
         # distributed variant is just the lean collector over that column.
-        hp, hy, hm, _ = _collect_lean_proba(test_scored, C, score_col="probability")
+        hp, hy, hm, _, _ = _collect_lean_proba(
+            test_scored, C, score_col="probability")
     else:
         hp, hy, hm = _collect_head_proba(test_scored, C)
     results["gated_pc_head"] = readout_from_proba(
@@ -831,12 +867,28 @@ def main(argv=None) -> int:
             test_scored = model.transform(bundle.test_df).cache()
 
         with _phase("score"):
+            # E2/WP4: the incident arm's eligibility comes from the BUNDLE (spec
+            # R2.3 — a corpus property; nothing this run computes may enter it),
+            # and its availability is decided by E1's WITNESS, not by a column
+            # probe. `bundle_preindex_witness` answers None for every corpus built
+            # before E1 or without the flag, and `run_readout` then prints a skip
+            # line instead of raising. Deliberately NOT `require_preindex_closure`:
+            # that one RAISES, which is right for the census (whose whole job is
+            # the eligibility census) and wrong here (whose job is the prevalent
+            # readout, with the incident block as an addition).
+            from preindex_closure import bundle_preindex_witness
+            _pw = bundle_preindex_witness(bundle)
+            _elig_col = str(_pw.get("col_name")) if _pw else None
+            if _elig_col:
+                print(f"[readout]   incident eligibility column: {_elig_col!r} "
+                      f"({_pw.get('version')})", flush=True)
             run_readout(train_scored, test_scored, manifest, recall_targets=rt,
                         fdr_targets=ft, min_count=min_count,
                         readout_mode=args.readout_mode,
                         ab_check=args.readout_ab_check, out_dir=run_dir,
                         theta_topm=args.readout_theta_topm,
-                        readout_max_iter=args.readout_max_iter)
+                        readout_max_iter=args.readout_max_iter,
+                        elig_col=_elig_col)
             print(f"[readout]   arm results written to "
                   f"{run_dir / 'results_readout.json'}", flush=True)
             train_scored.unpersist(); test_scored.unpersist()

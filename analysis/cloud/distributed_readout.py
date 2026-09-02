@@ -565,7 +565,9 @@ def _sparse_score_cells_kernel(packed, V, b_raw, C, chunk_rows=_TOPM_CHUNK_ROWS)
 def _lean_eval_kernel(rows, C, V=None, b_raw=None):
     """Pack one partition of scored docs into the LEAN eval block (plan §3, v2.1).
 
-    `rows` is an iterable of `(doc_id, score, label (C,), mask (C,))`, where `score`
+    `rows` is an iterable of `(doc_id, score, label (C,), mask (C,))` — or of
+    `(doc_id, score, label, mask, preindex_ids)` quints (`_row_quints`), which add
+    E1's per-document pre-index closure `R_d` as a SPARSE index list. `score`
     is the raw θ (K,) when `(V, b_raw)` are given — then `p = σ(clip(V·θ + b_raw))`,
     the same arithmetic as `_score_cells_kernel` — or an ALREADY-computed per-doc
     (C,) probability when `V is None` (the co-fit head's `probability` column, which
@@ -579,9 +581,10 @@ def _lean_eval_kernel(rows, C, V=None, b_raw=None):
     Returns ONE block per partition, not one record per row:
 
         `(ids (n,) int64, P (n,C) float32, y_idx int32, y_ptr (n+1,) int64,
-          m_idx int32 | None, m_ptr (n+1,) int64 | None)`
+          m_idx int32 | None, m_ptr (n+1,) int64 | None,
+          e_idx int32 | None, e_ptr (n+1,) int64 | None)`
 
-    Three things about that shape are load-bearing for the plan's driver budget:
+    Four things about that shape are load-bearing for the plan's driver budget:
 
       * **float32 p, index-list y/mask.** The driver eval needs the FULL (D_te,C)
         probability matrix (`detection_readout` takes a per-doc max over all nodes,
@@ -598,6 +601,16 @@ def _lean_eval_kernel(rows, C, V=None, b_raw=None):
       * **`m_idx is None` = "every cell observed".** `--label-mask-mode full` (the
         default) makes the mask all-ones for every doc, where an index list would be
         C int32s per row — larger than the float32 probabilities it accompanies.
+      * **The fourth run carries `R_d`, not eligibility (E2/WP4).** The incident
+        arm needs `elig[d,c] = c ∉ R_d` (spec D2), and at 0109's root prevalence the
+        ELIGIBLE set is the big one — CSR-ing it would cost ~C int32s per row. `R_d`
+        itself is the sparse side (it is stored sparse in the bundle for exactly that
+        reason, R1.5), so the run ships the pre-index closure ids verbatim and the
+        driver complements them into the eligibility matrix
+        (`gated_pc_cloud._densify_lean_blocks`). `e_idx is None` = "the column was
+        not collected" ⇒ every cell eligible; an EMPTY per-row run (`R_d = []`) is a
+        different and equally valid thing: that document carried nothing pre-index.
+        **+1 byte/cell** on the driver, and the +1 is the densified bool.
 
     Rows are emitted in partition order and carry `doc_id`, so the driver can align
     two independently collected paths (the A/B equality gate) without a shuffle.
@@ -609,7 +622,14 @@ def _lean_eval_kernel(rows, C, V=None, b_raw=None):
     ids, P = [], []
     y_parts, y_ptr = [], [0]
     m_parts, m_ptr = [], [0]
-    for doc_id, score, label, mask in rows:
+    e_parts, e_ptr = [], [0]
+    any_elig = False
+    for row in rows:
+        # Quads (`_row_quads`) and quints (`_row_quints`, E1's pre-index closure)
+        # both land here: one kernel, one packing, so the incident arm cannot drift
+        # from the prevalent one it is compared against.
+        doc_id, score, label, mask = row[0], row[1], row[2], row[3]
+        pre = row[4] if len(row) > 4 else None
         if V is None:
             p = np.asarray(score, dtype=np.float32)
         else:
@@ -631,6 +651,14 @@ def _lean_eval_kernel(rows, C, V=None, b_raw=None):
         mi = None if nnz == C else np.flatnonzero(mask).astype(np.int32)
         m_parts.append(mi)
         m_ptr.append(m_ptr[-1] + nnz)
+        if pre is None:
+            e_parts.append(np.zeros(0, dtype=np.int32))
+            e_ptr.append(e_ptr[-1])
+        else:
+            any_elig = True
+            ei = np.asarray(pre, dtype=np.int32).ravel()
+            e_parts.append(ei)
+            e_ptr.append(e_ptr[-1] + int(ei.size))
     n = len(ids)
     P = np.stack(P) if P else np.zeros((0, C), dtype=np.float32)
     y_idx = (np.concatenate(y_parts) if y_parts
@@ -641,8 +669,15 @@ def _lean_eval_kernel(rows, C, V=None, b_raw=None):
         dense = np.arange(C, dtype=np.int32)
         m_idx = np.concatenate([dense if mi is None else mi for mi in m_parts])
         m_ptr_arr = np.asarray(m_ptr, dtype=np.int64)
+    if not any_elig:
+        e_idx, e_ptr_arr = None, None           # column not collected: all eligible
+    else:
+        e_idx = (np.concatenate(e_parts) if e_parts
+                 else np.zeros(0, dtype=np.int32)).astype(np.int32, copy=False)
+        e_ptr_arr = np.asarray(e_ptr, dtype=np.int64)
     return (np.asarray(ids, dtype=np.int64).reshape(n),
-            P, y_idx, np.asarray(y_ptr, dtype=np.int64), m_idx, m_ptr_arr)
+            P, y_idx, np.asarray(y_ptr, dtype=np.int64), m_idx, m_ptr_arr,
+            e_idx, e_ptr_arr)
 
 
 def moments_to_mu_sd(sum_theta, sum_theta_sq, n_obs, *, eps=1e-12):
@@ -747,6 +782,36 @@ def _row_quads(rows, id_col, score_col, label_col, mask_col, topm=0):
             score = _topm_sparse(score, topm)
         yield (row[id_col], score,
                _to_array(row[label_col]), _to_array(row[mask_col]))
+
+
+def _row_quints(rows, id_col, score_col, label_col, mask_col, elig_col, topm=0):
+    """`_row_quads` plus E1's per-document pre-index closure `R_d` (spec D1).
+
+    The fifth element is the bundle's SPARSE `array<int>` column verbatim — the
+    engine ids the document already carried BEFORE its index — not a densified
+    eligibility vector. Two reasons, both load-bearing:
+
+      * it is the sparse side of the complement (see `_lean_eval_kernel`), so the
+        wire cost is O(|R_d|) rather than O(C) per row;
+      * it is the SAME object `diag_incident_census` folds, so the incident mask the
+        readout scores and the census that gated it cannot disagree about who is a
+        prior carrier. Eligibility is derived from it identically in both places
+        (`gated_pc_cloud.incident_eval_mask`), which is what spec R2.3 means by
+        "eligibility is a CORPUS property": it arrives from the bundle, and no code
+        path in the readout constructs one.
+
+    A NULL column value (the left-join's "no pre-index record" case, which
+    `attach_preindex_closure_to_bundle` already coalesces to `[]`) is passed through
+    as an empty list: carried nothing ⇒ eligible everywhere.
+    """
+    for row in rows:
+        score = _to_array(row[score_col])
+        if int(topm) > 0:
+            score = _topm_sparse(score, topm)
+        pre = row[elig_col]
+        yield (row[id_col], score,
+               _to_array(row[label_col]), _to_array(row[mask_col]),
+               [] if pre is None else [int(v) for v in pre])
 
 
 def _pack_partition(rows, topic_col, label_col, mask_col, topm=0):

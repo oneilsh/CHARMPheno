@@ -185,13 +185,20 @@ def detection_readout(proba_DC, y_DC, recall_targets):
 
 
 def readout_from_proba(proba, y_te, m_te, C, *, recall_targets, fdr_targets,
-                       min_count=0):
+                       min_count=0, skip_constant=False):
     """Full readout from an already-computed (N_te, C) per-node probability:
     ranking (AUC/AP) + per-node precision@recall / recall@FDR + case-vs-background
     detection. Shared by the pc_topics_lr arm (proba = post-hoc LR on theta) and the
-    co-fit head arm (proba = sigmoid(w_CK·theta))."""
+    co-fit head arm (proba = sigmoid(w_CK·theta)).
+
+    `skip_constant` (R2.1) forwards the RANKING axis's constant-column guard to
+    `_score_label`. It defaults OFF so every prevalent arm reproduces its recorded
+    numbers byte for byte (0104/0109/0110 are compared on them), and the INCIDENT
+    arm turns it on — that is the arm where a train-degenerate node's constant
+    column stops being all-positive and starts scoring an exact 0.5."""
     from analysis.pc.evaluate import _bundle_masked
-    ranking = _bundle_masked(proba, y_te, m_te, C, min_count)
+    ranking = _bundle_masked(proba, y_te, m_te, C, min_count,
+                             skip_constant=skip_constant)
     pr = pr_readout(proba, y_te, m_te, C, recall_targets, fdr_targets, min_count)
     det = detection_readout(proba, y_te, recall_targets)
     # Per-node (auc, n_pos) kept alongside the macro so the HEADLINE can split the
@@ -207,6 +214,196 @@ def readout_from_proba(proba, y_te, m_te, C, *, recall_targets, fdr_targets,
                            "n_pos": int(pr["per_node"].get(c, {}).get("n_pos", 0))}
     return {"ranking": ranking["macro"], "pr": pr["macro"], "detection": det,
             "per_node": per_node}
+
+
+# --------------------------------------------------------------------------- #
+# INCIDENT arm (spec E2 / plan WP4): the same readout on the incident cohort.  #
+# --------------------------------------------------------------------------- #
+# The D7 / C2.4 naming rule, verbatim, carried by every incident output. The heads
+# were fit on the PREVALENT problem (`_fit_readout_heads` standardizes per node on
+# that node's own observed TRAIN rows), so what the incident arm measures is a
+# prevalent-fit model evaluated on an incident cohort — a legitimate quantity, but
+# NOT "the incident AUC". Train-time incident masking is a deliberate non-goal
+# (spec §9); this string is the price of that deferral, paid in labelling.
+INCIDENT_NAMING = ("a PREVALENT-FIT model evaluated on an INCIDENT COHORT "
+                   "(spec D7 / audit C2.4) — heads are standardized and fit on "
+                   "each node's own observed TRAIN rows under the prevalent mask; "
+                   "this is NOT 'the incident AUC'")
+
+
+def incident_eval_mask(y, mask, elig):
+    """The D2/D3/D4 evaluation mask for the incident arm: `elig & (y | mask)`.
+
+    Per node c and document d, with `elig[d,c] = c ∉ R_d` (D2 — a prior carrier of
+    `closure(c)` leaves **BOTH** classes, which is the whole point: dropping it from
+    the positives only would be a different and wrong estimator):
+
+      * **incident POSITIVE** (D3) — eligible AND `label[d,c] == 1`. Deliberately
+        NOT gated on the observation mask: a positive is ATTESTED (the document
+        gained `closure(c)` in the label window), which is a fact about the label
+        window, not about whether this run chose to observe the cell.
+      * **incident NEGATIVE** (D4) — eligible AND observed AND `label[d,c] == 0`.
+        The mask is what makes a negative a NEGATIVE rather than an unobserved
+        cell: under `label_mask_mode="closure"` a node is observed only on rows
+        inside its parent's closure, so an unmasked zero is "not asked", not
+        "asked and answered no".
+
+    Union those two and you get `elig & (y | mask)`, which is what a masked ranking
+    readout wants — the rows that carry a class.
+
+    THIS IS THE SAME ARITHMETIC AS `diag_incident_census.census_partial`
+    (`n_ipos = elig*y`, `n_ineg = elig*m*(1-y)`), and the agreement is asserted on a
+    shared synthetic fixture in `tests/scripts/test_incident_readout.py`. It has to
+    be: the census is the corpus probe that GATED this arm, and if the two disagreed
+    about who is eligible, the gate would have been passed on a population the
+    readout does not score.
+
+    Pure numpy. `elig=None` (no E1 column) returns None — "no eligibility
+    information", which every caller reads as SKIP the incident arm."""
+    if elig is None:
+        return None
+    y = np.asarray(y)
+    mask = np.asarray(mask)
+    elig = np.asarray(elig).astype(bool)
+    has_class = (y != 0) | (mask != 0)
+    return (elig & has_class).astype(np.uint8)
+
+
+def _macro_over(per_node, nodes):
+    """Macro AUC/AP over an EXPLICIT node set (spec R2.2), from a `per_node` dict.
+
+    `readout_from_proba`'s `per_node` holds exactly the SCORED nodes (skipped ones
+    never enter it), so `set(per_node)` is that arm's full scoreable set and the
+    intersection of two arms' sets is the SHARED set. Averaging over a passed-in
+    node list rather than over whatever each arm happened to score is the entire
+    point of R2.2: a prevalent-vs-incident delta computed across different node
+    sets is not a comparison."""
+    nodes = [c for c in nodes if c in per_node]
+    aucs = [per_node[c]["auc"] for c in nodes]
+    aps = [per_node[c]["ap"] for c in nodes if per_node[c].get("ap") is not None]
+    return {"auc": float(np.mean(aucs)) if aucs else None,
+            "ap": float(np.mean(aps)) if aps else None,
+            "n_nodes": len(nodes)}
+
+
+def incident_readout(proba, y_te, m_te, elig, C, *, recall_targets, fdr_targets,
+                     min_count=0, prevalent=None, arm_label="gated_pc"):
+    """The `gated_pc_incident` results block: the second `readout_from_proba` call.
+
+    Everything E2 asks for, in one dict:
+
+      * **the incident readout itself** — `readout_from_proba` on `m_incident`
+        (D2/D3/D4 via `incident_eval_mask`), with R2.1's constant-column guard ON
+        (`skip_constant=True`);
+      * **R2.2, four macro lines** — prevalent/full, prevalent/shared,
+        incident/full, incident/shared, where "shared" is the both-arms-scoreable
+        node set. Reported together because the honest headline is the SHARED pair
+        and the full pair is what each arm can say on its own;
+      * **R2.1's three skip counts, never summed** (spec §8.5): degenerate test
+        column, small test column, constant prediction column;
+      * **R2.4 / D7** — `INCIDENT_NAMING` in the block itself, so a table rendered
+        from the JSON cannot lose it;
+      * **spec §8's four tags** on every number.
+
+    `prevalent` is the SAME arm's already-computed prevalent readout (the one
+    already in `results["gated_pc"]`), used only for the shared node set — no
+    re-scoring, no second fit, and structurally impossible for a run's own output to
+    enter the eligibility definition (R2.3: eligibility arrives from the BUNDLE).
+
+    Pure numpy + sklearn: given the four arrays it is fully unit-testable off-Spark,
+    which is where the constant-column fixture lives."""
+    m_incident = incident_eval_mask(y_te, m_te, elig)
+    if m_incident is None:
+        return None
+    readout = readout_from_proba(
+        proba, y_te, m_incident, C, recall_targets=recall_targets,
+        fdr_targets=fdr_targets, min_count=min_count,
+        # R2.1: the ranking axis gets the guard the detection pool has had since
+        # exp 0104. It is ON here and OFF on the prevalent arm on purpose — see
+        # `_score_label`'s `skip_constant`.
+        skip_constant=True)
+    inc_nodes = set(readout["per_node"])
+    prev_nodes = set((prevalent or {}).get("per_node", {}))
+    shared = sorted(inc_nodes & prev_nodes)
+    macros = {
+        "incident_full": _macro_over(readout["per_node"], sorted(inc_nodes)),
+        "incident_shared": _macro_over(readout["per_node"], shared),
+    }
+    if prevalent is not None:
+        macros["prevalent_full"] = _macro_over(prevalent["per_node"],
+                                               sorted(prev_nodes))
+        macros["prevalent_shared"] = _macro_over(prevalent["per_node"], shared)
+    return {
+        "naming": INCIDENT_NAMING,
+        "tags": {
+            "arm": "incident",
+            # Every macro line names its own node set; the block-level tag says
+            # both are present, which is R2.2's whole requirement.
+            "node_set": "both (shared + full, reported separately)",
+            "cell_type": "marginal",
+            "claim_type": "discrimination",
+        },
+        "eligibility": {
+            "definition": "incident-eligible(d, c) := c NOT IN R_d (spec D2)",
+            "source": "bundle column (E1 pre-index closure) — a CORPUS property, "
+                      "never a run property (spec R2.3); no fit output enters it",
+            "positives": "eligible AND label==1 (D3)",
+            "negatives": "eligible AND observed AND label==0 (D4)",
+            "n_eligible_cells": int(np.asarray(elig).astype(bool).sum()),
+            "n_scored_cells": int(m_incident.sum()),
+        },
+        "arm_label": arm_label,
+        "min_count": int(min_count),
+        "macros": macros,
+        "node_sets": {
+            "n_incident_scoreable": len(inc_nodes),
+            "n_prevalent_scoreable": len(prev_nodes),
+            "n_shared": len(shared),
+        },
+        # Three reasons, three counts, NEVER summed (spec §8.5).
+        "skipped_by_reason": readout["ranking"].get("skipped_by_reason", {}),
+        "readout": readout,
+    }
+
+
+def format_incident_readout(block) -> str:
+    """The incident block as driver log lines, with the D7 rule on the table."""
+    if not block:
+        return ("[driver]   incident arm SKIPPED: this corpus carries no E1 "
+                "pre-index closure column")
+    m, ns = block["macros"], block["node_sets"]
+    sk = block.get("skipped_by_reason") or {}
+
+    def _row(name, d):
+        if d is None:
+            return f"    {name:<24} n/a"
+        return (f"    {name:<24} AUC={_f(d['auc']).strip():<7} "
+                f"AP={_f(d['ap']).strip():<7} (over {d['n_nodes']} nodes)")
+
+    lines = [
+        f"[incident readout: {block['arm_label']}]  {block['naming']}",
+        "  arm=incident · cell=marginal · claim=DISCRIMINATION (never prospective)",
+        "  eligibility: c NOT IN R_d (spec D2), a CORPUS property — prior carriers "
+        "leave BOTH classes",
+        "  macro AUC/AP by ARM x NODE SET (R2.2 — a delta across different node "
+        "sets is not a comparison):",
+        _row("prevalent / full", m.get("prevalent_full")),
+        _row("prevalent / shared", m.get("prevalent_shared")),
+        _row("incident / full", m.get("incident_full")),
+        _row("incident / shared", m.get("incident_shared")),
+        f"  node sets: prevalent-scoreable={ns['n_prevalent_scoreable']}  "
+        f"incident-scoreable={ns['n_incident_scoreable']}  "
+        f"shared={ns['n_shared']}  (min_count={block['min_count']})",
+        "  skipped columns, THREE reasons counted separately (never summed): "
+        f"degenerate={sk.get('degenerate_test_column', 0)}  "
+        f"small={sk.get('small_test_column', 0)}  "
+        f"CONSTANT={sk.get('constant_prediction_column', 0)}",
+        "  (the constant count is R2.1's guard: a train-degenerate node's constant "
+        "column acquires negatives under the incident mask and would otherwise "
+        "score a hard 0.5 INSIDE the macro)",
+    ]
+    return "\n".join("[driver] " + ln if not ln.startswith("[") else ln
+                     for ln in lines)
 
 
 def score_arm(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, C, *, recall_targets,
@@ -754,7 +951,7 @@ def resolve_readout_calibration(flag):
 
 
 def _densify_lean_blocks(blocks, C):
-    """Per-partition lean blocks -> `(proba float32, y uint8, mask uint8, ids)`.
+    """Per-partition lean blocks -> `(proba f32, y u8, mask u8, ids, elig u8|None)`.
 
     The driver-side half of `distributed_readout._lean_eval_kernel`. Peak driver
     memory is the whole point of the v2.1 refinement, so it is worth being explicit:
@@ -765,16 +962,33 @@ def _densify_lean_blocks(blocks, C):
     rather than a second full copy of everything.
 
     `y`/`mask` arrive as CSR-style index runs; `mask` may be `None`, which means
-    "every doc observes every node" (`--label-mask-mode full`)."""
+    "every doc observes every node" (`--label-mask-mode full`).
+
+    THE FOURTH RUN (E2/WP4). When the collect selected E1's pre-index closure
+    column, each block carries a fifth CSR run holding `R_d` — the engine ids the
+    document ALREADY CARRIED before its index — and this returns the complementary
+    `elig` matrix, `elig[d,c] = c ∉ R_d` (spec D2), at **+1 byte/cell**. The
+    complement is taken here rather than on the executors because `R_d` is the
+    sparse side and eligibility the dense one (0109 root prevalence 0.9609): the
+    wire carries the small set, the driver materializes the big one. Blocks without
+    the run (a bundle built before E1, or a collect that did not ask) yield
+    `elig=None`, which every consumer reads as "no eligibility information" and
+    which makes the incident arm SKIP rather than silently score the prevalent
+    cells twice. Legacy 6-tuple blocks are accepted for the same reason."""
     C = int(C)
     D = sum(int(b[1].shape[0]) for b in blocks)
     proba = np.zeros((D, C), dtype=np.float32)
     y = np.zeros((D, C), dtype=np.uint8)
     mask = np.zeros((D, C), dtype=np.uint8)
     ids = np.zeros(D, dtype=np.int64)
+    # Allocated lazily: a run without the pre-index column must not pay (D,C) bytes
+    # for an all-ones array nobody asked for.
+    elig = None
     at = 0
     for j in range(len(blocks)):
-        b_ids, P, y_idx, y_ptr, m_idx, m_ptr = blocks[j]
+        b = blocks[j]
+        b_ids, P, y_idx, y_ptr, m_idx, m_ptr = b[:6]
+        e_idx, e_ptr = (b[6], b[7]) if len(b) > 6 else (None, None)
         n = int(P.shape[0])
         proba[at:at + n] = P
         ids[at:at + n] = b_ids
@@ -783,16 +997,21 @@ def _densify_lean_blocks(blocks, C):
             mask[at:at + n] = 1
         else:
             mask[np.repeat(np.arange(at, at + n), np.diff(m_ptr)), m_idx] = 1
+        if e_idx is not None:
+            if elig is None:
+                # Eligible by default; the run below SUBTRACTS the prior carriers.
+                elig = np.ones((D, C), dtype=np.uint8)
+            elig[np.repeat(np.arange(at, at + n), np.diff(e_ptr)), e_idx] = 0
         at += n
         blocks[j] = None                      # free the partition's block eagerly
-    return proba, y, mask, ids.tolist()
+    return proba, y, mask, ids.tolist(), elig
 
 
 def _collect_lean_proba(scored_df, C, V=None, b_raw=None, *, degenerate=None,
                         const=None, score_col="topicDistribution",
                         label_col="label", mask_col="labelMask",
-                        id_col="person_id", theta_topm=0):
-    """LEAN per-doc readout collect: `(proba (D,C) f32, y u8, mask u8, person_order)`.
+                        id_col="person_id", theta_topm=0, elig_col=None):
+    """LEAN readout collect: `(proba (D,C) f32, y u8, mask u8, person_order, elig)`.
 
     Plan §3 (v2.1): once the FIT is distributed, the driver eval needs only the test
     split's per-node probabilities and labels — no θ, no float64 (D,C) arrays, no
@@ -814,10 +1033,22 @@ def _collect_lean_proba(scored_df, C, V=None, b_raw=None, *, degenerate=None,
     the fitted coefficients belong to the truncated design matrix, so scoring full θ
     with them would evaluate a model on features it was never fit on. It is ignored
     (and must be left 0) on the `V is None` branch, where `score_col` is an
-    already-computed probability rather than a feature vector."""
+    already-computed probability rather than a feature vector.
+
+    `elig_col` (E2/WP4) names E1's per-document pre-index closure column
+    (`preindexClosure`) and adds it to the select as a FOURTH CSR run — the same
+    partition kernel, one extra column, +1 byte/cell on the returned `elig` matrix.
+    Left `None` (the default) the collect is byte-identical to what it was and
+    `elig` comes back `None`: the incident arm is then SKIPPED, never guessed. The
+    caller is responsible for checking the bundle's E1 WITNESS first
+    (`preindex_closure.bundle_preindex_witness`) — asking for the column against a
+    bundle that lacks it is a Spark AnalysisException, which is exactly the
+    mixed-vintage failure R1.4 exists to turn into a sentence."""
     C = int(C)
     theta_topm = int(theta_topm)
-    cols = (id_col, score_col, label_col, mask_col)
+    cols = ((id_col, score_col, label_col, mask_col) if elig_col is None
+            else (id_col, score_col, label_col, mask_col, elig_col))
+    _rows = _dr._row_quads if elig_col is None else _dr._row_quints
     sc = scored_df.sparkSession.sparkContext
 
     def _collect():
@@ -831,16 +1062,16 @@ def _collect_lean_proba(scored_df, C, V=None, b_raw=None, *, degenerate=None,
         if V is None:
             bcast = None
 
-            def _block(rows, _C=C, _cols=cols):
-                return [_dr._lean_eval_kernel(_dr._row_quads(rows, *_cols), _C)]
+            def _block(rows, _C=C, _cols=cols, _rw=_rows):
+                return [_dr._lean_eval_kernel(_rw(rows, *_cols), _C)]
         else:
             bcast = sc.broadcast((np.ascontiguousarray(V, dtype=np.float64),
                                   np.ascontiguousarray(b_raw, dtype=np.float64)))
 
-            def _block(rows, _b=bcast, _C=C, _cols=cols, _m=theta_topm):
+            def _block(rows, _b=bcast, _C=C, _cols=cols, _m=theta_topm, _rw=_rows):
                 V_, b_ = _b.value
                 return [_dr._lean_eval_kernel(
-                    _dr._row_quads(rows, *_cols, topm=_m), _C, V_, b_)]
+                    _rw(rows, *_cols, topm=_m), _C, V_, b_)]
 
         try:
             return scored_df.select(*cols).rdd.mapPartitions(_block).collect()
@@ -852,11 +1083,11 @@ def _collect_lean_proba(scored_df, C, V=None, b_raw=None, *, degenerate=None,
                 _dr._destroy_broadcast(bcast)
 
     blocks = _dr._retry_spark_action(_collect, label="lean eval collect")
-    proba, y, mask, ids = _densify_lean_blocks(blocks, C)
+    proba, y, mask, ids, elig = _densify_lean_blocks(blocks, C)
     if degenerate is not None and bool(np.any(degenerate)):
         deg = np.asarray(degenerate, dtype=bool)
         proba[:, deg] = np.asarray(const, dtype=np.float32)[deg]
-    return proba, y, mask, ids
+    return proba, y, mask, ids, elig
 
 
 _CKPT_VERSION = "readout-ckpt-v2"
@@ -1210,17 +1441,24 @@ def distributed_score_arm(train_scored, test_scored, C, K, *, recall_targets,
                           history=6, depth=None, warm_start=None, theta_topm=0,
                           checkpoint_dir=None, checkpoint_every=10,
                           topic_col="topicDistribution", label_col="label",
-                          mask_col="labelMask", id_col="person_id"):
+                          mask_col="labelMask", id_col="person_id",
+                          elig_col=None):
     """`score_arm` without the driver-side θ collect — the distributed twin.
 
     Returns `(readout, proba_te (D_te,C) f32, y_te u8, m_te u8, person_order,
-    (V, b_raw))`; the first four mirror `_score_full`'s `(readout, proba)` contract
-    plus the two label arrays the driver path used to get from
-    `_collect_theta_labels`, so every downstream consumer (`_conditional`, the
-    rarity quartile split, the headline) is unchanged. The trailing raw-θ fit
-    params are what a LATER solve on a near-identical problem warm-starts from
-    (`readout_ab_report`'s row-sampled fit); callers that only want the readout
+    (V, b_raw), elig u8|None)`; the first four mirror `_score_full`'s
+    `(readout, proba)` contract plus the two label arrays the driver path used to
+    get from `_collect_theta_labels`, so every downstream consumer (`_conditional`,
+    the rarity quartile split, the headline) is unchanged. The raw-θ fit
+    params at index 5 are what a LATER solve on a near-identical problem warm-starts
+    from (`readout_ab_report`'s row-sampled fit); callers that only want the readout
     index it out (`[0]`) and are unaffected by its presence.
+
+    `elig_col` (E2/WP4) names E1's pre-index closure column; it rides the SAME lean
+    collect as a fourth CSR run and comes back as the trailing `elig` matrix, which
+    the caller feeds to `incident_readout`. `None` (the default) keeps the collect
+    exactly as it was and returns `elig=None`. It is APPENDED to the tuple, so
+    `[:5]` and `[5]` keep meaning what they meant.
 
     Same three ingredients as the driver readout, moved: fit per-node LRs on the
     train split's θ (now one batched L-BFGS on the executors), score the test split
@@ -1254,13 +1492,13 @@ def distributed_score_arm(train_scored, test_scored, C, K, *, recall_targets,
         depth=depth, label=label, warm_start=warm_start, theta_topm=theta_topm,
         checkpoint_path=ckpt_path, checkpoint_every=checkpoint_every,
         topic_col=topic_col, label_col=label_col, mask_col=mask_col)
-    proba, y_te, m_te, persons = _collect_lean_proba(
+    proba, y_te, m_te, persons, elig = _collect_lean_proba(
         test_scored, C, V, b_raw, degenerate=degenerate, const=const,
         score_col=topic_col, label_col=label_col, mask_col=mask_col, id_col=id_col,
-        theta_topm=theta_topm)
+        theta_topm=theta_topm, elig_col=elig_col)
     readout = readout_from_proba(proba, y_te, m_te, C, recall_targets=recall_targets,
                                  fdr_targets=fdr_targets, min_count=min_count)
-    return readout, proba, y_te, m_te, persons, (V, b_raw)
+    return readout, proba, y_te, m_te, persons, (V, b_raw), elig
 
 
 def readout_ab_report(train_scored, test_scored, C, K, *, recall_targets,
@@ -2407,6 +2645,37 @@ def main() -> int:
         rt, ft = args._recall_targets, args._fdr_targets
         results = {}
 
+        # ---- E2/WP4: is the INCIDENT arm available on this corpus? -------------
+        # The witness decides (R1.4), never a `try: select`. Asking Spark for a
+        # column a pre-E1 bundle does not carry is an AnalysisException landing in
+        # the middle of the readout — the mixed-vintage failure the witness exists
+        # to turn into a sentence. On a miss the incident arm is SKIPPED with a
+        # printed line and the prevalent arm is untouched.
+        from preindex_closure import bundle_preindex_witness
+        _pw = bundle_preindex_witness(bundle)
+        elig_col = str(_pw.get("col_name")) if _pw else None
+        if elig_col is None:
+            print("[driver]   INCIDENT arm (E2) SKIPPED: this corpus carries no "
+                  "pre-index closure witness. Rebuild the corpus with "
+                  "--preindex-closure (a different bundle cache key — nothing "
+                  "already cached is invalidated) to get the incident block. The "
+                  "prevalent arm is unaffected.", flush=True)
+        elif readout_mode != "distributed":
+            # The eligibility column rides the LEAN collect, which only the
+            # distributed path performs. At C <= 500 (the driver path's own
+            # ceiling) the incident arm is not wired; whole-Mondo, where this
+            # program lives, resolves to distributed.
+            print(f"[driver]   INCIDENT arm (E2) SKIPPED: readout_mode resolved to "
+                  f"{readout_mode!r} and the eligibility column rides the LEAN "
+                  "(distributed) collect. Re-run with --readout-mode distributed "
+                  "for the incident block.", flush=True)
+            elig_col = None
+        else:
+            print(f"[driver]   INCIDENT arm (E2) ON: eligibility from bundle column "
+                  f"{elig_col!r} ({_pw.get('version')}) — a CORPUS property (spec "
+                  "R2.3); {INCIDENT}".replace("{INCIDENT}", INCIDENT_NAMING),
+                  flush=True)
+
         def _score(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te):
             return score_arm(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, C,
                              recall_targets=rt, fdr_targets=ft,
@@ -2568,9 +2837,10 @@ def main() -> int:
                     train_scored, test_scored, C, lay.K, recall_targets=rt,
                     fdr_targets=ft, min_count=args.min_label_count, label="gated_pc",
                     max_iter=args.readout_max_iter, theta_topm=theta_topm,
-                    checkpoint_dir=out)
+                    checkpoint_dir=out, elig_col=elig_col)
                 results["gated_pc"], proba_gp, y_te, m_te, _ = _dist_gp[:5]
                 _gp_fit = _dist_gp[5]         # raw-θ params: the calibration warm start
+                elig_te = _dist_gp[6]         # E1's (D,C) eligibility, or None
             else:
                 Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(
                     train_scored, C, sample_frac=_sf, seed=_sd)
@@ -2578,9 +2848,21 @@ def main() -> int:
                     test_scored, C, sample_frac=_sf, seed=_sd)
                 results["gated_pc"], proba_gp = _score_full(
                     Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te)
+                elig_te = None
             _dump_partial_results(out, results)
             print(format_arm_readout("gated_pc (pc_topics_lr)", results["gated_pc"]),
                   flush=True)
+            # E2/WP4: the SECOND readout_from_proba call, on the incident cohort.
+            # Same proba, same labels, a different eval mask — no re-fit, no second
+            # collect. Dumped immediately so a death below still leaves it on disk.
+            _inc = incident_readout(
+                proba_gp, y_te, m_te, elig_te, C, recall_targets=rt, fdr_targets=ft,
+                min_count=args.min_label_count, prevalent=results["gated_pc"],
+                arm_label="gated_pc (pc_topics_lr)")
+            if _inc is not None:
+                results["gated_pc_incident"] = _inc
+                _dump_partial_results(out, results)
+                print(format_incident_readout(_inc), flush=True)
             if ab_check:
                 # The plan's step-2 correctness gate, on the arm whose readout is the
                 # headline. Reuses the distributed result already computed, so the
@@ -2664,10 +2946,10 @@ def main() -> int:
                         _fit_df, C, lay.K, label="gated_pc calibration-fit",
                         max_iter=args.readout_max_iter, warm_start=_gp_fit,
                         theta_topm=theta_topm)
-                    proba_cal, y_cal, m_cal, _ = _collect_lean_proba(
+                    proba_cal, y_cal, m_cal, _, _ = _collect_lean_proba(
                         _cal_df, C, _Vc, _bc, degenerate=_degc, const=_constc,
                         theta_topm=theta_topm)
-                    proba_te_fit, _, _, _ = _collect_lean_proba(
+                    proba_te_fit, _, _, _, _ = _collect_lean_proba(
                         test_scored, C, _Vc, _bc, degenerate=_degc, const=_constc,
                         theta_topm=theta_topm)
                     # NOTE: calibrate_per_node returns a float64 copy of proba_te_fit, so
@@ -2725,7 +3007,7 @@ def main() -> int:
                       "everywhere)", flush=True)
             else:
                 if readout_mode == "distributed":
-                    hp, hy, hm, _ = _collect_lean_proba(
+                    hp, hy, hm, _, _ = _collect_lean_proba(
                         test_scored, C, score_col="probability")
                 else:
                     hp, hy, hm = _collect_head_proba(
