@@ -10,6 +10,7 @@ from charmpheno.omop.cohorts import (
 )
 from charmpheno.omop.doc_spec import (
     DocSpec,
+    EpisodeDocSpec,
     PatientCohortDocSpec,
     PatientDocSpec,
     PatientYearDocSpec,
@@ -23,6 +24,7 @@ __all__ = [
     "CANONICAL_COLUMNS",
     "COHORT_METADATA",
     "DocSpec",
+    "EpisodeDocSpec",
     "PatientCohortDocSpec",
     "PatientDocSpec",
     "PatientYearDocSpec",

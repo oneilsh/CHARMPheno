@@ -6,7 +6,7 @@ shape and the event-to-doc mapping is the entire substance of the
 abstraction: same OMOP frame, different DocSpec ⇒ different topic-model
 input.
 
-Two specs ship in v1 (ADR 0018):
+Two specs ship in v1 (ADR 0018), plus one added for exp 0111:
 
 - PatientDocSpec: doc_id = person_id. One doc per patient over their
   full event history. The pre-ADR default; reproduces existing behavior.
@@ -14,6 +14,14 @@ Two specs ship in v1 (ADR 0018):
   (default), each condition_era contributes one event-row to every
   calendar year it spans, so chronic conditions populate multiple
   patient-year docs and transient ones populate one.
+- PatientCohortDocSpec: doc_id = "{source_cohort}:{person_id}". One doc
+  per (patient, source_cohort) pair.
+- EpisodeDocSpec (exp 0111): doc_id = "{source_cohort}:{person_id}:
+  {index_date}" — PatientCohortDocSpec's doc_id with an episode index
+  APPENDED, so at most `cap` documents per (patient, cohort) instead of
+  one, anchored on gap-and-islands first-attestation episodes
+  (`analysis/cloud/episode_index.py` builds the index frame this spec
+  consumes).
 
 Each spec also serializes to/from a manifest dict for round-tripping
 through VIResult.metadata['corpus_manifest']['doc_spec'], so eval
@@ -256,6 +264,65 @@ class PatientCohortDocSpec(DocSpec):
 
     @classmethod
     def _from_manifest(cls, d: dict[str, Any]) -> "PatientCohortDocSpec":
+        return cls(min_doc_length=int(d.get("min_doc_length", 0)))
+
+
+@_register
+@dataclass(frozen=True)
+class EpisodeDocSpec(DocSpec):
+    """One document per (patient, source_cohort, episode index) — exp 0111.
+
+    doc_id = "{source_cohort}:{person_id}:{index_date}" — `PatientCohortDocSpec`'s
+    doc_id with the episode's `index_date` APPENDED, never inserted between the
+    existing components. Prefix parsers that recover `source_cohort` from
+    `doc_id` via ``split(":").getItem(0)`` (audit R5.1) survive an append
+    unchanged; an insertion would silently misparse every such call site. A
+    comorbid, multi-episode patient therefore gets one doc_id per (cohort,
+    episode) pair — the same per-cohort distinctness `PatientCohortDocSpec`
+    already gives a comorbid patient, extended across that patient's episodes.
+
+    Requires an `index_date` column on the events frame — one row per event,
+    already attributed to the episode whose document it feeds. That column
+    does not exist on `lookback_feature_label_events`'s / `lookback_feature_
+    frames`'s output TODAY (`cohorts.py:1663,1667` drop it before it reaches a
+    doc spec); the exp-0111 plan's WP-C is the one-blast commit that carries it
+    through. Until WP-C lands, `derive_docs` raises rather than silently
+    deriving a single-episode-shaped doc_id from a frame that cannot actually
+    distinguish episodes — see the error message below, which names that gap
+    explicitly rather than failing on a generic missing-column KeyError three
+    frames later.
+    """
+    name: str = field(default="episode", init=False)
+    required_columns: tuple[str, ...] = field(
+        default=("person_id", "source_cohort", "index_date"), init=False)
+    min_doc_length: int = 0
+
+    def derive_docs(self, events_df: DataFrame) -> DataFrame:
+        if "index_date" not in set(events_df.columns):
+            raise ValueError(
+                "EpisodeDocSpec requires an index_date column on the events "
+                "frame, and this frame does not carry one. "
+                "lookback_feature_label_events/lookback_feature_frames "
+                "(charmpheno/omop/cohorts.py) drop index_date before handing "
+                "back the events frame today — the exp-0111 plan's WP-C "
+                "passthrough (spec R5.2 / R7.1) is the change that carries it "
+                "through, and it has not landed yet. Available columns: "
+                f"{sorted(events_df.columns)}"
+            )
+        self.validate(events_df)
+        return events_df.withColumn(
+            "doc_id",
+            F.concat_ws(":",
+                        F.col("source_cohort").cast("string"),
+                        F.col("person_id").cast("string"),
+                        F.col("index_date").cast("string")),
+        )
+
+    def manifest(self) -> dict[str, Any]:
+        return {"name": self.name, "min_doc_length": self.min_doc_length}
+
+    @classmethod
+    def _from_manifest(cls, d: dict[str, Any]) -> "EpisodeDocSpec":
         return cls(min_doc_length=int(d.get("min_doc_length", 0)))
 
 

@@ -68,56 +68,23 @@ from __future__ import annotations
 # persons; the top band is open so no knob ever needs retuning.
 COUNT_BANDS = ((1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 10), (11, None))
 
-PERSON_COL = "person_id"
-DATE_COL = "first_attested_date"
-INDEX_COL = "index_date"
-EPISODE_COL = "episode_no"       # 1-based per person, in date order
-START_COL = "episode_start"
-NNODES_COL = "n_new_nodes"
-
-
-def build_episodes(first_attestation, *, gap_days, return_assignments=False):
-    """`(person_id, episode_no, episode_start, index_date, n_new_nodes)`.
-
-    Gap-and-islands over each person's DISTINCT first-attestation dates — the
-    `_stable_drug_intervals` idiom (`cohorts.py:2237-2252`): lag, break flag,
-    running sum. A break is `datediff > gap_days`, so two dates exactly
-    `gap_days` apart are the SAME episode (the boundary is inclusive; the gap
-    must be exceeded to split).
-
-    The island id is then rejoined to the per-(person, node, date) rows to count
-    how many distinct nodes each episode newly attests — the payoff density: an
-    episode doc contributes that many incident positives.
-
-    `return_assignments=True` additionally returns that per-(person, episode,
-    node) join, so the node-yield count reuses one clustering instead of
-    rebuilding it.
-    """
-    from pyspark.sql import Window
-    from pyspark.sql import functions as F
-
-    dates = first_attestation.select(PERSON_COL, DATE_COL).distinct()
-    w = Window.partitionBy(PERSON_COL).orderBy(DATE_COL)
-    islands = (dates
-               .withColumn("_prev", F.lag(DATE_COL).over(w))
-               .withColumn("_break",
-                           (F.col("_prev").isNull()
-                            | (F.datediff(F.col(DATE_COL), F.col("_prev"))
-                               > int(gap_days))).cast("int"))
-               .withColumn(EPISODE_COL, F.sum("_break").over(
-                   w.rowsBetween(Window.unboundedPreceding, 0)))
-               .select(PERSON_COL, DATE_COL, EPISODE_COL))
-    per_node = first_attestation.join(islands, on=[PERSON_COL, DATE_COL],
-                                      how="inner")
-    episodes = (per_node
-                .groupBy(PERSON_COL, EPISODE_COL)
-                .agg(F.min(DATE_COL).alias(START_COL),
-                     F.countDistinct("node_cid").alias(NNODES_COL))
-                .withColumn(INDEX_COL, F.date_sub(F.col(START_COL), 1)))
-    if return_assignments:
-        assignments = per_node.select(PERSON_COL, EPISODE_COL, "node_cid")
-        return episodes, assignments
-    return episodes
+# The clustering itself, and its column names, live in episode_index.py now:
+# episode_index_frame (WP-D's gated + capped provider) needs the SAME
+# build_episodes this probe already tests, and a library the fit driver
+# depends on may not import a driver-CLI tool script (lib<-tool, never the
+# reverse — see episode_index.py's module docstring). Re-exported under their
+# original names so this module's own call sites (`build_episodes(...)`,
+# `PERSON_COL`, ...) and `tests/scripts/test_episode_probe.py`'s
+# `ep.build_episodes` / `ep.PERSON_COL` usage are both unchanged.
+from episode_index import (  # noqa: E402
+    DATE_COL,
+    EPISODE_COL,
+    INDEX_COL,
+    NNODES_COL,
+    PERSON_COL,
+    START_COL,
+    build_episodes,
+)
 
 
 def node_yield(assignments, gated_episodes, *, bars=(20, 100)):
