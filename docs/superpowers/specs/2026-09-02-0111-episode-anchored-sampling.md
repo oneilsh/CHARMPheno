@@ -94,18 +94,26 @@ restated. New definitions:
 
 ### 3.2 New requirements
 
-- **R7.1 — The one-blast cache-drop commit.** R5.2 edits `cohorts.py`, which
+- **R7.1 — The one-blast cache-drop commit.** *(Scope WIDENED 2026-09-03 by
+  the plan doc, after code verification.)* R5.2 edits `cohorts.py`, which
   moves `cohort_defs_version()` and invalidates EVERY cache key in the repo
-  plus all four pinned tripwire hashes. This is accepted, once, knowingly —
-  and exactly once: the same commit carries every other edit that has been
-  waiting on an assembler/cohorts touch, namely (a) the WP0 residue — the
-  stale strip-claim comment at `case_finding_assembly.py:394-396`; (b) the
-  R5.14 prose amendment at `cohorts.py:723-728`; (c) re-pinning the four
+  plus all four pinned tripwire hashes — and the same blast must also carry
+  **`multi_domain.py`**, which hard-codes the index-builder selection
+  (`:382-394`, no external-frame option) and the doc spec (`:408`): WP7/R5.3
+  closed the cache-KEY hole, not the injection hole. Both files in ONE
+  commit, containing exactly: (a) the `index_date` passthrough in the
+  windowing helpers; (b) `index_df=` / `index_mode="external"` and
+  `doc_spec=` injection params on the assembler — seams only, on the
+  `attested_provider` precedent, so ALL episode logic stays driver-owned and
+  this is the last planned edit to either file; (c) the WP0 residue — the
+  stale strip-claim comment at `case_finding_assembly.py:394-396`; (d) the
+  R5.14 prose amendment at `cohorts.py:723-728`; (e) re-pinning the four
   tripwire hashes in `tests/scripts/test_case_finding_cache_mondo.py`, with
   the commit message naming the deliberate drop per the tripwire's own
   instruction. The standing "never edit" rule on these files is suspended for
   this commit alone and reinstated immediately after. Nothing else rides:
-  behavior changes beyond the passthrough are out of scope for the blast.
+  behavior changes beyond the seams are out of scope for the blast, and
+  existing callers passing no new arguments get byte-equivalent behavior.
 - **R7.2 — Probe-before-plan.** The 0111 plan doc is not written until
   `diag-episode-probe` numbers exist. The multiplier decides R5.8's path
   (build order changes materially either way) and the kill decomposition
