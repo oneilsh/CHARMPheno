@@ -145,12 +145,28 @@ def pr_readout(proba_DC, y_DC, mask_DC, C, recall_targets, fdr_targets, min_coun
     return {"per_node": per, "macro": macro}
 
 
-def detection_readout(proba_DC, y_DC, recall_targets):
-    """Case-vs-background detection: pool a per-doc case SCORE = max over disease-node
+def detection_readout(proba_DC, y_DC, recall_targets, *, doc_keys=None):
+    """Case-vs-background detection: pool a per-UNIT case SCORE = max over disease-node
     probabilities and the foreground indicator = the root node's label (label[:,0]=1
-    iff the doc has any attested disease node). Reports AUC/AP + precision@recall on
+    iff the unit has any attested disease node). Reports AUC/AP + precision@recall on
     that pooled signal — 'can we tell a rare-disease patient from a background one,
     and how precise is the surfaced case list?'. Empty/degenerate -> skipped.
+
+    `doc_keys` (R5.7, spec R5.7): pass the collect's int64 DOC KEY order
+    (`_doc_key_column` / `_collect_theta_labels`'s / `_collect_lean_proba`'s fourth
+    return) and the pool is DEDUPED TO PERSONS before scoring — `None` (the default)
+    keeps the exact pre-multi-doc per-document pool, byte-identical, which is what
+    every existing single-doc-per-person fixture and recorded run (0104/0109/0110)
+    is compared on. The semantic being preserved is the MAX-pooling rule this
+    function already applies across disease nodes for one document: extend it one
+    grain further and take the max over EVERY (document, node) cell a person owns,
+    with the foreground indicator OR'd (max) the same way — a person who attested
+    the disease in any one of their <=3 docs is a case. Anything else (e.g. a
+    doc-count-weighted average) would let a chronic 3-doc person cast 3 votes in a
+    detection rate that is supposed to answer one question per PERSON. On a
+    single-doc corpus `person_of(doc_key)` is a bijection onto the existing rows, so
+    passing `doc_keys` there is a no-op — proved by
+    `tests/scripts/test_multidoc_seams.py::test_detection_readout_single_doc_noop`.
 
     CONSTANT COLUMNS ARE EXCLUDED FROM THE POOL — an EVAL bug fix, always on.
     A node whose observed train cell is single-class gets a CONSTANT fallback
@@ -162,7 +178,10 @@ def detection_readout(proba_DC, y_DC, recall_targets):
     dropping it cannot lose signal; it can only stop one from being masked. Note
     this touches the DETECTION pool only: the ranking and per-node metrics score
     each column against its own labels and are deliberately left untouched (a
-    degenerate node is already reported there as skipped/degenerate)."""
+    degenerate node is already reported there as skipped/degenerate). The
+    constant-column filter runs BEFORE the person dedup — "is this node constant
+    over the test split" is a corpus/fit question, unaffected by how many
+    documents any one person contributes."""
     from sklearn.metrics import average_precision_score, roc_auc_score
     if proba_DC.shape[0] == 0 or proba_DC.shape[1] < 2:
         return {"skipped": "empty or single-node"}
@@ -174,6 +193,20 @@ def detection_readout(proba_DC, y_DC, recall_targets):
         return {"skipped": "all disease-node scores are constant",
                 "n_constant_nodes": n_const}
     score = disease[:, informative].max(axis=1)             # strongest disease node
+    n_units = int(len(score))
+    if doc_keys is not None:
+        persons = _dr.person_of(np.asarray(doc_keys))
+        # max-pool BOTH arrays onto the person grain in one pass (np.maximum.at
+        # is the unbuffered scatter-max sklearn/numpy ship for exactly this —
+        # ordinary fancy-index assignment would silently keep only the LAST
+        # document written per person instead of the max over all of them).
+        uniq_p, inv = np.unique(persons, return_inverse=True)
+        p_score = np.full(uniq_p.shape[0], -np.inf)
+        p_y = np.zeros(uniq_p.shape[0])
+        np.maximum.at(p_score, inv, score)
+        np.maximum.at(p_y, inv, y)
+        score, y = p_score, p_y
+        n_units = int(uniq_p.shape[0])
     if len(np.unique(y)) < 2:
         return {"skipped": "degenerate foreground indicator",
                 "n_constant_nodes": n_const}
@@ -181,11 +214,13 @@ def detection_readout(proba_DC, y_DC, recall_targets):
             "auc": float(roc_auc_score(y, score)),
             "ap": float(average_precision_score(y, score)),
             "n_constant_nodes": n_const,
+            "grain": "person" if doc_keys is not None else "document",
+            "n_units": n_units,
             "par": precision_at_recall(y, score, recall_targets)}
 
 
 def readout_from_proba(proba, y_te, m_te, C, *, recall_targets, fdr_targets,
-                       min_count=0, skip_constant=False):
+                       min_count=0, skip_constant=False, doc_keys=None):
     """Full readout from an already-computed (N_te, C) per-node probability:
     ranking (AUC/AP) + per-node precision@recall / recall@FDR + case-vs-background
     detection. Shared by the pc_topics_lr arm (proba = post-hoc LR on theta) and the
@@ -195,12 +230,19 @@ def readout_from_proba(proba, y_te, m_te, C, *, recall_targets, fdr_targets,
     `_score_label`. It defaults OFF so every prevalent arm reproduces its recorded
     numbers byte for byte (0104/0109/0110 are compared on them), and the INCIDENT
     arm turns it on — that is the arm where a train-degenerate node's constant
-    column stops being all-positive and starts scoring an exact 0.5."""
+    column stops being all-positive and starts scoring an exact 0.5.
+
+    `doc_keys` (R5.7) forwards ONLY to `detection_readout`. The ranking and
+    per-node PR axes are per-NODE metrics (spec R5.7 is silent on them; only the
+    detection pool's collapse of ALL nodes into one max-over-everything score
+    turns a multi-doc person's several rows into several votes toward the SAME
+    pooled AUC point). `None` (the default) is the pre-multi-doc per-document
+    pool, byte-identical to every recorded run."""
     from analysis.pc.evaluate import _bundle_masked
     ranking = _bundle_masked(proba, y_te, m_te, C, min_count,
                              skip_constant=skip_constant)
     pr = pr_readout(proba, y_te, m_te, C, recall_targets, fdr_targets, min_count)
-    det = detection_readout(proba, y_te, recall_targets)
+    det = detection_readout(proba, y_te, recall_targets, doc_keys=doc_keys)
     # Per-node (auc, n_pos) kept alongside the macro so the HEADLINE can split the
     # gated_pc-vs-unsup delta by node RARITY (insight 0066: PC's promised edge is the
     # hidden low-mass tail; a flat macro can hide it). auc from the ranking per_label
@@ -287,7 +329,8 @@ def _macro_over(per_node, nodes):
 
 
 def incident_readout(proba, y_te, m_te, elig, C, *, recall_targets, fdr_targets,
-                     min_count=0, prevalent=None, arm_label="gated_pc"):
+                     min_count=0, prevalent=None, arm_label="gated_pc",
+                     doc_keys=None):
     """The `gated_pc_incident` results block: the second `readout_from_proba` call.
 
     Everything E2 asks for, in one dict:
@@ -310,6 +353,10 @@ def incident_readout(proba, y_te, m_te, elig, C, *, recall_targets, fdr_targets,
     re-scoring, no second fit, and structurally impossible for a run's own output to
     enter the eligibility definition (R2.3: eligibility arrives from the BUNDLE).
 
+    `doc_keys` (R5.7) threads through to `readout_from_proba`'s own `doc_keys` —
+    the incident cohort is a row subset of the same test split the prevalent arm
+    scored, so it carries the same multi-doc-person risk in its detection pool.
+
     Pure numpy + sklearn: given the four arrays it is fully unit-testable off-Spark,
     which is where the constant-column fixture lives."""
     m_incident = incident_eval_mask(y_te, m_te, elig)
@@ -321,7 +368,7 @@ def incident_readout(proba, y_te, m_te, elig, C, *, recall_targets, fdr_targets,
         # R2.1: the ranking axis gets the guard the detection pool has had since
         # exp 0104. It is ON here and OFF on the prevalent arm on purpose — see
         # `_score_label`'s `skip_constant`.
-        skip_constant=True)
+        skip_constant=True, doc_keys=doc_keys)
     inc_nodes = set(readout["per_node"])
     prev_nodes = set((prevalent or {}).get("per_node", {}))
     shared = sorted(inc_nodes & prev_nodes)
@@ -407,14 +454,18 @@ def format_incident_readout(block) -> str:
 
 
 def score_arm(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, C, *, recall_targets,
-              fdr_targets, min_count=0):
+              fdr_targets, min_count=0, doc_keys=None):
     """Full readout for one arm's theta via the pc_topics_lr proba (a fresh per-node
     LR on the shaped theta). Pure; used inline by the driver and by gated_pc_readout
-    on a finished fit."""
+    on a finished fit. `doc_keys` (R5.7) is the TEST split's collect order (the
+    caller's own `_collect_theta_labels` fourth return) — forwarded to
+    `readout_from_proba` so the detection pool dedups to persons; `None` keeps the
+    pre-multi-doc per-document pool."""
     from analysis.pc.evaluate import _lr_proba_per_label_masked
     proba = _lr_proba_per_label_masked(Pi_tr, y_tr, m_tr, Pi_te, C)
     return readout_from_proba(proba, y_te, m_te, C, recall_targets=recall_targets,
-                              fdr_targets=fdr_targets, min_count=min_count)
+                              fdr_targets=fdr_targets, min_count=min_count,
+                              doc_keys=doc_keys)
 
 
 def format_arm_readout(name, arm):
@@ -439,7 +490,13 @@ def format_arm_readout(name, arm):
         # read on how much of the label DAG is structurally inert.
         nc = int(det.get("n_constant_nodes", 0) or 0)
         const = f"  [{nc} constant node col(s) excluded]" if nc else ""
-        lines.append(f"{name}: detection (case vs bg) AUC={det['auc']:.4f} "
+        # R5.7: the grain is printed, not just applied, so a multi-doc run's log
+        # states on its face whether "detection prevalence" means "of documents"
+        # or "of persons" — the two disagree by construction under multi-doc.
+        grain = det.get("grain", "document")
+        n_units = det.get("n_units")
+        units = f" ({n_units} {grain}s)" if n_units is not None else f" ({grain}-grain)"
+        lines.append(f"{name}: detection (case vs bg){units} AUC={det['auc']:.4f} "
                      f"AP={det['ap']:.4f} prev={det['prevalence']:.3f}  {dpar}{const}")
     return "\n".join("[driver]   " + ln for ln in lines)
 
@@ -770,6 +827,40 @@ def _ece(y, p, n_bins=10):
         if m.any():
             ece += abs(p[m].mean() - y[m].mean()) * (m.mean())
     return float(ece)
+
+
+def _person_keyed_cal_split(doc_keys, seed, cal_frac=0.25):
+    """PERSON-keyed calibration/fit split for the driver-path calibration block
+    (R5.6). Returns `(cal_sel, fit_sel)` boolean arrays over `doc_keys`'s own row
+    order, partitioning by PERSON (`_dr.person_of`) rather than by row, so a
+    multi-doc person's several documents in `doc_keys` all land on the SAME side.
+
+    Replaces a per-ROW `rng.random(n_rows) < cal_frac` draw, which let one
+    person's several documents straddle the boundary: some FIT the isotonic
+    calibrator while another was held out to GRADE it — grading a calibrator
+    partly on the same person's own (correlated) covariates it was just fit on,
+    an in-sample leak dressed as an out-of-sample ECE improvement. That is the
+    exp 0079 run-2 failure this split exists to prevent, reintroduced by
+    multi-doc corpora; pinned by
+    `test_multidoc_seams.py::test_person_keyed_cal_split_no_person_straddles`.
+
+    Mirrors the DISTRIBUTED twin's `F.pmod(F.hash(person_id, seed), 4) == 0`
+    split (`main`'s `readout_mode == "distributed"` branch) in KIND —
+    person-keyed, deterministic given `seed` — not in exact bucket arithmetic:
+    the two run in different runtimes (numpy here, Spark there) and neither
+    promises the other's literal RNG stream, only the invariant both exist to
+    guarantee (no person split across cal/fit).
+
+    `np.unique` sorts by VALUE, so which persons land in `cal` is a function of
+    person identity + seed alone — independent of row/collect order, the same
+    order-independence property the twin's hash gets from hashing instead of
+    drawing (and `_doc_key_sample` gets for the A/B gate's sample_frac, R5.5)."""
+    person = _dr.person_of(np.asarray(doc_keys, dtype=np.int64))
+    uniq_persons, inverse = np.unique(person, return_inverse=True)
+    rng = np.random.default_rng(int(seed))
+    person_cal = rng.random(uniq_persons.shape[0]) < float(cal_frac)
+    cal_sel = person_cal[inverse]           # broadcast back to doc_keys's row order
+    return cal_sel, ~cal_sel
 
 
 def calibrate_per_node(proba_cal, y_cal, m_cal, proba_te, C, *, min_pos=20):
@@ -1136,6 +1227,39 @@ def _assert_unique_doc_keys(ids, *, where):
             "bounded within-corpus index, not the raw chronological ordinal.")
 
 
+def _doc_key_sample(df, sample_frac, seed, *, n_buckets=10000):
+    """Keep the `sample_frac` share of DOCUMENTS whose int64 doc key (`_doc_key_
+    column`, spec R5.4) hashes into the low `n_buckets * sample_frac` buckets —
+    the DOC-KEY-grained twin of `readout_ab_report`'s old `DataFrame.sample()`
+    call (R5.5, seam 6).
+
+    `DataFrame.sample()` draws a Bernoulli trial per ROW INDEX within a
+    partition: a function of the query PLAN (partitioning, upstream shuffles),
+    not of document identity. `readout_ab_report` got away with that because ONE
+    physical read of ONE cached DataFrame feeds both the driver and the
+    distributed collect, but the promise its own log line makes —
+    "restricted to the SAME `sample_frac` sample" for a given `seed` — is a
+    promise about DOCUMENT identity, not about today's happening-to-match
+    physical plan. Hashing the doc key makes the kept set a pure function of
+    WHICH DOCUMENTS exist plus `seed`, independent of partitioning or row order,
+    exactly the property `case_finding_assembly.split_train_test` and the
+    distributed calibration split (`main`'s `readout_mode == "distributed"`
+    branch) already get from hashing instead of drawing. `n_buckets=10000`
+    mirrors `split_train_test`'s own bucket width.
+
+    Rows are the unit of `_doc_key_column`, i.e. DOCUMENTS, not persons — a
+    multi-doc person's several rows hash independently, on purpose: A2's job is
+    "the A and B collects compare the SAME documents" (both call sites hash the
+    SAME frame with the SAME seed), not "a person's documents move as a block"
+    (that grouping is A3's calibration split, which needs cal/fit to never share
+    a person; the A/B gate has no such constraint — it only needs A and B to
+    agree on what they scored)."""
+    from pyspark.sql import functions as F
+    cut = int(round(float(sample_frac) * n_buckets))
+    bucket = F.pmod(F.hash(_doc_key_column(df), F.lit(int(seed))), F.lit(int(n_buckets)))
+    return df.filter(bucket < F.lit(cut))
+
+
 # --------------------------------------------------------------------------- #
 # Spark collectors (cluster-covered; not unit-tested).                        #
 # --------------------------------------------------------------------------- #
@@ -1184,24 +1308,44 @@ def _collect_theta_labels(df, C, *, label_col="label", mask_col="labelMask",
 
 
 def _collect_head_proba(df, C, *, prob_col="probability", label_col="label",
-                        mask_col="labelMask", sample_frac=1.0, seed=0):
+                        mask_col="labelMask", sample_frac=1.0, seed=0,
+                        with_doc_keys=False):
     """Collect the co-fit head's per-node P(node)=sigmoid(w_CK.theta) + label/mask
-    to (proba (D,C), y (D,C), mask (D,C)). Only meaningful for a supervised
-    (weightY>0) transform, which appends `prob_col`. Cluster-covered. `sample_frac`
-    row-subsamples before the collect (bounds the driver footprint; see
-    _collect_theta_labels)."""
+    to (proba (D,C), y (D,C), mask (D,C)) — or, with `with_doc_keys=True`, a
+    fourth `doc_key_order` mirroring `_collect_theta_labels`'s int64 DOC KEY
+    order (spec R5.4), so the co-fit head's own readout can dedup its detection
+    pool to persons (R5.7) the same way the pc_topics_lr readout does. Only
+    meaningful for a supervised (weightY>0) transform, which appends `prob_col`.
+    Cluster-covered. `sample_frac` row-subsamples before the collect (bounds the
+    driver footprint; see _collect_theta_labels).
+
+    `with_doc_keys` defaults OFF and is opt-in, not a `doc_keys=None`-style
+    always-fourth-return: `gated_pc_readout.run_readout` (untouched by this WP)
+    calls this with a bare `hp, hy, hm = _collect_head_proba(test_scored, C)`
+    three-tuple unpack, and changing the return ARITY unconditionally breaks it
+    at import time with no type error to catch it until the tuple unpacks
+    wrong. `gated_pc_cloud.main`'s own co-fit head call site passes
+    `with_doc_keys=True` explicitly."""
     if sample_frac < 1.0:
         df = df.sample(withReplacement=False, fraction=float(sample_frac),
                        seed=int(seed))
-    rows = df.select(prob_col, label_col, mask_col).collect()
+    cols = [prob_col, label_col, mask_col]
+    if with_doc_keys:
+        cols = [_doc_key_column(df)] + cols
+    rows = df.select(*cols).collect()
     if not rows:
         z = np.zeros((0, C), dtype=np.float64)
-        return z, z, z.copy()
+        return (z, z, z.copy(), []) if with_doc_keys else (z, z, z.copy())
+    if with_doc_keys:
+        doc_key_order = [int(r["doc_key"]) for r in rows]
+        _assert_unique_doc_keys(doc_key_order, where="_collect_head_proba")
     proba = np.asarray([r[prob_col].toArray() for r in rows], dtype=np.float64)
     y_DC = np.asarray([[float(v) for v in r[label_col]] for r in rows],
                       dtype=np.float64)
     mask_DC = np.asarray([[float(v) for v in r[mask_col]] for r in rows],
                          dtype=np.float64)
+    if with_doc_keys:
+        return proba, y_DC, mask_DC, doc_key_order
     return proba, y_DC, mask_DC
 
 
@@ -1981,8 +2125,11 @@ def distributed_score_arm(train_scored, test_scored, C, K, *, recall_targets,
         test_scored, C, V, b_raw, degenerate=degenerate, const=const,
         score_col=topic_col, label_col=label_col, mask_col=mask_col, id_col=id_col,
         theta_topm=theta_topm, elig_col=elig_col)
+    # R5.7: this collect's own doc_keys dedups the detection pool to persons — the
+    # distributed path's test split is exactly as multi-doc as the driver path's.
     readout = readout_from_proba(proba, y_te, m_te, C, recall_targets=recall_targets,
-                                 fdr_targets=fdr_targets, min_count=min_count)
+                                 fdr_targets=fdr_targets, min_count=min_count,
+                                 doc_keys=doc_keys)
     return readout, proba, y_te, m_te, doc_keys, (V, b_raw), elig
 
 
@@ -2005,7 +2152,10 @@ def readout_ab_report(train_scored, test_scored, C, K, *, recall_targets,
     letting only the driver side sample (as the production driver path does, to fit
     its collect in 8g) would report the sampling, not the solver. That also makes the
     gate affordable at cardiovascular scale on the standard 8g driver: exp 0102 could
-    only afford `readout_sample_frac=0.3` there.
+    only afford `readout_sample_frac=0.3` there. The subsample itself is doc-key
+    hashed (R5.5, seam 6), not `DataFrame.sample()` — whole documents are kept or
+    dropped as units, so a person's several docs are never split between "sampled
+    in" and "sampled out" by the row-position accident `.sample()` would allow.
 
     `distributed` optionally passes in an already-computed
     `distributed_score_arm` result so the gate costs one extra readout, not two —
@@ -2028,15 +2178,35 @@ def readout_ab_report(train_scored, test_scored, C, K, *, recall_targets,
     warm = distributed[5] if (distributed is not None
                               and len(distributed) > 5) else None
     if sample_frac < 1.0:
-        # cache(): both paths must read the SAME rows, and an uncached `sample` is
-        # re-drawn on every action (same seed, but also the same recompute cost).
-        train_scored = train_scored.sample(
-            withReplacement=False, fraction=float(sample_frac), seed=int(seed)).cache()
-        test_scored = test_scored.sample(
-            withReplacement=False, fraction=float(sample_frac), seed=int(seed)).cache()
+        # DOC-KEY-keyed filter (R5.5/seam 6), not Spark's `.sample()`. `.sample()`
+        # draws a Bernoulli trial per ROW INDEX within a partition — a function of
+        # the query PLAN (partitioning, upstream shuffles), not of document
+        # identity. That is fine as long as exactly one physical read of ONE
+        # DataFrame feeds both paths (true below, since `train_scored`/
+        # `test_scored` are reassigned and cached before either collect runs), but
+        # it silently stops being "the same sample" the moment a caller re-derives
+        # these frames a different way (a different upstream filter, a differently
+        # partitioned bundle) and expects `seed`+`sample_frac` alone to reproduce
+        # it — which is exactly what this gate's OWN log line below promises.
+        # Hashing the int64 doc key (`_doc_key_column`, spec R5.4) makes the kept
+        # set a pure function of WHICH DOCUMENTS exist plus the seed — reproducible
+        # under a repartition or a differently-ordered upstream, which a
+        # two-docs-per-person fixture is what tells apart from `.sample()`'s
+        # position luck (`_doc_key_sample`'s own docstring; see
+        # test_multidoc_seams.py::test_doc_key_sample_is_order_and_partition_independent).
+        # This samples DOCUMENTS independently, same grain as the alignment dict
+        # below (doc key, not person) — a multi-doc person's several documents can
+        # land on either side, same as any other document; keeping a person's
+        # documents TOGETHER is a different property (A3's calibration split,
+        # where straddling cal/fit is the correctness bug being fixed).
+        #
+        # cache(): both paths must read the SAME rows, and an uncached filter is
+        # re-evaluated on every action (same seed, but also the same recompute cost).
+        train_scored = _doc_key_sample(train_scored, sample_frac, seed).cache()
+        test_scored = _doc_key_sample(test_scored, sample_frac, seed).cache()
         sampled = [train_scored, test_scored]
         print(f"[driver]   A/B gate: both paths restricted to the SAME "
-              f"{sample_frac:g} row sample (seed={seed})", flush=True)
+              f"{sample_frac:g} doc-key sample (seed={seed})", flush=True)
         distributed = None                    # the passed-in fit saw all the rows
     if distributed is None:
         distributed = distributed_score_arm(
@@ -2048,8 +2218,12 @@ def readout_ab_report(train_scored, test_scored, C, K, *, recall_targets,
     Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(train_scored, C)
     Pi_te, y_te, m_te, ids_drv = _collect_theta_labels(test_scored, C)
     p_drv = _lr_proba_per_label_masked(Pi_tr, y_tr, m_tr, Pi_te, C)
+    # R5.7: both sides of the gate dedup their detection pool to persons, or an
+    # A/B "agreement" on that one field would really be two different multi-doc
+    # weightings coincidentally landing close.
     r_drv = readout_from_proba(p_drv, y_te, m_te, C, recall_targets=recall_targets,
-                               fdr_targets=fdr_targets, min_count=min_count)
+                               fdr_targets=fdr_targets, min_count=min_count,
+                               doc_keys=ids_drv)
 
     def _fmt(v):
         return "n/a" if v is None else f"{v:.6f}"
@@ -2327,10 +2501,10 @@ def _make_eval_logger(bundle, C, args):
             if getattr(args, "_domain_cols", None):
                 m._set(featuresCols=args._domain_cols)
             Pi_tr, y_tr, mtr, _ = _collect_theta_labels(m.transform(bundle.train_df), C)
-            Pi_te, y_te, mte, _ = _collect_theta_labels(m.transform(bundle.test_df), C)
+            Pi_te, y_te, mte, ids_te = _collect_theta_labels(m.transform(bundle.test_df), C)
             arm = score_arm(Pi_tr, y_tr, mtr, Pi_te, y_te, mte, C,
                             recall_targets=rt, fdr_targets=ft,
-                            min_count=args.min_label_count)
+                            min_count=args.min_label_count, doc_keys=ids_te)
             auc = arm["ranking"]["auc"]
             det = arm["detection"]
             detap = None if det.get("skipped") else det.get("ap")
@@ -3164,19 +3338,21 @@ def main() -> int:
                   "R2.3); {INCIDENT}".replace("{INCIDENT}", INCIDENT_NAMING),
                   flush=True)
 
-        def _score(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te):
+        def _score(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, doc_keys=None):
             return score_arm(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, C,
                              recall_targets=rt, fdr_targets=ft,
-                             min_count=args.min_label_count)
+                             min_count=args.min_label_count, doc_keys=doc_keys)
 
-        def _score_full(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te):
+        def _score_full(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, doc_keys=None):
             """(readout, per-node test proba) — proba reused for the conditional
-            'sharpening' readout so the per-node LR is fit once per arm."""
+            'sharpening' readout so the per-node LR is fit once per arm. `doc_keys`
+            (R5.7) is the TEST split's collect order, threaded to
+            `readout_from_proba` so the detection pool dedups to persons."""
             from analysis.pc.evaluate import _lr_proba_per_label_masked
             proba = _lr_proba_per_label_masked(Pi_tr, y_tr, m_tr, Pi_te, C)
             readout = readout_from_proba(
                 proba, y_te, m_te, C, recall_targets=rt, fdr_targets=ft,
-                min_count=args.min_label_count)
+                min_count=args.min_label_count, doc_keys=doc_keys)
             return readout, proba
 
         def _conditional(proba_te, y_te, m_te, label):
@@ -3360,16 +3536,16 @@ def main() -> int:
                     fdr_targets=ft, min_count=args.min_label_count, label="gated_pc",
                     max_iter=args.readout_max_iter, theta_topm=theta_topm,
                     checkpoint_dir=out, elig_col=elig_col)
-                results["gated_pc"], proba_gp, y_te, m_te, _ = _dist_gp[:5]
+                results["gated_pc"], proba_gp, y_te, m_te, ids_gp = _dist_gp[:5]
                 _gp_fit = _dist_gp[5]         # raw-θ params: the calibration warm start
                 elig_te = _dist_gp[6]         # E1's (D,C) eligibility, or None
             else:
-                Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(
+                Pi_tr, y_tr, m_tr, ids_tr = _collect_theta_labels(
                     train_scored, C, sample_frac=_sf, seed=_sd)
-                Pi_te, y_te, m_te, _ = _collect_theta_labels(
+                Pi_te, y_te, m_te, ids_gp = _collect_theta_labels(
                     test_scored, C, sample_frac=_sf, seed=_sd)
                 results["gated_pc"], proba_gp = _score_full(
-                    Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te)
+                    Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, doc_keys=ids_gp)
                 elig_te = None
             _dump_partial_results(out, results)
             print(format_arm_readout("gated_pc (pc_topics_lr)", results["gated_pc"]),
@@ -3380,7 +3556,7 @@ def main() -> int:
             _inc = incident_readout(
                 proba_gp, y_te, m_te, elig_te, C, recall_targets=rt, fdr_targets=ft,
                 min_count=args.min_label_count, prevalent=results["gated_pc"],
-                arm_label="gated_pc (pc_topics_lr)")
+                arm_label="gated_pc (pc_topics_lr)", doc_keys=ids_gp)
             if _inc is not None:
                 results["gated_pc_incident"] = _inc
                 _dump_partial_results(out, results)
@@ -3489,9 +3665,12 @@ def main() -> int:
                     del proba_cal, y_cal, m_cal
                 else:
                     from analysis.pc.evaluate import _lr_proba_per_label_masked
-                    _crng = np.random.default_rng(args.seed if args.seed is not None else 0)
-                    cal_sel = _crng.random(Pi_tr.shape[0]) < 0.25
-                    fit_sel = ~cal_sel
+                    # Driver twin of the distributed split above, PERSON-keyed (R5.6)
+                    # — see `_person_keyed_cal_split`'s docstring for why (the exp
+                    # 0079 run-2 failure, reintroduced by multi-doc; pinned in
+                    # tests/scripts/test_multidoc_seams.py).
+                    cal_sel, fit_sel = _person_keyed_cal_split(
+                        ids_tr, args.seed if args.seed is not None else 0)
                     proba_cal = _lr_proba_per_label_masked(
                         Pi_tr[fit_sel], y_tr[fit_sel], m_tr[fit_sel], Pi_tr[cal_sel], C)
                     proba_te_fit = _lr_proba_per_label_masked(
@@ -3536,14 +3715,15 @@ def main() -> int:
                       "everywhere)", flush=True)
             else:
                 if readout_mode == "distributed":
-                    hp, hy, hm, _, _ = _collect_lean_proba(
+                    hp, hy, hm, ids_hd, _ = _collect_lean_proba(
                         test_scored, C, score_col="probability")
                 else:
-                    hp, hy, hm = _collect_head_proba(
-                        test_scored, C, sample_frac=_sf, seed=_sd)
+                    hp, hy, hm, ids_hd = _collect_head_proba(
+                        test_scored, C, sample_frac=_sf, seed=_sd,
+                        with_doc_keys=True)
                 results["gated_pc_head"] = readout_from_proba(
                     hp, hy, hm, C, recall_targets=rt, fdr_targets=ft,
-                    min_count=args.min_label_count)
+                    min_count=args.min_label_count, doc_keys=ids_hd)
                 print(format_arm_readout("gated_pc (co-fit head)",
                                          results["gated_pc_head"]), flush=True)
                 # Conditional readout on the CO-FIT HEAD proba too — the UNIFIED-model
@@ -3647,12 +3827,12 @@ def main() -> int:
                         us_train_scored, C,
                         sample_frac=args.readout_sample_frac,
                         seed=(args.seed if args.seed is not None else 0))
-                    Pi_te, y_te, m_te, _ = _collect_theta_labels(
+                    Pi_te, y_te, m_te, ids_us = _collect_theta_labels(
                         us_test_scored, C,
                         sample_frac=args.readout_sample_frac,
                         seed=(args.seed if args.seed is not None else 0))
                     results["unsup_gated"], proba_us = _score_full(
-                        Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te)
+                        Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, doc_keys=ids_us)
                 _dump_partial_results(out, results)
                 print(format_arm_readout("unsup_gated (pc_topics_lr)",
                                          results["unsup_gated"]), flush=True)
@@ -3701,9 +3881,10 @@ def main() -> int:
                 else:
                     Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(
                         dh_model.transform(bundle.train_df), C)
-                    Pi_te, y_te, m_te, _ = _collect_theta_labels(
+                    Pi_te, y_te, m_te, ids_dh = _collect_theta_labels(
                         dh_model.transform(bundle.test_df), C)
-                    results["dag_head"] = _score(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te)
+                    results["dag_head"] = _score(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te,
+                                                 doc_keys=ids_dh)
                 _dump_partial_results(out, results)
                 print(format_arm_readout("dag_head (pc_topics_lr)",
                                          results["dag_head"]), flush=True)
