@@ -164,6 +164,18 @@ arms are two corpora). The random arm is the existing population mode under
 the same new key vintage, same `split_salt` so persons land in the same
 train/test fold across arms.
 
+> **D2 MUST synthesize a BOUNDED within-corpus document index for the doc key
+> (found in WP-A1, `87074af`).** WP-A1's doc key is
+> `person_id * 64 + doc_index` with `doc_index ∈ [0, 64)`, and
+> `synthesize_doc_key` RAISES if that bound is exceeded. WP-D1's `episode_no`
+> is the *unbounded original chronological ordinal* (a chronic patient's 70th
+> episode carries `episode_no = 70`), kept deliberately for R7.5's ordinal
+> diagnostics — it is **not** the doc-key's low-bits value. D2 must give the
+> key a dense per-person `row_number()-1` (0-based) over each person's KEPT
+> documents, and carry D1's `episode_no` as a separate column for diagnostics.
+> The `episode_no < 64` guard and the densify-time uniqueness assertion in
+> WP-A1 are the tripwires that fail loudly if D1's raw ordinal leaks through.
+
 ### WP-E — smoke, both arms · orchestrator + Shawn (cluster) · gate
 
 Small-iteration fits of BOTH arms on the new key vintage. Checks, all
