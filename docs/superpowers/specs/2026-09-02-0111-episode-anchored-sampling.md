@@ -96,8 +96,11 @@ restated. New definitions:
 
 - **R7.1 — The one-blast cache-drop commit.** *(Scope WIDENED 2026-09-03 by
   the plan doc, after code verification.)* R5.2 edits `cohorts.py`, which
-  moves `cohort_defs_version()` and invalidates EVERY cache key in the repo
-  plus all four pinned tripwire hashes — and the same blast must also carry
+  moves `cohort_defs_version()` and invalidates every **bundle / corpus /
+  covariate** cache key (those three families fold it; the conversion sidecar
+  and the ontology download are keyed independently and SURVIVE — verified
+  2026-09-03, AGENTS.md cache-key section) plus all four pinned tripwire hashes
+  — and the same blast must also carry
   **`multi_domain.py`**, which hard-codes the index-builder selection
   (`:382-394`, no external-frame option) and the doc spec (`:408`): WP7/R5.3
   closed the cache-KEY hole, not the injection hole. Both files in ONE
