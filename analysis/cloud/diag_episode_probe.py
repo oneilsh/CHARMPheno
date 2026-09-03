@@ -14,6 +14,21 @@ pre-measurements in the incident-program spec (§E5) and plan (WP8a):
         and is the death anti-correlated with incidence (first episodes dying
         more than later ones)?
 
+GATE OCCUPANCY (`--gate-occupancy on`, spec R5.14)
+--------------------------------------------------
+A THIRD measurement, additive to the two above and off the SAME sidecar with no
+fit. exp 0111's two arms — EPISODE-anchored vs uniform-RANDOM index — share the
+365-day label, the two observation gates, and the per-person cap; they differ
+ONLY in where the index sits. Each document's GATE is the label nodes whose
+first attestation falls in the half-open forward window `[index, index+90d)`.
+Episode indices sit one day before a presentation, so their gate is non-empty
+essentially by construction (~100%); a uniform-random index rarely lands in the
+90-day run-up to a new diagnosis, so the random arm may be mostly EMPTY-gated —
+carrying no incident signal. This probe MEASURES that empty-gate rate per arm
+(pooled non-empty fraction + gate-size distribution) BEFORE a fit is spent, so
+the random arm's viability is known, not guessed. Egress-safe: pooled figures
+and counts of documents only, banner + `gate_occupancy_<tag>.json`.
+
 WHAT AN EPISODE IS, HERE
 ------------------------
 A gap-and-islands cluster of a person's FIRST-ATTESTATION dates — the dates on
@@ -84,7 +99,16 @@ from episode_index import (  # noqa: E402
     PERSON_COL,
     START_COL,
     build_episodes,
+    episode_index_frame,
+    random_index_frame,
 )
+
+# The frontier gate window: a document's GATE is the set of label nodes whose
+# FIRST attestation falls in the half-open forward window [index, index+90d) —
+# the "frontier" exp 0111 grants each document topic-block access to. 90d is the
+# spec's fixed gate; the constant names it so the probe's default and the
+# report banner cannot drift apart.
+GATE_DAYS = 90
 
 
 def node_yield(assignments, gated_episodes, *, bars=(20, 100)):
@@ -113,6 +137,135 @@ def node_yield(assignments, gated_episodes, *, bars=(20, 100)):
     for bar in bars:
         out[f"nodes_ge_{bar}"] = int(row[f"nodes_ge_{bar}"])
     return out
+
+
+def gate_occupancy(index_frame, first_attestation, *, gate_days=GATE_DAYS,
+                   quantiles=(0.5, 0.9, 0.99)):
+    """Pooled 90-day-gate occupancy for ONE index arm.
+
+    For each document (a `(person_id, index_date)` in `index_frame`), the GATE is
+    the set of label nodes whose first attestation lands in the half-open window
+    `[index_date, index_date + gate_days)` — half-open matching the label window
+    `conversion_analysis` pins (a positive is a first attestation in
+    `[index, index+W)`, a conversion is STRICTLY after; a code at `index+gate_days`
+    is OUTSIDE the gate). `countDistinct` over the in-window rows is the gate
+    size; a document with no in-window first attestation has size 0 — an EMPTY
+    gate, the thing the random arm is feared to produce.
+
+    FRONTIER LOWER BOUND, stated as such (same framing as `node_yield` and
+    `episode_index`): `node_cid` is the frontier node a code resolves to, and the
+    real gate rolls each frontier node UP the Mondo DAG, adding its ancestors.
+    That fold only ADDS nodes, so the NON-EMPTY FRACTION here is EXACT (a gate
+    with >=1 frontier node stays non-empty after ancestors are added, and one
+    with zero frontier nodes has zero ancestors to add), while the gate SIZE
+    (distinct-node count) is a LOWER BOUND on the rolled-up gate.
+
+    Returns a pooled dict — doc count, non-empty count and fraction, and gate-size
+    mean / p50 / p90 / p99. Counts of documents and pooled moments only, never a
+    per-node or per-document cell: egress-safe by construction. `None` fields on
+    an empty arm (no documents) so a degenerate input reports rather than raises.
+    """
+    from pyspark.sql import functions as F
+
+    idx = index_frame.select(PERSON_COL, INDEX_COL).distinct()
+    in_win = ((F.col(DATE_COL) >= F.col(INDEX_COL))
+              & (F.col(DATE_COL) < F.date_add(F.col(INDEX_COL), int(gate_days))))
+    # Left join so a document whose person has NO in-window first attestation
+    # still surfaces as one row with gate_size 0 (countDistinct ignores the
+    # null the `when` yields off-window) rather than vanishing from the count.
+    per_doc = (idx.join(
+                   first_attestation.select(PERSON_COL, DATE_COL, "node_cid"),
+                   on=PERSON_COL, how="left")
+               .groupBy(PERSON_COL, INDEX_COL)
+               .agg(F.countDistinct(F.when(in_win, F.col("node_cid")))
+                    .alias("gate_size")))
+    per_doc = per_doc.cache()
+    n_docs = per_doc.count()
+    if n_docs == 0:
+        per_doc.unpersist()
+        return {"n_docs": 0, "n_nonempty": 0, "nonempty_fraction": None,
+                "gate_size_mean": None, "gate_size_p50": None,
+                "gate_size_p90": None, "gate_size_p99": None}
+    row = per_doc.agg(
+        F.sum((F.col("gate_size") >= 1).cast("long")).alias("nonempty"),
+        F.avg("gate_size").alias("mean")).collect()[0]
+    qs = per_doc.approxQuantile("gate_size", list(quantiles), 0.001)
+    per_doc.unpersist()
+    n_nonempty = int(row["nonempty"])
+    return {"n_docs": int(n_docs), "n_nonempty": n_nonempty,
+            "nonempty_fraction": n_nonempty / n_docs,
+            "gate_size_mean": float(row["mean"]),
+            "gate_size_p50": qs[0], "gate_size_p90": qs[1],
+            "gate_size_p99": qs[2]}
+
+
+def run_gate_occupancy(first_attestation, observation_period, *, gap_days=90,
+                       gate_days=GATE_DAYS, cap=3, salt, prior_obs_days=365,
+                       window_days=365):
+    """Both arms' gate occupancy, side by side, off the cached sidecar. NO FIT.
+
+    exp 0111's two arms share the 365-day label and the SAME two observation
+    gates and per-person cap; they differ ONLY in index location. Before a fit is
+    spent we measure how occupied each arm's 90-day forward gate is:
+
+      * EPISODE arm — `episode_index_frame`: index = episode_start - 1, so the
+        episode's own first codes fall at `index+1`, INSIDE the gate. Non-empty
+        essentially by construction — this arm is the ~100% floor.
+      * RANDOM arm — `random_index_frame`: a uniform-random valid index. A
+        population-random index rarely sits in the 90-day run-up to a new
+        diagnosis, so this arm's gate may be mostly EMPTY — the quantity that
+        decides whether the random arm carries any incident signal at all.
+
+    The random arm is drawn on the EPISODE arm's surviving persons (passed as
+    `persons=`), so the two arms compare on an identical population and the only
+    difference left is where the index sits.
+    """
+    ep_idx = episode_index_frame(
+        first_attestation, observation_period, gap_days=gap_days, cap=cap,
+        salt=salt, prior_obs_days=prior_obs_days, window_days=window_days).cache()
+    ep_persons = ep_idx.select(PERSON_COL).distinct()
+    rnd_idx = random_index_frame(
+        observation_period, cap=cap, salt=salt, prior_obs_days=prior_obs_days,
+        window_days=window_days, persons=ep_persons).cache()
+    episode_arm = gate_occupancy(ep_idx, first_attestation, gate_days=gate_days)
+    random_arm = gate_occupancy(rnd_idx, first_attestation, gate_days=gate_days)
+    ep_idx.unpersist()
+    rnd_idx.unpersist()
+    return {"gap_days": int(gap_days), "gate_days": int(gate_days),
+            "cap": int(cap), "salt": str(salt),
+            "prior_obs_days": int(prior_obs_days), "window_days": int(window_days),
+            "episode_arm": episode_arm, "random_arm": random_arm}
+
+
+def format_gate_occupancy_report(res) -> str:
+    """The gate-occupancy banner. Pooled figures only — egress-safe."""
+    ep, rnd = res["episode_arm"], res["random_arm"]
+
+    def _pct(x):
+        return f"{100 * x:.1f}%" if x is not None else "n/a"
+
+    def _f(x):
+        return f"{x:.2f}" if x is not None else "n/a"
+
+    lines = [
+        f"[gate-occ] gap={res['gap_days']}d  gate=[index, index+{res['gate_days']}d)"
+        f"  cap={res['cap']}  prior_obs={res['prior_obs_days']}d  "
+        f"W={res['window_days']}d  salt={res['salt']}",
+        "[gate-occ] FRONTIER measure: non-empty fraction is EXACT (the Mondo-DAG "
+        "roll-up only ADDS ancestor nodes); gate SIZE is a lower bound on the "
+        "rolled-up gate",
+    ]
+    for name, arm in (("EPISODE", ep), ("RANDOM ", rnd)):
+        lines.append(
+            f"[gate-occ] {name} arm: {arm['n_docs']} docs, non-empty "
+            f"{_pct(arm['nonempty_fraction'])} (n={arm['n_nonempty']}); gate size "
+            f"mean={_f(arm['gate_size_mean'])}, p50={arm['gate_size_p50']}, "
+            f"p90={arm['gate_size_p90']}, p99={arm['gate_size_p99']}")
+    lines.append(
+        f"[gate-occ] side by side — EPISODE non-empty {_pct(ep['nonempty_fraction'])}"
+        f" vs RANDOM {_pct(rnd['nonempty_fraction'])}: the empty-gate cost of a "
+        "uniform-random index, measured with no fit spent")
+    return "\n".join(lines)
 
 
 def gate_episodes(episodes, observation_period, *, prior_obs_days, window_days):
@@ -323,6 +476,27 @@ def main(argv=None) -> int:
                         "takes the value as an argument); it does NOT edit the "
                         "hardcoded assembler constant, so no fit and no corpus "
                         "changes — a measurement, not a knob turned in anger.")
+    p.add_argument("--gate-occupancy", choices=("on", "off"), default="off",
+                   help="Additive: also measure how occupied each arm's 90-day "
+                        "GATE ([index, index+gate-days)) is, EPISODE vs "
+                        "uniform-RANDOM index, per (gap, prior_obs) pass. The "
+                        "random arm rarely sits before a presentation, so its "
+                        "gate may be mostly EMPTY — this quantifies that off the "
+                        "cached sidecar with NO fit, before a fit is spent. "
+                        "Writes `gate_occupancy_<tag>.json` next to the probe "
+                        "json.")
+    p.add_argument("--gate-days", default=str(GATE_DAYS),
+                   help="Forward gate window in days (default 90): a document's "
+                        "gate is the first-attestation nodes in the half-open "
+                        "[index, index+gate-days).")
+    p.add_argument("--gate-cap", default="3",
+                   help="Per-person doc cap for BOTH gate-occupancy arms (default "
+                        "3) — the arms share the cap so they differ only in index "
+                        "location.")
+    p.add_argument("--gate-salt", default="0111",
+                   help="Salt for the deterministic episode cap sample and random "
+                        "index draw. Same salt => identical draw on any rerun; a "
+                        "different salt reshuffles both. Never `F.rand()`.")
     args = p.parse_args(argv)
     configure_logging()
 
@@ -340,6 +514,8 @@ def main(argv=None) -> int:
     caps = tuple(int(x) for x in str(args.caps).split(",") if x.strip())
     prior_obs = [int(x) for x in str(args.prior_obs_days).split(",") if x.strip()]
     window_days = int(cm.get("label_window_days") or 365)
+    gate_days = int(args.gate_days)
+    gate_cap = int(args.gate_cap)
 
     with make_spark_session(app_name="diag-episode-probe") as spark:
         first = try_load_sidecar(spark, witness["sidecar_uri"], witness["key"])
@@ -366,6 +542,16 @@ def main(argv=None) -> int:
                     out = run_dir / f"episode_probe_{tag}.json"
                     out.write_text(_json.dumps(res, indent=2))
                     print(f"[probe] wrote {out}", flush=True)
+                if args.gate_occupancy == "on":
+                    with _phase(f"gate occupancy gap={gap}d prior_obs={pod}d"):
+                        gocc = run_gate_occupancy(
+                            first, obs, gap_days=gap, gate_days=gate_days,
+                            cap=gate_cap, salt=args.gate_salt,
+                            prior_obs_days=pod, window_days=window_days)
+                        print(format_gate_occupancy_report(gocc), flush=True)
+                        gout = run_dir / f"gate_occupancy_{tag}.json"
+                        gout.write_text(_json.dumps(gocc, indent=2))
+                        print(f"[gate-occ] wrote {gout}", flush=True)
         first.unpersist()
     return 0
 
