@@ -332,7 +332,9 @@ def test_ab_gate_warm_starts_its_sampled_fit_from_the_full_fit(spark, capsys):
         fdr_targets=FDR_TARGETS, min_count=0, label="ab-warm", seed=11,
         sample_frac=0.7, distributed=dist)
     txt = capsys.readouterr().out
-    assert "restricted to the SAME 0.7 row sample" in txt
+    # WP-A2 (R5.5): the sample is doc-key hashed, not `DataFrame.sample()`'s
+    # row-position draw — see gated_pc_cloud.readout_ab_report's docstring.
+    assert "restricted to the SAME 0.7 doc-key sample" in txt
     assert "(warm start)" in txt, "the sampled refit must start from the full fit"
     assert "A/B readout equality gate" in txt
     train_df.unpersist(); test_df.unpersist()
