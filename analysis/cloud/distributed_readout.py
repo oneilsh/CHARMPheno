@@ -465,6 +465,277 @@ def _score_cells_kernel(rows, V, b_raw, C, with_id=False):
 
 
 # --------------------------------------------------------------------------- #
+# Distributed EVAL carrying BOTH readout arms (exp 0111 WP-B, spec R5.8).      #
+# --------------------------------------------------------------------------- #
+# The driver readout scores the SAME per-doc probabilities twice — once under the
+# prevalent observation mask (`readout_from_proba` on `m_te`) and once under the
+# incident eval mask (`incident_readout` -> `incident_eval_mask = elig & (y|mask)`,
+# spec D2/D3/D4) — and both feed `_bundle_masked`/`_score_label`. Below C≈500 the
+# driver can hold the (D_te,C) proba/label/mask/elig arrays that make that two
+# calls of pure numpy; at the exp 0111 episode corpus (×2.66 the docs, audit §5f)
+# it cannot, so `score_cells_arms_df` explodes ONLY the observed-or-incident cells
+# (16 bytes/cell) and `per_node_metric_arms_rows` groups by node — nothing (D,C)
+# reaches the driver, and the metric object is `_score_label` ITSELF (as
+# `per_node_metric_rows` already is) so the distributed numbers cannot drift from
+# the driver ones. The R_d fourth-CSR run the lean kernel already carries
+# (`_row_quints`, `_lean_eval_kernel`) rides this path as the row's sparse
+# pre-index closure id list, so the incident arm is scored on the SAME eligibility
+# the census gated it with.
+def _score_cells_arms_kernel(rows, V, b_raw, C, with_id=False):
+    """Yield `(doc_key?, node, y, p, obs, inc)` for the PREVALENT-or-INCIDENT cells.
+
+    The eval_path=distributed twin of the driver's two `readout_from_proba` calls
+    (prevalent mask + incident mask), done in ONE explode so a doc's θ is scored
+    once. `rows` is `(doc_key?, theta, label, mask, elig_ids)` — `elig_ids` is the
+    document's sparse pre-index closure `R_d` (the `_row_quints` fifth element), or
+    `None` when the corpus carries no eligibility column. Per document and node c:
+
+      * `obs`  = `mask[c]` truthy — the PREVALENT observed cell (`_bundle_masked`
+        scores exactly these), identical to `_score_cells_kernel`'s cell set.
+      * `inc`  = `elig[c] AND (label[c] OR mask[c])`, `elig[c] = c ∉ R_d` — the
+        INCIDENT eval cell (`gated_pc_cloud.incident_eval_mask`, spec D2/D3/D4). A
+        prior carrier (`c ∈ R_d`) leaves BOTH classes; a positive rides even where
+        the cell was not observed (D3), a negative needs the observation mask (D4).
+        `elig_ids is None` makes `inc` identically 0 — "no eligibility information",
+        so the incident arm is SKIPPED downstream rather than silently scored on the
+        prevalent cells, the same contract `_densify_lean_blocks`' `elig=None` keeps.
+
+    A cell is emitted iff `obs OR inc`; `p = σ(clip(V[c]·θ + b_raw[c]))` is one score
+    shared by both arms, so a cell that is observed AND incident-eligible ships once
+    with both flags set. `with_id=True` prepends the int64 `doc_key` (spec R5.4) for
+    a person-grain consumer; the default 6-tuple stream is what the metric grouping
+    reads.
+    """
+    C = int(C)
+    V = np.asarray(V, dtype=np.float64)
+    b_raw = np.asarray(b_raw, dtype=np.float64)
+    for row in rows:
+        doc_key, (theta, label, mask, pre) = (
+            (row[0], row[1:]) if with_id else (None, row))
+        label = np.asarray(label)
+        mask = np.asarray(mask)
+        obs_bool = mask != 0
+        if pre is None:
+            inc_bool = np.zeros(C, dtype=bool)
+        else:
+            elig = np.ones(C, dtype=bool)
+            pre = np.asarray(pre, dtype=np.int64).ravel()
+            if pre.size:
+                elig[pre] = False
+            # incident_eval_mask semantics, verbatim: eligible AND carries a class.
+            inc_bool = elig & ((label != 0) | obs_bool)
+        union = np.flatnonzero(obs_bool | inc_bool)
+        if union.size == 0:
+            continue
+        z = np.clip(_row_scores(np.asarray(theta, dtype=np.float64), union,
+                                V, b_raw, C), -_SCORE_CLIP, _SCORE_CLIP)
+        p = 1.0 / (1.0 + np.exp(-z))
+        for j in range(union.size):
+            c = int(union[j])
+            rec = (c, float(label[c]), float(p[j]),
+                   int(obs_bool[c]), int(inc_bool[c]))
+            yield (int(doc_key),) + rec if with_id else rec
+
+
+def _score_label_pair(node, y, p, obs, inc, min_count):
+    """One node's PREVALENT and INCIDENT metric records, both via `_score_label`.
+
+    Shipped to the executors by `per_node_metric_arms_rows`. `y`/`p` are the node's
+    emitted cells; `obs`/`inc` are the two boolean cell selectors from
+    `_score_cells_arms_kernel`. Prevalent scores the observed cells; incident scores
+    the eligible-with-class cells with `skip_constant=True` — R2.1's guard, ON for
+    the incident arm exactly as `gated_pc_cloud.incident_readout` sets it, because a
+    train-degenerate node's constant fallback acquires negatives under the incident
+    mask and would otherwise score a hard 0.5 inside the macro. The scorer is
+    `analysis.pc.evaluate._score_label` itself (not a copy), so the distributed and
+    driver skip/`min_count` rules cannot diverge.
+    """
+    from analysis.pc.evaluate import _score_label
+
+    y = np.asarray(y, dtype=np.float64)
+    p = np.asarray(p, dtype=np.float64)
+    obs = np.asarray(obs, dtype=bool)
+    inc = np.asarray(inc, dtype=bool)
+
+    def _pack(rec):
+        return (None if rec["auc"] is None else float(rec["auc"]),
+                None if rec["ap"] is None else float(rec["ap"]),
+                int(rec["n_pos"]), int(rec["n_neg"]), rec["skipped"],
+                rec.get("skip_code"))
+
+    prev = _score_label(y[obs], p[obs], min_count=int(min_count))
+    incd = _score_label(y[inc], p[inc], min_count=int(min_count),
+                        skip_constant=True)
+    return int(node), _pack(prev), _pack(incd)
+
+
+# --------------------------------------------------------------------------- #
+# Distributed BINNED calibration sufficient statistics (exp 0111 WP-B, R5.8). #
+# --------------------------------------------------------------------------- #
+# `gated_pc_cloud.calibrate_per_node` fits a per-node isotonic on a HELD-OUT
+# calibration slice and applies it to test, but it does so by collecting every
+# (D_cal,C) calibration cell to the driver AND holding a float64 copy of the
+# (D_te,C) test proba (~6.5 GB at ×2.66, audit §5f — a wall on a 16 GB driver).
+# The sufficient statistic for a monotone calibrator is far smaller than the raw
+# points: bin each node's calibration scores into `n_bins` fixed-width bins over
+# [0,1] and keep `(count, sum_y)` per (node, bin) — C×n_bins ≈ C×100 float rows,
+# driver-tiny — then fit ONE weighted isotonic per node on the bin centers. The
+# fitted breakpoints broadcast back and `apply_binned_isotonic` scores test cells
+# with no driver-side (D,C) copy. The honest protocol is unchanged: the calibrator
+# is FIT on the cal slice's cells and the ECE is read on the TEST slice (spec R5.6
+# / exp 0079 run-2), only the fit's INPUT shrinks from raw points to binned counts.
+_CALIB_BINS = 100
+
+
+def _binned_calib_kernel(cells, C, n_bins=_CALIB_BINS):
+    """Accumulate `(count (C,n_bins), sum_y (C,n_bins))` over `(node, y, p)` cells.
+
+    Fixed-width bins over [0,1]: `bin(p) = clip(int(p*n_bins), 0, n_bins-1)`, so bin
+    j covers `[j/n_bins, (j+1)/n_bins)` (the top bin closes at 1.0). Each calibration
+    cell adds 1 to `count[node,bin]` and its label to `sum_y[node,bin]`. That pair is
+    every sufficient statistic a per-node weighted isotonic needs (the bin's rate is
+    `sum_y/count`, its weight is `count`), so the whole calibrator fit rides C×n_bins
+    driver-side floats instead of the (D_cal,C) collect.
+
+    Returns raw accumulators so partitions combine by plain addition and the driver
+    reduces once (`fit_binned_isotonic`). Pure numpy — the Spark shell is a thin
+    treeAggregate over it, None-sentinel per ADR 0047.
+    """
+    C, n_bins = int(C), int(n_bins)
+    count = np.zeros((C, n_bins), dtype=np.float64)
+    sum_y = np.zeros((C, n_bins), dtype=np.float64)
+    for node, y, p in cells:
+        c = int(node)
+        b = int(p * n_bins)
+        if b < 0:
+            b = 0
+        elif b >= n_bins:
+            b = n_bins - 1
+        count[c, b] += 1.0
+        sum_y[c, b] += float(y)
+    return count, sum_y
+
+
+def fit_binned_isotonic(count, sum_y, C, *, n_bins=_CALIB_BINS, min_pos=20):
+    """Reduce binned calibration stats to per-node isotonic BREAKPOINTS (or None).
+
+    THE driver-side reduction of `_binned_calib_kernel`, and the binned twin of
+    `gated_pc_cloud.calibrate_per_node`'s per-node `IsotonicRegression.fit`. For each
+    node c, over the non-empty bins, fits a WEIGHTED isotonic on the bin centers
+    `x = (j+0.5)/n_bins` with target `sum_y/count` and weight `count`, and returns
+    `(X_thresholds_, y_thresholds_)` — the same monotone step `IsotonicRegression`
+    stores, which `apply_binned_isotonic` evaluates with a plain `np.interp`
+    (out-of-range clamps to the end values, matching `out_of_bounds="clip"`).
+
+    A node PASSES THROUGH UNCALIBRATED (`None`, applied as the identity) exactly when
+    `calibrate_per_node` skips it: fewer than `min_pos` calibration positives, or a
+    single class among the observed cells (all-positive or all-negative). Keeping the
+    pass-through rule identical is what lets the parity gate compare the two.
+
+    Returns a length-C list of `(x_thr, y_thr)` float arrays or `None`.
+    """
+    from sklearn.isotonic import IsotonicRegression
+
+    C, n_bins = int(C), int(n_bins)
+    count = np.asarray(count, dtype=np.float64)
+    sum_y = np.asarray(sum_y, dtype=np.float64)
+    centers = (np.arange(n_bins, dtype=np.float64) + 0.5) / n_bins
+    out = []
+    for c in range(C):
+        n_c = count[c]
+        pos_c = float(sum_y[c].sum())
+        tot_c = float(n_c.sum())
+        # min_pos pass-through AND single-class pass-through — the two skips
+        # `calibrate_per_node` makes, expressed on the binned counts.
+        if pos_c < float(min_pos) or pos_c <= 0.0 or pos_c >= tot_c:
+            out.append(None)
+            continue
+        nz = n_c > 0
+        x = centers[nz]
+        w = n_c[nz]
+        rate = sum_y[c][nz] / w
+        iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+        iso.fit(x, rate, sample_weight=w)
+        out.append((np.asarray(iso.X_thresholds_, dtype=np.float64),
+                    np.asarray(iso.y_thresholds_, dtype=np.float64)))
+    return out
+
+
+def pooled_reliability_ece_from_bins(count, sum_y, *, n_bins=_CALIB_BINS,
+                                     breakpoints=None):
+    """Pooled equal-width reliability ECE from binned `(count, sum_y)`, collect-free.
+
+    The eval_path=distributed path never holds the (D,C) proba the shipped conditional
+    ECE reads, but the same C×n_bins sufficient statistics that fit the calibrator
+    also carry an honest ECE-on-test: each occupied `(node, bin)` contributes its
+    count `n`, positives `sum_y` and a confidence — the bin center for the RAW
+    reliability, or `interp(center, breakpoints[node])` for the CALIBRATED one
+    (`breakpoints=None` ⇒ raw). Cells are RE-BINNED by that confidence and the
+    standard `Σ_b (n_b/N)·|conf_b − acc_b|` is summed. The center-vs-exact confidence
+    error is ≤ 1/n_bins (100 bins ⇒ ≤ 0.01), the same resolution the fit itself uses,
+    so raw→calibrated on this metric is a faithful collect-free reading of what the
+    binned isotonic bought — reported next to the note that the conditional-EDGE ECE
+    (which needs the collect) is on the driver path.
+
+    Pure numpy, driver-side. Returns a float, or None for an empty corpus.
+    """
+    count = np.asarray(count, dtype=np.float64)
+    sum_y = np.asarray(sum_y, dtype=np.float64)
+    C, n_bins = count.shape[0], int(n_bins)
+    centers = (np.arange(n_bins, dtype=np.float64) + 0.5) / n_bins
+    acc_n = np.zeros(n_bins, dtype=np.float64)
+    acc_y = np.zeros(n_bins, dtype=np.float64)
+    acc_conf = np.zeros(n_bins, dtype=np.float64)
+    for c in range(int(C)):
+        bp = None if breakpoints is None else breakpoints[c]
+        conf = centers if bp is None else np.interp(centers, bp[0], bp[1])
+        for j in range(n_bins):
+            n = count[c, j]
+            if n <= 0.0:
+                continue
+            b = int(conf[j] * n_bins)
+            if b < 0:
+                b = 0
+            elif b >= n_bins:
+                b = n_bins - 1
+            acc_n[b] += n
+            acc_y[b] += sum_y[c, j]
+            acc_conf[b] += conf[j] * n
+    N = float(acc_n.sum())
+    if N <= 0.0:
+        return None
+    ece = 0.0
+    for b in range(n_bins):
+        if acc_n[b] > 0.0:
+            ece += abs(acc_conf[b] / acc_n[b] - acc_y[b] / acc_n[b]) * (acc_n[b] / N)
+    return float(ece)
+
+
+def apply_binned_isotonic(breakpoints, proba):
+    """Apply per-node isotonic breakpoints to a proba array — vectorized, identity
+    where a node passed through (`None`).
+
+    `breakpoints` is `fit_binned_isotonic`'s output; `proba` is `(D, C)` (or any
+    array whose last axis is C). `np.interp` reproduces
+    `IsotonicRegression.transform` for a monotone step with `out_of_bounds="clip"`
+    (values below the first / above the last threshold clamp to the end y). A `None`
+    node is copied through, so AUC/AP are provably unchanged for it and monotone-
+    preserved for the rest. Pure numpy — usable driver-side on a (D,C) array and,
+    per column, inside a distributed apply.
+    """
+    proba = np.asarray(proba, dtype=np.float64)
+    out = proba.copy()
+    C = proba.shape[-1]
+    for c in range(int(C)):
+        bp = breakpoints[c]
+        if bp is None:
+            continue
+        x_thr, y_thr = bp
+        out[..., c] = np.interp(proba[..., c], x_thr, y_thr)
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Sparse (top-m θ) partition kernels. Same estimator, truncated design matrix.  #
 # --------------------------------------------------------------------------- #
 # These are separate functions rather than branches inside the dense kernels for
@@ -1773,3 +2044,156 @@ def per_node_metric_rows(cells_df, C, *, min_count=0, engine="rdd"):
         per_node[int(node)] = {"auc": auc, "ap": ap, "n_pos": int(n_pos),
                                "n_neg": int(n_neg), "skipped": skipped}
     return per_node
+
+
+def _row_arms(rows, topic_col, label_col, mask_col, elig_col, id_col=None):
+    """Stream `(doc_key?, theta, label, mask, elig_ids)` for `_score_cells_arms_kernel`.
+
+    `elig_col` names E1's per-document pre-index closure column (`preindexClosure`),
+    a sparse `array<int>` that arrives verbatim as `R_d` (the same object the census
+    and `_row_quints` fold, so eligibility cannot mean two things). A NULL value
+    (the left-join's "no pre-index record", already coalesced to `[]`) is passed
+    through as `[]` — carried nothing ⇒ eligible everywhere.
+    """
+    for row in rows:
+        pre = row[elig_col]
+        pre = [] if pre is None else [int(v) for v in pre]
+        rec = (_to_array(row[topic_col]), _to_array(row[label_col]),
+               _to_array(row[mask_col]), pre)
+        yield (row[id_col],) + rec if id_col is not None else rec
+
+
+def score_cells_arms_df(scored_df, V, b_raw, C, *, elig_col,
+                        topic_col="topicDistribution", label_col="label",
+                        mask_col="labelMask", id_col=None):
+    """Explode the fitted model's PREVALENT-or-INCIDENT test cells to
+    `[node, y, p, obs, inc]` — the eval_path=distributed twin of the driver's two
+    `readout_from_proba` calls (spec R5.8 / WP-B).
+
+    Broadcasts the fitted raw-space `(V, b_raw)` and, per observed-or-incident cell,
+    emits its `(y, p)` plus the two arm flags `_score_cells_arms_kernel` computes
+    (`obs` = observed, `inc` = incident-eligible-with-class). `elig_col` carries E1's
+    `R_d` so the incident arm is scored on the corpus eligibility the census gated it
+    with; it is REQUIRED here (a prevalent-only distributed eval uses the existing
+    `score_cells_df`/`per_node_metric_rows`, which this does not disturb). The
+    dense-θ path only — a top-m distributed incident eval is deferred to the WP that
+    needs it, for the same reason `score_cells_df` refuses `id_col` with `topm`.
+
+    Returns a DataFrame `node int, y double, p double, obs int, inc int`, one row
+    per emitted cell (plus a leading `doc_key long` when `id_col` is given).
+    """
+    from pyspark.sql.types import (IntegerType, DoubleType, LongType,
+                                   StructField, StructType)
+
+    C = int(C)
+    sc = scored_df.sparkSession.sparkContext
+    bcast = sc.broadcast((np.ascontiguousarray(V, dtype=np.float64),
+                          np.ascontiguousarray(b_raw, dtype=np.float64)))
+    cols = ((id_col, topic_col, label_col, mask_col, elig_col) if id_col is not None
+            else (topic_col, label_col, mask_col, elig_col))
+
+    def _local(rows, _b=bcast, _C=C, _id=id_col, _tc=topic_col, _lc=label_col,
+               _mc=mask_col, _ec=elig_col):
+        V_, b_ = _b.value
+        adapted = _row_arms(rows, _tc, _lc, _mc, _ec, id_col=_id)
+        return _score_cells_arms_kernel(adapted, V_, b_, _C, with_id=_id is not None)
+
+    fields = [StructField("node", IntegerType(), False),
+              StructField("y", DoubleType(), False),
+              StructField("p", DoubleType(), False),
+              StructField("obs", IntegerType(), False),
+              StructField("inc", IntegerType(), False)]
+    if id_col is not None:
+        fields.insert(0, StructField("doc_key", LongType(), False))
+    schema = StructType(fields)
+    cells = scored_df.select(*cols).rdd.mapPartitions(_local)
+    # Broadcast kept alive by the lazy DataFrame's lineage (as in score_cells_df).
+    return scored_df.sparkSession.createDataFrame(cells, schema)
+
+
+def per_node_metric_arms_rows(cells_df, C, *, min_count=0):
+    """Per-node PREVALENT and INCIDENT AUC/AP over the arm cells — `_bundle_masked`
+    semantics for both arms, distributed, in one `groupByKey`.
+
+    Groups `score_cells_arms_df`'s cells by node and scores each node twice through
+    `_score_label_pair`: prevalent over the `obs` cells, incident over the `inc`
+    cells with `skip_constant=True` (R2.1's guard, matching
+    `gated_pc_cloud.incident_readout`). Returns `(prevalent_per_node,
+    incident_per_node)` — two `{c: {auc, ap, n_pos, n_neg, skipped}}` dicts in the
+    `_bundle_masked["per_label"]` shape, so `analysis.pc.evaluate._macro` /
+    `gated_pc_cloud._macro_over` apply unchanged.
+
+    Nodes with no emitted cell fill from `_score_label` on empty arrays (prevalent)
+    and the same with `skip_constant=True` (incident), reproducing the driver's
+    all-positive/degenerate record for an unobserved node exactly.
+
+    RDD engine only (the `groupByKey` path `per_node_metric_rows` defaults to): the
+    arm flags make an `applyInPandas` variant carry no extra correctness, and the
+    escape hatch's own note is that the pandas engine is cluster-Arrow-only.
+    """
+    from analysis.pc.evaluate import _score_label
+
+    C = int(C)
+    min_count = int(min_count)
+
+    def _pairs(row):
+        return int(row["node"]), (float(row["y"]), float(row["p"]),
+                                  float(row["obs"]), float(row["inc"]))
+
+    def _score(kv, _mc=min_count):
+        node, vals = kv
+        arr = np.asarray(list(vals), dtype=np.float64).reshape(-1, 4)
+        return _score_label_pair(node, arr[:, 0], arr[:, 1],
+                                 arr[:, 2], arr[:, 3], _mc)
+
+    rows = cells_df.rdd.map(_pairs).groupByKey().map(_score).collect()
+
+    empty = np.zeros(0, dtype=np.float64)
+    prev = {c: _score_label(empty, empty, min_count=min_count) for c in range(C)}
+    inc = {c: _score_label(empty, empty, min_count=min_count, skip_constant=True)
+           for c in range(C)}
+
+    def _unpack(rec):
+        auc, ap, n_pos, n_neg, skipped, skip_code = rec
+        return {"auc": auc, "ap": ap, "n_pos": int(n_pos), "n_neg": int(n_neg),
+                "skipped": skipped, "skip_code": skip_code}
+
+    for node, prev_rec, inc_rec in rows:
+        prev[int(node)] = _unpack(prev_rec)
+        inc[int(node)] = _unpack(inc_rec)
+    return prev, inc
+
+
+def binned_calibration_stats(cells_df, C, *, n_bins=_CALIB_BINS, depth=2):
+    """One distributed pass for the per-node BINNED calibration sufficient stats
+    (spec R5.8 / WP-B) — `(count (C,n_bins), sum_y (C,n_bins))`.
+
+    Reduces `score_cells_df`'s `(node, y, p)` cells over the CALIBRATION slice into
+    the C×n_bins counts `fit_binned_isotonic` fits a weighted isotonic on, so the
+    calibrator fit rides driver-tiny stats instead of the (D_cal,C) collect
+    `calibrate_per_node` pays. `treeAggregate` with a None SENTINEL zero (ADR 0047:
+    a dense `(C,n_bins)×2` zeroValue would ride the task closure and pyspark would
+    auto-broadcast it into a temp file nothing unlinks — the leak class
+    `SparkStatsFn` and `masked_moments` avoid the same way).
+    """
+    C, n_bins = int(C), int(n_bins)
+
+    def _local(rows, _C=C, _nb=n_bins):
+        return [_binned_calib_kernel(
+            ((int(r["node"]), float(r["y"]), float(r["p"])) for r in rows),
+            _C, _nb)]
+
+    def _combine(a, b):
+        if a is None:
+            return b
+        if b is None:
+            return a
+        return (a[0] + b[0], a[1] + b[1])
+
+    out = _retry_spark_action(
+        lambda: cells_df.select("node", "y", "p").rdd.mapPartitions(_local)
+        .treeAggregate(None, _combine, _combine, depth=int(depth)),
+        label="binned calibration stats")
+    if out is None:
+        return np.zeros((C, n_bins)), np.zeros((C, n_bins))
+    return out

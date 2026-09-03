@@ -369,6 +369,28 @@ def incident_readout(proba, y_te, m_te, elig, C, *, recall_targets, fdr_targets,
         # exp 0104. It is ON here and OFF on the prevalent arm on purpose — see
         # `_score_label`'s `skip_constant`.
         skip_constant=True, doc_keys=doc_keys)
+    return _assemble_incident_block(
+        readout, prevalent, min_count, arm_label,
+        n_eligible_cells=int(np.asarray(elig).astype(bool).sum()),
+        n_scored_cells=int(m_incident.sum()))
+
+
+def _assemble_incident_block(readout, prevalent, min_count, arm_label, *,
+                             n_eligible_cells, n_scored_cells):
+    """The incident results block, assembled from an already-scored incident readout.
+
+    Factored out of `incident_readout` so BOTH the driver path (which scores an
+    incident-masked (D,C) proba through `readout_from_proba`) and the
+    eval_path=distributed path (which builds `readout` from
+    `per_node_metric_arms_rows`' incident per-node dict, WP-B) produce the SAME block
+    — the R2.2 macro-by-node-set logic, the three-reason skip counts and the D7
+    naming live in one place, so the parity gate compares two numbers, not two
+    structures. `readout` must carry `per_node` (the scored incident nodes) and
+    `ranking.skipped_by_reason`; the cell counts are passed in because the driver
+    reads them off `m_incident`/`elig` arrays the distributed path never materializes
+    (it counts them distributed, or leaves them None). `readout` itself is embedded
+    on the driver path (the full ranking/pr/detection) and omitted (None) when the
+    distributed path has only the ranking axis."""
     inc_nodes = set(readout["per_node"])
     prev_nodes = set((prevalent or {}).get("per_node", {}))
     shared = sorted(inc_nodes & prev_nodes)
@@ -396,8 +418,8 @@ def incident_readout(proba, y_te, m_te, elig, C, *, recall_targets, fdr_targets,
                       "never a run property (spec R2.3); no fit output enters it",
             "positives": "eligible AND label==1 (D3)",
             "negatives": "eligible AND observed AND label==0 (D4)",
-            "n_eligible_cells": int(np.asarray(elig).astype(bool).sum()),
-            "n_scored_cells": int(m_incident.sum()),
+            "n_eligible_cells": n_eligible_cells,
+            "n_scored_cells": n_scored_cells,
         },
         "arm_label": arm_label,
         "min_count": int(min_count),
@@ -1408,6 +1430,32 @@ def resolve_readout_calibration(flag):
     return flag == "on"
 
 
+def resolve_eval_path(flag, readout_mode):
+    """`--eval-path {driver,distributed}` -> the eval path this run scores on (WP-B).
+
+    ORTHOGONAL to `--readout-mode`, which chose the FIT path (driver θ-collect vs
+    executor batched L-BFGS). This chooses the EVAL path: `driver` runs the shipped
+    `_densify_lean_blocks` collect + `readout_from_proba` (the O(N·C) driver collect,
+    audit §5f); `distributed` scores the per-node ranking arms via
+    `distributed_readout.score_cells_arms_df` / `per_node_metric_arms_rows` with
+    nothing (D_te,C) reaching the driver — the path the exp 0111 episode corpus needs
+    (×2.66 the docs).
+
+    It only has meaning when the FIT was distributed (the executor-side scored frame
+    and the fitted raw-θ params are what the cell explode reads); under
+    `readout_mode=driver` there is no such frame, so `distributed` degrades to
+    `driver` with a caller-printed note. Default `driver` until the parity gate is
+    green on the current cache — this WP changes NO existing run until the default is
+    flipped in a later step."""
+    if flag in (None,):
+        return "driver"
+    if flag not in ("driver", "distributed"):
+        raise ValueError(f"unknown eval path {flag!r}")
+    if flag == "distributed" and readout_mode != "distributed":
+        return "driver"
+    return flag
+
+
 def _densify_lean_blocks(blocks, C):
     """Per-partition lean blocks -> `(proba f32, y u8, mask u8, ids, elig u8|None)`.
 
@@ -2131,6 +2179,114 @@ def distributed_score_arm(train_scored, test_scored, C, K, *, recall_targets,
                                  fdr_targets=fdr_targets, min_count=min_count,
                                  doc_keys=doc_keys)
     return readout, proba, y_te, m_te, doc_keys, (V, b_raw), elig
+
+
+# The pr/detection axes score_cells_arms_df does NOT carry: PR@recall / recall@FDR
+# are per-node threshold sweeps and detection is a per-doc max over ALL C nodes —
+# neither is a per-(node) reduction of the exploded cells, so both are marked
+# skipped on the eval_path=distributed path rather than approximated. They are
+# co-fit-head / diagnostic axes, not the ranking headline the parity gate proves;
+# run `--eval-path driver` on a corpus the collect fits to read them. (A distributed
+# per-doc-max detection is a natural later addition; it is out of WP-B's scope.)
+_EVAL_DIST_PR_SKIP = {"par": {}, "raf": {}, "n_labels_scored": 0,
+                      "skipped": "eval_path=distributed (per-node PR sweep not "
+                                 "carried by the cell explode; run --eval-path "
+                                 "driver)"}
+_EVAL_DIST_DET_SKIP = {"skipped": "eval_path=distributed (detection is a per-doc "
+                                  "max over all C; not carried by the per-node "
+                                  "cell explode — run --eval-path driver)"}
+
+
+def _readout_from_per_node(per_node_metrics, C, *, recall_targets, fdr_targets):
+    """A `readout_from_proba`-shaped dict from a distributed per-node metric table.
+
+    `per_node_metrics` is `per_node_metric_rows` / `per_node_metric_arms_rows`'
+    output — the `_bundle_masked["per_label"]` shape, one record per node. This
+    reproduces `readout_from_proba`'s ranking + per_node fields from it EXACTLY
+    (`analysis.pc.evaluate._macro` on the per_label, then the same scored-node
+    per_node filter), and marks pr/detection skipped-distributed. It is the bridge
+    that lets the eval_path=distributed ranking feed every consumer the driver
+    readout feeds (`format_arm_readout`, the headline, the incident block's shared
+    node set) without a (D,C) collect."""
+    from analysis.pc.evaluate import _macro
+    ranking_macro = _macro(per_node_metrics)
+    per_node = {}
+    for c in range(int(C)):
+        rl = per_node_metrics.get(c, {})
+        if rl.get("skipped") is None and rl.get("auc") is not None:
+            per_node[c] = {"auc": float(rl["auc"]),
+                           "ap": (None if rl.get("ap") is None
+                                  else float(rl["ap"])),
+                           "n_pos": int(rl.get("n_pos", 0))}
+    return {"ranking": ranking_macro, "pr": dict(_EVAL_DIST_PR_SKIP),
+            "detection": dict(_EVAL_DIST_DET_SKIP), "per_node": per_node}
+
+
+def distributed_ranking_readout(test_scored, C, V, b_raw, *, recall_targets,
+                                fdr_targets, min_count=0, id_col="person_id",
+                                elig_col=None, theta_topm=0,
+                                arm_label="gated_pc (pc_topics_lr)"):
+    """Collect-free PREVALENT (+ INCIDENT) ranking readout — eval_path=distributed (WP-B).
+
+    The eval_path=distributed replacement for `_collect_lean_proba` +
+    `_densify_lean_blocks` + `readout_from_proba`'s ranking axis (+ `incident_readout`):
+    `distributed_readout.score_cells_arms_df` explodes the observed-or-incident test
+    cells and `per_node_metric_arms_rows` groups them by node, so nothing (D_te,C)
+    reaches the driver (audit §5f — the O(N·C) collect that breaks a 16 GB driver at
+    ×2.66). The incident arm rides the SAME explode via E1's `R_d` fourth CSR run
+    (`elig_col`), scored on the corpus eligibility the census gated it with.
+
+    Returns `(prevalent_readout, incident_block_or_None)`:
+
+      * `prevalent_readout` — `readout_from_proba` shape (ranking + per_node; pr /
+        detection skipped-distributed, see the module constants above);
+      * `incident_block` — the `_assemble_incident_block` output built from the
+        distributed incident per-node table, structurally identical to
+        `incident_readout`'s so the parity gate compares two numbers not two shapes;
+        `None` when `elig_col` is absent (no incident arm on this corpus).
+
+    `theta_topm > 0` is REFUSED here: `score_cells_arms_df` is dense-θ only (spec
+    R5.4 defers the top-m + doc-key + arms combination), and a silent full-θ eval of
+    a top-m fit would score a model on features it was not fit on — the same trap
+    `_collect_lean_proba`'s `theta_topm` guard prevents on the driver path."""
+    if int(theta_topm) > 0:
+        raise ValueError(
+            "distributed_ranking_readout: eval_path=distributed does not yet carry "
+            "top-m truncation (score_cells_arms_df is dense-θ only). Run "
+            "--eval-path driver at this --readout-theta-topm, or --readout-theta-topm "
+            "0 with --eval-path distributed.")
+    C = int(C)
+    scored = test_scored.withColumn("doc_key", _doc_key_column(test_scored, id_col))
+    if elig_col is not None:
+        cells = _dr.score_cells_arms_df(scored, V, b_raw, C, elig_col=elig_col)
+        prev_pn, inc_pn = _dr.per_node_metric_arms_rows(cells, C, min_count=min_count)
+    else:
+        cells = _dr.score_cells_df(scored, V, b_raw, C)
+        prev_pn = _dr.per_node_metric_rows(cells, C, min_count=min_count)
+        inc_pn = None
+    prevalent = _readout_from_per_node(prev_pn, C, recall_targets=recall_targets,
+                                       fdr_targets=fdr_targets)
+    if inc_pn is None:
+        return prevalent, None
+    from analysis.pc.evaluate import _macro
+    inc_readout = _readout_from_per_node(inc_pn, C, recall_targets=recall_targets,
+                                         fdr_targets=fdr_targets)
+    # R2.1's guard is ON for the incident macro's skip accounting, exactly as the
+    # driver path sets skip_constant=True — the per-node table already carries the
+    # constant-column skips (per_node_metric_arms_rows scores incident with
+    # skip_constant=True), so its _macro reproduces the three-reason counts.
+    inc_readout["ranking"] = {"skipped_by_reason":
+                              _macro(inc_pn)["skipped_by_reason"]}
+    # n_scored_cells is exact and free from the per-node records (n_pos+n_neg over
+    # every node, scored or skipped). n_eligible_cells is a (D,C) diagnostic the
+    # distributed path does not materialize (eligible-but-unobserved cells are never
+    # emitted); the census is its authoritative source, so it is left None here.
+    n_scored = int(sum(int(r.get("n_pos", 0)) + int(r.get("n_neg", 0))
+                       for r in inc_pn.values()))
+    block = _assemble_incident_block(
+        inc_readout, prevalent, min_count, arm_label,
+        n_eligible_cells=None, n_scored_cells=n_scored)
+    return prevalent, block
 
 
 def readout_ab_report(train_scored, test_scored, C, K, *, recall_targets,
@@ -3078,6 +3234,20 @@ def parse_args(argv=None):
                         "it off (CHARM_DEV does this automatically) and halves the "
                         "supervised arm's readout wall-clock. Never off for a run of "
                         "record: VOI readiness is exactly the calibrated posterior.")
+    p.add_argument("--eval-path", choices=["driver", "distributed"], default="driver",
+                   help="EVAL path for the gated_pc ranking arms (exp 0111 WP-B), "
+                        "ORTHOGONAL to --readout-mode (the FIT path). 'driver' (the "
+                        "default): the shipped _densify_lean_blocks collect + "
+                        "readout_from_proba (the O(N.C) driver collect, audit S5f). "
+                        "'distributed': score the prevalent + incident per-node "
+                        "ranking via score_cells_arms_df/per_node_metric_arms_rows "
+                        "with nothing (D_te,C) reaching the driver, and fit the "
+                        "isotonic calibrator on BINNED sufficient stats (no cal-slice "
+                        "collect) — the path the episode corpus needs (x2.66 docs). "
+                        "Only meaningful under --readout-mode distributed; the "
+                        "conditional/detection/PR axes need the collect and are "
+                        "skipped on this path. Default 'driver' until the WP-B parity "
+                        "gate is green on the current cache.")
     p.add_argument("--head-converge-iters", type=int, default=25,
                    help="Newton steps for the post-fit HEAD-FORMULATION LADDER "
                         "(localize-head only): converge each localized head variant on "
@@ -3270,6 +3440,33 @@ def main() -> int:
                   f"scores each doc's top-{theta_topm} theta entries (truncated, not "
                   "renormalized) — see the per-fit 'theta top-m mass' line for the "
                   "measured coverage this is buying against", flush=True)
+        # WP-B: the EVAL path, orthogonal to the FIT path resolved above. Only
+        # meaningful once the fit is distributed (the executor-side scored frame is
+        # what the cell explode reads); resolve_eval_path degrades it to driver
+        # otherwise. Default driver until the parity gate is green.
+        eval_path = resolve_eval_path(getattr(args, "eval_path", "driver"),
+                                      readout_mode)
+        if eval_path == "distributed" and theta_topm > 0:
+            # score_cells_arms_df is dense-θ only (spec R5.4 defers top-m + doc-key +
+            # arms); scoring a top-m fit on full θ would evaluate a model on features
+            # it was never fit on. Keep the truncation and fall back to the driver
+            # collect for the eval rather than silently mixing feature maps.
+            print(f"[driver]   eval_path=distributed IGNORED because "
+                  f"readout_theta_topm={theta_topm}>0 (the cell explode is dense-θ "
+                  "only); using the driver collect for the eval.", flush=True)
+            eval_path = "driver"
+        if getattr(args, "eval_path", "driver") == "distributed":
+            if eval_path == "distributed":
+                print("[driver]   eval_path=distributed (WP-B): the gated_pc ranking "
+                      "arms score via score_cells_arms_df/per_node_metric_arms_rows "
+                      "(no O(N.C) driver collect) and the calibrator fits on BINNED "
+                      "stats. The conditional/detection/PR axes need the collect and "
+                      "are SKIPPED on this path.", flush=True)
+            else:
+                print("[driver]   eval_path=distributed IGNORED under "
+                      f"readout_mode={readout_mode!r} (the cell explode reads the "
+                      "distributed fit's scored frame; there is none on the driver "
+                      "path). Re-run with --readout-mode distributed.", flush=True)
         run_calibration = resolve_readout_calibration(
             getattr(args, "readout_calibration", "on"))
         if not run_calibration:
@@ -3423,6 +3620,7 @@ def main() -> int:
             "kappa": args.kappa, "max_iter": args.max_iter,
             "min_label_count": args.min_label_count,
             "readout_mode": readout_mode,
+            "eval_path": eval_path,
             "readout_sample_frac": (1.0 if readout_mode == "distributed"
                                     else args.readout_sample_frac),
             # Both change WHAT was fit / what was reported, so they belong in the
@@ -3525,7 +3723,28 @@ def main() -> int:
             test_scored = pc_model.transform(bundle.test_df).cache()
             _sf = args.readout_sample_frac
             _sd = args.seed if args.seed is not None else 0
-            if readout_mode == "distributed":
+            if readout_mode == "distributed" and eval_path == "distributed":
+                # WP-B: fit the heads on the executors (as the collect path does),
+                # then score COLLECT-FREE via the cell explode — no (D_te,C) proba
+                # ever reaches the driver (audit §5f). proba_gp/y_te/m_te/elig_te
+                # therefore do not exist; the conditional/detection axes that need
+                # them are skipped below on `proba_gp is None`.
+                _ck = Path(out) / "readout_ckpt_gated_pc.npz" if out else None
+                _V_gp, _b_gp, _const_gp, _deg_gp, _ = _fit_readout_heads(
+                    train_scored, C, lay.K, label="gated_pc",
+                    max_iter=args.readout_max_iter, theta_topm=theta_topm,
+                    checkpoint_path=_ck, checkpoint_every=10)
+                if out:
+                    _write_readout_heads(out, "gated_pc", _V_gp, _b_gp, _const_gp,
+                                         _deg_gp, C, lay.K, theta_topm)
+                results["gated_pc"], _inc_dist = distributed_ranking_readout(
+                    test_scored, C, _V_gp, _b_gp, recall_targets=rt, fdr_targets=ft,
+                    min_count=args.min_label_count, elig_col=elig_col,
+                    arm_label="gated_pc (pc_topics_lr)")
+                _gp_fit = (_V_gp, _b_gp)
+                proba_gp = y_te = m_te = ids_gp = elig_te = None
+                _dist_gp = None
+            elif readout_mode == "distributed":
                 # No θ collect at all: the per-node LRs are fit on the executors and
                 # only the lean test-split eval bundle comes back. Pi_tr/y_tr/m_tr
                 # therefore do not exist on this path — everything below that needs
@@ -3539,6 +3758,7 @@ def main() -> int:
                 results["gated_pc"], proba_gp, y_te, m_te, ids_gp = _dist_gp[:5]
                 _gp_fit = _dist_gp[5]         # raw-θ params: the calibration warm start
                 elig_te = _dist_gp[6]         # E1's (D,C) eligibility, or None
+                _inc_dist = None
             else:
                 Pi_tr, y_tr, m_tr, ids_tr = _collect_theta_labels(
                     train_scored, C, sample_frac=_sf, seed=_sd)
@@ -3547,21 +3767,29 @@ def main() -> int:
                 results["gated_pc"], proba_gp = _score_full(
                     Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, doc_keys=ids_gp)
                 elig_te = None
+                _inc_dist = None
             _dump_partial_results(out, results)
             print(format_arm_readout("gated_pc (pc_topics_lr)", results["gated_pc"]),
                   flush=True)
             # E2/WP4: the SECOND readout_from_proba call, on the incident cohort.
             # Same proba, same labels, a different eval mask — no re-fit, no second
             # collect. Dumped immediately so a death below still leaves it on disk.
-            _inc = incident_readout(
-                proba_gp, y_te, m_te, elig_te, C, recall_targets=rt, fdr_targets=ft,
-                min_count=args.min_label_count, prevalent=results["gated_pc"],
-                arm_label="gated_pc (pc_topics_lr)", doc_keys=ids_gp)
+            # Under eval_path=distributed the incident block was already built
+            # collect-free by `distributed_ranking_readout` (from the arms explode),
+            # so use it rather than re-scoring a (D,C) proba that does not exist.
+            if eval_path == "distributed":
+                _inc = _inc_dist
+            else:
+                _inc = incident_readout(
+                    proba_gp, y_te, m_te, elig_te, C, recall_targets=rt,
+                    fdr_targets=ft, min_count=args.min_label_count,
+                    prevalent=results["gated_pc"],
+                    arm_label="gated_pc (pc_topics_lr)", doc_keys=ids_gp)
             if _inc is not None:
                 results["gated_pc_incident"] = _inc
                 _dump_partial_results(out, results)
                 print(format_incident_readout(_inc), flush=True)
-            if ab_check:
+            if ab_check and _dist_gp is not None:
                 # The plan's step-2 correctness gate, on the arm whose readout is the
                 # headline. Reuses the distributed result already computed, so the
                 # extra cost is one driver-path readout.
@@ -3571,15 +3799,26 @@ def main() -> int:
                     seed=_sd, sample_frac=_sf, distributed=_dist_gp,
                     max_iter=args.readout_max_iter, theta_topm=theta_topm)
             # Conditional 'sharpening' readout: P(child | parent-cohort) by DAG depth.
-            results["gated_pc_conditional"] = _conditional(
-                proba_gp, y_te, m_te, "gated_pc")
-            # E3/WP5: the same cells, incident-local, with the D6 P-stratum. An
-            # ADDITION beside the prevalent block above, never a replacement — the
-            # prevalent conditional numbers are what 0104/0109 are compared on.
-            if elig_te is not None:
-                results["gated_pc_incident_conditional"] = _incident_conditional(
-                    proba_gp, y_te, elig_te, "gated_pc")
-                _dump_partial_results(out, results)
+            # It scores the FULL (D,C) proba against an all-ones mask, so it needs
+            # the collect — under eval_path=distributed (`proba_gp is None`) it is
+            # skipped with a note. It is a co-fit / VOI diagnostic, not the ranking
+            # headline the WP-B parity gate proves; run --eval-path driver for it.
+            if proba_gp is None:
+                print("[driver]   conditional 'sharpening' + incident-conditional "
+                      "readouts SKIPPED under eval_path=distributed (they score the "
+                      "full (D,C) proba against an all-ones mask — the collect this "
+                      "path avoids; run --eval-path driver on a corpus the collect "
+                      "fits)", flush=True)
+            else:
+                results["gated_pc_conditional"] = _conditional(
+                    proba_gp, y_te, m_te, "gated_pc")
+                # E3/WP5: the same cells, incident-local, with the D6 P-stratum. An
+                # ADDITION beside the prevalent block above, never a replacement —
+                # the prevalent conditional numbers are what 0104/0109 are compared on.
+                if elig_te is not None:
+                    results["gated_pc_incident_conditional"] = _incident_conditional(
+                        proba_gp, y_te, elig_te, "gated_pc")
+                    _dump_partial_results(out, results)
             # ORACLE LOCALIZED readout (A-vs-B diagnostic for the co-fit head): the
             # BEST-POSSIBLE per-node logistic fit on EXACTLY the co-fit head's topic
             # support (allowed_with_siblings) — same hypothesis class as the localized
@@ -3624,7 +3863,52 @@ def main() -> int:
             # the isotonic ECE is a reliability report, never a ranking signal, so the
             # dev loop's comparisons survive without it and the numbers of record come
             # from the full run that keeps it on.
-            if run_calibration:
+            if run_calibration and eval_path == "distributed":
+                # WP-B COLLECT-FREE calibration. The FIT no longer collects the
+                # (D_cal,C) calibration cells: the cal slice is scored into cells and
+                # reduced to C×n_bins BINNED sufficient stats (n, sum_y), the driver
+                # fits ONE weighted isotonic per node on the bins (min_pos=20 and the
+                # single-class skip preserved, spec R5.6), and an honest ECE-on-test
+                # is read from the TEST slice's own binned stats (raw vs calibrated-
+                # through-the-breakpoints). The conditional-EDGE ECE the collect path
+                # reports needs the full (D,C) proba, so it is skipped here — this is
+                # the reliability ECE a collect-free path can honestly produce.
+                from pyspark.sql import functions as _F
+                _h = _F.pmod(_F.hash(_F.col("person_id"), _F.lit(int(_sd))),
+                             _F.lit(4))
+                _cal_df = train_scored.filter(_h == 0)
+                _fit_df = train_scored.filter(_h != 0)
+                _Vc, _bc, _constc, _degc, _ = _fit_readout_heads(
+                    _fit_df, C, lay.K, label="gated_pc calibration-fit",
+                    max_iter=args.readout_max_iter, warm_start=_gp_fit,
+                    theta_topm=theta_topm)
+                _cal_scored = _cal_df.withColumn(
+                    "doc_key", _doc_key_column(_cal_df))
+                _cal_cells = _dr.score_cells_df(_cal_scored, _Vc, _bc, C)
+                _cnt, _sy = _dr.binned_calibration_stats(_cal_cells, C)
+                _bp = _dr.fit_binned_isotonic(_cnt, _sy, C, min_pos=20)
+                _te_scored = test_scored.withColumn(
+                    "doc_key", _doc_key_column(test_scored))
+                _te_cells = _dr.score_cells_df(_te_scored, _Vc, _bc, C)
+                _tcnt, _tsy = _dr.binned_calibration_stats(_te_cells, C)
+                _ece_raw = _dr.pooled_reliability_ece_from_bins(_tcnt, _tsy)
+                _ece_cal = _dr.pooled_reliability_ece_from_bins(
+                    _tcnt, _tsy, breakpoints=_bp)
+                _n_cal = sum(1 for b in _bp if b is not None)
+                results["gated_pc_calibration_binned"] = {
+                    "method": "binned isotonic (WP-B, collect-free)",
+                    "n_bins": _dr._CALIB_BINS, "min_pos": 20,
+                    "n_nodes_calibrated": int(_n_cal),
+                    "reliability_ece_raw": _ece_raw,
+                    "reliability_ece_cal": _ece_cal,
+                    "note": "pooled equal-width reliability ECE on the TEST slice "
+                            "(collect-free); the conditional-edge ECE needs the "
+                            "driver collect and is on --eval-path driver"}
+                print(f"[driver]   BINNED isotonic calibration (WP-B, collect-free): "
+                      f"{_n_cal} nodes calibrated (min_pos=20); pooled reliability "
+                      f"ECE-on-test raw={_f(_ece_raw).strip()} -> "
+                      f"calibrated={_f(_ece_cal).strip()}", flush=True)
+            elif run_calibration:
                 if readout_mode == "distributed":
                     # Distributed twin of the 75/25 calibration split. The split is a
                     # HASH of person_id (deterministic, complementary, and no driver-side
