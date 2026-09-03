@@ -681,9 +681,16 @@ diag-conversion-analysis: zip cluster-overlay $(WORKSPACE_ENV)
 # carry), and capped totals for per-person doc caps 3 and 5. Requires the sidecar
 # witness (exit 4 -> `make build-conversion-sidecar ID=N` first). Banner and
 # episode_probe_gap<g>.json are POOLED figures only.
+# GATE OCCUPANCY (--gate-occupancy on): additively measures how occupied each
+# arm's 90-day forward gate [index, index+90d) is — EPISODE-anchored (~100%
+# non-empty by construction) vs uniform-RANDOM index (feared mostly EMPTY) — off
+# the SAME cached sidecar, NO fit. Per arm, pooled: non-empty fraction + gate-size
+# mean/p50/p90/p99, side by side. Writes gate_occupancy_<tag>.json.
 # Example:
 #   make diag-episode-probe ID=110
 #   make diag-episode-probe ID=110 GPR_ARGS="--gap-days 30,60,90"
+#   make diag-episode-probe ID=110 GPR_ARGS="--gate-occupancy on"
+#   make diag-episode-probe ID=110 GPR_ARGS="--gate-occupancy on --gate-cap 3 --gate-salt 0111"
 diag-episode-probe: zip cluster-overlay $(WORKSPACE_ENV)
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	. ./$(WORKSPACE_ENV) && \

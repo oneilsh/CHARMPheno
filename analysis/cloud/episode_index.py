@@ -11,6 +11,11 @@ The driver-owned machinery WP-C's injection seams (`index_df=`, `doc_spec=` on
   * `episode_index_frame` — the GATED, CAPPED `(person_id, index_date,
     episode_no)` frame (D9-D11): both observation gates, then a deterministic
     salted-hash sample keeping at most `cap` surviving episodes per person.
+  * `random_index_frame` — the RANDOM arm's sibling provider (spec R5.14): the
+    SAME gates and cap as `episode_index_frame`, but the index is drawn UNIFORMLY
+    over the person's fully-observed calendar interval instead of anchored on a
+    presentation. The two arms differ in index location and nothing else — what
+    the gate-occupancy probe measures the cost of before a fit is spent.
   * `min_doc_length_drop_rate_by_ordinal` — the R7.5 monitoring table: does
     `min_doc_length` drop episode docs non-uniformly toward the incident
     (first-episode) end.
@@ -258,6 +263,124 @@ def episode_index_frame(first_attestation, observation_period, *, gap_days=90,
     )
     kept = ranked.where(F.col("_rank") <= int(cap))
     return kept.select(PERSON_COL, INDEX_COL, EPISODE_COL)
+
+
+def random_index_frame(observation_period, *, cap=3, salt, prior_obs_days=365,
+                       window_days=365, persons=None):
+    """`(person_id, index_date)` — the UNIFORM-RANDOM index arm, gate-matched.
+
+    The sibling of `episode_index_frame` for exp 0111's RANDOM arm (spec R5.14).
+    Both arms share the SAME two observation gates (`prior_obs_days`,
+    `window_days`) and the SAME per-person cap; they differ in the ONE thing the
+    experiment is designed to isolate — where the index sits. `episode_index_
+    frame` anchors on presentations (episode_start - 1); this one draws days
+    UNIFORMLY over the person's fully-observed calendar interval, with no regard
+    to when the person's coding actually happens.
+
+    WHY UNIFORM CALENDAR DAYS, NOT EVENT-SHIFTED DATES
+    ---------------------------------------------------
+    The candidate set is `cap` uniform day-offset draws inside each observation
+    period's valid interval `[op_start + prior_obs_days, op_end - window_days]`
+    (the exact span `_window_observed_cohort` admits), NOT the person's first-
+    attestation dates shifted. Anchoring on attestation dates would put every
+    random index a fixed offset before a real presentation — which is precisely
+    what `episode_index_frame` already does, and would erase the contrast the
+    probe exists to measure: that a population-random index rarely lands in the
+    90-day run-up to a new diagnosis, so its forward gate is usually EMPTY.
+    `cohorts._random_event_windows` deliberately anchors on events because an
+    empty document is useless for a FIT; here we WANT the empty-gate rate a truly
+    uniform index incurs, so we draw uniform on purpose and MEASURE it.
+
+    WHY A HASH-TO-OFFSET DRAW, NOT RANK-OVER-EVERY-DAY
+    ---------------------------------------------------
+    A strictly uniform draw-without-replacement would rank every calendar day in
+    the valid interval by `hash(person, day, salt)` and keep the `cap` lowest —
+    the `_random_event_windows` min-hash idiom (`cohorts.py:1129-1143`), extended
+    from keep-1 to keep-cap. But enumerating every day explodes a person's multi-
+    year valid interval into thousands of rows before ranking (~10^9 rows over
+    the cohort). Drawing `offset = pmod(hash(person, op_start, draw_no, salt),
+    n_valid_days)` is the SAME uniform distribution at `cap` rows per period
+    (modulo bias ~ n_valid / 2^32 ≈ 10^-6, negligible), deterministic and
+    resume-stable for the identical reason (a pure function of the salted
+    identifying columns, never `F.rand()`). `draw_no` in the hash separates the
+    `cap` draws; a rare collision of two draws onto the same day simply yields
+    fewer than `cap` distinct indices — "up to `cap`", exactly as the population
+    picker yields "up to 1".
+
+    VALIDITY IS THE ASSEMBLER'S OWN GATE, BELT-AND-SUSPENDERS
+    ---------------------------------------------------------
+    Draws are constructed to land in a valid interval, but they are then passed
+    through `_window_observed_cohort` (the SAME function the episode arm and the
+    assembler gate with) so validity is the assembler's own semantics, not this
+    module's interval arithmetic. A candidate that any off-by-one would have
+    slipped past is dropped by the gate function itself — the probe's random
+    indices are, by construction AND by re-check, all fully observed.
+
+    `persons`, when given (a frame carrying `person_id`), restricts the draw to
+    that population — exp 0111 passes the EPISODE arm's surviving persons so the
+    two arms compare on an identical person set and the only difference left is
+    index location. `salt` has no default for the same experiment-identity reason
+    `episode_index_frame`'s does not.
+    """
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+
+    op = observation_period.select(
+        PERSON_COL, "observation_period_start_date",
+        "observation_period_end_date")
+    if persons is not None:
+        op = op.join(persons.select(PERSON_COL).distinct(), on=PERSON_COL,
+                     how="inner")
+
+    # The valid interval is EXACTLY what `_window_observed_cohort` admits:
+    # index >= op_start + prior_obs_days  AND  index + window_days <= op_end,
+    # i.e. index in the inclusive day range [valid_start, valid_end].
+    valid = (op
+             .withColumn("_valid_start",
+                         F.date_add("observation_period_start_date",
+                                    int(prior_obs_days)))
+             .withColumn("_valid_end",
+                         F.date_add("observation_period_end_date",
+                                    -int(window_days)))
+             .withColumn("_n_valid",
+                         F.datediff(F.col("_valid_end"), F.col("_valid_start"))
+                         + F.lit(1))
+             .where(F.col("_n_valid") >= 1))
+
+    # `cap` deterministic uniform draws per (person, period). crossJoin against a
+    # tiny range keeps this array-free (ADR 0047): no Python list rides a
+    # closure, the draw index is a plain column.
+    draws = valid.sparkSession.range(int(cap)).withColumnRenamed("id", "_draw")
+    drawn = (valid.crossJoin(draws)
+             .withColumn("_off",
+                         F.pmod(F.hash(F.col(PERSON_COL),
+                                       F.col("observation_period_start_date"),
+                                       F.col("_draw"), F.lit(str(salt))),
+                                F.col("_n_valid")))
+             .withColumn(INDEX_COL, F.date_add(F.col("_valid_start"),
+                                               F.col("_off")))
+             .select(PERSON_COL, INDEX_COL)
+             .distinct())
+
+    from charmpheno.omop.cohorts import _window_observed_cohort
+    valid_draws = _window_observed_cohort(
+        drawn, observation_period, prior_obs_days=int(prior_obs_days),
+        window_days=int(window_days))
+
+    # A person with several observation periods can produce more than `cap`
+    # distinct valid draws; rank by the same salted-hash idiom and keep `cap`,
+    # so the per-person doc budget matches the episode arm exactly.
+    ranked = valid_draws.withColumn(
+        "_h", F.sha2(F.concat_ws("|",
+                                 F.col(PERSON_COL).cast("string"),
+                                 F.col(INDEX_COL).cast("string"),
+                                 F.lit(str(salt))), 256)
+    ).withColumn(
+        "_rank", F.row_number().over(
+            Window.partitionBy(PERSON_COL)
+            .orderBy(F.col("_h").asc(), F.col(INDEX_COL).asc()))
+    )
+    return ranked.where(F.col("_rank") <= int(cap)).select(PERSON_COL, INDEX_COL)
 
 
 def min_doc_length_drop_rate_by_ordinal(doc_lengths, *, min_doc_length,
