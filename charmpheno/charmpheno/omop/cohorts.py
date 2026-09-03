@@ -720,10 +720,14 @@ def _window_observed_cohort(
             F.col("observation_period_start_date"), prior_obs_days))
         .where(F.date_add(F.col("index_date"), window_days)
                <= F.col("observation_period_end_date"))
-        # A person may have several observation_period rows that each satisfy
-        # the gates; distinct() collapses them so a survivor is one row, not one
-        # per qualifying period (which would fan out duplicate documents in the
-        # downstream cond_df join and over-weight multi-period patients).
+        # A person may have several observation_period rows that each satisfy the
+        # gates for the SAME index_date; distinct() collapses those identical
+        # (person_id, index_date) duplicates so a survivor is one row, not one per
+        # qualifying period. This dedups TRUE duplicates of one index only — it is
+        # NOT a stance against a person holding several DISTINCT index_dates.
+        # Episode anchoring (exp 0111, spec R5.14) deliberately gives a person one
+        # row per episode index for CAPTURE (representativeness is the random arm's
+        # job), and those distinct indices pass through here untouched.
         .select("person_id", "index_date")
         .distinct()
     )
@@ -1652,19 +1656,25 @@ def lookback_feature_label_events(events_df, index_df, *, date_col,
     `index_df` = (person_id, index_date, source_cohort). Feature frame = events in
     [index_date - lookback_days, index_date); label frame = events in
     [index_date, index_date + label_window_days). Each frame carries source_cohort
-    (index_date dropped). Events only occur within observation periods, so the
+    AND index_date. Events only occur within observation periods, so the
     lookback naturally yields the available history (up to lookback_days); the
     >=1yr-prior observation requirement is enforced upstream in the index table.
+
+    index_date rides through to both frames (it used to be dropped here) because a
+    downstream DocSpec keys the document on it: an EpisodeDocSpec's doc_id is
+    cohort:person:index, so it needs the per-event index_date to tell one person's
+    episodes apart (exp 0111, spec R5.2/R7.1). The passthrough is additive — every
+    existing caller keys on person or cohort and never reads the column, and the
+    BOW/attestation paths group by doc_id (to_bow_dataframe, doc_attested_nodes),
+    so index_date is aggregated away and changes no existing corpus.
     """
     joined = events_df.join(F.broadcast(index_df), on="person_id", how="inner")
     feature = (joined
                .where(F.col(date_col) < F.col("index_date"))
-               .where(F.col(date_col) >= F.date_sub(F.col("index_date"), lookback_days))
-               .drop("index_date"))
+               .where(F.col(date_col) >= F.date_sub(F.col("index_date"), lookback_days)))
     label = (joined
              .where(F.col(date_col) >= F.col("index_date"))
-             .where(F.col(date_col) < F.date_add(F.col("index_date"), label_window_days))
-             .drop("index_date"))
+             .where(F.col(date_col) < F.date_add(F.col("index_date"), label_window_days)))
     return feature, label
 
 

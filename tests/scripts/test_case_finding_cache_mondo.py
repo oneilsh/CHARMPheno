@@ -56,12 +56,19 @@ _SNOMED_BASE = dict(
     min_patient_count=20, doc_min_length=0, prior_obs_days=365, window_days=365,
     disease="diabetes", min_n=50, holdout_frac=0.2, split_salt=20260716,
     n_bg=2, tpn=1, cdr="p.d")
-# Computed against the pre-change compute_bundle_cache_key. A cached SNOMED bundle
-# lives under exactly these; if one of them moves, every cache entry in every
-# bucket silently becomes unreachable and the next run rebuilds from BigQuery.
-_SNOMED_KEY = "d658ce0a9a7425dd"
-_SNOMED_LABELED_KEY = "3cf6c7aac6140393"          # emit_labels + closure mask
-_SNOMED_LOOKBACK_KEY = "275c8e6a76283e86"         # lookback windowing + strip both
+# A cached SNOMED bundle lives under exactly these; if one of them moves OUTSIDE a
+# deliberate cache drop, every cache entry in every bucket silently becomes
+# unreachable and the next run rebuilds from BigQuery.
+#
+# RE-PINNED by exp-0111 WP-C (the one-blast cache drop, spec R7.1): carrying
+# `index_date` through `lookback_feature_label_events` (`cohorts.py`) moves
+# `cohort_defs_version()`, and the strip-claim comment fix moves `assembly_src`
+# (`case_finding_assembly.py`) — both fold into EVERY key, so all four hashes here
+# shifted at once. That was the announced, one-commit full cache drop; the whole
+# repo re-assembles once. These are the post-drop values.
+_SNOMED_KEY = "e1246c57202b8e8c"
+_SNOMED_LABELED_KEY = "ed0a73957bb603c2"          # emit_labels + closure mask
+_SNOMED_LOOKBACK_KEY = "63388be08ce3b53c"         # lookback windowing + strip both
 
 
 def test_existing_snomed_keys_are_byte_identical():
@@ -92,7 +99,12 @@ _MD_BASE = dict(_SNOMED_BASE, multidomain=True, extra_domains=("drug",),
 # right call (an actual hierarchy change SHOULD invalidate), but it must be a
 # decision: re-pin this only alongside a note saying why the caches were dropped.
 # It is also why the 0109 reduction lives in `mondo_collapse.py` instead.
-_MONDO_KEY_NO_COLLAPSE = "ca958995cc1cfb17"
+#
+# RE-PINNED by exp-0111 WP-C alongside the three SNOMED keys above: this key ALSO
+# folds `multi_domain_src`, which WP-C moved by opening the `index_df` / `doc_spec`
+# injection seams — but it would have shifted regardless, since `cohort_defs` and
+# `assembly_src` (both moved by WP-C) fold into every key. Post-drop value.
+_MONDO_KEY_NO_COLLAPSE = "0ba6393f0d92af07"
 
 
 def test_mondo_key_with_collapse_off_is_byte_identical():

@@ -128,7 +128,10 @@ def lookback_feature_frames(domain_raws, index_df, date_cols, *,
     feature frame. Only domain 0's forward [index, index + label_window_days)
     window is kept as the label frame -- the gate is condition-only, so a
     drug/observation event never defines a frontier. index_df carries
-    source_cohort, which the join propagates onto every feature/label frame.
+    source_cohort AND index_date, which the join propagates onto every
+    feature/label frame (index_date is what an EpisodeDocSpec keys the document on
+    -- exp 0111 R5.2; the passthrough lives in `lookback_feature_label_events`, so
+    this wrapper carries it with no change of its own).
     """
     from charmpheno.omop.cohorts import lookback_feature_label_events
 
@@ -333,7 +336,8 @@ def assemble_multidomain_case_finding_corpus(
         vocab_size, min_df, min_patient_count, n_bg=2, tpn=1, doc_min_length=0,
         strip_mode="test_only", lookback_days=365, label_window_days=365,
         emit_labels=True, label_mask_mode="full",
-        before_dag=None, attested_provider=None, index_mode="disease"):
+        before_dag=None, attested_provider=None, index_mode="disease",
+        index_df=None, doc_spec=None):
     """End-to-end BQ assembly of the multi-domain case-finding bundle (LOOKBACK
     mode). Domain 0 is conditions (the label/gate source); ``extra_domains`` are
     read single-domain and windowed against the SAME condition-derived index.
@@ -345,6 +349,21 @@ def assemble_multidomain_case_finding_corpus(
     forward per-patient window is condition-defined and does not cleanly window a
     second domain); pass an already-lookback config. Requires a live CDR
     (cluster-covered, like the single-domain lookback body).
+
+    Two injection seams (exp 0111 R7.1), on the `attested_provider` precedent so
+    that ALL episode logic stays driver-owned and no episode code lands in this
+    source-hashed module:
+
+    - `index_df` + `index_mode="external"`: a driver-supplied
+      `(person_id, index_date, source_cohort, ...)` index frame used VERBATIM as
+      the index table, so an episode index (one row per (person, episode)) drives
+      the windowing without a builder here. The two self-building modes
+      ("population"/"disease") REJECT a non-None `index_df` -- they own their index
+      -- and "external" REQUIRES one.
+    - `doc_spec`: the document unit. `None` defaults to today's
+      `PatientCohortDocSpec(min_doc_length=doc_min_length)` (byte-for-byte the
+      prior behavior); a caller passes an `EpisodeDocSpec` to key documents on the
+      per-event `index_date` the R5.2 passthrough now carries.
     """
     from charmpheno.omop import load_omop_bigquery
     from charmpheno.omop.cohorts import (
@@ -378,20 +397,40 @@ def assemble_multidomain_case_finding_corpus(
     # gate is the intrinsic ≥1yr floor (not the forward knob). "disease" anchors
     # the index on first-dx foreground + general background; "population" indexes
     # EVERY patient on a random event-anchored window (whole-Mondo / template-branch
-    # fit, where the Mondo climb — not one disease — defines the frontier).
-    if index_mode == "population":
+    # fit, where the Mondo climb — not one disease — defines the frontier);
+    # "external" takes a driver-built index frame verbatim (the episode seam).
+    if index_mode == "external":
+        # Injection seam: the driver already built the index (an episode index,
+        # say), so no builder runs here — its columns propagate through the
+        # lookback join to the doc spec, which reads only the ones it declares.
+        if index_df is None:
+            raise ValueError(
+                "index_mode='external' requires an index_df (the driver-supplied "
+                "(person_id, index_date, source_cohort) index frame); none was "
+                "passed.")
+    elif index_mode == "population":
+        if index_df is not None:
+            raise ValueError(
+                "index_mode='population' builds its own random-anchored index; it "
+                "does not accept an index_df. Use index_mode='external' to supply "
+                "one.")
         index_df = case_finding_population_index_table(
             cond, spark=spark, cdr_dataset=cdr, billing_project=billing,
             date_col=cond_date, prior_obs_days=_LOOKBACK_PRIOR_OBS_DAYS,
             label_window_days=label_window_days)
     elif index_mode == "disease":
+        if index_df is not None:
+            raise ValueError(
+                "index_mode='disease' builds its own first-dx index; it does not "
+                "accept an index_df. Use index_mode='external' to supply one.")
         index_df = case_finding_index_table(
             cond, disease=disease, spark=spark, cdr_dataset=cdr,
             billing_project=billing, date_col=cond_date,
             prior_obs_days=_LOOKBACK_PRIOR_OBS_DAYS, label_window_days=label_window_days)
     else:
         raise ValueError(
-            f"index_mode must be 'disease' or 'population', got {index_mode!r}")
+            f"index_mode must be 'disease', 'population' or 'external', "
+            f"got {index_mode!r}")
     feature_frames, cond_label = lookback_feature_frames(
         domain_raws, index_df, date_cols,
         lookback_days=lookback_days, label_window_days=label_window_days)
@@ -405,7 +444,10 @@ def assemble_multidomain_case_finding_corpus(
         root = _FOREST_ROOT_CID if len(anchors) > 1 else None
         before_dag = load_condition_dag(
             spark, anchors=anchors, root=root, cdr=cdr, billing=billing)
-    doc_spec = PatientCohortDocSpec(min_doc_length=doc_min_length)
+    # Doc-unit seam: default to today's spec byte-for-byte; a caller injects an
+    # EpisodeDocSpec to key documents on the index_date the R5.2 passthrough carries.
+    if doc_spec is None:
+        doc_spec = PatientCohortDocSpec(min_doc_length=doc_min_length)
 
     # One vocab spec per domain (same fit knobs; a real per-domain sweep is future).
     # Measurement is tokenized with per-document BINARY presence — it has no OMOP

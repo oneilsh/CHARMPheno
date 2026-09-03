@@ -166,3 +166,118 @@ def test_multidomain_bundle_fits_through_the_gated_shim_and_round_trips(spark, t
     loaded = load_result(tmp_path / "fit")
     assert isinstance(loaded.global_params["lambda"], dict)
     assert loaded.metadata["domains"] == [len(vm) for vm in bundle.vocab_maps]
+
+
+# --------------------------------------------------------------------------- #
+# exp 0111 WP-C behavior-preservation oracles: the index_date passthrough is    #
+# purely additive, and the assembler's index_df / doc_spec are pure seams.      #
+# --------------------------------------------------------------------------- #
+def test_lookback_feature_frames_carries_index_date_additively(spark):
+    """The R5.2 passthrough is ADDITIVE. On the current one-index-per-person shape,
+    each frame equals the pre-WP-C output except for the added index_date column —
+    same columns otherwise, same rows, same values — and index_date carries the
+    correct per-person anchor. Dropping the column reproduces the old contract; the
+    add is exactly what an EpisodeDocSpec keys on."""
+    from charmpheno.omop.multi_domain import lookback_feature_frames
+    from pyspark.sql import Row
+    index_df = spark.createDataFrame([
+        Row(person_id=1, index_date=dt.date(2020, 6, 1), source_cohort="dz"),
+        Row(person_id=2, index_date=dt.date(2021, 3, 1), source_cohort="general"),
+    ])
+    cond = spark.createDataFrame([
+        Row(person_id=1, concept_id=201, condition_era_start_date=dt.date(2020, 1, 1)),  # pre -> feat
+        Row(person_id=1, concept_id=202, condition_era_start_date=dt.date(2020, 7, 1)),  # post -> label
+        Row(person_id=2, concept_id=203, condition_era_start_date=dt.date(2021, 2, 1)),  # pre -> feat
+    ])
+    drug = spark.createDataFrame([
+        Row(person_id=1, concept_id=900, drug_era_start_date=dt.date(2020, 2, 1)),        # pre -> feat
+        Row(person_id=1, concept_id=901, drug_era_start_date=dt.date(2020, 8, 1)),        # post -> dropped
+    ])
+    feats, cond_label = lookback_feature_frames(
+        [cond, drug], index_df, ["condition_era_start_date", "drug_era_start_date"],
+        lookback_days=365, label_window_days=365)
+    cond_feat, drug_feat = feats
+
+    anchors = {r["person_id"]: r["index_date"] for r in index_df.collect()}
+    for frame in (cond_feat, drug_feat, cond_label):
+        assert "index_date" in frame.columns
+        for r in frame.collect():
+            assert r["index_date"] == anchors[r["person_id"]]
+
+    # Additivity: with index_date dropped, the frames are exactly the old shape.
+    assert set(cond_feat.drop("index_date").columns) == {
+        "person_id", "concept_id", "condition_era_start_date", "source_cohort"}
+    assert set(drug_feat.drop("index_date").columns) == {
+        "person_id", "concept_id", "drug_era_start_date", "source_cohort"}
+    assert {(r["person_id"], r["concept_id"], r["source_cohort"])
+            for r in cond_feat.collect()} == {(1, 201, "dz"), (2, 203, "general")}
+    assert {(r["person_id"], r["concept_id"]) for r in drug_feat.collect()} == {(1, 900)}
+    assert {(r["person_id"], r["concept_id"]) for r in cond_label.collect()} == {(1, 202)}
+
+
+def test_assemble_multidomain_case_finding_corpus_wpc_seams(monkeypatch):
+    """WP-C injection-seam oracle (R7.1). external REQUIRES index_df and uses it
+    verbatim; population/disease REJECT a non-None index_df; doc_spec=None
+    reproduces today's PatientCohortDocSpec(min_doc_length=doc_min_length)
+    byte-for-byte and a passed spec is forwarded as-is. BigQuery and the real
+    lookback/assemble are stubbed — only the seam wiring runs, so this needs no
+    Spark and no CDR."""
+    import charmpheno.omop as omop_pkg
+    from charmpheno.omop import multi_domain as md
+    from charmpheno.omop import cohorts
+    from charmpheno.omop.doc_spec import PatientCohortDocSpec
+
+    monkeypatch.setattr(omop_pkg, "load_omop_bigquery", lambda **kw: object())
+
+    captured = {}
+
+    def _fake_lookback(domain_raws, index_df, date_cols, *, lookback_days,
+                       label_window_days):
+        captured["index_df"] = index_df
+        return [object() for _ in domain_raws], object()  # (feature_frames, cond_label)
+    monkeypatch.setattr(md, "lookback_feature_frames", _fake_lookback)
+
+    def _fake_assemble(cond0, extras, before_dag, *, doc_spec, **kw):
+        captured["doc_spec"] = doc_spec
+        return "BUNDLE"
+    monkeypatch.setattr(md, "assemble_multidomain_from_events", _fake_assemble)
+
+    # The self-building index tables must never run on the external path.
+    monkeypatch.setattr(cohorts, "case_finding_index_table",
+                        lambda *a, **k: pytest.fail("disease index builder ran"))
+    monkeypatch.setattr(cohorts, "case_finding_population_index_table",
+                        lambda *a, **k: pytest.fail("population index builder ran"))
+
+    common = dict(disease="rare6", cdr="p.d", billing="bp", extra_domains=("drug",),
+                  person_mod=1, min_n=0, vocab_size=10, min_df=1, min_patient_count=1,
+                  doc_min_length=7, before_dag=object())  # non-None DAG skips the load
+
+    # external REQUIRES index_df
+    with pytest.raises(ValueError, match="external.*requires an index_df"):
+        md.assemble_multidomain_case_finding_corpus(
+            None, index_mode="external", index_df=None, **common)
+
+    # population / disease REJECT a non-None index_df (they own their index)
+    with pytest.raises(ValueError, match="population.*does not accept an index_df"):
+        md.assemble_multidomain_case_finding_corpus(
+            None, index_mode="population", index_df=object(), **common)
+    with pytest.raises(ValueError, match="disease.*does not accept an index_df"):
+        md.assemble_multidomain_case_finding_corpus(
+            None, index_mode="disease", index_df=object(), **common)
+
+    # external uses index_df VERBATIM; doc_spec=None -> today's default spec.
+    my_index = object()
+    out = md.assemble_multidomain_case_finding_corpus(
+        None, index_mode="external", index_df=my_index, doc_spec=None, **common)
+    assert out == "BUNDLE"
+    assert captured["index_df"] is my_index
+    default_spec = captured["doc_spec"]
+    assert isinstance(default_spec, PatientCohortDocSpec)
+    assert default_spec.name == "patient_cohort"
+    assert default_spec.min_doc_length == 7          # == doc_min_length, byte-for-byte
+
+    # a passed doc_spec is forwarded verbatim.
+    sentinel = PatientCohortDocSpec(min_doc_length=3)
+    md.assemble_multidomain_case_finding_corpus(
+        None, index_mode="external", index_df=object(), doc_spec=sentinel, **common)
+    assert captured["doc_spec"] is sentinel

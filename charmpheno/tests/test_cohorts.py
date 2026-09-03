@@ -550,7 +550,11 @@ def test_lookback_feature_label_events_splits_pre_and_post_index(spark):
     lc = {r["concept_id"] for r in lab.collect()}
     assert fc == {901}                    # only within [index-1y, index)
     assert lc == {200, 201}               # only within [index, index+1y)
-    assert "index_date" not in feat.columns and "source_cohort" in feat.columns
+    # index_date now RIDES THROUGH (exp 0111 R5.2 passthrough) so a downstream
+    # EpisodeDocSpec can key the document on it; source_cohort still rides along.
+    assert "index_date" in feat.columns and "source_cohort" in feat.columns
+    assert {r["index_date"] for r in feat.collect()} == {dt.date(2015, 1, 1)}
+    assert {r["index_date"] for r in lab.collect()} == {dt.date(2015, 1, 1)}
     # 5-year lookback pulls the older feature events too
     feat5, _ = lookback_feature_label_events(
         events, index_df, date_col="condition_era_start_date",
