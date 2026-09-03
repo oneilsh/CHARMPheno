@@ -61,14 +61,48 @@ restated. New definitions:
   episodes, not "earliest" or "latest": either extreme would correlate the kept
   documents with record position and quietly re-bias what the gate already
   biases. `cap` is fixed by the probe (§4).
-- **D12 — Arms.** 0111 is a TWO-ARM experiment on one corpus identity:
-  the **episode arm** (D8–D11) and a **random arm** — the existing
-  population-random index, refit under 0111's identical configuration. The
-  random arm is the control (R5.13); 0104/0109/0110 numbers are never
-  comparison targets for either arm (insight 0010: doc-unit-sensitive numbers
-  do not compare across doc units). What makes the two arms comparable at all
-  is that C and the label DAG are person-level and index-independent (audit
-  seam 10) — both arms share the node set by construction.
+- **D12 — Arms (MATCHED, revised 2026-09-03).** 0111 is a TWO-ARM experiment on
+  one corpus identity: the **episode arm** (D8–D11) and a **random arm**. Both
+  arms are **cap-3 multi-document, and share the D13 gate rule and the 365-day
+  label** — they differ ONLY in index selection: the episode arm anchors
+  `index = episode_start − 1`; the random arm draws up to 3 uniform-random
+  indices per person (deterministic salted, never `F.rand()`) that pass the same
+  `_window_observed_cohort` gates. This isolates *anchoring* as the sole
+  difference (superseding the earlier "existing population-random 1-doc arm,"
+  which confounded anchoring with doc-count and gate width). The random arm is
+  the control (R5.13); 0104/0109/0110 numbers are never comparison targets for
+  either arm (insight 0010). C and the label DAG are person-level and
+  index-independent (audit seam 10), so both arms share the node set by
+  construction.
+- **D13 — Gate-frontier separation (added 2026-09-03; the parallel-agent
+  handoff, critically evaluated).** The estimator's **gate** (topic-block access,
+  the `frontier` column) is separated from the **outcome label**:
+  - **Gate frontier** = the first-attestation nodes whose first attestation
+    falls in the 90-day window `[index, index + 90d)` (matching the episode
+    gap), rolled up through the same Mondo DAG frontier logic. This ALONE
+    controls gated topic support during the `weightY=0` fit.
+  - **Outcome labels** = the existing `label`/`labelMask` from the full 365-day
+    forward frame, unchanged; the prevalent/incident readout protocol and the
+    D2 incident-eligibility mask are untouched.
+  Today `frontier` and `label` are effectively the same object — both derived
+  from the 365-day forward attestations (`attach_labels` reads the `frontier`
+  column, `multi_domain.py:302-303`) — so for an episode doc the gate currently
+  bleeds in the whole forward year, not just the presentation. D13 restores
+  temporal locality: a diagnosis months after the episode remains an *outcome*
+  but does not open a topic block for *this* document's fit. The clusters are
+  **first-attestation clusters, not complete clinical episodes** — say so where
+  precision matters.
+- **D14 — Driver-side, seam-verified.** D13 is implemented **driver-side**, not
+  by re-editing the source-hashed assembler (no second cache blast). Seam trace
+  (2026-09-03): the estimator reads `frontierCol`/`labelCol`/`labelMaskCol` as
+  three distinct inputs (`gated_pc_cloud.py:2685-2698`); `label` is baked at
+  assembly and frozen in the cached bundle; `index_date` is recoverable per-doc
+  from the `EpisodeDocSpec` doc_id. So a driver-owned step overwrites ONLY the
+  `frontier` column (with the 90-day gate, rolled up by *calling* the
+  assembler's `attach_frontiers`) after bundle load and before `.fit()`, leaving
+  the 365-day labels intact. The gate policy is recorded in the run manifest
+  (a stable `gate_frontier_mode` value), not silently reused under an existing
+  key.
 
 ## 3. Requirements
 

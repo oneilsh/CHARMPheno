@@ -165,9 +165,13 @@ against a freshly cold cache.
 closure via the new injection params; `index_mode: external` +
 `episode_sampling: {gap_days: 90, cap: 3, salt: …}` in experiment front
 matter, ALL folded into the bundle cache key (fresh keys per arm — the two
-arms are two corpora). The random arm is the existing population mode under
-the same new key vintage, same `split_salt` so persons land in the same
-train/test fold across arms.
+arms are two corpora). The random arm is a **matched cap-3 multi-doc arm**
+(D12, revised): up to 3 uniform-random deterministic-salted indices per person,
+same `_window_observed_cohort` gates, same `split_salt` so persons land in the
+same train/test fold across arms — differing from the episode arm ONLY in index
+location. (Superseded: the earlier "existing population mode, 1 doc/person" — it
+confounded anchoring with doc-count and gate width.) Both arms carry the D13
+gate rule via WP-D3.
 
 > **D2 MUST synthesize a BOUNDED within-corpus document index for the doc key
 > (found in WP-A1, `87074af`).** WP-A1's doc key is
@@ -180,6 +184,51 @@ train/test fold across arms.
 > documents, and carry D1's `episode_no` as a separate column for diagnostics.
 > The `episode_no < 64` guard and the densify-time uniqueness assertion in
 > WP-A1 are the tripwires that fail loudly if D1's raw ordinal leaks through.
+
+### WP-D3 — gate-frontier separation (D13/D14) · driver-owned · size M
+
+Separate the estimator's **gate** from the **outcome label** so an episode
+document gates on its 90-day presentation, not the whole forward year. Seam
+already traced (D14): three distinct estimator columns, `label` frozen at
+assembly, `index_date` recoverable from the doc_id — so this is a **driver-owned
+post-load transform, no source-hashed edit, no second cache blast.**
+
+Shape (the seam audit's preferred form, confirmed viable):
+1. Assemble both arms normally (frontier + label both from the 365-day frame,
+   baked into the bundle as today).
+2. Post-load, per document: recover `index_date` from the `EpisodeDocSpec`
+   doc_id; compute the **90-day gate attestations** = first-attestation nodes
+   (from the E4 sidecar, or the retained episode assignments) with first
+   attestation in `[index, index + 90d)`; roll them up by **calling** the
+   assembler's `attach_frontiers` (a callable — never edit it).
+3. **Overwrite only the `frontier` column** (join by doc key); leave
+   `label`/`labelMask` untouched.
+4. Refuse missing / duplicate / mismatched joins loudly (never fall back to an
+   empty/background frontier by accident); assert one frontier per document.
+5. Record `gate_frontier_mode` in the run manifest; keep `weightY=0` gated fit
+   reading the swapped `frontier` and the readout reading the 365-day
+   `label`/`labelMask`.
+
+Applied IDENTICALLY to both arms (D12 matched) — the episode arm's gate is rich
+by construction; the random arm's is mostly empty by construction (a random
+index rarely precedes a presentation), which is the intended demonstration that
+anchoring is what supplies the gate. **WP-B2 (below) measures the occupancy
+first** so this is quantified, not assumed.
+
+Tests (the handoff's list): same-cluster multimorbidity both in the gate;
+later-forward-year outcome in `label` but NOT the gate; a pre-index recurrence
+not opening its block; DAG roll-up parity with the ordinary frontier; person-
+keyed split integrity; cap integrity (only retained episodes reach the gate);
+join integrity (loud failure); **outcome-label byte-identity** (`label`/
+`labelMask` unchanged vs the current 365-day assembly on a fixed synthetic
+frame); manifest records the policy.
+
+**WP-B2 — gate-occupancy probe (size S, cluster, runs first).** Sidecar-based,
+no fit: per arm (episode vs matched-random), the fraction of docs with a
+non-empty 90-day gate and the gate-size distribution. Frontier-level (occupancy
+exact, size a lower bound). De-risks D12/D13 before any fit — if the random
+arm's occupancy is near-zero we know the control is extreme-by-construction and
+frame the result accordingly.
 
 ### WP-E — smoke, both arms · orchestrator + Shawn (cluster) · gate
 
