@@ -40,12 +40,23 @@ the label-DAG / assembler modules.
 
 ### The cache-key landmine (source-hashed modules)
 
-Bundle/corpus/sidecar cache keys fold in the **source hash of whole modules**
-(`cohort_defs_version()` over `cohorts.py`; `_module_source_hash` over the
-assembler and label-DAG modules). Editing one **silently invalidates every cache
-key in the repo, or poisons a cache under a byte-identical key** — a
-wrong-results hazard, not merely a rebuild cost. Several also carry **byte-pinned
-tripwire hashes** in `tests/scripts/test_case_finding_cache_mondo.py` (60 tests).
+**Bundle, corpus, and covariate** cache keys fold in the **source hash of whole
+modules** (`cohort_defs_version()` over `cohorts.py`, folded at
+`_case_finding_cache.py:147` / `_corpus_cache.py:77` / `_covariates_cache.py:61`;
+`_module_source_hash` over the assembler and label-DAG modules). Editing one
+**silently invalidates every bundle/corpus/covariate cache key, or poisons a
+cache under a byte-identical key** — a wrong-results hazard, not merely a rebuild
+cost. Several of those keys also carry **byte-pinned tripwire hashes** in
+`tests/scripts/test_case_finding_cache_mondo.py` (60 tests).
+
+**NOT everything is invalidated (mechanism-verified, do not overstate):** the
+**conversion sidecar** is keyed *independently* — `conversion_sidecar_key`
+(`conversion_sidecar.py:159-170`) folds only its own module source + `(cdr,
+person_mod, DAG identity, code_map)`, deliberately **not** `cohort_defs_version`
+— so an assembler/cohorts edit does NOT orphan it (its docstring: "a bundle-key
+move does not orphan the sidecar"). The raw Mondo ontology download
+(keyed by `mondo_version`) likewise survives. So a source-hashed edit rebuilds
+the bundle/corpus/covariates but leaves the expensive sidecar a HIT.
 
 **Treat as source-hashed / do-not-edit-casually:**
 `charmpheno/charmpheno/omop/{cohorts,multi_domain,case_finding_assembly}.py`;
