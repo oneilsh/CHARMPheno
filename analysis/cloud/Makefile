@@ -699,7 +699,7 @@ diag-episode-probe: zip cluster-overlay $(WORKSPACE_ENV)
 	    --conf spark.dynamicAllocation.enabled=false \
 	    --conf spark.executor.instances=12 \
 	    $(foreach kv,$(GPR_SPARK_CONF),--conf $(kv)) \
-	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/conversion_sidecar.py,$(REPO_ROOT)/analysis/cloud/diag_episode_probe.py \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/conversion_sidecar.py,$(REPO_ROOT)/analysis/cloud/episode_index.py,$(REPO_ROOT)/analysis/cloud/diag_episode_probe.py \
 	    $(REPO_ROOT)/analysis/cloud/diag_episode_probe.py \
 	    --run-dir "$(RUNS_DIR)/$(shell printf '%04d' $(ID))-*" \
 	    $(GPR_ARGS)
