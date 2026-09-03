@@ -152,9 +152,13 @@ R7.3 by a wide margin (2,583 nodes ≥20 gated episodes vs 0110's ~1,791
 scoreable / 923 starved). **The incidence fork is SET (Shawn, 2026-09-03):**
 the 365-day prior-obs gate STAYS for the primary arm — the corpus is "incident
 among the year-plus-observed," and the 66.2% first-episode kill is reported as
-the measured conditional-capture caveat, not engineered away. A relaxed-gate
-**sensitivity** (probe re-run at reduced prior-obs, no fit) is a named plan
-item quantifying what the gate costs. All §4 inputs to the plan are resolved.
+the measured conditional-capture caveat, not engineered away. The relaxed-gate
+**sensitivity is now MEASURED** (2026-09-03; results report §"WP-H sensitivity"):
+relaxing prior-obs 365→90→0 recovers first episodes only 66.2%→42.9% (a 43%
+structural floor remains), grows the corpus just +6.8%, and leaves node yield
+essentially flat (2,584→2,587 at ≥20) — so the gate leaves little capturable
+coverage on the table, and 365d stands as the primary at no meaningful cost.
+All §4 inputs to the plan are resolved.
 
 The rules that produced those decisions, `make diag-episode-probe ID=110`
 (requires the 0110 sidecar witness; no fit, no cache impact), per gap ∈ {60, 90}:

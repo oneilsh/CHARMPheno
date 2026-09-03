@@ -81,14 +81,10 @@ any-hit — match the readout's existing detection semantics and SAY which in
 the docstring). Oracle: fixture where episode-weighting and person-level
 disagree by construction.
 
-> **A2/A3/A4 LANDED (`428874e`).** One residue, deferred deliberately to keep
-> the WP scoped to `gated_pc_cloud.py`: **`gated_pc_readout.py`'s OWN co-fit
-> head detection call still runs episode-weighted** (it unpacks
-> `_collect_head_proba` as a 3-tuple; A4 made the doc-key return opt-in so that
-> path stayed byte-identical). `gated_pc_readout.py` is driver-owned/editable —
-> thread `with_doc_keys=True` + `detection_readout(doc_keys=…)` into its co-fit
-> head arm. Small; MUST close before episode-arm record runs (WP-G), and a
-> natural rider on WP-B (which is already in that file's neighborhood).
+> **A2/A3/A4 LANDED (`428874e`); the `gated_pc_readout.py` co-fit head
+> detection residue is now CLOSED by WP-B (`0ab5d50`)** — it deduped that call
+> to persons on both branches while wiring `--eval-path` through the recovery
+> path, exactly as this note anticipated. No residue remains.
 
 ### WP-B — distributed eval + distributed calibration apply (R5.8) · one Opus agent · driver-owned, no cache impact · size L
 

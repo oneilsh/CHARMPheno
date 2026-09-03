@@ -99,3 +99,38 @@ My lean is **road 1 for the primary arm, road 2 as a named sensitivity** the
 plan budgets one cheap probe pass for (the tool already decomposes the gate, so
 measuring capture at relaxed prior-obs is a re-run with one flag, no fit). But
 this is the incidence definition, which is yours to set before I write the plan.
+
+## WP-H sensitivity — measured (2026-09-03), fork RESOLVED
+
+Shawn chose road 1 (365d primary) + road 2 as a sensitivity. The sweep
+(`--gap-days 90 --prior-obs-days 365,90,0`, off the same sidecar, no fit):
+
+| prior-obs | gated eps | persons ≥1 | kill both | prior-only | first-ep kill | later-ep kill | nodes ≥20 | ≥100 |
+|---|---|---|---|---|---|---|---|---|
+| **365d** | 2,517,033 | 294,426 | 19.8% | 10.2% | **66.2%** | 14.1% | 2,584 | 2,324 |
+| 90d | 2,641,163 | 305,633 | 15.9% | 6.0% | 56.0% | 10.9% | 2,586 | 2,351 |
+| 0d | 2,686,971 | 311,427 | 14.4% | 4.5% | **42.9%** | 10.9% | 2,587 | 2,364 |
+
+Three findings, and together they **vindicate keeping 365d for the primary arm**:
+
+1. **First-episode recovery is partial and floored.** First-episode kill falls
+   66.2% → 42.9% as the gate drops to zero — ~23 pp recovered — but **43% of
+   first episodes die even with NO prior-obs requirement**, to the follow-up
+   gate and to indices (`start − 1`) landing at/before record start. First-
+   episode capture is structurally bounded; you cannot buy your way to it.
+   (Internal check: follow-up-only kill is a flat 14.4% across all three — it is
+   prior-obs-independent, as it must be.)
+2. **Relaxing barely moves what matters.** Corpus +6.8% (2.52M → 2.69M), persons
+   +5.8%, and **node yield essentially flat** (2,584 → 2,587 at ≥20; the ≥100
+   floor rises only 2,324 → 2,364). The label space was already un-starved at
+   365d; the gate relaxation adds negligible coverage or volume.
+3. **The unmeasured cost is incidence purity.** The probe cannot see it, but
+   dropping prior-obs admits prevalent contamination — 30–90 days of prior
+   record cannot distinguish a true onset from a diagnosis merely coded for the
+   first time in a short window. The trade is ~23 pp of (unattainable-in-full)
+   first episodes against confirmed-incident purity.
+
+**Decision:** 365d is the primary arm. The relaxed values are a recorded
+sensitivity, not a fit — the gate is not leaving materially capturable coverage
+on the table, and the "incident among the year-plus-observed" framing is the
+honest one. Egress: all figures pooled; per-node counts are counts-of-nodes.
