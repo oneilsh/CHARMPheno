@@ -1055,13 +1055,95 @@ def dag_closure_parents(parent_int, C):
 
 
 # --------------------------------------------------------------------------- #
+# The int64 doc-key seam, driver side (exp 0111 WP-A1, spec R5.4).             #
+# --------------------------------------------------------------------------- #
+# Every readout collect below identifies a row by an int64 DOC KEY rather than
+# by the raw `person_id`/`doc_id`. The synthesis and its inverse live once, in
+# `distributed_readout` (bare-importable on executors, already on every submit's
+# `--py-files`); this file imports them (`_dr.synthesize_doc_key`, `_dr.person_
+# of`, radix/guard constants) so there is exactly one definition of the map.
+# `_doc_key_column` builds the key as a Spark Column at the collect's own select;
+# `_assert_unique_doc_keys` is the corpus-level tripwire the driver runs once the
+# keys have been materialized (see below).
+def _doc_key_column(df, person_col="person_id"):
+    """`doc_key = person_id * RADIX + episode_no` as a guarded Spark Column.
+
+    The DRIVER-side half of the doc-key seam: the readout collects add this
+    column and select it as the row id, so `_lean_eval_kernel` / the A/B
+    alignment / the calibration split all speak one int64 that yields the person
+    back through `_dr.person_of` (spec R5.4).
+
+    `episode_no` is the bounded WITHIN-CORPUS document index. Today's corpora are
+    single-doc — one document per person, no `episode_no` column — so it defaults
+    to literal 0 and `doc_key = person_id * 64`, i.e. the current int64 person
+    ids scaled order-preservingly (nothing about the byte-identical single-doc
+    path moves). When WP-D2 wires the episode corpus it must materialize a
+    bounded per-person document index (0 .. cap-1) under this name — NOT WP-D1's
+    unbounded chronological `episode_no` (`episode_index.py`), which would carry
+    past the radix and collide; see the seam comment in `distributed_readout`.
+
+    The `[0, 2**57)` person-id and `[0, RADIX)` episode-no guards are folded into
+    the column with `raise_error`, so they cost nothing extra (they evaluate in
+    the collect's own scan) and a violation surfaces AT the row that carries it,
+    before the silent int64 overflow / block carry it would otherwise become.
+    """
+    from pyspark.sql import functions as F
+
+    person = F.col(person_col).cast("long")
+    if "episode_no" in df.columns:
+        ep = F.col("episode_no").cast("long")
+    else:
+        ep = F.lit(0).cast("long")
+    radix = F.lit(int(_dr.DOC_KEY_RADIX))
+    return (
+        F.when(person.isNull() | (person < 0)
+               | (person >= F.lit(int(_dr.DOC_KEY_MAX_PERSON_ID))),
+               F.raise_error(F.concat(
+                   F.lit("doc_key: person_id out of [0, 2**57): "),
+                   F.coalesce(person.cast("string"), F.lit("null")))))
+        .when((ep < 0) | (ep >= radix),
+              F.raise_error(F.concat(
+                  F.lit("doc_key: episode_no out of [0, "
+                        f"{int(_dr.DOC_KEY_RADIX)}) — this is the bounded "
+                        "within-corpus document index, not WP-D1's unbounded "
+                        "chronological ordinal: "),
+                  ep.cast("string"))))
+        .otherwise(person * radix + ep)
+        .cast("long")
+        .alias("doc_key"))
+
+
+def _assert_unique_doc_keys(ids, *, where):
+    """Corpus-level uniqueness tripwire on the materialized doc keys (spec R5.4).
+
+    Run where the keys are FIRST materialized on the driver as a full array — the
+    tail of each readout collect (`_collect_theta_labels`, `_densify_lean_blocks`)
+    — because that is the cheapest honest point: the ids are already in hand, so
+    the check is one `set` build, no extra Spark pass. A duplicate here means two
+    documents share a key, which is exactly the failure the radix is chosen to
+    prevent (a person carrying > RADIX documents, or WP-D1's raw ordinal leaking
+    into the low bits): the A/B alignment dict would silently overwrite one with
+    the other (the seam-6 bug, spec R5.5) and the per-doc eval arrays would be
+    indexed ambiguously. Better a named raise than a wrong number.
+    """
+    n = len(ids)
+    if n != len(set(int(i) for i in ids)):
+        raise ValueError(
+            f"doc-key collision in {where}: {n} rows carry "
+            f"{len(set(int(i) for i in ids))} distinct doc keys. Two documents "
+            "synthesized the same person_id*RADIX+episode_no — check the "
+            "per-person document cap (<= RADIX) and that episode_no is the "
+            "bounded within-corpus index, not the raw chronological ordinal.")
+
+
+# --------------------------------------------------------------------------- #
 # Spark collectors (cluster-covered; not unit-tested).                        #
 # --------------------------------------------------------------------------- #
 def _collect_theta_labels(df, C, *, label_col="label", mask_col="labelMask",
                           topic_col="topicDistribution", sample_frac=1.0, seed=0):
     """Collect ONLY the K-dim per-doc theta + the (C,) label/mask arrays to numpy
     (never the dense BOW), so it stays on the driver's memory budget at cohort
-    scale. Returns (Pi (D,K), y_DC (D,C), mask_DC (D,C), person_order). Empty df
+    scale. Returns (Pi (D,K), y_DC (D,C), mask_DC (D,C), doc_key_order). Empty df
     -> correctly-shaped zero arrays. Mirrors pc_antidepressant_cloud's
     _collect_topics_labels but with configurable label/mask column names (this
     corpus uses 'label'/'labelMask' from the Step-A adapter).
@@ -1069,6 +1151,13 @@ def _collect_theta_labels(df, C, *, label_col="label", mask_col="labelMask",
     This is the DRIVER readout's input and the reason `--readout-mode distributed`
     exists: θ and both (D,C) float64 label/mask arrays are 8*D*(K+2C) bytes per
     split before any proba array is built (see `resolve_readout_mode`).
+
+    The fourth return is the row order as int64 DOC KEYS (`_doc_key_column`), not
+    raw person ids (spec R5.4): the A/B gate aligns this driver collect against
+    the distributed lean collect on DOCUMENT identity, and any person-grain step
+    recovers the person via `_dr.person_of`. On single-doc corpora a doc key is
+    `person_id * RADIX`, so the order is the person order rescaled — unchanged in
+    meaning.
 
     `sample_frac` (<1.0) row-subsamples BEFORE the collect — the readout collects
     per-doc theta AND builds (N, C) proba arrays on the driver, both O(N); at
@@ -1078,8 +1167,9 @@ def _collect_theta_labels(df, C, *, label_col="label", mask_col="labelMask",
     if sample_frac < 1.0:
         df = df.sample(withReplacement=False, fraction=float(sample_frac),
                        seed=int(seed))
-    rows = df.select("person_id", topic_col, label_col, mask_col).collect()
-    person_order = [r["person_id"] for r in rows]
+    rows = df.select(_doc_key_column(df), topic_col, label_col, mask_col).collect()
+    doc_key_order = [int(r["doc_key"]) for r in rows]
+    _assert_unique_doc_keys(doc_key_order, where="_collect_theta_labels")
     if rows:
         Pi = np.asarray([r[topic_col].toArray() for r in rows], dtype=np.float64)
         y_DC = np.asarray([[float(v) for v in r[label_col]] for r in rows],
@@ -1090,7 +1180,7 @@ def _collect_theta_labels(df, C, *, label_col="label", mask_col="labelMask",
         Pi = np.zeros((0, 0), dtype=np.float64)
         y_DC = np.zeros((0, C), dtype=np.float64)
         mask_DC = np.zeros((0, C), dtype=np.float64)
-    return Pi, y_DC, mask_DC, person_order
+    return Pi, y_DC, mask_DC, doc_key_order
 
 
 def _collect_head_proba(df, C, *, prob_col="probability", label_col="label",
@@ -1228,14 +1318,20 @@ def _densify_lean_blocks(blocks, C):
             elig[np.repeat(np.arange(at, at + n), np.diff(e_ptr)), e_idx] = 0
         at += n
         blocks[j] = None                      # free the partition's block eagerly
-    return proba, y, mask, ids.tolist(), elig
+    id_list = ids.tolist()
+    # Corpus-level uniqueness tripwire, at the point the doc keys are first a full
+    # driver array (spec R5.4). The lean eval arrays above are row-indexed and the
+    # A/B gate aligns on these keys, so a collision here would be a silently
+    # mis-attributed row rather than an error — assert instead.
+    _assert_unique_doc_keys(id_list, where="_densify_lean_blocks")
+    return proba, y, mask, id_list, elig
 
 
 def _collect_lean_proba(scored_df, C, V=None, b_raw=None, *, degenerate=None,
                         const=None, score_col="topicDistribution",
                         label_col="label", mask_col="labelMask",
                         id_col="person_id", theta_topm=0, elig_col=None):
-    """LEAN readout collect: `(proba (D,C) f32, y u8, mask u8, person_order, elig)`.
+    """LEAN readout collect: `(proba (D,C) f32, y u8, mask u8, doc_key_order, elig)`.
 
     Plan §3 (v2.1): once the FIT is distributed, the driver eval needs only the test
     split's per-node probabilities and labels — no θ, no float64 (D,C) arrays, no
@@ -1267,11 +1363,24 @@ def _collect_lean_proba(scored_df, C, V=None, b_raw=None, *, degenerate=None,
     caller is responsible for checking the bundle's E1 WITNESS first
     (`preindex_closure.bundle_preindex_witness`) — asking for the column against a
     bundle that lacks it is a Spark AnalysisException, which is exactly the
-    mixed-vintage failure R1.4 exists to turn into a sentence."""
+    mixed-vintage failure R1.4 exists to turn into a sentence.
+
+    `id_col` names the PERSON-ID column the row's int64 doc key is synthesized
+    from (`_doc_key_column`, spec R5.4); the collect materializes a `doc_key`
+    column and hands the kernel THAT, never the raw id — so the returned
+    `doc_key_order` is document identity (one entry per row) and a person-grain
+    consumer recovers the person via `_dr.person_of`. On single-doc corpora
+    `doc_key == person_id * RADIX`, order-preserving, so nothing about the
+    existing path's meaning changes."""
     C = int(C)
     theta_topm = int(theta_topm)
-    cols = ((id_col, score_col, label_col, mask_col) if elig_col is None
-            else (id_col, score_col, label_col, mask_col, elig_col))
+    # Synthesize the int64 doc key at the seam and select it as the row id, so the
+    # kernel packs an int64 (a raw string doc_id would raise) and every row stays
+    # person-derivable. `id_col` is the person-id SOURCE column, not the id itself.
+    scored_df = scored_df.withColumn("doc_key", _doc_key_column(scored_df, id_col))
+    key_col = "doc_key"
+    cols = ((key_col, score_col, label_col, mask_col) if elig_col is None
+            else (key_col, score_col, label_col, mask_col, elig_col))
     _rows = _dr._row_quads if elig_col is None else _dr._row_quints
     sc = scored_df.sparkSession.sparkContext
 
@@ -1809,8 +1918,9 @@ def distributed_score_arm(train_scored, test_scored, C, K, *, recall_targets,
                           elig_col=None):
     """`score_arm` without the driver-side θ collect — the distributed twin.
 
-    Returns `(readout, proba_te (D_te,C) f32, y_te u8, m_te u8, person_order,
-    (V, b_raw), elig u8|None)`; the first four mirror `_score_full`'s
+    Returns `(readout, proba_te (D_te,C) f32, y_te u8, m_te u8, doc_key_order,
+    (V, b_raw), elig u8|None)`; the fifth is the per-DOCUMENT int64 key order
+    (`_doc_key_column`, spec R5.4). The first four mirror `_score_full`'s
     `(readout, proba)` contract plus the two label arrays the driver path used to
     get from `_collect_theta_labels`, so every downstream consumer (`_conditional`,
     the rarity quartile split, the headline) is unchanged. The raw-θ fit
@@ -1867,13 +1977,13 @@ def distributed_score_arm(train_scored, test_scored, C, K, *, recall_targets,
         # excluded. Additive.
         _write_readout_heads(checkpoint_dir, label, V, b_raw, const, degenerate,
                              C, K, theta_topm)
-    proba, y_te, m_te, persons, elig = _collect_lean_proba(
+    proba, y_te, m_te, doc_keys, elig = _collect_lean_proba(
         test_scored, C, V, b_raw, degenerate=degenerate, const=const,
         score_col=topic_col, label_col=label_col, mask_col=mask_col, id_col=id_col,
         theta_topm=theta_topm, elig_col=elig_col)
     readout = readout_from_proba(proba, y_te, m_te, C, recall_targets=recall_targets,
                                  fdr_targets=fdr_targets, min_count=min_count)
-    return readout, proba, y_te, m_te, persons, (V, b_raw), elig
+    return readout, proba, y_te, m_te, doc_keys, (V, b_raw), elig
 
 
 def readout_ab_report(train_scored, test_scored, C, K, *, recall_targets,
@@ -1962,10 +2072,13 @@ def readout_ab_report(train_scored, test_scored, C, K, *, recall_targets,
                      f"n>1e-3={int((d_auc > 1e-3).sum())}")
     lines.append(f"  nodes scored: dist={r_dist['ranking']['n_labels_scored']} "
                  f"driver={r_drv['ranking']['n_labels_scored']}")
-    # Row-wise probability agreement on a sampled subset, aligned by person_id (the
-    # two collects walk the same partitions but neither promises an order).
-    pos = {int(pid): i for i, pid in enumerate(ids_dist)}
-    rows = [(i, pos[int(pid)]) for i, pid in enumerate(ids_drv) if int(pid) in pos]
+    # Row-wise probability agreement on a sampled subset, aligned by int64 DOC KEY
+    # (the two collects walk the same partitions but neither promises an order).
+    # The key is per-DOCUMENT (`_doc_key_column`, spec R5.4), so under multi-doc a
+    # person's several documents align one-to-one instead of colliding in this
+    # dict — the seam that made person-keyed alignment silently overwrite rows.
+    pos = {int(k): i for i, k in enumerate(ids_dist)}
+    rows = [(i, pos[int(k)]) for i, k in enumerate(ids_drv) if int(k) in pos]
     if rows:
         rng = np.random.default_rng(int(seed))
         take = rng.choice(len(rows), size=min(int(n_rows), len(rows)), replace=False)
