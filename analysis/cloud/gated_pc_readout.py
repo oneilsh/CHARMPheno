@@ -64,9 +64,11 @@ from disk_telemetry import start_disk_telemetry
 from gated_pc_cloud import (
     _DRIVER_READOUT_MAX_C, _MONDO_DAG_SOURCES, _collect_head_proba,
     _collect_lean_proba, _collect_theta_labels, _dump_partial_results,
+    _fit_readout_heads, _write_readout_heads, distributed_ranking_readout,
     distributed_score_arm, format_arm_readout, format_incident_readout,
     incident_readout, multidomain_cache_key, multidomain_load_or_build,
-    readout_ab_report, readout_from_proba, resolve_readout_mode, score_arm,
+    readout_ab_report, readout_from_proba, resolve_eval_path,
+    resolve_readout_mode, score_arm,
 )
 
 # What the batched solve got before fits recorded their own cap. Runs older than
@@ -191,6 +193,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "|dproba|). Report only — never asserts. Ignored unless the "
                         f"mode resolves to distributed AND C<={_DRIVER_READOUT_MAX_C} "
                         "(the driver path must still be affordable to compare to).")
+    p.add_argument("--eval-path", choices=["driver", "distributed"], default="driver",
+                   help="EVAL path for the gated_pc ranking arms (exp 0111 WP-B), "
+                        "orthogonal to --readout-mode. 'distributed' scores the "
+                        "prevalent + incident per-node ranking via the cell explode "
+                        "(no O(N.C) driver collect); 'driver' (default) uses the "
+                        "shipped lean collect. Only meaningful when the readout "
+                        "resolves to distributed. This is the flag the WP-B CLUSTER "
+                        "parity run flips against the 0110 corpus.")
     p.add_argument("--readout-theta-topm", type=int, default=None,
                    help="OVERRIDE the manifest's readout_theta_topm for this re-readout "
                         "(0 forces full-K). Default: the manifest's value, which "
@@ -542,7 +552,8 @@ def reconstruct_model(run_dir: Path, manifest: dict):
 
 def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targets,
                 min_count, readout_mode="auto", ab_check=False, out_dir=None,
-                theta_topm=None, readout_max_iter=None, elig_col=None):
+                theta_topm=None, readout_max_iter=None, elig_col=None,
+                eval_path="driver"):
     """Score both gated_pc arms off two already-TRANSFORMED splits. No argparse.
 
     The whole body of this tool that is worth testing: given the frames a finished
@@ -639,20 +650,50 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
         readout_max_iter, _mi_src = resolve_readout_max_iter(readout_max_iter, manifest)
         print(f"[readout]   readout max_iter={readout_max_iter} (from {_mi_src})",
               flush=True)
-        dist = distributed_score_arm(
-            train_scored, test_scored, C, K, recall_targets=recall_targets,
-            fdr_targets=fdr_targets, min_count=min_count, label="gated_pc",
-            theta_topm=theta_topm, max_iter=readout_max_iter,
-            # Same dir as `results_readout.json`, and for the same reason one step
-            # earlier in the pipeline: this tool IS the recovery path, and its solve
-            # is the multi-hour part. A death mid-solve (the 08-28 preemption-wave
-            # job abort cost 9,112s) now costs at most `checkpoint_every`
-            # iterations, because the next invocation finds the checkpoint next to
-            # the manifest it already reads. `None` when no out_dir was given —
-            # nowhere durable to put it.
-            checkpoint_dir=out_dir, elig_col=elig_col)
-        results["gated_pc"] = dist[0]
+        _epath = resolve_eval_path(eval_path, mode)
+        if _epath == "distributed" and int(theta_topm or 0) > 0:
+            print(f"[readout]   eval_path=distributed IGNORED (readout_theta_topm="
+                  f"{theta_topm}>0; the cell explode is dense-θ only)", flush=True)
+            _epath = "driver"
+        if _epath == "distributed":
+            # WP-B: fit the heads on the executors, then score COLLECT-FREE via the
+            # cell explode (no (D_te,C) proba reaches the driver — audit §5f). This
+            # is the `make gated-pc-readout ID=110 --eval-path distributed` path the
+            # orchestrator points at the real 0110 corpus for the CLUSTER parity run.
+            print("[readout]   eval_path=distributed (WP-B): ranking arms via "
+                  "score_cells_arms_df/per_node_metric_arms_rows (no driver "
+                  "collect); conditional/detection/PR axes need the collect and are "
+                  "skipped — run --eval-path driver for them.", flush=True)
+            _ck = Path(out_dir) / "readout_ckpt_gated_pc.npz" if out_dir else None
+            _V, _b, _const, _deg, _ = _fit_readout_heads(
+                train_scored, C, K, label="gated_pc", max_iter=readout_max_iter,
+                theta_topm=theta_topm, checkpoint_path=_ck, checkpoint_every=10)
+            if out_dir:
+                _write_readout_heads(out_dir, "gated_pc", _V, _b, _const, _deg,
+                                     C, K, theta_topm)
+            results["gated_pc"], _inc_block = distributed_ranking_readout(
+                test_scored, C, _V, _b,
+                recall_targets=recall_targets, fdr_targets=fdr_targets,
+                min_count=min_count, elig_col=elig_col,
+                arm_label="gated_pc (pc_topics_lr)")
+            dist = None
+        else:
+            dist = distributed_score_arm(
+                train_scored, test_scored, C, K, recall_targets=recall_targets,
+                fdr_targets=fdr_targets, min_count=min_count, label="gated_pc",
+                theta_topm=theta_topm, max_iter=readout_max_iter,
+                # Same dir as `results_readout.json`, and for the same reason one
+                # step earlier in the pipeline: this tool IS the recovery path, and
+                # its solve is the multi-hour part. A death mid-solve (the 08-28
+                # preemption-wave job abort cost 9,112s) now costs at most
+                # `checkpoint_every` iterations, because the next invocation finds
+                # the checkpoint next to the manifest it already reads. `None` when
+                # no out_dir was given — nowhere durable to put it.
+                checkpoint_dir=out_dir, elig_col=elig_col)
+            results["gated_pc"] = dist[0]
+            _inc_block = None
     else:
+        _inc_block = None
         Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(train_scored, C)
         Pi_te, y_te, m_te, _ = _collect_theta_labels(test_scored, C)
         results["gated_pc"] = score_arm(
@@ -661,20 +702,23 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
     _dump(results)
     print(format_arm_readout("gated_pc (pc_topics_lr)", results["gated_pc"]),
           flush=True)
-    if dist is not None and dist[6] is not None:
-        # The second readout_from_proba call (E2): same proba, same labels, the
-        # incident eval mask. This is the cheap path the program actually uses —
-        # `make gated-pc-readout ID=110` against a warm bundle and a saved fit.
+    # E2/WP4 incident block. Two sources, one shape: the collect path scores the
+    # incident-masked (D,C) proba here; the eval_path=distributed path already built
+    # the block collect-free from the arms explode (`_inc_block`). This is the cheap
+    # path the program actually uses — `make gated-pc-readout ID=110` against a warm
+    # bundle and a saved fit.
+    _inc = _inc_block
+    if _inc is None and dist is not None and dist[6] is not None:
         _inc = incident_readout(
             dist[1], dist[2], dist[3], dist[6], C, recall_targets=recall_targets,
             fdr_targets=fdr_targets, min_count=min_count,
             prevalent=results["gated_pc"], arm_label="gated_pc (pc_topics_lr)")
-        if _inc is not None:
-            results["gated_pc_incident"] = _inc
-            _dump(results)
-            print(format_incident_readout(_inc).replace("[driver]", "[readout]"),
-                  flush=True)
-    if ab:
+    if _inc is not None:
+        results["gated_pc_incident"] = _inc
+        _dump(results)
+        print(format_incident_readout(_inc).replace("[driver]", "[readout]"),
+              flush=True)
+    if ab and dist is not None:
         # Reuses the distributed result just computed, so the gate costs one extra
         # (driver-path) readout, not two.
         readout_ab_report(train_scored, test_scored, C, K,
@@ -697,13 +741,18 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
     if mode == "distributed":
         # No LR involved — `probability` IS the per-doc (C,) P(node) — so the
         # distributed variant is just the lean collector over that column.
-        hp, hy, hm, _, _ = _collect_lean_proba(
+        hp, hy, hm, ids_hd, _ = _collect_lean_proba(
             test_scored, C, score_col="probability")
     else:
-        hp, hy, hm = _collect_head_proba(test_scored, C)
+        # WP-A4 residue (plan 2026-09-03 note): the co-fit head arm's OWN detection
+        # pool must dedup to persons under multi-doc too — collect the doc keys and
+        # thread them, exactly as the pc_topics_lr arm does. `with_doc_keys=True`
+        # is opt-in so the arity change is explicit (see `_collect_head_proba`).
+        hp, hy, hm, ids_hd = _collect_head_proba(
+            test_scored, C, with_doc_keys=True)
     results["gated_pc_head"] = readout_from_proba(
         hp, hy, hm, C, recall_targets=recall_targets, fdr_targets=fdr_targets,
-        min_count=min_count)
+        min_count=min_count, doc_keys=ids_hd)
     _dump(results)
     print(format_arm_readout("gated_pc (co-fit head)", results["gated_pc_head"]),
           flush=True)
@@ -888,7 +937,7 @@ def main(argv=None) -> int:
                         ab_check=args.readout_ab_check, out_dir=run_dir,
                         theta_topm=args.readout_theta_topm,
                         readout_max_iter=args.readout_max_iter,
-                        elig_col=_elig_col)
+                        elig_col=_elig_col, eval_path=args.eval_path)
             print(f"[readout]   arm results written to "
                   f"{run_dir / 'results_readout.json'}", flush=True)
             train_scored.unpersist(); test_scored.unpersist()

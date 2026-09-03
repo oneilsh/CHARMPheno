@@ -704,27 +704,54 @@ def test_calibration_block_is_entirely_inside_the_gate():
 
     `main` cannot be called without a BigQuery corpus, so the "not executed" claim is
     pinned structurally instead: every piece of the calibration block — its second
-    batched solve, its two lean collects, the isotonic fit and the result key — has
-    to live inside the `if run_calibration:` suite, at a deeper indent. A future edit
-    that hoists any of them out (the easy mistake: computing `proba_te_fit`
-    unconditionally because something below "might" want it) fails here, which is the
-    only place it would be caught before a cluster run pays for it.
+    batched solve, its lean collects / BINNED stats, the isotonic fit and the result
+    keys — has to live inside a `run_calibration`-gated suite, at a deeper indent. A
+    future edit that hoists any of them out (the easy mistake: computing
+    `proba_te_fit` unconditionally because something below "might" want it) fails
+    here, which is the only place it would be caught before a cluster run pays for it.
+
+    WP-B split the block into an `if run_calibration and eval_path == "distributed":`
+    branch (the collect-free BINNED calibration) and an `elif run_calibration:`
+    branch (the shipped collect path); BOTH are gated on `run_calibration`, so
+    `--readout-calibration off` still skips every calibration action. This checks the
+    whole if/elif compound statement is one gated region and every marker is inside.
     """
     import inspect
     import textwrap
 
     src = textwrap.dedent(inspect.getsource(gpc.main)).splitlines()
-    starts = [i for i, ln in enumerate(src) if ln.strip() == "if run_calibration:"]
-    assert len(starts) == 1, "one gate, one block"
+    starts = [i for i, ln in enumerate(src)
+              if ln.strip() == "if run_calibration and eval_path == \"distributed\":"]
+    assert len(starts) == 1, "one gated calibration region"
     head = starts[0]
     indent = len(src[head]) - len(src[head].lstrip())
-    end = next((i for i in range(head + 1, len(src))
-                if src[i].strip() and (len(src[i]) - len(src[i].lstrip())) <= indent),
-               len(src))
+
+    def _same_indent_clause(ln):
+        # an `elif`/`else` continuing the SAME compound statement at head indent
+        return (len(ln) - len(ln.lstrip())) == indent and \
+            ln.strip().startswith(("elif ", "else:"))
+
+    # every `elif`/`else` at head indent from `head` on is gated on run_calibration
+    for i in range(head + 1, len(src)):
+        ln = src[i]
+        if not ln.strip():
+            continue
+        li = len(ln) - len(ln.lstrip())
+        if li < indent:
+            break
+        if li == indent and not _same_indent_clause(ln):
+            end = i
+            break
+    else:
+        end = len(src)
+    # the region is head .. end; assert its `elif` continues the run_calibration gate
+    assert any("elif run_calibration:" in src[i] for i in range(head, end)), \
+        "the second calibration branch must stay gated on run_calibration"
     block = "\n".join(src[head:end])
     outside = "\n".join(src[:head] + src[end:])
     for marker in ('label="gated_pc calibration-fit"', "calibrate_per_node(",
-                   '"gated_pc_conditional_cal"', "conditional ECE (VOI readiness"):
+                   '"gated_pc_conditional_cal"', "conditional ECE (VOI readiness",
+                   "binned_calibration_stats(", '"gated_pc_calibration_binned"'):
         assert marker in block, marker
         assert marker not in outside, f"{marker} escaped the gate"
 
