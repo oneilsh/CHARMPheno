@@ -312,6 +312,17 @@ def main(argv=None) -> int:
                    help="Comma-separated gap values; one probe pass per value.")
     p.add_argument("--caps", default="3,5",
                    help="Per-person doc caps to size (sum of min(n, cap)).")
+    p.add_argument("--prior-obs-days", default="365",
+                   help="Comma-separated prior-observation-gate values; one "
+                        "probe pass per (gap, prior_obs) pair. Default 365 is "
+                        "the assembler's hardcoded `_LOOKBACK_PRIOR_OBS_DAYS` — "
+                        "the 0111 PRIMARY arm. Pass e.g. `365,90,0` for the "
+                        "R5.10 relaxed-gate SENSITIVITY (spec §4 / WP-H): what "
+                        "the incidence definition costs. This probe RELAXES the "
+                        "gate only in its own survival call (the gate function "
+                        "takes the value as an argument); it does NOT edit the "
+                        "hardcoded assembler constant, so no fit and no corpus "
+                        "changes — a measurement, not a knob turned in anger.")
     args = p.parse_args(argv)
     configure_logging()
 
@@ -327,6 +338,7 @@ def main(argv=None) -> int:
     witness = _json.loads(witness_path.read_text())
     gaps = [int(x) for x in str(args.gap_days).split(",") if x.strip()]
     caps = tuple(int(x) for x in str(args.caps).split(",") if x.strip())
+    prior_obs = [int(x) for x in str(args.prior_obs_days).split(",") if x.strip()]
     window_days = int(cm.get("label_window_days") or 365)
 
     with make_spark_session(app_name="diag-episode-probe") as spark:
@@ -340,13 +352,20 @@ def main(argv=None) -> int:
                                       billing=cm.get("billing"))
         first = first.cache()
         for gap in gaps:
-            with _phase(f"episode probe gap={gap}d"):
-                res = run_probe(first, obs, gap_days=gap,
-                                window_days=window_days, caps=caps)
-                print(format_probe_report(res), flush=True)
-                out = run_dir / f"episode_probe_gap{gap}.json"
-                out.write_text(_json.dumps(res, indent=2))
-                print(f"[probe] wrote {out}", flush=True)
+            for pod in prior_obs:
+                # The filename carries prior_obs ONLY when it is relaxed off the
+                # 365 primary, so the original `episode_probe_gap<g>.json` names
+                # (the recorded primary run) are byte-stable and a sensitivity
+                # sweep never overwrites them.
+                tag = f"gap{gap}" if pod == 365 else f"gap{gap}_prior{pod}"
+                with _phase(f"episode probe gap={gap}d prior_obs={pod}d"):
+                    res = run_probe(first, obs, gap_days=gap,
+                                    window_days=window_days, caps=caps,
+                                    prior_obs_days=pod)
+                    print(format_probe_report(res), flush=True)
+                    out = run_dir / f"episode_probe_{tag}.json"
+                    out.write_text(_json.dumps(res, indent=2))
+                    print(f"[probe] wrote {out}", flush=True)
         first.unpersist()
     return 0
 
