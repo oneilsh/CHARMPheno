@@ -640,3 +640,30 @@ bottom.
 and delivered on the 0110 native corpus.** E5 (episode-anchored sampling) remains
 0111, deferred by design. Still owed to the record: the shared-node comparison
 against 0104's anchor-space record (needs the OMOP↔Mondo xref to align id systems).
+
+---
+
+**2026-09-03 — derived work, run closed.** Everything that scoped exp 0111 ran
+OFF THIS RUN'S PERSISTED ARTIFACTS with zero re-fits and zero corpus
+re-assembly — the persisted-heads npz and the E4 sidecar paying for three
+analyses they weren't built for:
+
+- **0111 scout** (`docs/reports/2026-09-02-0111-scouting-window-depth.md`):
+  eval-side horizon sweep REFUTED window-widening (AUC falls 0.6003→0.5857;
+  the AP rise is a base-rate artifact — insight 0077); depth breakout is a
+  reporting characterization (shallow-concentrated, present everywhere).
+- **Episode probes** (`docs/reports/2026-09-02-0111-episode-probe-results.md`,
+  `diag-episode-probe` off this run's sidecar): 2,583/2,714 nodes reach ≥20
+  gated onset episodes vs this run's 923 starved — episode anchoring un-starves
+  the label space; 66.2% of FIRST episodes die to the 365d prior-obs gate
+  (insight 0078). Decisions locked for 0111: gap 90d, cap 3, distributed eval
+  as a precondition.
+
+Insights promoted from this run: **0075** (tracking vs prediction, ~0.067 AUC),
+**0076** (prospective-within-retrospective decile validation), **0077** (window
+refutation), **0078** (episode probe). Spec for the successor:
+`docs/superpowers/specs/2026-09-02-0111-episode-anchored-sampling.md`. This
+run's numbers are the last of their doc unit that future work compares against
+directly — 0111 changes the document unit and carries its own random arm as
+control (insight 0010); 0110 continues as the *artifact* supplier (bundle,
+sidecar, heads), not as a numeric baseline for episode arms.

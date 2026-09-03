@@ -141,10 +141,12 @@ node yield below ~1,800), **R5.8 distributed eval + distributed calibration
 apply wired as a plan precondition** (×2.66 sits at the no-headroom boundary and
 the calibration driver copy is the wall regardless of cap). Node yield PASSED
 R7.3 by a wide margin (2,583 nodes ≥20 gated episodes vs 0110's ~1,791
-scoreable / 923 starved). **One fork left open for Shawn:** the 66.2%
-first-episode kill makes the 365-day prior-obs gate an incidence-*definition*
-choice — keep 365d and report conditional capture (lean), vs relax it for the
-episode arm as a named sensitivity. The plan is not written until this is set.
+scoreable / 923 starved). **The incidence fork is SET (Shawn, 2026-09-03):**
+the 365-day prior-obs gate STAYS for the primary arm — the corpus is "incident
+among the year-plus-observed," and the 66.2% first-episode kill is reported as
+the measured conditional-capture caveat, not engineered away. A relaxed-gate
+**sensitivity** (probe re-run at reduced prior-obs, no fit) is a named plan
+item quantifying what the gate costs. All §4 inputs to the plan are resolved.
 
 The rules that produced those decisions, `make diag-episode-probe ID=110`
 (requires the 0110 sidecar witness; no fit, no cache impact), per gap ∈ {60, 90}:
