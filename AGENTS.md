@@ -1,7 +1,119 @@
 # AGENTS.md
 
-Orientation for LLM-based coding agents working on CHARMPheno. Humans can read
-it too; it is not a user-facing README.
+Orientation for LLM-based coding agents working on CHARMPheno, and the
+**overview of record** for the repo's conventions. Humans can read it too; it is
+not a user-facing README. It is loaded into every session via `CLAUDE.md`
+(`@AGENTS.md`), so the top sections are the fast on-ramp and the rest is
+pointer-heavy for as-needed lookup.
+
+---
+
+## Start here
+
+CHARMPheno is interpretable computational phenotyping over All of Us OMOP EHR:
+gated LDA / prediction-constrained (PC) topic models fit with Bayesian
+variational inference, distributed on Spark/Dataproc. Three layers:
+
+- `spark-vi/` — the domain-agnostic VI framework (`VIModel`, `VIRunner`,
+  `OnlineHDP`). Never imports `charmpheno`.
+- `charmpheno/` — the clinical specialization (OMOP semantics, concept vocab,
+  export, metrics). May depend on `spark-vi`; the reverse is forbidden.
+- `analysis/cloud/` — the runnable Dataproc drivers (fit, readout, diagnostics)
+  and their `Makefile`.
+
+**Where the active line of work lives — read this before reading code.** The
+current experiment, its design, and its results are the newest entries in:
+
+- `docs/experiments/NNNN-*.md` — the experiment log (what was run, why, results).
+- `docs/superpowers/specs/` and `docs/superpowers/plans/` — the normative spec
+  and build plan for in-flight work.
+- `docs/reports/` — analyses and scouting notes feeding decisions.
+
+Orient from those, then the code. The active development branch is named in
+**Cluster practices** below.
+
+## Operational invariants you can break *silently*
+
+These are the mistakes that don't fail loudly — they corrupt caches, leak data,
+or ship wrong numbers. Read before editing anything under `charmpheno/omop/` or
+the label-DAG / assembler modules.
+
+### The cache-key landmine (source-hashed modules)
+
+Bundle/corpus/sidecar cache keys fold in the **source hash of whole modules**
+(`cohort_defs_version()` over `cohorts.py`; `_module_source_hash` over the
+assembler and label-DAG modules). Editing one **silently invalidates every cache
+key in the repo, or poisons a cache under a byte-identical key** — a
+wrong-results hazard, not merely a rebuild cost. Several also carry **byte-pinned
+tripwire hashes** in `tests/scripts/test_case_finding_cache_mondo.py` (60 tests).
+
+**Treat as source-hashed / do-not-edit-casually:**
+`charmpheno/charmpheno/omop/{cohorts,multi_domain,case_finding_assembly}.py`;
+`analysis/cloud/{mondo_dag,mondo_native_dag,mondo_usage_core,mondo_collapse,
+mondo_to_omop_mapping,condition_dag,preindex_closure}.py`. The **authoritative
+check** is that tripwire suite passing byte-identical.
+
+- **Driver-owned files are free to edit:** `analysis/cloud/{gated_pc_cloud,
+  gated_pc_readout,distributed_readout,conversion_*,diag_*,episode_index}.py`,
+  `scripts/run_experiment.py`, the `Makefile`, tests. Prefer solving at a driver
+  **seam** (the `attested_provider` / injection-parameter pattern) over editing
+  a hashed module.
+- Editing a hashed module is a **deliberate, announced, full cache-drop** in ONE
+  commit that re-pins the tripwire hashes and names the drop. Never incidental.
+- **`--py-files` rule:** any module whose functions run executor-side (UDFs,
+  `mapPartitions`) must be on `--py-files` in **every** submit path that can
+  trigger it, or executors hit `ModuleNotFoundError`.
+- **ADR 0047 closure doctrine:** nothing array-shaped rides a task closure;
+  `treeAggregate` zeros are None-sentinel. Study `distributed_readout.py`'s
+  `SparkStatsFn` before touching the distributed paths.
+
+### Egress floor (All of Us)
+
+Aggregate outputs respect the disclosure floor: **any cell < 20 is not
+disclosable**. Per-node / per-cell tables stay workspace-internal; committed
+reports and log banners carry pooled figures and counts-of-nodes only. **Never
+commit patient-level data** to the tree under any circumstances (see Data and
+repo hygiene).
+
+## Cluster practices
+
+Cluster runs happen on the user's Dataproc cluster, checked out at
+`~/repos/CHARMPheno`. Two facts govern every cluster command:
+
+1. **A fresh cluster clones on `main`.** A bare `make …` there runs stale code or
+   fails "No rule to make target", and a plain `git pull origin <branch>` from
+   `main` fails on divergent branches. So **every command handed to the user for
+   the cluster MUST carry this preamble** (it creates a tracking branch on a
+   fresh clone and fast-forwards an existing one):
+
+   ```bash
+   cd ~/repos/CHARMPheno && git fetch origin claude/gated-conditional-voi && git checkout claude/gated-conditional-voi && git pull --ff-only
+   ```
+
+   Then the real command on the next line(s), e.g.:
+
+   ```bash
+   cd ~/repos/CHARMPheno && git fetch origin claude/gated-conditional-voi && git checkout claude/gated-conditional-voi && git pull --ff-only
+   make -C analysis/cloud diag-episode-probe ID=110 GPR_ARGS="--gap-days 90"
+   ```
+
+   - The active development branch is currently **`claude/gated-conditional-voi`**.
+     Update the name here when it changes.
+   - `git pull --ff-only` fast-forwards or refuses — never merges or destroys
+     local state. The cluster is a pure runner; a refusal means something
+     unexpected, so surface it rather than papering over with `reset --hard`.
+   - This applies ONLY to commands the user runs on the cluster. Commands run in
+     the session's own working copy do not need it.
+
+2. **Caches on HDFS are cluster-local and ephemeral.** Bundle, corpus, and
+   sidecar caches default to `hdfs://…`, which dies with the cluster — a fresh
+   cluster has empty HDFS and must rebuild. Expensive artifacts (the sidecar,
+   the bundle) therefore rebuild per cluster unless pointed at a **persistent,
+   in-boundary GCS bucket** (`GPR_SIDECAR_URI` / `GPR_CACHE_URI` / `LR_CACHE_URI`).
+   Do not guess bucket names — the Makefile defaults may be stale; ask the user
+   for the current in-boundary staging bucket before writing to GCS.
+   Right-size the master for the driver-collect wall of record runs, not just
+   the smoke.
 
 ## Read these before suggesting architectural changes
 
@@ -33,17 +145,6 @@ chat. Use plain Greek letters (λ, γ, α, θ, β) and ASCII math (`E[log β]`,
 `[text](path)` links DO render and should be used. (LaTeX inside
 `docs/architecture/*.md` files is fine — it renders when those files are
 viewed in a Markdown previewer.)
-
-These are **living** documents. If a change contradicts them, either update the
-relevant section in the same commit, or write an ADR in
-[`docs/decisions/`](docs/decisions/) recording the departure. Never silently
-diverge.
-
-[`docs/REVIEW_LOG.md`](docs/REVIEW_LOG.md) is a complementary living document: a
-running log of code-walkthrough and refactor sessions. After a substantive
-review or refactor session, append a new dated entry at the top noting which
-areas were reviewed, what shipped, what pre-existing issues were caught, and
-any open threads parked. Keep entries impersonal and project-scoped.
 
 ## Understanding is a first-class deliverable
 
@@ -77,7 +178,8 @@ any open threads parked. Keep entries impersonal and project-scoped.
   - Wraps `spark_vi.models.OnlineHDP` with OMOP semantics, concept vocab,
     downstream export, recovery-vs-ground-truth metrics.
   - May depend on `spark-vi`; the reverse is forbidden.
-- `analysis/` holds runnable end-to-end scripts (thin).
+- `analysis/` holds runnable end-to-end scripts (thin). `analysis/cloud/` is the
+  Dataproc drivers + `Makefile`; `scripts/run_experiment.py` is the fit entry.
 - `notebooks/` holds thin drivers that import from `analysis/` or packages.
   Algorithms never live in notebook cells.
 
@@ -100,45 +202,62 @@ any open threads parked. Keep entries impersonal and project-scoped.
   to install the hooks and the nbstripout git clean filter (so notebook
   outputs strip at `git add` time, not at commit time).
 - Work with clinical data only in its approved environment; do not check
-  patient-level data into the working tree under any circumstances.
+  patient-level data into the working tree under any circumstances. Aggregate
+  outputs respect the egress floor (Operational invariants).
 
-## Decision log
+## The `docs/` map
 
-`docs/decisions/NNNN-<slug>.md` records architectural choices. When making a
-new architectural call, check whether it refines, supersedes, or conflicts
-with an existing ADR, and record accordingly.
+Every non-obvious choice or observation leaves a durable, numbered artifact in
+`docs/` — the discipline is spelled out in
+[`docs/META_process.md`](docs/META_process.md). The systems, and their indexes:
 
-## Insights log
-
-[`docs/insights/`](docs/insights/) records *learned things about the modeling
-regime or the data* — empirical observations from runs, failure modes,
-diagnostic interpretation, hypotheses that did or didn't survive contact with
-reality. Insights complement ADRs: ADRs are forward-looking *decisions*,
-insights are backward-looking *observations*.
-
-When a run surfaces a non-obvious modeling phenomenon, failure mode, or
-counterintuitive result, add an insight under `docs/insights/NNNN-<slug>.md`.
-Each insight should name the **setting context** that produced it — model,
-doc unit, key hyperparameters that differ from recent defaults — at a level
-like "trying with very large K values revealed X; other settings as in other
-recent patient-year runs." Detail level is to let a future reader judge
-whether the observation likely generalizes or was regime-specific. See
-[`docs/insights/README.md`](docs/insights/README.md) for the format.
+- [`docs/decisions/`](docs/decisions/) — **ADRs**: forward-looking architectural
+  *decisions* (why X over Y). ~200 words each; supersession named, never
+  overwritten. Index + skeleton in its README.
+- [`docs/insights/`](docs/insights/) — **Insights**: backward-looking empirical
+  *observations* from runs (failure modes, which diagnostics discriminate,
+  hypotheses that did/didn't survive). Name the setting that produced each.
+  Index + format in its README.
+- [`docs/experiments/`](docs/experiments/) — **Experiment log**: one dated,
+  numbered doc per experiment (front matter + run log + results). Status
+  lifecycle and index in its README.
+- [`docs/superpowers/`](docs/superpowers/) — **Specs & plans**: `specs/` hold
+  the normative design (definitions, requirements) for a body of work; `plans/`
+  hold the work-package build plan that implements a spec. The
+  audit → spec → plan → experiment → report flow is described in its README.
+- [`docs/reports/`](docs/reports/) — analyses, scouting notes, and audits that
+  feed decisions but are not themselves experiments (dated, not numbered).
+- [`docs/architecture/`](docs/architecture/) — the living architectural vision
+  (above). If a change contradicts these, update the section in the same commit
+  or write an ADR recording the departure. Never silently diverge.
+- [`docs/REVIEW_LOG.md`](docs/REVIEW_LOG.md) — a running log of code-walkthrough
+  and refactor sessions. After a substantive review or refactor, append a dated
+  entry at the top: areas reviewed, what shipped, pre-existing issues caught,
+  open threads parked. Impersonal and project-scoped.
 
 ## Testing expectations
 
-- Default `make test` runs unit tests only and must finish in under ~10s.
-- `@pytest.mark.slow` for integration tests (simulator data, local Spark,
-  minutes-scale). Run via `make test-all`.
-- `@pytest.mark.cluster` for tests that require a real Dataproc cluster.
-  Manual only, triggered by `make test-cluster`.
+- **Package unit tests:** `make test` — unit only, must finish under ~10s.
+- **Package integration:** `make test-all` (`@pytest.mark.slow`: simulator data,
+  local Spark, minutes-scale).
+- **Cluster-driver tests** (`analysis/cloud/`, under `tests/scripts/`) need the
+  framework on the path, and `-m ""` to include the slow local-Spark cases:
+  ```bash
+  PYTHONPATH=spark-vi poetry run pytest tests/scripts/<file> -p no:randomly -m ""
+  ```
+  Some failures are pre-existing/environmental (e.g. `charmpheno.omop` import
+  errors inside PySpark UDF workers) — baseline with `git stash` first; the
+  obligation is no NEW failures, and the tripwire suite stays byte-identical.
+- **Cluster tests:** `@pytest.mark.cluster`, manual only via `make test-cluster`.
 
 ## When you finish a change
 
 Before declaring work complete:
-- Tests pass (`make test` minimum; `make test-all` if integration surfaces
-  changed).
+- Tests pass (`make test` minimum; `make test-all` if integration surfaced
+  changed; the relevant `tests/scripts/` suite if a driver changed).
 - Relevant `docs/architecture/*.md` section updated if the change was
-  architectural, or an ADR records the exception.
+  architectural, or an ADR records the exception. A run that surfaced something
+  gets an experiment/insight/report entry.
 - Docstrings for new math functions explain *why*, not just *what*.
-- No data files, secrets, or large binaries staged.
+- No data files, secrets, or large binaries staged; no patient-level data;
+  aggregate outputs within the egress floor.
