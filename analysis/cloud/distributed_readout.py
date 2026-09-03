@@ -128,6 +128,110 @@ _COVERAGE_BINS = 1000
 
 
 # --------------------------------------------------------------------------- #
+# The int64 doc-key seam (exp 0111 WP-A1, spec R5.4).                          #
+# --------------------------------------------------------------------------- #
+# Every row the readout stack identifies is a DOCUMENT, and until exp 0111 a
+# document was a person: `doc_id == person_id`, an int64, and the whole eval
+# stack (`_lean_eval_kernel`, `_densify_lean_blocks`, the A/B alignment dict)
+# leans on that int64-ness — string doc_ids raise the moment they reach
+# `np.asarray(ids, dtype=np.int64)`. Exp 0111 makes a person carry up to a few
+# episode documents (`EpisodeDocSpec`, `doc_id = "cohort:person:index_date"`, a
+# STRING), so the stack needs one synthesized int64 that (a) is unique per
+# document, (b) yields the person back by pure arithmetic wherever person-grain
+# logic needs it, and (c) leaves the pre-0111 single-doc corpora on EXACTLY the
+# ids they have today (up to an order-preserving scale), so nothing about the
+# byte-identical single-doc path moves.
+#
+#   doc_key = person_id * DOC_KEY_RADIX + episode_no
+#
+# with `0 <= episode_no < DOC_KEY_RADIX` the per-person, WITHIN-CORPUS document
+# index. RADIX=64 is a power of two so the inverse is a shift/mask, and 64 is
+# generous: exp 0111 caps a person at <= 3 documents (cap-5 fallback), so the
+# used range is <= 5 << 64. Because episode_no occupies the low bits and is
+# bounded, sorting by doc_key sorts by (person_id, episode_no) — order-
+# preserving — and the person blocks `[p*64, p*64+64)` are disjoint, so keys
+# never collide across persons. For every corpus that exists TODAY there is one
+# document per person, episode_no is 0, and doc_key = person_id * 64: the
+# current ids, scaled, and `person_of(doc_key) == person_id` exactly.
+#
+# COMPATIBILITY WITH WP-D1 (verified, and it is NOT a free identity — read this).
+# WP-D1's `episode_index.py` emits an `episode_no` that is the ORIGINAL
+# chronological ordinal of a person's episode (1-based, NOT re-ranked after the
+# per-person cap — deliberately, so R7.5's ordinal drop-rate table and the
+# 66.2% first-episode-kill decomposition keep meaning "how many-th new-diagnosis
+# cluster is this"). That ordinal is UNBOUNDED — a chronic patient's 70th
+# episode reports `episode_no = 70` even if the cap keeps only three of them —
+# so it is NOT the value that may occupy these low 6 bits. The `episode_no` this
+# key wants is the bounded WITHIN-CORPUS document index (0 .. cap-1) of the
+# documents actually assembled for a person; WP-D2, when it wires the episode
+# corpus, must hand this seam that bounded index (or, equivalently, a dense
+# per-person `row_number()-1` over the kept documents), never D1's raw ordinal.
+# `synthesize_doc_key` enforces the bound (episode_no < RADIX raises), and the
+# corpus-level uniqueness assertion at densify time (`gated_pc_cloud.
+# _assert_unique_doc_keys`) is the second tripwire: a person carrying more than
+# RADIX documents, or D1's raw ordinal leaking through, shows up as a collision
+# there rather than as a silently mis-attributed row. EpisodeDocSpec itself keys
+# its string `doc_id` on `index_date`, not on any ordinal, so nothing downstream
+# of the doc spec assumes the two `episode_no`s are the same object.
+DOC_KEY_RADIX = 64
+# Overflow guard: doc_key must stay inside int64. The largest key is
+# `(person_id) * 64 + 63`, so `person_id < 2**57` keeps it below 2**63 - 1 with
+# the low 6 bits to spare. OMOP person_ids are far below this (int32-range in
+# every corpus this repo has assembled), so the guard is a tripwire on a
+# malformed id or a mis-scaled key, never a real-corpus constraint.
+DOC_KEY_MAX_PERSON_ID = 1 << 57
+
+
+def synthesize_doc_key(person_id, episode_no=0):
+    """`(person_id, episode_no) -> doc_key = person_id * RADIX + episode_no` (int64).
+
+    THE one definition of the synthesis (spec R5.4). Pure, and vectorized: a
+    Python int in gives a Python int out; numpy arrays in give an int64 array
+    out — the driver builds the (D,) key array for a whole split through the same
+    call the scalar tests exercise, so the two can never drift.
+
+    Guards both operands because a violation is silent otherwise: a `person_id >=
+    2**57` overflows int64 after the multiply and wraps into some other person's
+    block; an `episode_no >= RADIX` (e.g. WP-D1's raw chronological ordinal —
+    see the module comment) carries into the next person's block. Either is a
+    cross-person collision, so both raise HERE, at synthesis, rather than as a
+    mystery row later.
+    """
+    p = np.asarray(person_id)
+    e = np.asarray(episode_no)
+    if np.any(p < 0) or np.any(p >= DOC_KEY_MAX_PERSON_ID):
+        raise ValueError(
+            f"doc_key: person_id out of [0, 2**57); the overflow guard "
+            f"(DOC_KEY_MAX_PERSON_ID) tripped — max seen "
+            f"{int(np.max(p))}")
+    if np.any(e < 0) or np.any(e >= DOC_KEY_RADIX):
+        raise ValueError(
+            f"doc_key: episode_no out of [0, {DOC_KEY_RADIX}); this is the "
+            f"bounded WITHIN-CORPUS document index, NOT WP-D1's unbounded "
+            f"chronological ordinal — max seen {int(np.max(e))}")
+    key = p.astype(np.int64) * np.int64(DOC_KEY_RADIX) + e.astype(np.int64)
+    return int(key) if key.ndim == 0 else key
+
+
+def person_of(doc_key):
+    """`doc_key -> person_id` — the inverse's person half (`doc_key // RADIX`).
+
+    THE one place person-grain logic recovers the person from a row's key
+    (calibration splits, per-person dedup, A/B alignment when it wants persons
+    rather than documents). Scalar- and array-safe like `synthesize_doc_key`, so
+    a caller never open-codes `// 64` and can never disagree with the radix.
+    """
+    return np.asarray(doc_key).astype(np.int64) // np.int64(DOC_KEY_RADIX) \
+        if np.ndim(doc_key) else int(doc_key) // DOC_KEY_RADIX
+
+
+def episode_of(doc_key):
+    """`doc_key -> episode_no` — the inverse's episode half (`doc_key % RADIX`)."""
+    return np.asarray(doc_key).astype(np.int64) % np.int64(DOC_KEY_RADIX) \
+        if np.ndim(doc_key) else int(doc_key) % DOC_KEY_RADIX
+
+
+# --------------------------------------------------------------------------- #
 # Pure numpy partition kernels (unit-tested; no SparkSession).                 #
 # --------------------------------------------------------------------------- #
 def _topm_coverage_kernel(thetas, ms, n_bins=_COVERAGE_BINS):
@@ -325,7 +429,7 @@ def _stats_kernel(rows, V, b_raw, C, K, node_mask=None):
     return loss, g_raw, s
 
 
-def _score_cells_kernel(rows, V, b_raw, C):
+def _score_cells_kernel(rows, V, b_raw, C, with_id=False):
     """Yield `(node, y, p)` for every OBSERVED cell of every row — the eval explode.
 
     Plan §3: per-node metrics need only that node's `(y, p)` pairs (16 bytes/cell),
@@ -333,11 +437,20 @@ def _score_cells_kernel(rows, V, b_raw, C):
     executors for eval. Same sparse-vs-dense score reuse as `_stats_kernel`.
     Generator (not a list) so a partition's cells stream into the shuffle writer
     instead of materializing per-partition.
+
+    `with_id=True` prepends the row's int64 `doc_key` to every cell — `(doc_key,
+    node, y, p)` — for the person-grain distributed eval a later WP wires (spec
+    R5.4): grouping the cells by `person_of(doc_key)` is how a distributed
+    calibration split or a person-level dedup stays person-grain when a person
+    owns several documents. Rows then arrive as `(doc_key, theta, label, mask)`.
+    The default (`with_id=False`) is the byte-identical 16-bytes/cell path.
     """
     C = int(C)
     V = np.asarray(V, dtype=np.float64)
     b_raw = np.asarray(b_raw, dtype=np.float64)
-    for theta, label, mask in rows:
+    for row in rows:
+        doc_key, (theta, label, mask) = (
+            (row[0], row[1:]) if with_id else (None, row))
         obs = np.flatnonzero(mask)
         if obs.size == 0:
             continue
@@ -345,7 +458,10 @@ def _score_cells_kernel(rows, V, b_raw, C):
         p = 1.0 / (1.0 + np.exp(-z))
         y = label[obs]
         for j in range(obs.size):
-            yield int(obs[j]), float(y[j]), float(p[j])
+            if with_id:
+                yield int(doc_key), int(obs[j]), float(y[j]), float(p[j])
+            else:
+                yield int(obs[j]), float(y[j]), float(p[j])
 
 
 # --------------------------------------------------------------------------- #
@@ -565,8 +681,8 @@ def _sparse_score_cells_kernel(packed, V, b_raw, C, chunk_rows=_TOPM_CHUNK_ROWS)
 def _lean_eval_kernel(rows, C, V=None, b_raw=None):
     """Pack one partition of scored docs into the LEAN eval block (plan §3, v2.1).
 
-    `rows` is an iterable of `(doc_id, score, label (C,), mask (C,))` — or of
-    `(doc_id, score, label, mask, preindex_ids)` quints (`_row_quints`), which add
+    `rows` is an iterable of `(doc_key, score, label (C,), mask (C,))` — or of
+    `(doc_key, score, label, mask, preindex_ids)` quints (`_row_quints`), which add
     E1's per-document pre-index closure `R_d` as a SPARSE index list. `score`
     is the raw θ (K,) when `(V, b_raw)` are given — then `p = σ(clip(V·θ + b_raw))`,
     the same arithmetic as `_score_cells_kernel` — or an ALREADY-computed per-doc
@@ -612,8 +728,10 @@ def _lean_eval_kernel(rows, C, V=None, b_raw=None):
         different and equally valid thing: that document carried nothing pre-index.
         **+1 byte/cell** on the driver, and the +1 is the densified bool.
 
-    Rows are emitted in partition order and carry `doc_id`, so the driver can align
-    two independently collected paths (the A/B equality gate) without a shuffle.
+    Rows are emitted in partition order and carry the int64 `doc_key`, so the
+    driver can align two independently collected paths (the A/B equality gate) on
+    DOCUMENT identity — one row per key — without a shuffle, and recover the
+    person for any person-grain step via `person_of` (spec R5.4).
     """
     C = int(C)
     if V is not None:
@@ -628,6 +746,14 @@ def _lean_eval_kernel(rows, C, V=None, b_raw=None):
         # Quads (`_row_quads`) and quints (`_row_quints`, E1's pre-index closure)
         # both land here: one kernel, one packing, so the incident arm cannot drift
         # from the prevalent one it is compared against.
+        # `doc_id` here is the synthesized int64 DOC KEY
+        # (`synthesize_doc_key`, `= person_id * RADIX + episode_no`), never the
+        # raw string `doc_id` a multi-doc `EpisodeDocSpec` stamps. The row
+        # adapters (`_row_quads`/`_row_quints`) receive it as the already-int64
+        # `doc_key` column the readout collect materializes, so the
+        # `np.asarray(ids, dtype=np.int64)` below is exact by construction for
+        # both single- and multi-doc corpora — the seam that used to raise on a
+        # string id now carries a person-derivable int64 (spec R5.4).
         doc_id, score, label, mask = row[0], row[1], row[2], row[3]
         pre = row[4] if len(row) > 4 else None
         if V is None:
@@ -743,6 +869,20 @@ def _row_triples(rows, topic_col, label_col, mask_col):
                _to_array(row[mask_col]))
 
 
+def _row_triples_id(rows, id_col, topic_col, label_col, mask_col):
+    """`_row_triples` prefixed with the int64 doc key — the `with_id` cell path.
+
+    `id_col` names the synthesized `doc_key` column (`synthesize_doc_key`), so
+    `_score_cells_kernel(..., with_id=True)` can carry document identity through
+    the explode and a person-grain consumer recovers the person via `person_of`.
+    """
+    for row in rows:
+        yield (row[id_col],
+               _to_array(row[topic_col]),
+               _to_array(row[label_col]),
+               _to_array(row[mask_col]))
+
+
 def _row_sparse(rows, topic_col, label_col, mask_col, topm):
     """Spark Rows -> `(idx (m,) int32, val (m,), obs (n,) int32, y_obs (n,))` tuples.
 
@@ -765,10 +905,14 @@ def _row_sparse(rows, topic_col, label_col, mask_col, topm):
 
 
 def _row_quads(rows, id_col, score_col, label_col, mask_col, topm=0):
-    """Stream `(doc_id, score, label, mask)` off Spark Rows for `_lean_eval_kernel`.
+    """Stream `(doc_key, score, label, mask)` off Spark Rows for `_lean_eval_kernel`.
 
-    `score_col` is θ or an already-computed probability vector depending on the
-    caller; both arrive as Spark ML Vectors, so the same `_to_array` serves.
+    `id_col` names the int64 DOC-KEY column (`synthesize_doc_key`), which the
+    readout collect materializes before it selects — never the raw string
+    `doc_id`, which `_lean_eval_kernel` cannot pack into its int64 id array
+    (spec R5.4). `score_col` is θ or an already-computed probability vector
+    depending on the caller; both arrive as Spark ML Vectors, so the same
+    `_to_array` serves.
 
     `topm > 0` truncates the score to its top-m `(idx, val)` pair — valid ONLY when
     `score_col` is θ and the kernel is scoring it with `(V, b_raw)`. An
@@ -1464,7 +1608,7 @@ def make_spark_stats_fn(scored_df, C, K, mu, sd, *, fold_standardization,
 
 
 def score_cells_df(scored_df, V, b_raw, C, *, topic_col="topicDistribution",
-                   label_col="label", mask_col="labelMask", topm=0):
+                   label_col="label", mask_col="labelMask", topm=0, id_col=None):
     """Explode the fitted model's OBSERVED test cells to `[node, y, p]`.
 
     Plan §2–3: broadcast the fitted (raw-space) parameters, emit `P(node c)` only
@@ -1474,19 +1618,40 @@ def score_cells_df(scored_df, V, b_raw, C, *, topic_col="topicDistribution",
 
     Returns a DataFrame `node int, y double, p double`, one row per observed
     (doc, node) cell.
+
+    `id_col` (spec R5.4) names the int64 `doc_key` column the readout collect
+    synthesizes; when given, the schema gains a leading `doc_key long` and every
+    cell carries its document identity, so a distributed eval that must reduce
+    per person (a calibration split, a per-person dedup) groups on
+    `person_of(doc_key)` — the reason this escape-hatch path "speaks doc_key" for
+    the WP that wires it into a driver. The person-grain need is what motivates
+    it; `per_node_metric_rows` groups by `node` alone and is indifferent to the
+    extra column (it selects by name). Left `None` the output is byte-identical
+    to before. The doc-key path uses the DENSE kernel only, so `id_col` with
+    `topm > 0` is refused rather than silently threading truncation and identity
+    through two different loops.
     """
-    from pyspark.sql.types import (DoubleType, IntegerType, StructField,
-                                   StructType)
+    from pyspark.sql.types import (DoubleType, IntegerType, LongType,
+                                   StructField, StructType)
 
     C = int(C)
     topm = int(topm)
+    if id_col is not None and topm > 0:
+        raise ValueError(
+            "score_cells_df: id_col (doc_key) is supported on the dense path "
+            "only; a top-m distributed eval that also needs doc_key must thread "
+            "the id through _sparse_chunks first (deferred to that WP)")
     sc = scored_df.sparkSession.sparkContext
     bcast = sc.broadcast((np.ascontiguousarray(V, dtype=np.float64),
                           np.ascontiguousarray(b_raw, dtype=np.float64)))
-    cols = (topic_col, label_col, mask_col)
+    cols = ((id_col, topic_col, label_col, mask_col) if id_col is not None
+            else (topic_col, label_col, mask_col))
 
-    def _local(rows, _b=bcast, _C=C, _cols=cols, _m=topm):
+    def _local(rows, _b=bcast, _C=C, _cols=cols, _m=topm, _id=id_col):
         V_, b_ = _b.value
+        if _id is not None:
+            return _score_cells_kernel(
+                _row_triples_id(rows, *_cols), V_, b_, _C, with_id=True)
         if _m > 0:
             # `(V, b_raw)` were FIT on truncated θ, so the cells they score must be
             # truncated too — same feature map, fit and eval.
@@ -1494,9 +1659,12 @@ def score_cells_df(scored_df, V, b_raw, C, *, topic_col="topicDistribution",
                                               V_, b_, _C)
         return _score_cells_kernel(_row_triples(rows, *_cols), V_, b_, _C)
 
-    schema = StructType([StructField("node", IntegerType(), False),
-                         StructField("y", DoubleType(), False),
-                         StructField("p", DoubleType(), False)])
+    fields = [StructField("node", IntegerType(), False),
+              StructField("y", DoubleType(), False),
+              StructField("p", DoubleType(), False)]
+    if id_col is not None:
+        fields.insert(0, StructField("doc_key", LongType(), False))
+    schema = StructType(fields)
     cells = scored_df.select(*cols).rdd.mapPartitions(_local)
     # The broadcast is kept alive by the returned DataFrame's lineage (it is lazy),
     # so it is NOT unpersisted here — it dies with the SparkContext or when the
@@ -1553,6 +1721,11 @@ def per_node_metric_rows(cells_df, C, *, min_count=0, engine="rdd"):
     Returns `{c: {"auc", "ap", "n_pos", "n_neg", "skipped"}}` — the mapping
     `_bundle_masked` puts under `"per_label"`, so `analysis.pc.evaluate._macro` can
     be applied to it unchanged.
+
+    A `cells_df` carrying the optional leading `doc_key` column
+    (`score_cells_df(..., id_col=...)`, spec R5.4) scores identically here: this
+    path selects `node`/`y`/`p` BY NAME, so the document identity a person-grain
+    consumer needs simply rides through untouched.
 
     Requires `analysis.pc.evaluate` to be importable ON THE EXECUTORS (see module
     docstring).
