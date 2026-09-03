@@ -60,9 +60,11 @@ def test_pre_index_windowing_restricts_to_lookback(spark):
 
     assert feat_concepts == {12, 13}
     assert label_concepts == {14, 15}
-    # index_date is dropped; source_cohort rides along.
-    assert "index_date" not in feature.columns
+    # index_date now rides through (exp 0111 R5.2 passthrough); source_cohort too.
+    # This driver reads only the feature concepts, so the extra column is inert here.
+    assert "index_date" in feature.columns
     assert "source_cohort" in feature.columns
+    assert {r["index_date"] for r in feature.collect()} == {_d("2020-06-01")}
 
 
 def test_pre_index_windowing_is_per_person(spark):

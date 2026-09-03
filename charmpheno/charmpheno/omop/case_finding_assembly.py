@@ -393,8 +393,12 @@ def assemble_from_events(events_df, before_dag, *, doc_spec, min_n,
 
     # 2) prune the DAG on TRAIN patient counts only. Attestations come from the
     #    label frame (== events_df in forward mode). NOTE (lookback mode): the
-    #    leakage strip below (step 6) is a no-op in this mode, since DAG node
-    #    codes are absent from the feature frame (events_df) by construction.
+    #    leakage strip below (step 6) is NARROW, not the no-op the old comment
+    #    claimed — it drops only the DAG's OWN node cids (before_dag.nodes() =
+    #    anchor cids + synthetic negatives; audit §E6), which a prevalent patient's
+    #    pre-index window can still carry, and it never touches the attestation-
+    #    climbed DESCENDANTS that actually place a patient on a node. So the
+    #    windowing alone does not make the strip vacuous.
     train_att = doc_attested_nodes(train_lab, node_cids, doc_spec=doc_spec).cache()
     test_att = doc_attested_nodes(test_lab, node_cids, doc_spec=doc_spec).cache()
     try:
