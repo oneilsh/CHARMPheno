@@ -78,7 +78,8 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
                              doc_spec=DEFAULT_DOC_SPEC,
                              preindex_closure=False,
                              preindex_closure_version="",
-                             episode_sampling=None) -> str:
+                             episode_sampling=None,
+                             gate_frontier_mode=None) -> str:
     """Stable 16-hex hash of the inputs that determine the assembled bundle.
 
     Folds cohort_defs_version() plus content hashes of condition_dag +
@@ -127,6 +128,11 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
     index frame — the episode arm or its matched-random sibling. Folded ONLY when
     supplied (`index_mode="external"`), so every existing key is byte-identical;
     see the fold site below.
+
+    `gate_frontier_mode` (exp 0111 WP-D3 / D13) marks a bundle whose `frontier` gate
+    is the 90-day presentation window while its `label`/`labelMask` stay the 365-day
+    frame (`gate90d`). Folded ONLY when a gate is requested (external path), the same
+    discipline — an un-gated episode bundle keys byte-identically.
     """
     from charmpheno.omop import condition_dag, case_finding_assembly
     from charmpheno.omop.cohorts import cohort_defs_version
@@ -176,6 +182,14 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
     if episode_sampling:
         payload["episode_sampling"] = {
             k: episode_sampling[k] for k in sorted(episode_sampling)}
+    # exp 0111 WP-D3 (D13): the gate/label-separation identity. A gated bundle
+    # reads a 90-day `frontier` while its `label`/`labelMask` stay the 365-day
+    # frame — same labels, DIFFERENT gate — so it is a distinct cached artifact
+    # from the un-gated (365-day-frontier) episode bundle. Folded ONLY when a gate
+    # is actually requested (never for 'none'/absent), the `episode_sampling`
+    # discipline, so every existing key is byte-identical and the tripwire pins it.
+    if gate_frontier_mode and str(gate_frontier_mode) != "none":
+        payload["gate_frontier_mode"] = str(gate_frontier_mode)
     # Only fold the Gated-PC label columns into the key when they are requested,
     # so the default (emit_labels=False) path keeps its existing key and existing
     # dag-placement caches stay valid; a labeled bundle gets a distinct key.

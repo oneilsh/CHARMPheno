@@ -884,6 +884,12 @@ def build_gated_pc_args(
                      str(effective["episode_window_days"])])
     if effective.get("episode_sidecar_uri"):
         args.extend(["--episode-sidecar-uri", str(effective["episode_sidecar_uri"])])
+    # exp 0111 (WP-D3 / D13): the gate/label separation. > 0 swaps each document's
+    # 90-day presentation frontier in as the gate while the 365-day outcome label
+    # stays put. Off (0) by default so a non-D13 run keys byte-identically.
+    if effective.get("gate_frontier_days") is not None:
+        args.extend(["--gate-frontier-days",
+                     str(effective["gate_frontier_days"])])
     if effective.get("readout_sample_frac") is not None:
         args.extend(["--readout-sample-frac", str(effective["readout_sample_frac"])])
     if effective.get("readout_mode"):

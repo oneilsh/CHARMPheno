@@ -363,6 +363,13 @@ def corpus_spec_from_manifest(manifest: dict, *, doc_min_length=None, billing=No
         # MISS where to reload/rebuild the index's sidecar.
         "episode_sampling": _pick("episode_sampling", None),
         "episode_sidecar_uri": _pick("episode_sidecar_uri", ""),
+        # exp 0111 WP-D3 (D13): the gate/label-separation identity. Defaults to None
+        # (absent) — what every manifest written before D13 means, so an old run
+        # recomputes its byte-identical key — and is folded into the bundle key ONLY
+        # on the external path (multidomain_cache_key), so a re-readout of a gated
+        # episode bundle recomputes the fit's OWN key. The readout reads the 365-day
+        # `label`/`labelMask` regardless; this field only routes the cache key.
+        "gate_frontier_mode": _pick("gate_frontier_mode", None),
         # E1 (exp E-census onward). Mondo-only, defaults to False — what every
         # manifest written before the flag existed means — and the CLI wins in
         # both directions for a fit whose manifest omits or contradicts it, the
