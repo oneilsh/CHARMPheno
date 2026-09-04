@@ -1,0 +1,11 @@
+# Episode-anchored whole-Mondo case-finding cohort (exp 0111/0112). Same label DAG
+# and corpus contract as population_mondo_all.yaml (the full native-Mondo hierarchy,
+# dag_source: mondo_native, patients placed by code map) — the ONLY difference is the
+# document INDEX: instead of a population-random index it uses the driver-built
+# episode / matched-random external index (index_mode: external, doc_spec: episode).
+# This file exists so load_defaults finds a <cohort>.yaml to merge over _base.yaml;
+# all the operational knobs (index_arm, gate_frontier_days, the episode_* sampling
+# parameters, and the copied-from-0110 fit config) live in each experiment doc's front
+# matter. `disease` is vestigial here (the label space is not disease-scoped).
+cohort: episode_mondo_all
+cohort_def: episode_mondo_all

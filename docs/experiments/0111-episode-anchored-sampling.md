@@ -46,7 +46,90 @@ disease: rare_priority
 # scoreable node set, never cross-experiment.
 #
 # Everything else (dag_source: mondo_native, window, strip, mask, vocab, head params,
-# seed, spark_conf, preindex_closure) is copied from 0110 verbatim.
+# seed, spark_conf) is copied from 0110 verbatim EXCEPT preindex_closure, forced OFF:
+# the E1 preindex-closure post-pass over an EXTERNAL episode index is not yet wired
+# (WP-D2 found the combination raises loudly, by design), and WP-F's incident census
+# consumes R_d — so a small follow-up WP must wire preindex-over-episodes before WP-F.
+# Until then 0111 runs without the R_d column. person_mod:1 / max_iter:100 is the
+# RECORD config; the WP-E smoke launches the SAME corpus with a reduced iteration cap.
+# The episode corpus is ~x2.66 the doc count — eval_path=distributed (WP-B) avoids the
+# driver-collect wall; re-size instances/partitions off the real corpus, not 0110's.
+#
+# WHY the assembler's own prior_obs_days is inert here: index_mode="external" takes the
+# driver-built index_df VERBATIM (multi_domain.py external path), so the episode gate is
+# applied by the PROVIDER (episode_prior_obs_days:365 / episode_window_days:365), not by
+# the assembler. prior_obs_days:0 is copied from 0110 for the feature window and does not
+# re-gate the external index.
+
+dag_source: mondo_native
+index_arm: episode
+gate_frontier_days: 90
+episode_gap_days: 90
+episode_cap: 3
+episode_salt: "0111"
+episode_prior_obs_days: 365
+episode_window_days: 365
+preindex_closure: false
+readout_mode: distributed
+readout_theta_topm: 256
+weight_y: 0.0
+weight_y_warmup_iters: 0
+skip_unsup_gated: true
+min_positives: 100
+mondo_version: 2026-06-02
+mondo_cache_dir: data/mondo
+extra_domains: measurement,drug
+label_mask_mode: closure
+localize_head: true
+head_support: path_cousins_kids
+head_intercept: true
+head_standardize: true
+doc_concentration: 0.5
+head_lr: 1.0
+person_mod: 1
+prior_obs_days: 0
+doc_min_length: 10
+min_n: 0
+holdout_frac: 0.2
+vocab_size: 5000
+min_df: 20
+min_patient_count: 20
+window_mode: lookback
+lookback_days: 1825
+label_window_days: 365
+strip_mode: both
+n_bg: 8
+tpn: 1
+optimize_doc_concentration: true
+head_optimizer: newton
+head_newton_ridge: 0.05
+head_l2: 0.01
+grad_cavi_iters: 15
+topic_trust: 0.05
+max_iter: 100
+subsampling_rate: 0.1
+tau0: 64.0
+kappa: 0.51
+cavi_max_iter: 100
+cavi_tol: 0.001
+with_dag_head: false
+baseline_max_iter: 100
+min_label_count: 20
+eval_every: 0
+num_partitions: 96
+seed: 42
+cache_uri: hdfs:///user/dataproc/charm/case_finding_cache
+# spark_conf VALUES copied verbatim from 0110; the hard-won rationale (executor-heap
+# OOM / DA idle-kill / exclude starvation / driver-disk GC) is in 0110's run log +
+# front-matter comments. Re-tune only via GPR_SPARK_CONF on a beefier cluster.
+spark_conf:
+  spark.executor.cores: 2
+  spark.executor.memory: 8g
+  spark.executor.memoryOverhead: 3g
+  spark.dynamicAllocation.enabled: "false"
+  spark.executor.instances: 12
+  spark.excludeOnFailure.timeout: 10m
+  spark.cleaner.periodicGC.interval: "5min"
 ---
 
 # 0111 — episode-anchored sampling
