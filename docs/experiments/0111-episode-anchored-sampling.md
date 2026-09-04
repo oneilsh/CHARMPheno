@@ -71,8 +71,9 @@ episode_prior_obs_days: 365
 episode_window_days: 365
 preindex_closure: false
 readout_mode: distributed
-eval_path: distributed
-readout_max_iter: 20   # TEMP: WP-E smoke value; REVERT (unset -> default 200) for WP-G (task #9)
+# eval_path: the distributed cell-explode needs full-K theta (topm=0); under
+# readout_theta_topm=256 the driver eval collect is BOUNDED (test_docs x 256, sub-GB)
+# and is the chosen path. distributed eval was measured inert here and removed.
 readout_theta_topm: 256
 weight_y: 0.0
 weight_y_warmup_iters: 0
@@ -108,7 +109,7 @@ head_newton_ridge: 0.05
 head_l2: 0.01
 grad_cavi_iters: 15
 topic_trust: 0.05
-max_iter: 15   # TEMP: WP-E smoke value; REVERT to 100 for the WP-G record run (task #9)
+max_iter: 100
 subsampling_rate: 0.1
 tau0: 64.0
 kappa: 0.51
@@ -226,6 +227,37 @@ distributed eval path is confirmed at real scale (C=2714). **Episode arms are cl
 `eval_path: distributed`** — which they need anyway (the ~×2.66 doc count makes the
 driver-collect eval the memory wall). run_experiment now forwards `eval_path` from front
 matter (mirrors `readout_mode`); both arm docs set it. Egress: all figures pooled.
+
+### 2026-09-04 — WP-E smoke (episode arm), then a clean record run
+
+First episode-arm fit (`make exp ID=111`), initially at smoke caps (topic max_iter 15,
+readout_max_iter 20). **Corpus-shape checks PASS:** cache HIT (bundle banked), C=2714
+heads / K=2721, ledger kept 2714 / dropped 0, `test_fg_docs=156034` → ~780k docs = the
+predicted **×2.66**; domain θ balanced [0.389/0.429/0.182]; **2241 prevalent-scoreable
+nodes vs 0110's 1855** — the un-starving already visible in the prevalent arm.
+
+Three log lines that look alarming but are explained:
+- **`detection skipped (degenerate foreground indicator)`** — BY DESIGN: every episode
+  doc anchors on a presentation, so the root/foreground label is all-1 (no background
+  class). `detection_readout` correctly skips (code: `len(unique(y))<2`). The episode
+  arm's signal is per-node discrimination, not case-vs-bg.
+- **`INCIDENT arm SKIPPED: no pre-index closure witness`** — expected (`preindex_closure:
+  false`). The E1 preindex + external episode index is unwired; a follow-up WP must add
+  preindex-over-episodes before WP-F's incident census. Prevalent arm unaffected.
+- **calibration-fit `505 stalled`, `max|grad|=9.55e4` not descending, 2973 line-search
+  failures** — NOT ill-conditioning. The readout solver optimizes a SUMMED log-loss
+  (`_fit_readout_heads`), so the gradient scales with cell count; the episode arm's
+  ×2.66 cells start it at 7.29e5, and a cold solve needs the full ~200 readout iters
+  (`_READOUT_GTOL=1e-4` absolute) — it was capped at 20. The stalls/line-search storm
+  came from warm-starting off the killed run's stale checkpoint (curvature history not
+  carried on resume, early iters thrash). A cold full-length run resolves it.
+- **eval_path=distributed inert** under `readout_theta_topm=256` (the cell-explode needs
+  full-K θ); the bounded driver eval collect is the chosen path. Removed from front
+  matter. The real ×2.66 memory wall is the CALIBRATION collect at WP-G (distributed).
+
+All quality numbers from the capped/warm-started smoke are uninterpretable. Reverted both
+arms to the record config (topic max_iter 100, readout default 200, cold start) for a
+clean converged run — the read of episode-arm quality comes from that, not the smoke.
 
 ### Next (cluster, with Shawn)
 
