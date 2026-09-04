@@ -2730,6 +2730,18 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
 # and the re-readout's key routing cannot drift apart.
 _MONDO_DAG_SOURCES = ("mondo", "mondo_native")
 
+# exp 0111 WP-D2. `EpisodeDocSpec().name` read once, so the driver's episode wiring
+# and the cache key agree on the doc-unit token without importing the class at
+# module import time (the assembler modules stay lazy-imported). The literal
+# tagged onto every episode/random document's `source_cohort` — the two arms are
+# whole-population single-cohort corpora, so one tag (not the population index's
+# cancer/general split) is the honest label, applied IDENTICALLY to both arms so
+# they differ only in index location (D12). The doc_id becomes
+# "episode:{person}:{index_date}" on both arms; the arm identity rides the cache
+# key (episode_sampling.arm), not the doc_id.
+_EPISODE_DOC_SPEC_NAME = "episode"
+_EPISODE_SOURCE_COHORT = "episode"
+
 # The multi-domain assembler's kwargs, derived from a corpus SPEC — the dict the
 # fit writes into `manifest["corpus_manifest"]` and the re-readout reads back out.
 # One derivation, two callers, so a re-readout's cache key cannot drift from the
@@ -2790,12 +2802,27 @@ def multidomain_corpus_spec(args, extra_domains) -> dict:
     option there, it is part of the construction, so exposing the flag would only
     let a run ask for it twice."""
     mondo = args.dag_source in _MONDO_DAG_SOURCES
+    # exp 0111 WP-D2: when an --index-arm is chosen the Mondo corpus is assembled
+    # on a driver-built EXTERNAL episode/random index (see mondo_assemble_fn), not
+    # the population/disease index. index_mode="external" is what routes the
+    # assembler onto the injection seam, and the doc unit becomes EpisodeDocSpec
+    # (doc_id = cohort:person:index) so a person's several documents stay distinct.
+    episode_arm = str(getattr(args, "index_arm", "") or "")
+    if episode_arm and not mondo:
+        raise ValueError(
+            f"--index-arm {episode_arm!r} is the exp-0111 episode/random index and "
+            "is defined only on the Mondo path (--dag-source mondo/mondo_native); "
+            f"got --dag-source {args.dag_source}.")
+    if episode_arm:
+        base_index_mode = "external"
+    else:
+        base_index_mode = "population" if mondo else "disease"
     return {
         "dag_source": args.dag_source,
         "disease": args.disease, "cdr": args.cdr, "billing": args.billing,
         "source_table": args.source_table,
         "extra_domains": list(extra_domains),
-        "index_mode": "population" if mondo else "disease",
+        "index_mode": base_index_mode,
         "person_mod": args.person_mod, "vocab_size": args.vocab_size,
         "min_df": args.min_df, "min_patient_count": args.min_patient_count,
         "doc_min_length": args.doc_min_length,
@@ -2817,9 +2844,28 @@ def multidomain_corpus_spec(args, extra_domains) -> dict:
                         if args.dag_source == "mondo" else False,
         # The doc unit this corpus is assembled under — a cache-key input as of
         # R5.3, recorded in the spec (and hence the manifest) so a re-readout
-        # recomputes the fit's own key. Today it is a constant; the point is that
-        # when it stops being one, the key moves with it.
-        "doc_spec": doc_spec_identity(),
+        # recomputes the fit's own key. On the episode/random arms it is
+        # EpisodeDocSpec (doc_id = cohort:person:index), which moves the key
+        # naturally; otherwise it is today's constant (PatientCohortDocSpec).
+        "doc_spec": (_EPISODE_DOC_SPEC_NAME if episode_arm
+                     else doc_spec_identity()),
+        # exp 0111 WP-D2: the external-index identity. Present ONLY on an episode/
+        # random arm, so every population/disease/mondo spec keys byte-identically
+        # to before. `arm` is what distinguishes the two arms' bundles; the rest are
+        # the gate/cap/salt parameters that determine which index rows exist.
+        # `sidecar_uri` is deliberately OUTSIDE this dict — the sidecar is keyed
+        # independently and is not corpus identity for the bundle (it never enters
+        # the key), it only tells the MISS closure where to load/build it.
+        **({"episode_sampling": {
+                "arm": episode_arm,
+                "gap_days": int(args.episode_gap_days),
+                "cap": int(args.episode_cap),
+                "salt": str(args.episode_salt),
+                "prior_obs_days": int(args.episode_prior_obs_days),
+                "window_days": int(args.episode_window_days)},
+            "episode_sidecar_uri": str(getattr(args, "episode_sidecar_uri", "")
+                                       or "")}
+           if episode_arm else {}),
         # E1's pre-index closure column. Mondo-only — it is built by re-running
         # the SAME attestation provider on the feature window, and only the Mondo
         # paths construct one driver-side — and OFF by default, so an existing
@@ -2851,6 +2897,13 @@ def _multidomain_params(spec):
     # existed defaults to today's constant and therefore keys byte-identically.
     key_extra = {"multidomain": True,
                  "doc_spec": str(spec.get("doc_spec") or doc_spec_identity())}
+    # exp 0111 WP-D2: fold the external-index identity ONLY on the external path,
+    # so every population/disease/mondo key stays byte-identical (the `dag_collapse`
+    # discipline). `index_mode` itself already rides `assembly` (and hence the key)
+    # via _SPEC_ASSEMBLY_KEYS; this adds the arm + gate/cap/salt parameters that
+    # `index_mode="external"` alone does not name.
+    if str(spec.get("index_mode")) == "external" and spec.get("episode_sampling"):
+        key_extra["episode_sampling"] = dict(spec["episode_sampling"])
     if mondo:
         key_extra.update(mondo=True, mondo_version=spec["mondo_version"],
                          mondo_branch=spec.get("mondo_branch") or "",
@@ -2884,7 +2937,187 @@ def multidomain_cache_key(spec) -> str:
     return compute_bundle_cache_key(**key_params)
 
 
-def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=None):
+# --------------------------------------------------------------------------- #
+# exp 0111 WP-D2: the episode / matched-random EXTERNAL index seam.            #
+# --------------------------------------------------------------------------- #
+# Everything here runs ONLY inside the Mondo assemble closure, i.e. ONLY on a
+# bundle cache MISS — a HIT reloads the baked bundle and pays for none of the
+# sidecar load or the index build. The index frame is handed VERBATIM to
+# multi_domain's `index_mode="external"` seam (WP-C), so no episode logic lands in
+# any source-hashed module; this driver owns all of it.
+
+
+def _resolve_episode_sidecar_uri(spec, cache_uri):
+    """Where the first-attestation sidecar the episode index reads lives.
+
+    Explicit `--episode-sidecar-uri` wins; otherwise the same default
+    `build-conversion-sidecar` uses — a `conversion_sidecar` sibling of the bundle
+    cache. The sidecar is keyed INDEPENDENTLY of the bundle (its own
+    `conversion_sidecar_key`), so a bundle-key move never orphans it and it belongs
+    beside, never inside, a bundle key's dir."""
+    uri = str(spec.get("episode_sidecar_uri") or "").rstrip("/")
+    if uri:
+        return uri
+    if cache_uri:
+        return f"{str(cache_uri).rstrip('/')}/conversion_sidecar"
+    raise ValueError(
+        "exp 0111 episode index needs a sidecar location on a cache MISS: pass "
+        "--episode-sidecar-uri (a persistent in-boundary bucket) or --cache-uri "
+        "(the sidecar defaults to <cache-uri>/conversion_sidecar).")
+
+
+def _load_or_build_first_attestation(spark, spec, *, sidecar_uri, code_map_norm,
+                                     code_map_identity, dag_source):
+    """The E4 first-attestation frame `(person_id, node_cid, first_attested_date)`.
+
+    Load the sidecar at its own key; on a MISS build just the first-attestation
+    half from the code map already in hand (the DAG build is happening in this same
+    closure) and save it. The horizon half (`build_and_save`'s second parquet) is
+    index-dependent and unused here, so it is deliberately NOT built — a later
+    conversion analysis rebuilds it under the same key if it needs it. Runs only on
+    a bundle cache MISS, and the sidecar itself is usually a HIT (the probe or a
+    prior fit built it), so the full-history scan is paid at most once per cluster."""
+    from conversion_sidecar import (build_conversion_sidecar,
+                                     conversion_sidecar_key, save_sidecar,
+                                     try_load_sidecar)
+    key = conversion_sidecar_key(
+        cdr=spec["cdr"], person_mod=int(spec["person_mod"]),
+        dag_source=dag_source, mondo_version=spec.get("mondo_version") or "",
+        mondo_branch=spec.get("mondo_branch") or "",
+        min_positives=int(spec.get("min_positives") or 0),
+        code_map_identity=code_map_identity)
+    first = try_load_sidecar(spark, sidecar_uri, key)
+    if first is not None:
+        print(f"[episode]   sidecar HIT ({sidecar_uri})", flush=True)
+        return first
+    print(f"[episode]   sidecar MISS — building first-attestation once "
+          f"({sidecar_uri})", flush=True)
+    from charmpheno.omop import load_omop_bigquery
+    cond = load_omop_bigquery(
+        spark=spark, cdr_dataset=spec["cdr"], billing_project=spec["billing"],
+        person_sample_mod=int(spec["person_mod"]), source_table="condition_era")
+    first = build_conversion_sidecar(cond, code_map_norm)
+    try:
+        save_sidecar(first, sidecar_uri, key)
+    except Exception as exc:                                    # noqa: BLE001
+        print(f"[episode]   WARNING: sidecar write to {sidecar_uri} failed "
+              f"({type(exc).__name__}: {exc}); proceeding with the in-memory "
+              "frame (next MISS rebuilds it).", flush=True)
+    return first
+
+
+def _build_external_index_df(spark, spec, *, code_map_norm, code_map_identity,
+                             dag_source, cache_uri):
+    """`(index_df, ordinal_df)` for the episode / matched-random arm (WP-D2).
+
+    `index_df` = `(person_id, index_date, source_cohort)` — exactly the shape
+    multi_domain's external seam consumes; `source_cohort` is a single literal (both
+    arms are whole-population single-cohort corpora). `ordinal_df` =
+    `(person_id, index_date, episode_ordinal)` for the episode arm — WP-D1's
+    UNBOUNDED chronological ordinal, carried for the R7.5 drop-rate diagnostic and
+    joined onto the bundle by `_attach_bounded_doc_index`; `None` for the random arm
+    (a uniform draw has no episode ordinal).
+
+    D12 MATCHED: the random arm is drawn over the EPISODE arm's surviving persons and
+    shares every gate/cap/salt, so the two arms differ only in index location."""
+    from pyspark.sql import functions as F
+
+    from episode_index import (INDEX_COL, PERSON_COL, EPISODE_COL,
+                               episode_index_frame, random_index_frame)
+    samp = spec["episode_sampling"]
+    arm = str(samp["arm"])
+    sidecar_uri = _resolve_episode_sidecar_uri(spec, cache_uri)
+    first = _load_or_build_first_attestation(
+        spark, spec, sidecar_uri=sidecar_uri, code_map_norm=code_map_norm,
+        code_map_identity=code_map_identity, dag_source=dag_source)
+    from conversion_sidecar import load_observation_period
+    obs = load_observation_period(spark, cdr=spec["cdr"], billing=spec["billing"])
+
+    common = dict(prior_obs_days=int(samp["prior_obs_days"]),
+                  window_days=int(samp["window_days"]),
+                  cap=int(samp["cap"]), salt=str(samp["salt"]))
+    episode = episode_index_frame(first, obs, gap_days=int(samp["gap_days"]),
+                                  **common)
+    if arm == "episode":
+        index = episode.select(PERSON_COL, INDEX_COL)
+        ordinal_df = episode.select(
+            PERSON_COL, INDEX_COL,
+            F.col(EPISODE_COL).alias("episode_ordinal"))
+    elif arm == "random":
+        # The episode arm's SURVIVING persons (post-gate) define the matched
+        # population; the random draw shares the gates and cap.
+        persons = episode.select(PERSON_COL).distinct()
+        index = random_index_frame(obs, persons=persons, **common)
+        ordinal_df = None
+    else:
+        raise ValueError(f"episode_sampling.arm must be 'episode' or 'random', "
+                         f"got {arm!r}")
+    index_df = index.withColumn(
+        "source_cohort", F.lit(_EPISODE_SOURCE_COHORT))
+    return index_df, ordinal_df
+
+
+def _attach_bounded_doc_index(bundle, *, ordinal_df=None):
+    """Bake the BOUNDED within-corpus document index onto the bundle's frames (WP-D2).
+
+    `_doc_key_column` (WP-A1) reads a column literally named `episode_no` and REQUIRES
+    it in `[0, RADIX=64)` — it is the low bits of `doc_key = person_id*64 + episode_no`.
+    WP-D1's `episode_no` is the UNBOUNDED chronological ordinal (a chronic patient's
+    70th episode carries 70) and must NEVER reach the doc key. So here, at the one
+    point the whole corpus is in hand, we synthesize a DENSE per-person
+    `row_number()-1` (0-based) over each person's KEPT documents ordered by index_date,
+    and write THAT as `episode_no`. cap <= 3 << 64, so the bound holds; the
+    `episode_no < 64` guard in `_doc_key_column` and `_assert_unique_doc_keys` are the
+    tripwires if the raw ordinal ever leaked through instead.
+
+    WHY DERIVE FROM THE BUNDLE, NOT CARRY THE INDEX FRAME'S ORDINAL
+    ---------------------------------------------------------------
+    The bounded index must be reconstructible AT READOUT from what the bundle carries.
+    The bundle carries `doc_id = "episode:{person}:{index_date}"` (EpisodeDocSpec), so
+    a dense rank over the parsed `index_date` within `person_id` reconstructs the exact
+    same 0-based index the fit used — no fit-only state, no drift. Baking it as a real
+    column means every readout collect (which transforms these frames) sees it with no
+    readout edit, and it survives the parquet save/reload byte-for-byte.
+
+    Person-keyed split (all of a person's documents land on one side), so the dense
+    rank computed independently within train and within test equals the within-person
+    rank globally.
+
+    `ordinal_df` (episode arm only): WP-D1's UNBOUNDED ordinal `(person_id, index_date,
+    episode_ordinal)`, left-joined so R7.5's drop-rate-by-ordinal diagnostic can read
+    it. When absent (random arm), `episode_ordinal` mirrors the bounded index — a
+    uniform draw has no chronological episode number."""
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+
+    def _with_index(df):
+        # doc_id = "episode:{person}:{index_date}"; the index_date is the LAST
+        # component (EpisodeDocSpec APPENDS it), recovered by splitting on ':'.
+        idx_str = F.element_at(F.split(F.col("doc_id"), ":"), -1)
+        df = df.withColumn("_idx_str", idx_str)
+        w = Window.partitionBy("person_id").orderBy(
+            F.col("_idx_str").asc(), F.col("doc_id").asc())
+        df = df.withColumn("episode_no",
+                           (F.row_number().over(w) - F.lit(1)).cast("long"))
+        if ordinal_df is not None:
+            ordj = ordinal_df.select(
+                F.col("person_id"),
+                F.col("index_date").cast("string").alias("_idx_str"),
+                F.col("episode_ordinal").cast("long").alias("episode_ordinal"))
+            df = df.join(F.broadcast(ordj), on=["person_id", "_idx_str"],
+                         how="left")
+        else:
+            df = df.withColumn("episode_ordinal",
+                               F.col("episode_no") + F.lit(1))
+        return df.drop("_idx_str")
+
+    bundle.train_df = _with_index(bundle.train_df)
+    bundle.test_df = _with_index(bundle.test_df)
+    return bundle
+
+
+def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=None,
+                      cache_uri=None):
     """A MISS-ONLY assembler for the Mondo corpus: build the DAG + climb, THEN assemble.
 
     The Mondo hierarchy costs a whole-Mondo -> OMOP mapping, a power-count over
@@ -2909,6 +3142,14 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
     attestation map instead of a SNOMED climb frame. Same seam, same caching, same
     `min_n=0` contract — only the DAG and the provider differ, which is exactly
     what the `before_dag` / `attested_provider` override pair exists for.
+
+    `spec["index_mode"] == "external"` (exp 0111 WP-D2) routes the corpus onto the
+    driver-built episode / matched-random index: `_external_seam` builds the
+    `(person_id, index_date, source_cohort)` frame from the E4 sidecar (MISS-only —
+    a HIT never loads it), the assembler and the attestation provider both key on
+    EpisodeDocSpec, and `_attach_bounded_doc_index` bakes the BOUNDED within-corpus
+    `episode_no` the readout doc key needs onto the bundle. All of it is
+    driver-owned; no episode logic enters a source-hashed module.
 
     `spec["preindex_closure"]` (E1, default False) adds a POST-PASS on the
     assembled bundle: `preindex_closure.attach_preindex_closure_to_bundle` re-runs
@@ -2946,13 +3187,41 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
             print(format_preindex_report(bundle), flush=True)
         return bundle
 
+    def _external_seam(spark, assembly_params, *, code_map_sdf, concept_col,
+                       node_col, code_map_identity, dag_source):
+        """exp 0111 WP-D2: `(index_df, assemble_doc_spec, provider_doc_spec, ordinal_df)`.
+
+        On the external path (an --index-arm was chosen) this normalizes the label
+        front end's code map, builds the driver-owned episode/random index frame from
+        the sidecar (MISS-only) and selects EpisodeDocSpec for BOTH the assembler's BOW
+        and the attestation provider, so the doc_id the provider derives matches the
+        one the corpus is keyed on. Off the external path it is a NO-OP that touches
+        NONE of its code-map inputs: no index frame, PatientCohortDocSpec on the
+        provider, and the assembler builds its own default doc spec (doc_spec=None) —
+        byte-for-byte the prior behavior (the code map is normalized only when the
+        episode index actually needs it)."""
+        from charmpheno.omop.doc_spec import EpisodeDocSpec, PatientCohortDocSpec
+        if str(assembly_params.get("index_mode")) != "external":
+            return None, None, PatientCohortDocSpec(), None
+        from conversion_sidecar import normalize_code_map
+        code_map_norm = normalize_code_map(
+            code_map_sdf, concept_col=concept_col, node_col=node_col)
+        arm = str(spec["episode_sampling"]["arm"])
+        with _phase(f"build exp-0111 {arm} index (external, MISS-only)"):
+            index_df, ordinal_df = _build_external_index_df(
+                spark, spec, code_map_norm=code_map_norm,
+                code_map_identity=code_map_identity, dag_source=dag_source,
+                cache_uri=cache_uri)
+        dml = int(assembly_params.get("doc_min_length") or 0)
+        return index_df, EpisodeDocSpec(min_doc_length=dml), EpisodeDocSpec(), ordinal_df
+
     def _assemble_mondo_native(spark, **assembly_params):
-        from charmpheno.omop.doc_spec import PatientCohortDocSpec
         from charmpheno.omop.multi_domain import (
             assemble_multidomain_case_finding_corpus)
         from mondo_native_dag import (
-            build_mondo_native_fit_inputs, format_native_build_report,
-            format_native_powering_report, make_mondo_native_attested_provider)
+            MONDO_NATIVE_VERSION, build_mondo_native_fit_inputs,
+            format_native_build_report, format_native_powering_report,
+            make_mondo_native_attested_provider)
         build = _build_inputs or build_mondo_native_fit_inputs
         assemble = _assemble or assemble_multidomain_case_finding_corpus
         branch = spec.get("mondo_branch") or ""
@@ -2963,8 +3232,19 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
                 mondo_cache_dir=spec.get("mondo_cache_dir") or "data/mondo",
                 min_positives=spec["min_positives"],
                 branch_root=(branch or None))
+            # exp 0111 WP-D2: build the external episode/random index (if any) and
+            # pick the doc spec BOTH the provider and the assembler use. The code map
+            # is normalized inside the seam ONLY on the external path, so the ordinary
+            # Mondo path touches none of it.
+            index_df, assemble_doc_spec, provider_doc_spec, ordinal_df = (
+                _external_seam(spark, assembly_params, code_map_sdf=code_map_sdf,
+                               concept_col="std_cid", node_col="node_cid",
+                               code_map_identity=(
+                                   f"mondo_native:{MONDO_NATIVE_VERSION}:"
+                                   f"{len(kept_cids)}"),
+                               dag_source="mondo_native"))
             provider = make_mondo_native_attested_provider(
-                code_map_sdf, doc_spec=PatientCohortDocSpec())
+                code_map_sdf, doc_spec=provider_doc_spec)
             # BOTH lines before any fit: C and K are expected to GROW here
             # (closure support >= direct support), and the plan says measure,
             # do not guess.
@@ -2979,12 +3259,15 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
                           reduced={"n_classes": stats["n_final_nodes"]
                                    - stats["n_coded_kept"], "native": stats})
         bundle = assemble(spark, before_dag=before_dag,
-                          attested_provider=provider, **assembly_params)
-        return _with_preindex(spark, bundle, before_dag=before_dag,
-                              provider=provider, assembly_params=assembly_params)
+                          attested_provider=provider, index_df=index_df,
+                          doc_spec=assemble_doc_spec, **assembly_params)
+        bundle = _with_preindex(spark, bundle, before_dag=before_dag,
+                                provider=provider, assembly_params=assembly_params)
+        if index_df is not None:
+            bundle = _attach_bounded_doc_index(bundle, ordinal_df=ordinal_df)
+        return bundle
 
     def _assemble_mondo(spark, **assembly_params):
-        from charmpheno.omop.doc_spec import PatientCohortDocSpec
         from charmpheno.omop.multi_domain import (
             assemble_multidomain_case_finding_corpus)
         from mondo_dag import build_mondo_fit_inputs, make_mondo_attested_provider
@@ -2998,8 +3281,20 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
                 mondo_cache_dir=spec.get("mondo_cache_dir") or "data/mondo",
                 min_positives=spec["min_positives"],
                 branch_root=(branch or None))
+            # exp 0111 WP-D2: build the external episode/random index (if any) and
+            # pick the doc spec BOTH the provider and the assembler use. The sidecar
+            # code map is the climb frame (normalized inside the seam only on the
+            # external path); its identity is the terminal count, exactly what
+            # conversion_sidecar.code_map_from_manifest folds, so the fit and the probe
+            # compute the SAME sidecar key.
+            index_df, assemble_doc_spec, provider_doc_spec, ordinal_df = (
+                _external_seam(spark, assembly_params, code_map_sdf=climb_sdf,
+                               concept_col="descendant_concept_id",
+                               node_col="ancestor_concept_id",
+                               code_map_identity=f"mondo:{len(terminal_cids)}",
+                               dag_source="mondo"))
             provider = make_mondo_attested_provider(
-                climb_sdf, doc_spec=PatientCohortDocSpec())
+                climb_sdf, doc_spec=provider_doc_spec)
             print(f"[mondo]   powered terminals={len(terminal_cids)}, "
                   f"class nodes={reduced['n_classes']}, "
                   f"branch={branch or 'ALL'}", flush=True)
@@ -3018,9 +3313,13 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
                 on_inputs(count_of=count_of, terminal_cids=terminal_cids,
                           reduced=reduced)
         bundle = assemble(spark, before_dag=before_dag,
-                          attested_provider=provider, **assembly_params)
-        return _with_preindex(spark, bundle, before_dag=before_dag,
-                              provider=provider, assembly_params=assembly_params)
+                          attested_provider=provider, index_df=index_df,
+                          doc_spec=assemble_doc_spec, **assembly_params)
+        bundle = _with_preindex(spark, bundle, before_dag=before_dag,
+                                provider=provider, assembly_params=assembly_params)
+        if index_df is not None:
+            bundle = _attach_bounded_doc_index(bundle, ordinal_df=ordinal_df)
+        return bundle
 
     return _assemble_mondo_native if native else _assemble_mondo
 
@@ -3041,7 +3340,7 @@ def multidomain_load_or_build(spark, spec, *, cache_uri=None, on_inputs=None,
     if key_extra.get("mondo"):
         assemble_fn = mondo_assemble_fn(spec, on_inputs=on_inputs,
                                         _build_inputs=_build_inputs,
-                                        _assemble=_assemble)
+                                        _assemble=_assemble, cache_uri=cache_uri)
     else:
         assemble_fn = _assemble or assemble_multidomain_case_finding_corpus
     return load_or_build_case_finding_bundle(
@@ -3142,6 +3441,51 @@ def parse_args(argv=None):
                         "nothing). OFF by default: it changes the bundle (and its "
                         "cache key), so existing experiments reproduce "
                         "byte-identically.")
+    # exp 0111 (WP-D2): episode-anchored / matched-random index arms. When
+    # --index-arm is set the Mondo corpus is assembled on a DRIVER-built external
+    # index (index_mode="external") of at most `--episode-cap` documents per
+    # person keyed on their gap-and-islands first-attestation EPISODES (episode
+    # arm) or on uniform-random in-observation dates (random arm), instead of the
+    # one-doc-per-person population/disease index. Both arms are multi-doc and
+    # share every gate/cap/salt — the random arm is drawn over the episode arm's
+    # SURVIVING persons so the two compare on an identical person set (D12).
+    p.add_argument("--index-arm", choices=["episode", "random"], default="",
+                   help="exp 0111: assemble on a driver-built EXTERNAL episode index "
+                        "(index_mode=external) instead of the population/disease "
+                        "index. 'episode' anchors documents on gap-and-islands "
+                        "first-attestation episodes; 'random' draws matched uniform "
+                        "in-observation dates over the episode arm's surviving "
+                        "persons. Empty (default) keeps the current single-doc "
+                        "index. Mondo path only (dag_source mondo/mondo_native).")
+    p.add_argument("--episode-gap-days", type=int, default=90,
+                   help="exp 0111: gap (days) that splits one first-attestation "
+                        "episode from the next (gap-and-islands). 90 is the probe's "
+                        "settled value.")
+    p.add_argument("--episode-cap", type=int, default=3,
+                   help="exp 0111: per-person document cap for BOTH arms (deterministic "
+                        "salted sample). Must be < 64 (the doc-key radix); 3 is the "
+                        "probe's settled value.")
+    p.add_argument("--episode-salt", default="0111",
+                   help="exp 0111: salt for the deterministic per-person cap sample "
+                        "(episode arm) and the uniform index draw (random arm). Same "
+                        "salt => identical draw on any rerun; never F.rand(). It is a "
+                        "corpus-identity input and folds into the bundle cache key.")
+    p.add_argument("--episode-prior-obs-days", type=int, default=365,
+                   help="exp 0111: prior-observation gate (days) an index must clear "
+                        "for BOTH arms. 365 matches the assembler's lookback floor "
+                        "(_LOOKBACK_PRIOR_OBS_DAYS) — the 0111 primary arm.")
+    p.add_argument("--episode-window-days", type=int, default=365,
+                   help="exp 0111: forward-observation gate (days) an index must clear "
+                        "for BOTH arms. 365 matches the assembler's label window.")
+    p.add_argument("--episode-sidecar-uri", default="",
+                   help="exp 0111: root URI of the E4 first-attestation sidecar the "
+                        "episode index is built from. The sidecar has its OWN "
+                        "(bundle-key-independent) key, so it is NOT part of the bundle "
+                        "cache key. Empty (default) derives <cache-uri>/"
+                        "conversion_sidecar, matching build-conversion-sidecar. Point "
+                        "it at a persistent in-boundary bucket so it survives a "
+                        "cluster (AGENTS.md). Loaded ONLY on a bundle cache MISS; a "
+                        "MISS with no sidecar present builds it once and saves it.")
     p.add_argument("--k", type=int, default=50,
                    help="K for the UNGATED --with-dag-head arm only; the gated arms "
                         "derive K from the layout (n_bg + nodes*tpn).")

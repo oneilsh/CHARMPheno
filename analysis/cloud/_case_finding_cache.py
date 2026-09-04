@@ -77,7 +77,8 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
                              mondo_native_version="",
                              doc_spec=DEFAULT_DOC_SPEC,
                              preindex_closure=False,
-                             preindex_closure_version="") -> str:
+                             preindex_closure_version="",
+                             episode_sampling=None) -> str:
     """Stable 16-hex hash of the inputs that determine the assembled bundle.
 
     Folds cohort_defs_version() plus content hashes of condition_dag +
@@ -121,6 +122,11 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
     `preindex_closure` (+ `preindex_closure_version` and the module's source hash)
     marks a bundle that carries E1's per-document pre-index closure column. Mondo
     path only, folded ONLY when on — the `dag_collapse` discipline.
+
+    `episode_sampling` (exp 0111 WP-D2) is the identity of a driver-built EXTERNAL
+    index frame — the episode arm or its matched-random sibling. Folded ONLY when
+    supplied (`index_mode="external"`), so every existing key is byte-identical;
+    see the fold site below.
     """
     from charmpheno.omop import condition_dag, case_finding_assembly
     from charmpheno.omop.cohorts import cohort_defs_version
@@ -157,6 +163,19 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
     # something the payload does not already say.
     if str(doc_spec) != DEFAULT_DOC_SPEC:
         payload["doc_spec"] = str(doc_spec)
+    # exp 0111 WP-D2: the episode-anchored (or matched-random) sampling design.
+    # A DIFFERENT index frame is a DIFFERENT corpus, but the index frame itself is
+    # a driver-built DataFrame that never rides the assembler kwargs — so its
+    # identity (the arm plus the gap/cap/salt/gate parameters that determine which
+    # (person, index_date) rows exist) is folded here as an explicit dict. The two
+    # arms (`episode` / `random`) share every parameter and differ only in `arm`,
+    # so `arm` is what splits their two bundles. Folded ONLY when supplied (the
+    # `index_mode="external"` path), for exactly the `dag_collapse` reason: every
+    # population/disease/mondo key ever computed passed no episode_sampling and
+    # must stay byte-identical, and the tripwire suite pins that.
+    if episode_sampling:
+        payload["episode_sampling"] = {
+            k: episode_sampling[k] for k in sorted(episode_sampling)}
     # Only fold the Gated-PC label columns into the key when they are requested,
     # so the default (emit_labels=False) path keeps its existing key and existing
     # dag-placement caches stay valid; a labeled bundle gets a distinct key.
