@@ -2866,6 +2866,18 @@ def multidomain_corpus_spec(args, extra_domains) -> dict:
             "episode_sidecar_uri": str(getattr(args, "episode_sidecar_uri", "")
                                        or "")}
            if episode_arm else {}),
+        # exp 0111 WP-D3 (D13): the gate/label SEPARATION identity. Present ONLY on
+        # an episode/random arm WITH a positive gate width (`--gate-frontier-days`),
+        # so an un-gated episode bundle and every non-episode bundle key byte-
+        # identically to before. A D13-gated bundle carries the SAME 365-day
+        # `label`/`labelMask` but a 90-day `frontier`, so it is a DISTINCT artifact —
+        # the mode token (`gate90d`) is what splits its cache key from the un-gated
+        # one. Kept as a SIBLING of `episode_sampling` (not folded into that dict) so
+        # WP-D2's pinned sampling-dict shape is unchanged.
+        **({"gate_frontier_mode": _gate_frontier_mode(
+                int(getattr(args, "gate_frontier_days", 0) or 0))}
+           if (episode_arm
+               and int(getattr(args, "gate_frontier_days", 0) or 0) > 0) else {}),
         # E1's pre-index closure column. Mondo-only — it is built by re-running
         # the SAME attestation provider on the feature window, and only the Mondo
         # paths construct one driver-side — and OFF by default, so an existing
@@ -2904,6 +2916,13 @@ def _multidomain_params(spec):
     # `index_mode="external"` alone does not name.
     if str(spec.get("index_mode")) == "external" and spec.get("episode_sampling"):
         key_extra["episode_sampling"] = dict(spec["episode_sampling"])
+    # exp 0111 WP-D3 (D13): fold the gate/label-separation identity ONLY on the
+    # external path and ONLY when a gate is requested, so an un-gated episode bundle
+    # (and every non-episode bundle) keys byte-identically. A gated bundle carries a
+    # 90-day `frontier` under the same 365-day label, so it is a distinct artifact.
+    if (str(spec.get("index_mode")) == "external"
+            and spec.get("gate_frontier_mode")):
+        key_extra["gate_frontier_mode"] = str(spec["gate_frontier_mode"])
     if mondo:
         key_extra.update(mondo=True, mondo_version=spec["mondo_version"],
                          mondo_branch=spec.get("mondo_branch") or "",
@@ -3016,7 +3035,10 @@ def _build_external_index_df(spark, spec, *, code_map_norm, code_map_identity,
     `(person_id, index_date, episode_ordinal)` for the episode arm — WP-D1's
     UNBOUNDED chronological ordinal, carried for the R7.5 drop-rate diagnostic and
     joined onto the bundle by `_attach_bounded_doc_index`; `None` for the random arm
-    (a uniform draw has no episode ordinal).
+    (a uniform draw has no episode ordinal). `first_attestation` (the E4
+    `(person_id, node_cid, first_attested_date)` sidecar frame) is returned so the
+    WP-D3 gate-frontier post-pass reuses it WITHOUT reloading the sidecar — it is
+    already loaded here, and the load is the expensive part.
 
     D12 MATCHED: the random arm is drawn over the EPISODE arm's surviving persons and
     shares every gate/cap/salt, so the two arms differ only in index location."""
@@ -3054,7 +3076,7 @@ def _build_external_index_df(spark, spec, *, code_map_norm, code_map_identity,
                          f"got {arm!r}")
     index_df = index.withColumn(
         "source_cohort", F.lit(_EPISODE_SOURCE_COHORT))
-    return index_df, ordinal_df
+    return index_df, ordinal_df, first
 
 
 def _attach_bounded_doc_index(bundle, *, ordinal_df=None):
@@ -3114,6 +3136,193 @@ def _attach_bounded_doc_index(bundle, *, ordinal_df=None):
     bundle.train_df = _with_index(bundle.train_df)
     bundle.test_df = _with_index(bundle.test_df)
     return bundle
+
+
+# --------------------------------------------------------------------------- #
+# exp 0111 WP-D3 (D13): separate the estimator's GATE from the outcome LABEL.  #
+# --------------------------------------------------------------------------- #
+# The gate an episode document reads (`frontierCol="frontier"`) becomes its
+# 90-day PRESENTATION window [index, index+90d); the outcome the PC head reads
+# (`labelCol="label"`) stays the full 365-day forward frame. `none` is the
+# byte-identical default everywhere (no separation — the 365-day frontier the
+# assembler baked stands); a positive width W is `gateWd`, the token that both
+# moves the bundle cache key (a gated bundle is a DISTINCT artifact) and drives
+# the MISS-only post-pass window.
+
+_GATE_FRONTIER_NONE = "none"
+
+
+def _gate_frontier_mode(gate_days) -> str:
+    """The gate-frontier identity token for a forward-window width (days).
+
+    0 (or off) -> 'none'; a positive W -> 'gateWd' (e.g. 'gate90d'). The token is
+    the cache-key identity — it is what makes a D13-gated episode bundle a distinct
+    cached artifact from the un-gated (365-day-frontier) one — and, parsed back by
+    `_gate_frontier_days`, the driver of the post-pass gate window."""
+    d = int(gate_days or 0)
+    return _GATE_FRONTIER_NONE if d <= 0 else f"gate{d}d"
+
+
+def _gate_frontier_days(mode) -> int:
+    """Inverse of `_gate_frontier_mode`: the width (days) a mode token names, or 0
+    for 'none'/absent. A malformed token RAISES rather than silently disabling the
+    gate — a wrong-results hazard, never a quiet no-op."""
+    import re
+    m = str(mode or "").strip()
+    if not m or m == _GATE_FRONTIER_NONE:
+        return 0
+    match = re.fullmatch(r"gate(\d+)d", m)
+    if not match:
+        raise ValueError(f"unrecognized gate_frontier_mode {mode!r}; expected "
+                         "'none' or 'gate<days>d' (e.g. 'gate90d').")
+    return int(match.group(1))
+
+
+def _attach_gate_frontier(spark, bundle, *, first_attestation, before_dag,
+                          gate_days, n_bg, tpn):
+    """exp 0111 WP-D3 (D13): overwrite each document's GATE with its 90-day
+    presentation window, leaving the 365-day outcome LABEL untouched.
+
+    WHY A MISS-ONLY DRIVER POST-PASS, NOT A HIT-TIME TRANSFORM
+    ---------------------------------------------------------
+    The gate frontier is the roll-up of a document's in-window attested nodes onto
+    the label DAG's SURVIVORS, and that roll-up walks the PRE-PRUNE DAG
+    (`before_dag`) exactly as `attach_frontiers` does at assembly. `before_dag` is a
+    build by-product that lives ONLY inside the assemble closure — it is never
+    serialized into a loaded HIT bundle — so the swap MUST run here, before the
+    bundle is cached; a later HIT then reloads a bundle whose `frontier` is ALREADY
+    the gate. `assemble(emit_labels=True)` baked `label`/`labelMask` from the
+    365-day frontier BEFORE it returned (case_finding_assembly.py:461-466), so those
+    columns are already frozen at 365 days; this pass overwrites ONLY `frontier` —
+    that is the whole of the D13 separation.
+
+    THE GATE = [index, index + gate_days). For each document (doc_id =
+    "episode:{person}:{index_date}") the gate's attested node set is the sidecar
+    `node_cid`s whose FIRST attestation lands in the half-open forward window
+    [index, index+gate_days) — the SAME join `diag_episode_probe.gate_occupancy`
+    (WP-B2) measures. Half-open matches the label window's own convention (a code
+    exactly at index+gate_days is OUTSIDE the gate). An empty gate yields `[]`, a
+    valid background-only frontier the gated LDA accepts — the document is NEVER
+    dropped.
+
+    ROLL-UP BY CALLING `attach_frontiers` (never editing it). Concept-id
+    attestations climb to engine-id survivors through the identical
+    `attach_frontiers(attested_df, before_dag, keep, cid2int, lay)` the ordinary
+    frontier path uses; only the INPUT differs (the 90-day attested set rather than
+    the 365-day one), so the gate frontier is the ordinary frontier over a narrower
+    window.
+
+    KEEP == the survivor set (proven, not assumed). At assembly `keep =
+    after_dag.nodes()` and `(parent_int, int2cid, cid2int) = after_dag.to_engine()`;
+    `to_engine` maps the anchor to 0 and EVERY other node of `after_dag.nodes()` to
+    1..N, so `set(cid2int) == after_dag.nodes() == keep`. We therefore read the
+    survivor set straight off the bundle as `set(bundle.cid2int)` and reconstruct
+    `lay = DagLayout(bundle.parent_int, n_bg, tpn)` identically to the fit
+    (gated_pc_cloud.py's fit path), so the gate frontier lives in the SAME engine-id
+    node space as the label — the head's C rows and the gate's blocks stay aligned.
+
+    JOIN INTEGRITY, LOUD. Every bundle document must receive EXACTLY ONE new
+    frontier. The per-document gate frame is asserted unique on (person_id, doc_id);
+    the overwrite is a LEFT join (so a document with no gate row surfaces as a NULL
+    we catch, not a vanished row) that must not change the document count and must
+    leave NO document without a gate. A missing / duplicate / mismatched join RAISES
+    — it never silently falls back to an empty or stale frontier. (An EMPTY gate is
+    a present `[]`, distinct from an ABSENT document's null, so the null check
+    separates the two.)
+    """
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from charmpheno.omop.case_finding_assembly import attach_frontiers
+
+    keep = set(bundle.cid2int)               # == after_dag.nodes() (proven above)
+    cid2int = bundle.cid2int
+    lay = DagLayout(bundle.parent_int, n_bg=n_bg, tpn=tpn)
+
+    def _gate(df):
+        attested = _gate_attested_frame(df, first_attestation, gate_days=gate_days)
+        gate_fr = attach_frontiers(attested, before_dag, keep, cid2int, lay)
+        return _overwrite_frontier(df, gate_fr)
+
+    bundle.train_df = _gate(bundle.train_df)
+    bundle.test_df = _gate(bundle.test_df)
+    return bundle
+
+
+def _gate_attested_frame(df, first_attestation, *, gate_days):
+    """Per document, the CONCEPT-id node set attested inside its 90-day gate.
+
+    Returns `(person_id, doc_id, attested_cids: array<bigint>)` — the shape
+    `attach_frontiers` consumes. For each document (doc_id =
+    "episode:{person}:{index_date}") the set is the `first_attestation` `node_cid`s
+    whose FIRST attestation lands in the half-open forward window
+    [index, index+gate_days) — the SAME join `diag_episode_probe.gate_occupancy`
+    (WP-B2) measures. A LEFT join keyed on `person_id` plus a `when(in_win, node_cid)`
+    keeps a document with NO in-window attestation as a present row with an EMPTY
+    `attested_cids` (collect_set drops the off-window nulls), never dropping it —
+    an empty gate is a valid background-only frontier."""
+    from pyspark.sql import functions as F
+
+    fa = first_attestation.select(
+        F.col("person_id").cast("long").alias("person_id"),
+        F.col("node_cid").cast("long").alias("node_cid"),
+        F.col("first_attested_date").cast("date").alias("first_attested_date"))
+    # index_date is the LAST ':' component (EpisodeDocSpec appends it) — the same
+    # parse `_attach_bounded_doc_index` uses; cast to a real date for the window.
+    docs = (df.select("person_id", "doc_id").distinct()
+            .withColumn("_idx",
+                        F.to_date(F.element_at(F.split(F.col("doc_id"), ":"), -1))))
+    in_win = ((F.col("first_attested_date") >= F.col("_idx"))
+              & (F.col("first_attested_date")
+                 < F.date_add(F.col("_idx"), int(gate_days))))
+    return (docs.join(fa, on="person_id", how="left")
+            .groupBy("person_id", "doc_id")
+            .agg(F.collect_set(F.when(in_win, F.col("node_cid")))
+                 .alias("attested_cids")))
+
+
+def _overwrite_frontier(df, gate_frontier):
+    """Overwrite `df`'s `frontier` with `gate_frontier`'s, joined on the doc key,
+    refusing a missing / duplicate / mismatched join LOUDLY (WP-D3 join integrity).
+
+    `gate_frontier` carries `(person_id, doc_id, frontier)`, one row per document.
+    The guards, in order: (1) the gate frame must be UNIQUE on (person_id, doc_id) —
+    an ambiguous frontier is a raise, never a silent pick; (2) a LEFT join must not
+    change the document count — a duplicate gate key that inflated it is a raise;
+    (3) NO document may come back without a gate — a missing join surfaces as a NULL
+    (distinct from an EMPTY gate's present `[]`) and is a hard error, never an
+    empty-/stale-frontier fallback. Only `frontier` is replaced; every other column
+    (`label`/`labelMask`/`features`/`episode_no`/…) rides through untouched."""
+    from pyspark.sql import functions as F
+
+    gate = gate_frontier.select(
+        "person_id", "doc_id",
+        F.col("frontier").alias("_gate_frontier")).cache()
+    try:
+        n_gate = gate.count()
+        n_keys = gate.select("person_id", "doc_id").distinct().count()
+        if n_gate != n_keys:
+            raise ValueError(
+                f"exp 0111 D13 gate: {n_gate - n_keys} duplicate (person_id, "
+                "doc_id) rows in the gate frame — refusing an ambiguous frontier "
+                "overwrite (one frontier per document is required).")
+        n_before = df.count()
+        joined = (df.drop("frontier")
+                  .join(gate, on=["person_id", "doc_id"], how="left"))
+        n_after = joined.count()
+        if n_after != n_before:
+            raise ValueError(
+                f"exp 0111 D13 gate: the gate join changed the document count "
+                f"({n_before} -> {n_after}) — a duplicate gate key inflated the "
+                "bundle; refusing.")
+        n_missing = joined.where(F.col("_gate_frontier").isNull()).count()
+        if n_missing:
+            raise ValueError(
+                f"exp 0111 D13 gate: {n_missing} bundle document(s) received no "
+                "gate frontier — a missing join is a hard error, never an "
+                "empty-frontier fallback.")
+        return (joined.withColumn("frontier", F.col("_gate_frontier"))
+                .drop("_gate_frontier"))
+    finally:
+        gate.unpersist()
 
 
 def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=None,
@@ -3187,33 +3396,60 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
             print(format_preindex_report(bundle), flush=True)
         return bundle
 
+    def _with_gate_frontier(spark, bundle, *, first_attestation, before_dag,
+                            assembly_params):
+        """The exp 0111 WP-D3 (D13) gate-frontier swap, or the bundle untouched when
+        `gate_frontier_mode` is 'none'/absent.
+
+        Runs ONLY on the external path (an --index-arm) and ONLY when a positive gate
+        width is requested, so an un-gated episode/random bundle — and every non-
+        episode bundle — is byte-for-byte what it was. `n_bg`/`tpn` come from
+        `assembly_params` (the exact kwargs the assembler was called with), so the
+        gate's DagLayout cannot drift from the label's; `before_dag` and the reused
+        `first_attestation` frame both come from the closure, never from a HIT
+        bundle (which carries neither)."""
+        gate_days = _gate_frontier_days(spec.get("gate_frontier_mode"))
+        if gate_days <= 0:
+            return bundle
+        with _phase(f"exp-0111 D13 gate-frontier swap "
+                    f"([index, index+{gate_days}d), MISS-only)"):
+            bundle = _attach_gate_frontier(
+                spark, bundle, first_attestation=first_attestation,
+                before_dag=before_dag, gate_days=gate_days,
+                n_bg=int(assembly_params["n_bg"]), tpn=int(assembly_params["tpn"]))
+        return bundle
+
     def _external_seam(spark, assembly_params, *, code_map_sdf, concept_col,
                        node_col, code_map_identity, dag_source):
-        """exp 0111 WP-D2: `(index_df, assemble_doc_spec, provider_doc_spec, ordinal_df)`.
+        """exp 0111: `(index_df, assemble_doc_spec, provider_doc_spec, ordinal_df,
+        first_attestation)`.
 
         On the external path (an --index-arm was chosen) this normalizes the label
         front end's code map, builds the driver-owned episode/random index frame from
         the sidecar (MISS-only) and selects EpisodeDocSpec for BOTH the assembler's BOW
         and the attestation provider, so the doc_id the provider derives matches the
-        one the corpus is keyed on. Off the external path it is a NO-OP that touches
-        NONE of its code-map inputs: no index frame, PatientCohortDocSpec on the
-        provider, and the assembler builds its own default doc spec (doc_spec=None) —
-        byte-for-byte the prior behavior (the code map is normalized only when the
-        episode index actually needs it)."""
+        one the corpus is keyed on. It also hands back the E4 first-attestation frame
+        so the WP-D3 gate post-pass reuses it (no second sidecar load). Off the
+        external path it is a NO-OP that touches NONE of its code-map inputs: no index
+        frame, PatientCohortDocSpec on the provider, the assembler builds its own
+        default doc spec (doc_spec=None), and no first-attestation frame — byte-for-
+        byte the prior behavior (the code map is normalized only when the episode
+        index actually needs it)."""
         from charmpheno.omop.doc_spec import EpisodeDocSpec, PatientCohortDocSpec
         if str(assembly_params.get("index_mode")) != "external":
-            return None, None, PatientCohortDocSpec(), None
+            return None, None, PatientCohortDocSpec(), None, None
         from conversion_sidecar import normalize_code_map
         code_map_norm = normalize_code_map(
             code_map_sdf, concept_col=concept_col, node_col=node_col)
         arm = str(spec["episode_sampling"]["arm"])
         with _phase(f"build exp-0111 {arm} index (external, MISS-only)"):
-            index_df, ordinal_df = _build_external_index_df(
+            index_df, ordinal_df, first = _build_external_index_df(
                 spark, spec, code_map_norm=code_map_norm,
                 code_map_identity=code_map_identity, dag_source=dag_source,
                 cache_uri=cache_uri)
         dml = int(assembly_params.get("doc_min_length") or 0)
-        return index_df, EpisodeDocSpec(min_doc_length=dml), EpisodeDocSpec(), ordinal_df
+        return (index_df, EpisodeDocSpec(min_doc_length=dml), EpisodeDocSpec(),
+                ordinal_df, first)
 
     def _assemble_mondo_native(spark, **assembly_params):
         from charmpheno.omop.multi_domain import (
@@ -3236,7 +3472,7 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
             # pick the doc spec BOTH the provider and the assembler use. The code map
             # is normalized inside the seam ONLY on the external path, so the ordinary
             # Mondo path touches none of it.
-            index_df, assemble_doc_spec, provider_doc_spec, ordinal_df = (
+            index_df, assemble_doc_spec, provider_doc_spec, ordinal_df, first_att = (
                 _external_seam(spark, assembly_params, code_map_sdf=code_map_sdf,
                                concept_col="std_cid", node_col="node_cid",
                                code_map_identity=(
@@ -3265,6 +3501,9 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
                                 provider=provider, assembly_params=assembly_params)
         if index_df is not None:
             bundle = _attach_bounded_doc_index(bundle, ordinal_df=ordinal_df)
+            bundle = _with_gate_frontier(
+                spark, bundle, first_attestation=first_att,
+                before_dag=before_dag, assembly_params=assembly_params)
         return bundle
 
     def _assemble_mondo(spark, **assembly_params):
@@ -3287,7 +3526,7 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
             # external path); its identity is the terminal count, exactly what
             # conversion_sidecar.code_map_from_manifest folds, so the fit and the probe
             # compute the SAME sidecar key.
-            index_df, assemble_doc_spec, provider_doc_spec, ordinal_df = (
+            index_df, assemble_doc_spec, provider_doc_spec, ordinal_df, first_att = (
                 _external_seam(spark, assembly_params, code_map_sdf=climb_sdf,
                                concept_col="descendant_concept_id",
                                node_col="ancestor_concept_id",
@@ -3319,6 +3558,9 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
                                 provider=provider, assembly_params=assembly_params)
         if index_df is not None:
             bundle = _attach_bounded_doc_index(bundle, ordinal_df=ordinal_df)
+            bundle = _with_gate_frontier(
+                spark, bundle, first_attestation=first_att,
+                before_dag=before_dag, assembly_params=assembly_params)
         return bundle
 
     return _assemble_mondo_native if native else _assemble_mondo
@@ -3486,6 +3728,22 @@ def parse_args(argv=None):
                         "it at a persistent in-boundary bucket so it survives a "
                         "cluster (AGENTS.md). Loaded ONLY on a bundle cache MISS; a "
                         "MISS with no sidecar present builds it once and saves it.")
+    # exp 0111 (WP-D3 / D13): separate the estimator's GATE from the outcome LABEL.
+    # When > 0 (and an --index-arm is set) each document's `frontier` gate is swapped
+    # to its [index, index+N-day) PRESENTATION window while `label`/`labelMask` stay
+    # the full 365-day frame the assembler baked — the D13 separation. A MISS-only
+    # driver post-pass; the gate mode (`gateNd`) folds into the bundle cache key, so
+    # a gated bundle is a distinct artifact from the un-gated one. 0 (default) keeps
+    # the 365-day frontier as the gate, so every existing key stays byte-identical.
+    p.add_argument("--gate-frontier-days", type=int, default=0,
+                   help="exp 0111 (D13): forward-window width (days) of the GATE the "
+                        "gated estimator reads, separated from the 365-day outcome "
+                        "label. > 0 swaps each episode/random document's `frontier` "
+                        "to its [index, index+N-day) presentation window (90 is the "
+                        "spec's gate); the outcome `label`/`labelMask` stay the "
+                        "365-day frame. Folds into the bundle cache key as `gateNd`. "
+                        "0 (default) leaves the frontier at 365 days — no separation, "
+                        "byte-identical key. Requires --index-arm (external path).")
     p.add_argument("--k", type=int, default=50,
                    help="K for the UNGATED --with-dag-head arm only; the gated arms "
                         "derive K from the layout (n_bg + nodes*tpn).")
