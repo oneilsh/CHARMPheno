@@ -894,6 +894,12 @@ def build_gated_pc_args(
         args.extend(["--readout-sample-frac", str(effective["readout_sample_frac"])])
     if effective.get("readout_mode"):
         args.extend(["--readout-mode", str(effective["readout_mode"])])
+    # exp 0111 WP-B: eval path for the gated_pc ranking arms (driver | distributed),
+    # orthogonal to readout_mode. The episode corpus (~x2.66 docs) makes the driver
+    # eval-collect the memory wall at C>2k, so the arms set eval_path: distributed;
+    # 0110's fewer docs let the driver path run, which is why it has no such key.
+    if effective.get("eval_path"):
+        args.extend(["--eval-path", str(effective["eval_path"])])
     if effective.get("readout_ab_check"):
         args.append("--readout-ab-check")
     if effective.get("readout_max_iter") is not None:

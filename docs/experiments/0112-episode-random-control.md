@@ -47,6 +47,7 @@ episode_prior_obs_days: 365
 episode_window_days: 365
 preindex_closure: false
 readout_mode: distributed
+eval_path: distributed
 readout_theta_topm: 256
 weight_y: 0.0
 weight_y_warmup_iters: 0
@@ -100,7 +101,9 @@ spark_conf:
   spark.executor.memory: 8g
   spark.executor.memoryOverhead: 3g
   spark.dynamicAllocation.enabled: "false"
-  spark.executor.instances: 12
+  # 20 executors (whole cluster) — see 0111's spark_conf note. Raised from 12 per
+  # Shawn (2026-09-04). One 11g executor per 13544MB worker; extras run smaller.
+  spark.executor.instances: 20
   spark.excludeOnFailure.timeout: 10m
   spark.cleaner.periodicGC.interval: "5min"
 ---
