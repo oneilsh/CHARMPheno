@@ -134,3 +134,28 @@ Three findings, and together they **vindicate keeping 365d for the primary arm**
 sensitivity, not a fit — the gate is not leaving materially capturable coverage
 on the table, and the "incident among the year-plus-observed" framing is the
 honest one. Egress: all figures pooled; per-node counts are counts-of-nodes.
+
+## Gate-occupancy (WP-B2) — the matched random arm is a real baseline, not a strawman
+
+`diag-episode-probe --gate-occupancy on` (gap 90d, cap 3, no fit): per arm, the
+fraction of documents whose 90-day gate `[index, index+90d)` is non-empty, and
+the gate-size distribution. FRONTIER measure — non-empty fraction is EXACT (the
+Mondo-DAG roll-up only adds ancestors), gate size a lower bound.
+
+| arm | docs | non-empty gate | gate size mean / p50 / p90 / p99 |
+|---|---|---|---|
+| episode | 783,956 | **100.0%** | 3.52 / 2 / 7 / 19 |
+| random (matched) | 882,918 | **26.9%** | 0.83 / 0 / 3 / 10 |
+
+(Gap 60d identical: 100.0% vs 27.0%.)
+
+**Finding — the matched random control is viable, not degenerate.** Prediction
+before measuring was "random ≈ near-empty"; it is 27% non-empty. So the D12
+matched comparison is "rich gates (episode: 100%, mean 3.52 nodes) vs sparse
+gates (random: 27% occupied, median 0)" — a ~4× density gap and ~3.3× more
+gated documents (784k vs ~238k), not "signal vs nothing." ~73% of random docs
+gate on background only (valid; the gated LDA handles empty frontiers), so the
+random arm learns node-specific structure from ~238k gated docs. Anchoring's
+gate-richness advantage is now quantified pre-fit; the fit measures how far it
+propagates to recovery. No design change — this de-risks the matched control
+(it will fit and be interpretable). Egress: pooled fractions + doc counts only.
