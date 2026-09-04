@@ -1,5 +1,11 @@
 # 0111 handoff — resume point for the next session — 2026-09-04
 
+> **UPDATE 2026-09-04 (later): WP-D2 (`fe017e6`) and WP-D3 (`d84506a`) have LANDED.**
+> The pure-code build is complete; the "NEXT: the build" section below is done. The
+> living record is now [`../experiments/0111-episode-anchored-sampling.md`](../experiments/0111-episode-anchored-sampling.md)
+> — resume from its "Next (cluster, with Shawn)" section: first post-WP-C bundle
+> rebuild → WP-B parity → WP-E smoke → WP-F census.
+
 Written before a context compaction. Branch **`claude/gated-conditional-voi`**,
 tree clean, everything below is committed and pushed. The authoritative design
 is the spec + plan (linked below); this doc is the "where we are / what's next"
