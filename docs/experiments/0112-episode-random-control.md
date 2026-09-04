@@ -48,6 +48,7 @@ episode_window_days: 365
 preindex_closure: false
 readout_mode: distributed
 eval_path: distributed
+readout_max_iter: 20   # TEMP: WP-E smoke value; REVERT (unset -> default 200) for WP-G (task #9)
 readout_theta_topm: 256
 weight_y: 0.0
 weight_y_warmup_iters: 0
