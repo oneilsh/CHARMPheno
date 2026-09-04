@@ -71,6 +71,7 @@ episode_prior_obs_days: 365
 episode_window_days: 365
 preindex_closure: false
 readout_mode: distributed
+eval_path: distributed
 readout_theta_topm: 256
 weight_y: 0.0
 weight_y_warmup_iters: 0
@@ -127,7 +128,11 @@ spark_conf:
   spark.executor.memory: 8g
   spark.executor.memoryOverhead: 3g
   spark.dynamicAllocation.enabled: "false"
-  spark.executor.instances: 12
+  # 20 executors (8 primary + 12 spot) — the episode corpus is ~x2.66 the doc count,
+  # so use the whole cluster. Each is 8g+3g=11g, one per 13544MB worker. YARN grants
+  # what exists and holds the rest pending, so a smaller cluster still runs (fewer
+  # executors, no error). Raised from 0110's 12 per Shawn (2026-09-04).
+  spark.executor.instances: 20
   spark.excludeOnFailure.timeout: 10m
   spark.cleaner.periodicGC.interval: "5min"
 ---
@@ -204,14 +209,31 @@ stayed byte-identical at every step.
   in the key + manifest. Activate with `--gate-frontier-days 90`. Verified: tripwire
   60/60, D2 14/14, D3 14/14 incl. label byte-identity.
 
+### 2026-09-04 — WP-B parity (cluster) — PASS
+
+Driver-vs-distributed eval-path parity on the 0110 corpus (`make gated-pc-readout ID=110`,
+`--readout-max-iter 20` to make the head-fit cheap; parity is about eval agreement on
+identical heads, not head convergence). First attempt was confounded — one run
+warm-resumed the killed 200-iter run's solver checkpoint (16/2537 converged) while the
+other cold-started (0 converged), so they scored DIFFERENT heads (~0.003 AUC gap, all
+head-difference). Re-run cold (checkpoint consumed) reproduced the distributed run's fit
+line EXACTLY (`56447 node-passes, max|grad|=1.44e3, 0 converged`) and then driver-eval and
+distributed-eval printed BYTE-IDENTICAL readout numbers: prevalent/full 0.7405/0.4150,
+prevalent/shared 0.7470/0.4439, incident 0.6780/0.2459, detection 0.6522/0.9739. Combined
+with the committed local <1e-9 oracle (`test_distributed_eval_parity.py`, WP-B), the
+distributed eval path is confirmed at real scale (C=2714). **Episode arms are cleared for
+`eval_path: distributed`** — which they need anyway (the ~×2.66 doc count makes the
+driver-collect eval the memory wall). run_experiment now forwards `eval_path` from front
+matter (mirrors `readout_mode`); both arm docs set it. Egress: all figures pooled.
+
 ### Next (cluster, with Shawn)
 
 1. **First post-WP-C bundle rebuild** — the WP-C drop moved the bundle/corpus/covariate
    keys; no rebuild has been paid yet. First `make exp` re-assembles each arm (~20 min
    BigQuery/arm). HDFS caches are cluster-ephemeral; if the cluster was bounced, rebuild
    the sidecar first (`make build-conversion-sidecar ID=110`, survives WP-C).
-2. **WP-B parity** — driver vs distributed on the rebuilt 0110 bundle (`compare_per_node`)
-   before flipping the episode arms to `--eval-path distributed`.
+2. ~~**WP-B parity**~~ — DONE (2026-09-04, above): distributed == driver at C=2714. Episode
+   arms use `eval_path: distributed`.
 3. **WP-E smoke** — both arms, small iterations: A/B gate (episode arm), R5.11 / insight
    0009 coherence + topic-usage, R7.5 ordinal drop-rate, corpus shape vs probe (×2.66,
    ≤3 docs/person).
