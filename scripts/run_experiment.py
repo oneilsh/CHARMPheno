@@ -863,6 +863,27 @@ def build_gated_pc_args(
         args.append("--dag-collapse")
     if effective.get("preindex_closure"):
         args.append("--preindex-closure")
+    # exp 0111 (WP-D2): episode-anchored / matched-random index arms. `index_arm`
+    # in front matter switches the Mondo corpus onto the driver-built external
+    # index; the sampling knobs default to the probe's settled values, so a bare
+    # `index_arm: episode` is enough. episode_sidecar_uri points the sidecar load
+    # at a persistent bucket (defaults to <cache_uri>/conversion_sidecar).
+    if effective.get("index_arm"):
+        args.extend(["--index-arm", str(effective["index_arm"])])
+    if effective.get("episode_gap_days") is not None:
+        args.extend(["--episode-gap-days", str(effective["episode_gap_days"])])
+    if effective.get("episode_cap") is not None:
+        args.extend(["--episode-cap", str(effective["episode_cap"])])
+    if effective.get("episode_salt") is not None:
+        args.extend(["--episode-salt", str(effective["episode_salt"])])
+    if effective.get("episode_prior_obs_days") is not None:
+        args.extend(["--episode-prior-obs-days",
+                     str(effective["episode_prior_obs_days"])])
+    if effective.get("episode_window_days") is not None:
+        args.extend(["--episode-window-days",
+                     str(effective["episode_window_days"])])
+    if effective.get("episode_sidecar_uri"):
+        args.extend(["--episode-sidecar-uri", str(effective["episode_sidecar_uri"])])
     if effective.get("readout_sample_frac") is not None:
         args.extend(["--readout-sample-frac", str(effective["readout_sample_frac"])])
     if effective.get("readout_mode"):

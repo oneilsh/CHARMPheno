@@ -354,6 +354,15 @@ def corpus_spec_from_manifest(manifest: dict, *, doc_min_length=None, billing=No
         # override: unlike the Mondo build inputs, the doc unit is not something a
         # rebuild can be told to differ on, because the assembler hard-codes it.
         "doc_spec": str(_pick("doc_spec", DEFAULT_DOC_SPEC)),
+        # exp 0111 WP-D2: the external episode/random index identity. Defaults to
+        # None (absent) — what every manifest written before the arms existed means,
+        # so an old run recomputes its byte-identical key — and is folded into the
+        # bundle key ONLY on the `index_mode="external"` path (multidomain_cache_key),
+        # so a re-readout of an episode bundle recomputes the fit's OWN key. The
+        # sidecar URI rides too but is NOT a key input; it only tells a re-readout
+        # MISS where to reload/rebuild the index's sidecar.
+        "episode_sampling": _pick("episode_sampling", None),
+        "episode_sidecar_uri": _pick("episode_sidecar_uri", ""),
         # E1 (exp E-census onward). Mondo-only, defaults to False — what every
         # manifest written before the flag existed means — and the CLI wins in
         # both directions for a fit whose manifest omits or contradicts it, the
