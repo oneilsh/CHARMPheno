@@ -83,7 +83,7 @@ head_newton_ridge: 0.05
 head_l2: 0.01
 grad_cavi_iters: 15
 topic_trust: 0.05
-max_iter: 100
+max_iter: 15   # TEMP: WP-E smoke value; REVERT to 100 for the WP-G record run (task #9)
 subsampling_rate: 0.1
 tau0: 64.0
 kappa: 0.51
