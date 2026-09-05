@@ -46,19 +46,25 @@ disease: rare_priority
 # (0113's own-label variant leakage) + minibatch rarity, and the plain-K-LDA-on-one-subDAG
 # test (0079) becomes the discriminator for whether uncoded signal exists at all.
 #
-# COST NOTE (scalable seed). The concatenated multi-domain V (~11.6k = 5000+5000+1601)
-# is >= spectral_max_vocab (8000), so spectral_method routes SCALABLE (dense would be a
-# driver V×V collect — the 0110 disk wall). The seed now uses the BATCHED variant
-# (gated_init.scalable_block_aligned_lambda): it recovers B nodes per projected-
-# cooccurrence pass, batched within a depth level, collapsing ~n_nodes+1 SEQUENTIAL
-# corpus passes into ~n_nodes/B — the fix for the ~1h-per-attempt seed on a lean cluster
-# (the first attempt of this run, pre-batching, was ~2.5h projected). B auto-sizes to a
-# ~400 MB driver-result budget (B≈5 at this V,d); override live with no redeploy via
-# `CHARM_SPECTRAL_BATCH=<n>` in the submit env (lower it, e.g. 2-3, if a lean executor
-# OOMs on the B dense (V,d) group accumulators). Progress prints per batch
-# ("seeded k/N nodes (depth d, Ns elapsed)") so it never looks hung. The seed is
-# batch-size-INVARIANT (a node's sketch is the same docs regardless of its batch), so
-# tuning B changes only speed, not the fitted seed.
+# COST NOTE (scalable seed). Concatenated multi-domain V ~11.6k >= spectral_max_vocab
+# (8000) -> SCALABLE routing (dense = driver V×V collect, the 0110 disk wall). The seed
+# is BATCHED (gated_init.scalable_block_aligned_lambda): B nodes per projected-cooccurrence
+# pass, batched within a depth level, ~n_nodes passes -> ~n_nodes/B, with per-batch
+# progress logging. Two costs bound B, both now handled:
+#   - DRIVER COLLECT. Each pass treeReduces ~sqrt(numPartitions) partials to the driver,
+#     each holding all B+1 dense (V,d) float32 sketches; peak ~ sqrt(P)·(B+1)·V·d·4. B
+#     AUTO-SIZES to spark.driver.maxResultSize (0.7 budget) so it cannot OOM — the first
+#     batched attempt DID OOM (4.1 GiB > 4 GiB maxResultSize at B=6, V·d=11601·1498)
+#     because the old sizing ignored the sqrt(P) fan-out. Override via
+#     CHARM_SPECTRAL_BATCH=<n> (warns past the safe cap).
+#   - PROJECTION DIM d. The scalable path places only ~tpn+|seed_rows| anchors PER NODE,
+#     never K, so d need not clear K (the dense floor). spectral_d: 768 here (JL "safe
+#     margin" ~1000; EM refines the seed, so a slightly smaller d is a speed lever, not a
+#     quality cut) shrinks each (V,d) sketch ~2x vs the old K=1498 floor -> faster passes
+#     AND a bigger safe B. Expected B≈6 at 768 / 4 GiB; ~50 passes, ~40-50 min on the lean
+#     cluster. FASTER: spectral_d: 512 -> B≈10, ~30 passes; or raise maxResultSize if the
+#     master has RAM. The seed is batch-size-INVARIANT (tuning B changes speed, not the
+#     fitted seed); d changes the seed slightly but within EM's refinement.
 dag_source: mondo_native
 mondo_branch: MONDO:0004995
 tpn: 5
@@ -67,6 +73,7 @@ diag_only: true
 # --- the ONLY change from 0113: spectral block-aligned seed for the gated engine ---
 init: spectral
 spectral_method: scalable   # concatenated V ~11.6k >= 8000 threshold; dense = driver wall
+spectral_d: 768             # random-projection dim: smaller = faster + bigger safe batch (see COST)
 anchor_scope: closure       # node trained from its whole closure; ancestors deflated by topo order
 spectral_topo_order: forward  # ancestors-first: each node's seed = its increment over ancestors
 # ------------------------------------------------------------------------------------

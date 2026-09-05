@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import itertools
 import logging
+import math
 import os
+import re
 import time
 
 import numpy as np
@@ -317,26 +319,100 @@ class _NodeGroups:
         self.groups = groups
 
 
-def _resolve_batch_size(batch_size: int, V: int, d: int) -> int:
+def _scalable_projection_dim(lay, V: int) -> int:
+    """Random-projection dim d for the SCALABLE per-node/per-batch recovery.
+
+    The scalable path recovers at most (tpn + |seed_rows|) anchors PER NODE — the
+    node's own tpn plus background + its ancestors' already-recovered anchors — never
+    all K at once (that is the DENSE path's need, and the only reason
+    default_projection_dim floors d at K). At whole-Mondo K that K-floor inflates every
+    (V, d) sketch — the per-pass compute AND the driver-collect that bound the batch
+    width — for no recovery benefit. Size d to the JL "safe margin" ~1000 (Arora et al.
+    2013; default_projection_dim's own target_dim), lifted only if some node's anchor
+    set exceeds it, and capped at V. Not a quality cut: recovery needs only d >= that
+    per-node anchor count, and background/per-node recoveries place far fewer than K."""
+    max_anc = max((len(lay.closure(u)) for u in lay.nodes), default=1)
+    max_anchors = int(lay.n_bg) + int(lay.tpn) * (max_anc + 1)
+    return int(min(int(V), max(1000, max_anchors)))
+
+
+def _parse_spark_bytes(v) -> int | None:
+    """Parse a Spark size string ('4g', '4096m', '4294967296', '4gb') to bytes.
+
+    Spark uses 1024-based suffixes (k/m/g/t/p). Returns None for '0'/'' / unset /
+    unparseable (Spark's '0' meaning 'no limit')."""
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    if not s or s == "0":
+        return None
+    m = re.fullmatch(r"([0-9]*\.?[0-9]+)\s*([kmgtp]?)i?b?", s)
+    if not m:
+        try:
+            return int(s)
+        except ValueError:
+            return None
+    scale = {"": 1, "k": 1024, "m": 1024 ** 2, "g": 1024 ** 3,
+             "t": 1024 ** 4, "p": 1024 ** 5}[m.group(2)]
+    return int(float(m.group(1)) * scale)
+
+
+def _safe_batch_cap(rdd, V: int, d: int, *, depth: int = 2, safety: float = 0.7,
+                    hard_cap: int = 32) -> int:
+    """Largest B whose batched pass keeps the driver-collect under maxResultSize.
+
+    `projected_cooccurrence_rdd` treeReduces the per-partition accumulators to the
+    driver, so the driver receives ~n_final ≈ ceil(numPartitions**(1/depth)) partial
+    results (≈ sqrt(P) at the default depth 2), each holding ALL (B+1) dense (V, d)
+    float32 group sketches (pooled + B groups). Peak ≈ n_final·(B+1)·V·d·4 bytes — the
+    quantity that overflowed spark.driver.maxResultSize when the earlier fixed-budget
+    sizing ignored the n_final fan-out. Solve B against a `safety` fraction of the
+    configured maxResultSize; unlimited/unset -> a fixed cap. (A 15% fudge covers the
+    float64 p_w/df_w marginals, which are ~V·8 ≪ the V·d·4 sketches.)"""
+    try:
+        budget = _parse_spark_bytes(rdd.context.getConf().get(
+            "spark.driver.maxResultSize", "1g"))
+    except Exception:                                    # pragma: no cover - defensive
+        budget = 1024 ** 3
+    if not budget or budget <= 0:
+        return hard_cap
+    try:
+        n_part = max(1, rdd.getNumPartitions())
+    except Exception:                                    # pragma: no cover - defensive
+        n_part = 200
+    n_final = max(2, math.ceil(n_part ** (1.0 / max(depth, 1))))
+    per_array = 1.15 * 4 * int(V) * int(d)
+    b = int((safety * budget) / (n_final * per_array)) - 1
+    return int(max(1, min(hard_cap, b)))
+
+
+def _resolve_batch_size(batch_size: int, V: int, d: int, rdd, *,
+                        depth: int = 2) -> int:
     """Nodes to sketch per projected-cooccurrence pass (the batched seed's width).
 
-    Each batched node carries a dense ``(V, d)`` float32 group sketch that reaches the
-    driver on the tree-reduce, so B is bounded by a driver-result budget: keep
-    ``B·V·d·4`` bytes under ~400 MB by default — comfortably below the 1 GB
-    ``spark.driver.maxResultSize`` floor, and small enough that a lean cluster's
-    executors hold only B such accumulators per task. ``batch_size > 0`` overrides the
-    auto value; the env var ``CHARM_SPECTRAL_BATCH`` overrides both, for no-redeploy
-    tuning on the cluster. Always >= 1 (B=1 reproduces the per-node path)."""
+    Default = the memory-safe cap (`_safe_batch_cap`, sized from the cluster's
+    maxResultSize + partition count). ``CHARM_SPECTRAL_BATCH`` (env) or a positive
+    ``batch_size`` override it for no-redeploy tuning, warning if the request exceeds
+    the safe cap (honored anyway — the operator may have raised maxResultSize)."""
+    safe = _safe_batch_cap(rdd, V, d, depth=depth)
+    requested = None
     env = os.environ.get("CHARM_SPECTRAL_BATCH")
     if env:
         try:
-            return max(1, int(env))
+            requested = int(env)
         except ValueError:
-            pass
-    if batch_size and int(batch_size) > 0:
-        return max(1, int(batch_size))
-    per = 4 * int(V) * int(d)
-    return int(max(1, min(32, (400 * 1024 * 1024) // max(per, 1))))
+            requested = None
+    if requested is None and batch_size and int(batch_size) > 0:
+        requested = int(batch_size)
+    if requested is not None:
+        if requested > safe:
+            logger.warning(
+                "scalable seed: requested batch=%d exceeds the memory-safe cap %d "
+                "(V=%d, d=%d, driver maxResultSize); honoring it — lower it or raise "
+                "spark.driver.maxResultSize if the driver-collect OOMs.",
+                requested, safe, V, d)
+        return max(1, requested)
+    return safe
 
 
 def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
@@ -383,10 +459,15 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
     equivalent; a future repartition of `group_rdd` would break that).
 
     COST: this issues `n_nodes + 1` sequential passes, each a full scan of the
-    cached corpus — fine for tens of nodes, but O(n_nodes) passes is slow for
-    hundreds. The bounded-memory batching variant (recover B node slabs per pass
-    via a non-empty `_NodeGroups(batch)`, batched within a depth level so no node
-    shares a batch with an ancestor) is the follow-up for large DAGs.
+    cached corpus. In NORMAL mode this is now BATCHED: B nodes are recovered per
+    pass via a non-empty `_NodeGroups(batch)`, batched WITHIN a depth level so no
+    node shares a batch with an ancestor/descendant (see the loop below), cutting
+    ~n_nodes passes to ~n_nodes/B. B auto-sizes to the driver's maxResultSize
+    (`_safe_batch_cap`: the treeReduce collects ~sqrt(P) partials, each holding all
+    B+1 dense (V, d) sketches) and d drops the dense path's K-floor
+    (`_scalable_projection_dim`), the two knobs that make a deep, wide DAG's seed
+    tractable on a lean cluster. Only PROBE mode (env-gated diagnostics) keeps the
+    slow per-node passes, whose per-node n_docs/unigram the group machinery omits.
 
     `anchor_scope` mirrors the dense function: "closure" (default) trains each
     node's sketch from every doc in its frontier closure and background from ALL
@@ -429,7 +510,7 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
     )
     _validate_anchor_scope(anchor_scope)
     if d is None:
-        d = default_projection_dim(lay.K, V)
+        d = _scalable_projection_dim(lay, V)
 
     lay_b = rdd.context.broadcast(lay)
 
@@ -701,7 +782,7 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                     if j < fg_beta.shape[0]:
                         beta[idx] = fg_beta[j]
 
-            B = _resolve_batch_size(batch_size, V, d)
+            B = _resolve_batch_size(batch_size, V, d, rdd)
             levels = [list(g) for _, g in
                       itertools.groupby(order, key=lambda u: lay.depth(u))]
             logger.info(

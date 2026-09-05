@@ -92,6 +92,69 @@ def test_scalable_block_aligned_lambda_is_block_aligned_and_deflated(spark):
     assert not np.allclose(beta1, beta2)
 
 
+def test_parse_spark_bytes():
+    from spark_vi.models.topic.gated_init import _parse_spark_bytes
+    assert _parse_spark_bytes("4g") == 4 * 1024 ** 3
+    assert _parse_spark_bytes("4gb") == 4 * 1024 ** 3
+    assert _parse_spark_bytes("4096m") == 4096 * 1024 ** 2
+    assert _parse_spark_bytes("2.0g") == int(2.0 * 1024 ** 3)
+    assert _parse_spark_bytes("4294967296") == 4294967296
+    assert _parse_spark_bytes("0") is None       # Spark's "no limit"
+    assert _parse_spark_bytes("") is None
+    assert _parse_spark_bytes(None) is None
+
+
+class _FakeRDD:
+    """Minimal rdd stand-in for _safe_batch_cap: only .context.getConf().get and
+    .getNumPartitions are read."""
+    def __init__(self, max_result, n_part):
+        self._mr, self._p = max_result, n_part
+        outer = self
+
+        class _Conf:
+            def get(self, k, default=None):
+                return outer._mr if k == "spark.driver.maxResultSize" else default
+
+        class _Ctx:
+            def getConf(self):
+                return _Conf()
+        self.context = _Ctx()
+
+    def getNumPartitions(self):
+        return self._p
+
+
+def test_safe_batch_cap_keeps_driver_collect_under_maxresultsize():
+    # The exact 0114 scenario that OOM'd at B=6: V=11601, d=1000, 96 partitions,
+    # 4 GiB maxResultSize. The cap must keep the treeReduce driver-collect
+    # (~sqrt(P) partials, each B+1 dense (V,d) float32 sketches) safely under budget.
+    from spark_vi.models.topic.gated_init import _safe_batch_cap
+    V, d, P, mrs = 11601, 1000, 96, 4 * 1024 ** 3
+    B = _safe_batch_cap(_FakeRDD("4g", P), V, d)
+    assert B >= 1
+    n_final = 10                                  # ceil(sqrt(96))
+    peak = n_final * (B + 1) * V * d * 4          # bytes actually collected
+    assert peak < mrs                             # would not OOM
+    # a bigger budget admits a bigger batch; a tiny budget floors at 1
+    assert _safe_batch_cap(_FakeRDD("16g", P), V, d) > B
+    assert _safe_batch_cap(_FakeRDD("256m", P), V, d) == 1
+    # unlimited (0) -> a fixed sane cap, not unbounded
+    assert 1 <= _safe_batch_cap(_FakeRDD("0", P), V, d) <= 32
+
+
+def test_scalable_projection_dim_drops_k_floor():
+    # A big-K layout (many nodes x tpn): d must be the JL ~1000 margin, NOT K
+    # (which the dense default_projection_dim would floor to and inflate every sketch).
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_init import _scalable_projection_dim
+    parent = {i: 0 for i in range(1, 121)}        # 120 shallow nodes under root
+    lay = DagLayout(parent, n_bg=8, tpn=5)        # K = 8 + 120*5 = 608
+    assert lay.K == 608
+    assert _scalable_projection_dim(lay, V=5000) == 1000     # not K, not V
+    # capped at V when V is small
+    assert _scalable_projection_dim(lay, V=400) == 400
+
+
 def test_scalable_block_aligned_lambda_batch_size_invariant(spark):
     # The batched seed recovers B nodes per pass, but a node's group sketch is the
     # same docs regardless of who shares its batch — so the seed MUST NOT depend on
