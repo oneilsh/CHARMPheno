@@ -1,7 +1,7 @@
 ---
 id: 115
 slug: mondo-cardiovascular-tpn5-spectral-binary
-status: pending
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -179,8 +179,51 @@ make -C analysis/cloud inspect-topics ID=115 \\
 
 ## Run log
 
-*(pending)*
+**2026-09-05 — fit.** 0114's config + `count_transform: binary`, fit-only, K=1498, same
+bundle/seed. Saved fit-only λ.
 
 ## Results
 
-*(pending; model params / counts-of-nodes only, egress floor)*
+**Acceptance — did binarization re-align the burst-anchored topics? NO. Burst-bias is
+FALSIFIED as the cause. The floor stayed lifted, but the pregnancy anchoring persisted —
+so the misalignment is GENUINE objective misalignment (separability ≠ phenotype), not a
+token-mass artifact.**
+
+- **Floor held (no re-starvation):** 1% starved, all depths sharp (frac ~0.01–0.02).
+  Median evidence is uniformly lower than 0114 (depth-4 383 vs 1000; depth-5 279 vs 719)
+  — expected and benign: binarization removes repeat mass, so λ-sum drops while sharpness
+  is unchanged. Redundancy is even cleaner than 0114 (0/81 collapsed, worst fed-cosine
+  **0.17** vs 0.36). So per-doc presence is a viable representation.
+- **The pregnancy anchoring PERSISTED** on the cardiomyopathy family, essentially
+  unchanged from 0114: **intrinsic cardiomyopathy** (d4) still *Gestation period · 1st/2nd/
+  3rd trimester · high-risk pregnancy · miscarriage* (and one topic a genetic grab-bag —
+  cystic fibrosis / trisomy 21 / hemophilia); **dilated cardiomyopathy** (d5) still
+  *trimesters · gestation weeks · disorder of pregnancy // oxytocin*; **cardiomyopathy**
+  (d3) still generic-symptom + pregnancy. The coherent nodes stayed coherent (AF →
+  *Paroxysmal/Chronic/Persistent AF · atrial flutter · VT // rivaroxaban·metoprolol·
+  diltiazem*; systolic/diastolic HF; valve).
+
+**Interpretation.** At presence level, "was pregnant" is *still* the single most-separable
+feature of the intrinsic/dilated-CM patient population — because these nodes' patients ARE
+disproportionately young women diagnosed peri-pregnancy, and (with the CM code stripped)
+the residual most-distinctive PRESENCE direction is the demographic/etiologic stratum
+(peripartum, genetic), not a unified cardiac phenotype. So the anchor is surfacing REAL
+population structure of a heterogeneous node, not a counting artifact. This is exactly the
+"unsupervised separability ≠ node meaning" residual: the deflated CAVI objective has no
+term preferring the cardiac-discriminating direction over the most-separable substratum,
+and binarization (which only removes repetition) cannot supply one.
+
+**Verdict — the burst-bias / objective-misalignment fork (insight 0082) resolves toward
+OBJECTIVE.** The cheap fix (presence) is ruled out for this residual. The principled lever
+is a LABEL-AWARE objective (supervision) — pull each node's topic toward its
+case-vs-control discriminating direction — and this is plausibly insight 0066's payoff
+regime (a lower-separability cardiac signal buried under a more-separable demographic one),
+unlike the AoU antidepressant task where PC was marginal. Cheaper-than-PC alternative:
+NUISANCE DEFLATION (deflate each node against a corpus-wide demographic basis). BUT whether
+this residual is worth paying for is a DETECTION question, not a topic-legibility one: the
+next move is `gated-pc-readout` on 0114/0115 — does the demographic anchor cost case-finding
+AUC, or does the localized head simply not read it? Only if it costs detection is
+supervision / nuisance-deflation worth the compute.
+
+Secondary: binary presence did not hurt (cleaner redundancy, floor held), so it is a
+reasonable default representation independent of the alignment question.

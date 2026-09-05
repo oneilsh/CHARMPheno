@@ -4,6 +4,14 @@
 **Topic:** lda, init, spectral, gated-pc, case-finding
 **Status:** Confirmed on exp 0114 (CV branch, MONDO:0004995, tpn=5, fit-only, spectral
 scalable seed) vs exp 0113 (same, random init). The A/B is clean — only the seed differs.
+**UPDATE (exp 0115):** the alignment residual's burst-bias vs objective-misalignment fork
+is RESOLVED toward OBJECTIVE — `count_transform: binary` (per-doc presence) did NOT
+dislodge the pregnancy anchoring on the cardiomyopathy family (floor held, redundancy
+even cleaner, but intrinsic/dilated CM stayed pregnancy/genetic-anchored). So the
+misalignment is genuine — at presence level, the most-separable direction for these
+heterogeneous nodes IS the demographic/etiologic stratum, not a counting artifact. The
+lever is a label-aware objective (supervision / nuisance deflation), gated on whether it
+actually costs DETECTION (a `gated-pc-readout` question), not counts.
 
 **Relates to:** 0079 (the depth starvation this resolves — its "MECHANISM UNRESOLVED /
 init untested at depth" is now settled: init was it), 0080/0081 (the shallow/background
@@ -61,10 +69,11 @@ objective determines that "most-separable" ≠ "phenotype."
 
 - **Spectral init is the deep-node starvation fix** and should be the default for any deep
   gated fit; starvation was never a fundamental limit.
-- **The alignment residual decomposes** into (a) burst / utilization-volume bias — fixable
-  cheaply by `count_transform: binary` (per-doc presence, insight 0077 extended to all
-  domains; exp 0115 is the deconfounding A/B, prediction: the pregnancy-anchored CMs recede
-  while AF/HF hold); (b) genuine objective misalignment (separability ≠ phenotype) — only a
+- **The alignment residual decomposes** into (a) burst / utilization-volume bias — TESTED
+  and FALSIFIED for the cardiomyopathy family by exp 0115 (`count_transform: binary` left
+  the pregnancy anchoring in place; the floor held and redundancy even improved, but the
+  CMs stayed pregnancy/genetic-anchored — so at presence level the demographic stratum is
+  genuinely the most-separable direction, not a counting artifact); (b) genuine objective misalignment (separability ≠ phenotype) — only a
   label-aware objective (supervision / PC) aligns the criterion with node meaning, and this
   hidden-signal-under-a-dominant-one regime is exactly where insight 0066 says PC pays,
   unlike the AoU antidepressant task; (c) genuine label heterogeneity (peripartum CM IS
