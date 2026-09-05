@@ -565,6 +565,17 @@ def build_report(run_dir, *, top_topics, top_loadings, t_words,
         w(f"| BG{t} | {sh['evidence'][t]:.4g} | {sh['support'][t]:.1f} | "
           f"{sh['top1'][t]:.3f} | {dom_names[d]} |")
     w("")
+    # Background carries most of the corpus mass; its words say what "everyone"
+    # looks like (the backbone the node topics are deflated against).
+    if inv_maps:
+        w(f"Background words (top {t_words} per domain):")
+        w("")
+        for t in range(n_bg):
+            w(f"- **BG{t}** — ev {sh['evidence'][t]:.3g}, support {sh['support'][t]:.0f}")
+            for line in topic_word_lines(t, lams, inv_maps, names, name_by_id,
+                                         dom_names, t_words):
+                w(line)
+        w("")
 
     # ---- per-node topic sharpness (the headline) ----
     def depth_of(t):
