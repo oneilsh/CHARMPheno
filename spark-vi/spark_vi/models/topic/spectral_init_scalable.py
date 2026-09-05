@@ -116,6 +116,20 @@ def _r_rows(indices, seed: int, d: int, cache: dict | None = None) -> np.ndarray
     return out
 
 
+def precompute_projection_rows(V: int, d: int, seed: int) -> np.ndarray:
+    """The full ``(V, d)`` Gaussian projection matrix ``R`` — every token's row.
+
+    Equivalent to ``_r_rows(np.arange(V), seed, d)``: row ``w`` is
+    ``default_rng(SeedSequence([seed, w])).standard_normal(d)``, the SAME
+    per-word convention the streaming co-occurrence sketch draws, so a driver-side
+    projection built from this matrix is consistent with the distributed sketch.
+    Precomputed once and reused across nodes by the parallel-analysis probe
+    (``scalable_block_aligned_lambda``, ``probe_pa``); factored here so all-token
+    and per-index projections cannot drift to different row seeds.
+    """
+    return _r_rows(np.arange(int(V), dtype=np.int64), seed, d)
+
+
 def _project_doc(indices, counts, R_rows):
     """Rank-1 projected co-occurrence + word-marginal contributions for one doc.
 
