@@ -46,6 +46,17 @@ stripped (`strip_mode both`), a fine-grained Mondo leaf contributes almost no
 vocabulary its parent category doesn't, so its block starves even when the node
 has adequate labelled documents.
 
+This also bounds the readout directly at DEPLOYMENT. Training gates each doc's
+CAVI to `allowed_set(frontier)`, but `transform` folds held-out docs in UNGATED
+(full-K) — you can't gate by the label you're predicting (`gated_lda.py:4`). A
+starved topic (β ≈ uniform) cannot win words in the fold-in responsibility
+softmax, so its θ dimension is **inert at test** — θ_c ≈ 0 for every doc, disease
+or not — and node c's localized head has nothing to read but ancestors/background
+(population context). The ungated fold-in adds no noise (flat topics stay ~0, they
+don't steal mass) and the head is localized anyway; the killer is the starvation,
+not the ungating. Fix the topics and the ungated deployment works as designed
+(that IS the placement task).
+
 Critically, this means **label coverage ≠ topic learnability**. Insight 0078
 showed episode anchoring un-starves the *label* space (2583/2714 nodes reach ≥20
 gated onset episodes as positives). 0079 is orthogonal: those same deep nodes
