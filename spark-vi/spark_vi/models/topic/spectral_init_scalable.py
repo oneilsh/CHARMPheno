@@ -183,7 +183,7 @@ class ProjectedCoocResult:
 
 def projected_cooccurrence_rdd(
     rdd, partition, V: int, d: int, seed: int, *, depth: int = 2,
-    dtype=np.float32,
+    dtype=np.float32, pooled: bool = True,
 ) -> ProjectedCoocResult:
     """One distributed pass: pooled + per-group projected co-occurrence, p_w, df_w.
 
@@ -198,6 +198,17 @@ def projected_cooccurrence_rdd(
     both ``pooled_QR`` and ``group_QR[g]``. The (V, d) accumulators use ``dtype``
     (default float32, for memory at large V); p_w is float64 and df_w int64.
 
+    ``pooled`` (default True) computes the corpus-pooled sketch (``pooled_QR``,
+    ``p_w``, ``df_w``) — needed for the background block and the per-node probe
+    diagnostics. Set it False for a per-GROUP-only pass (the batched node seed):
+    then the expensive per-doc projection (``_project_doc``, O(nnz·d)) runs ONLY
+    for docs that train one of the requested groups — a doc training none of them
+    is skipped entirely, so a pass over deep nodes (tiny closures) collapses to a
+    cheap scan instead of projecting the whole corpus. The pooled fields come back
+    EMPTY (a doc in no group contributes nothing to any group sketch, so group
+    results are identical to a pooled=True pass), and the pooled (V, d) array is
+    dropped from the driver-collect too.
+
     Normalization: results are left on the SUMMED scale (Σ_docs, no division by
     n_docs or grand total). Downstream anchor-finding row-normalizes Q's sketch,
     so any global positive scalar cancels — averaging here would only lose
@@ -208,14 +219,17 @@ def projected_cooccurrence_rdd(
     groups = tuple(partition.groups)
 
     def _local(docs, _p=p_bcast, _V=V, _d=d, _seed=seed, _dtype=dtype,
-               _groups=groups):
+               _groups=groups, _pooled=pooled):
         part = _p.value
-        pooled = np.zeros((_V, _d), dtype=_dtype)
         group_QR = {g: np.zeros((_V, _d), dtype=_dtype) for g in _groups}
         group_p_w = {g: np.zeros(_V, dtype=np.float64) for g in _groups}
         group_df_w = {g: np.zeros(_V, dtype=np.int64) for g in _groups}
-        p_w = np.zeros(_V, dtype=np.float64)
-        df_w = np.zeros(_V, dtype=np.int64)
+        # Pooled accumulators only when requested; empty placeholders otherwise so
+        # the tree-combine and driver-collect carry ~nothing for the pooled slot.
+        pooled = np.zeros((_V, _d), dtype=_dtype) if _pooled \
+            else np.zeros((_V, 0), dtype=_dtype)
+        p_w = np.zeros(_V if _pooled else 0, dtype=np.float64)
+        df_w = np.zeros(_V if _pooled else 0, dtype=np.int64)
         known = set(_groups)
         r_cache: dict = {}
         n_docs = 0
@@ -224,18 +238,23 @@ def projected_cooccurrence_rdd(
             L = float(n.sum())
             if L < 2:
                 continue
+            in_groups = [g for g in doc.groups if g in known]
+            # pooled=False: a doc training none of the requested groups adds nothing
+            # to any sketch, so skip its projection entirely (the depth speedup).
+            if not _pooled and not in_groups:
+                continue
             idx = np.asarray(doc.indices, dtype=np.int64)
             R_rows = _r_rows(idx, _seed, _d, cache=r_cache)
             qr, pw = _project_doc(idx, n, R_rows)
             qr = qr.astype(_dtype)
-            pooled[idx] += qr
-            p_w[idx] += pw
-            df_w[idx] += 1
-            for g in doc.groups:
-                if g in known:
-                    group_QR[g][idx] += qr
-                    group_p_w[g][idx] += pw
-                    group_df_w[g][idx] += 1
+            if _pooled:
+                pooled[idx] += qr
+                p_w[idx] += pw
+                df_w[idx] += 1
+            for g in in_groups:
+                group_QR[g][idx] += qr
+                group_p_w[g][idx] += pw
+                group_df_w[g][idx] += 1
             n_docs += 1
         return [(pooled, group_QR, p_w, df_w, group_p_w, group_df_w, n_docs)]
 

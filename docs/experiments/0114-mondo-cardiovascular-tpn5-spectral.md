@@ -49,8 +49,12 @@ disease: rare_priority
 # COST NOTE (scalable seed). Concatenated multi-domain V ~11.6k >= spectral_max_vocab
 # (8000) -> SCALABLE routing (dense = driver V×V collect, the 0110 disk wall). The seed
 # is BATCHED (gated_init.scalable_block_aligned_lambda): B nodes per projected-cooccurrence
-# pass, batched within a depth level, ~n_nodes passes -> ~n_nodes/B, with per-batch
-# progress logging. Two costs bound B, both now handled:
+# pass, batched within a depth level, ~n_nodes passes -> ~n_nodes/B, with per-BATCH timing
+# logged (each batch's own seconds, not cumulative elapsed). The batch passes run
+# pooled=False, so a doc is projected ONLY if it trains one of the batch's nodes — deep
+# levels (tiny closures) skip almost the whole corpus and get cheap, so per-batch time
+# FALLS with depth (total ~ Σ_node docs-training-node, not n_passes × all_docs). Two costs
+# bound B, both now handled:
 #   - DRIVER COLLECT. Each pass treeReduces ~sqrt(numPartitions) partials to the driver,
 #     each holding all B+1 dense (V,d) float32 sketches; peak ~ sqrt(P)·(B+1)·V·d·4. B
 #     AUTO-SIZES to spark.driver.maxResultSize (0.7 budget) so it cannot OOM — the first
