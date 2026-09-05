@@ -35,15 +35,19 @@ generic-chronic, cardiometabolic), now **confirmed with measurement + drug** —
 
 Two things are genuinely worth flagging:
 
-1. **Sibling redundancy — but only the *uniform* kind is a concern.** ≥3 shallow
-   nodes learned essentially the *same* acute-care archetype. Partial redundancy
-   (some of a parent's children differentiate, some don't) is expected and fine —
-   it reflects real heterogeneity in how distinctive each child is. The concerning
-   signal is a parent whose children *uniformly* collapse to one topic, which is
-   capacity starvation at that parent (the `tpn=1` under-capacity below). So the
-   right measurement is per-parent child-differentiation (pairwise topic cosine
-   among a parent's children), flagging uniform collapse and correlating it with
-   fan-out — not "do siblings look alike" in the aggregate.
+1. **Sibling redundancy — MEASURED, and it is NOT a problem.** `inspect_topics
+   --redundancy` (per-parent cosine among a parent's FED children, starved ones
+   excluded as trivially uniform): of 194 parents with ≥2 fed children, **0 show
+   uniform collapse (median fed-cosine > 0.8)**, and **corr(fan-out, median
+   fed-cosine) = −0.09** — near-zero and if anything negative, *refuting* the
+   "wide parent + `tpn=1` → collapse" hypothesis. Wide parents (heart disorder
+   fan-out 18 median 0.23; disease-by-body-system 19, 0.18; respiratory 17, 0.21)
+   differentiate their children WELL; only the occasional lone pair is
+   near-duplicate (arterial disorder max 0.98, body-system max 0.91 — but median
+   low). The top median is diabetes mellitus 0.79 (T1/T2/complicated subtypes that
+   *should* share a signature). So partial redundancy is real and harmless; uniform
+   collapse does not occur. **Where topics are fed, capacity is fine — starvation
+   at depth (0079) is the sole binding wall, not `tpn`/redundancy.**
 2. **Measurement is `[normal]`-panel-dominated** across nearly every topic and all
    8 background topics (evidence 4–7e6, measurement-dominant). Value-state
    tokenization adds little beyond "labs were drawn."
