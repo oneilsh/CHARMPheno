@@ -363,12 +363,13 @@ def _safe_batch_cap(rdd, V: int, d: int, *, depth: int = 2, safety: float = 0.7,
 
     `projected_cooccurrence_rdd` treeReduces the per-partition accumulators to the
     driver, so the driver receives ~n_final ≈ ceil(numPartitions**(1/depth)) partial
-    results (≈ sqrt(P) at the default depth 2), each holding ALL (B+1) dense (V, d)
-    float32 group sketches (pooled + B groups). Peak ≈ n_final·(B+1)·V·d·4 bytes — the
-    quantity that overflowed spark.driver.maxResultSize when the earlier fixed-budget
-    sizing ignored the n_final fan-out. Solve B against a `safety` fraction of the
-    configured maxResultSize; unlimited/unset -> a fixed cap. (A 15% fudge covers the
-    float64 p_w/df_w marginals, which are ~V·8 ≪ the V·d·4 sketches.)"""
+    results (≈ sqrt(P) at the default depth 2). The batched node passes run
+    ``pooled=False``, so each partial holds only the B dense (V, d) float32 GROUP
+    sketches (the corpus-pooled sketch is not collected); peak ≈ n_final·B·V·d·4
+    bytes — the quantity that overflowed spark.driver.maxResultSize when the earlier
+    fixed-budget sizing ignored the n_final fan-out. Solve B against a `safety`
+    fraction of the configured maxResultSize; unlimited/unset -> a fixed cap. (A 15%
+    fudge covers the float64 p_w/df_w marginals, ~V·8 ≪ the V·d·4 sketches.)"""
     try:
         budget = _parse_spark_bytes(rdd.context.getConf().get(
             "spark.driver.maxResultSize", "1g"))
@@ -382,7 +383,7 @@ def _safe_batch_cap(rdd, V: int, d: int, *, depth: int = 2, safety: float = 0.7,
         n_part = 200
     n_final = max(2, math.ceil(n_part ** (1.0 / max(depth, 1))))
     per_array = 1.15 * 4 * int(V) * int(d)
-    b = int((safety * budget) / (n_final * per_array)) - 1
+    b = int((safety * budget) / (n_final * per_array))
     return int(max(1, min(hard_cap, b)))
 
 
@@ -788,21 +789,27 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
             logger.info(
                 "scalable_block_aligned_lambda: seeding %d node(s) over %d depth "
                 "level(s), batch=%d (V=%d, d=%d)", len(order), len(levels), B, V, d)
-            _t0 = time.time()
             _done = 0
             for lv in levels:
                 for i in range(0, len(lv), B):
                     batch = lv[i:i + B]
+                    _tb = time.time()
+                    # pooled=False: only docs training one of this batch's nodes are
+                    # projected, so a deep-level batch (tiny closures) is a cheap scan.
                     r = projected_cooccurrence_rdd(
-                        group_rdd, _NodeGroups(tuple(batch)), V, d, seed)
+                        group_rdd, _NodeGroups(tuple(batch)), V, d, seed,
+                        pooled=False)
                     for u in batch:
                         _recover_block(u, r.group_QR[u], r.group_p_w[u],
                                        r.group_df_w[u])
                     _done += len(batch)
+                    # Per-batch timing (not cumulative): the seed's per-"iteration"
+                    # cost, which should fall sharply as depth deepens (smaller
+                    # closures -> fewer projected docs).
                     logger.info(
                         "scalable_block_aligned_lambda: seeded %d/%d node(s) "
-                        "(depth %d, %.0fs elapsed)", _done, len(order),
-                        lay.depth(batch[0]), time.time() - _t0)
+                        "(depth %d): %d node(s) in %.1fs", _done, len(order),
+                        lay.depth(batch[0]), len(batch), time.time() - _tb)
 
         if probe_any:
             from spark_vi.models.topic.effective_rank import (
