@@ -4,6 +4,15 @@
 **Topic:** lda
 **Status:** Observed
 
+**Relates to:** 0078 (episode anchoring un-starves the LABEL space — this is the
+orthogonal *topic* view), 0071 ("as ONE fit K≈3,800 is not viable — decompose by
+body system into a cascade" — the monolith 0111 fits is exactly what starves),
+the 0111 scouting report (2026-09-02, Finding 2: case-finding signal attenuates
+monotonically with depth; deep nodes are thin), 0080 (the fed shallow topics).
+This is a cleaner *quantification* (topic λ-evidence by depth) of a known
+depth-thinness, not a new failure mode — its one novel claim is the label↔topic
+split below.
+
 ## Observation
 
 Inspecting the fitted 0111 episode-arm globals (`gated_pc_result.npz` λ +
@@ -50,13 +59,19 @@ depth and top-1 loses on deep small parents.
 ## Implications
 
 - The interpretable-per-node-topic goal is not met past depth ~4 with this
-  architecture, regardless of sampling. Episode anchoring cannot fix a depth-5
-  cliff; the 0111-vs-0112 comparison must be judged on **deep-node evidence**
-  (does anchoring move the depth-5 floor at all?), not only on AUC.
-- Candidate directions if deep interpretability is required: tpn>1 or shared
-  subtree topics, hierarchical topic tying (a leaf's topic priored on its
-  parent's), or relaxing the closure gate so a leaf competes for its ancestors'
-  tokens. Each is a model change deserving its own experiment + ADR.
+  MONOLITHIC whole-Mondo fit, regardless of sampling. Episode anchoring cannot fix
+  a depth-5 cliff; the 0111-vs-0112 comparison must be judged on **deep-node
+  evidence** (does anchoring move the depth-5 floor at all?), not only on AUC.
+- The known-good direction is already on record: 0071 concluded whole-Mondo "as
+  ONE fit is not viable — decompose by body system into a cascade," each branch fit
+  at K~few-hundred (the regime where 0019-style phenotype emergence works). The
+  depth-5 cliff is fresh evidence *for* that conclusion, seen in the fitted topics
+  rather than only in the head-cost argument.
+- Other candidate model levers (each its own experiment + ADR, and note the priors
+  below): tpn>1 or shared subtree topics; relaxing the closure gate so a leaf
+  competes for its ancestors' tokens; larger n_bg. NOT `weight_y>0` (PC is a
+  standing-constraint dead end, 0066), and init is a null lever historically (0063)
+  though untested at this scale.
 - The readout's raw-θ head coefficients EXPLODE (±1e4–1e5) for these low-variance
   starved topics (V = W_std/σ, σ→0); read standardized W_std, not raw V, for any
   loadings interpretation (`inspect_topics` prefers the ckpt W_std when present).
