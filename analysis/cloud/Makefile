@@ -126,7 +126,8 @@ help:
 	@echo "  report ID=N             COMPACT gated_pc digest (flags + fit-health + signal lines)."
 	@echo "  inspect-topics ID=N      OFF-CLUSTER topics view (sharpness + readout loadings)"
 	@echo "                           from the saved fit; no Spark/YARN, safe mid-fit. Add"
-	@echo "                           INSPECT_KEY=<bundle key> for topic words + node depth."
+	@echo "                           INSPECT_KEY=<bundle key> for topic words + node depth,"
+	@echo "                           and RESOLVE_NAMES=1 to name the words (off-YARN bq lookup)."
 	@echo "  eval-exp [ID=N]         Re-run eval; if ID omitted, auto-selects most-recently-fit."
 	@echo "  build-dashboard-exp     - build dashboard bundle (auto-picks freshest fit needing build)"
 	@echo "  build-dashboard-exp ID=N - force rebuild for a specific experiment"
@@ -522,6 +523,12 @@ gated-pc-readout: zip cluster-overlay $(WORKSPACE_ENV)
 INSPECT_CACHE_URI  ?= $(GPR_CACHE_URI)
 INSPECT_META       ?=
 INSPECT_KEY        ?=
+INSPECT_NAMES      ?=
+# RESOLVE_NAMES=1: before rendering, run resolve_vocab_names (targeted `bq query`
+# on the CDR concept table, off-YARN) to name the topic WORDS -- measurement/drug
+# vocab features that show as cid:#### otherwise. Needs the bundle meta (so set
+# INSPECT_KEY or INSPECT_META). cdr + billing come from the run's manifest.
+RESOLVE_NAMES      ?=
 INSPECT_ARGS       ?=
 # QUOTED glob, like GPR_RUN_DIR: inspect_topics.resolve_run_dir keeps the one dir
 # with gated_pc_result.npz. Override with an exact dir via INSPECT_RUN_DIR.
@@ -536,8 +543,18 @@ inspect-topics: $(WORKSPACE_ENV)
 	    { echo "ERROR: could not fetch bundle meta; check INSPECT_KEY / INSPECT_CACHE_URI"; exit 1; }; \
 	fi; \
 	. ./$(WORKSPACE_ENV) && \
+	NAMES="$(INSPECT_NAMES)"; \
+	if [ -n "$(RESOLVE_NAMES)" ] && [ -z "$$NAMES" ]; then \
+	  if [ -z "$$META" ]; then echo "ERROR: RESOLVE_NAMES needs the bundle meta (set INSPECT_KEY or INSPECT_META)"; exit 1; fi; \
+	  NAMES="/tmp/concept_names_$(ID).csv"; \
+	  echo "[inspect-topics] resolving vocab names via bq (off-YARN) -> $$NAMES"; \
+	  python $(REPO_ROOT)/analysis/cloud/resolve_vocab_names.py \
+	    --run-dir "$(INSPECT_RUN_DIR)" --bundle-meta "$$META" --out "$$NAMES" || \
+	    { echo "ERROR: resolve_vocab_names failed"; exit 1; }; \
+	fi; \
 	python $(REPO_ROOT)/analysis/cloud/inspect_topics.py "$(INSPECT_RUN_DIR)" \
 	    $${META:+--bundle-meta "$$META"} \
+	    $${NAMES:+--concept-names "$$NAMES"} \
 	    $(INSPECT_ARGS)
 
 # Sibling-support diagnostic for residual degenerate nodes (exp 0109): one pass
