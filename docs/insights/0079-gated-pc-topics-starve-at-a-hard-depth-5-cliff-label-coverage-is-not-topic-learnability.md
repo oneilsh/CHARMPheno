@@ -150,12 +150,29 @@ with several mechanisms this data does NOT separate:
    anchored on its own code is a leaky SINK that defeats the uncoded-discovery goal
    — strip is load-bearing, only its scope is negotiable).
 
-**The decisive cheap test:** a basic K≈80 LDA on one subDAG's patients. Clean
-subtype signal ⇒ modeling artifact ⇒ spectral init / closure-strip / softer gate
-become A/B-able levers. No signal ⇒ that slice is a genuine ceiling. Until that
-runs, the mechanism is UNRESOLVED — the earlier "information ceiling / init
-refuted" reading is retracted. The cascade (0071) and multi-domain (0062) points
-still stand.
+**The `tpn` confound (found by checking the experiment log — the strongest lever).**
+Signal-existence is already settled by prior runs: 0035 (a rare EDS foreground,
+~956 docs, recovered POTS/MCAS/vascular-EDS/GI **subphenotypes**), 0019 (K=80 flat
+LDA → ~40 specific phenotypes), and coherent rare6 node topics (0063). So deep/sub
+structure IS recoverable — NOT an information ceiling. Crucially, **every one of
+those successes used a generous per-node topic budget** — rare6/diabetes ran
+`tpn=5` (exps 0052–0069), EDS a 20-topic foreground block — whereas the whole-Mondo
+monolith (0104/0110/0111) runs **`tpn=1`**, compute-forced (`tpn=5` at 2714 nodes is
+K≈13,600). So "recovers vs starves" is CONFOUNDED with topic budget 5-vs-1: a node
+with one topic cannot out-compete its ancestor stack to express its residual;
+with five it has room. This is the block-sizing arc (0015/0019) with a sharp,
+evidence-backed hypothesis, and it is a more likely lever than init or information.
+
+**The informative test (supersedes the flat-LDA idea):** re-fit ONE body-system
+branch (e.g. cardiovascular, ~273 nodes → K≈1,373) from the CURRENT native-Mondo +
+multidomain corpus at **`tpn=5`**, inspect deep-node evidence-by-depth vs 0111's
+`tpn=1`. Isolates scale (branch vs monolith) AND budget, and IS the 0071 cascade
+prototype. (exp 0090/0093 is the closest existing subDAG fit — CV branch, `tpn=1` —
+but 0093 measured HEAD starvation, 0/437 heads dead, not topic λ-evidence by depth.)
+
+Until that runs, the mechanism is UNRESOLVED — the earlier "information ceiling /
+init refuted" reading is retracted. The cascade (0071) and multi-domain (0062)
+points still stand; `tpn` is now the leading structural lever.
 
 **Setting context:** exp 0111 episode arm — gated-PC (weight_y 0, unsupervised
 topics + separate L-BFGS readout), whole-Mondo native DAG (C=2714, K=2721,
