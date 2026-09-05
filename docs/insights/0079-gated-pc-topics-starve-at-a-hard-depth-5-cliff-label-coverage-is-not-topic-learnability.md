@@ -2,9 +2,13 @@
 
 **Date:** 2026-09-05
 **Topic:** lda
-**Status:** Observed — **see the Refinement (same day): the cliff is NOT depth or
-prevalence, it is code-separability after the leakage strip (0062's information
-constraint); the "uniform depth-5 cliff" framing is superseded.**
+**Status:** Observed, MECHANISM UNRESOLVED — **the "uniform depth-5 cliff" framing
+(body) and the later "information ceiling / init-refuted" reading (Refinement) are
+BOTH over-reads. What is established: the fed/starved split tracks code-separability
+after the leakage strip. What is NOT: whether the starved-but-populated nodes starve
+from genuine non-differentiability, the aggressive global strip, hard deflation, or a
+flat-start init trap — these are separable by experiment (see the Correction). A
+basic K≈80 LDA on one subDAG is the decisive next test.**
 
 **Relates to:** 0078 (episode anchoring un-starves the LABEL space — this is the
 orthogonal *topic* view), 0071 ("as ONE fit K≈3,800 is not viable — decompose by
@@ -111,25 +115,47 @@ NOT a random init trap (systematic, not scattered), NOT minibatch sparsity
 leakage strip.** `strip_mode="both"` drops EVERY DAG-node code from the BOW, train
 included (`case_finding_assembly.py:449-452`: `drop_idxs = {vocab_map[c] for c in
 before_dag.nodes()}`). So a node's topic is built from a vocabulary with its own
-defining code — and all Mondo codes — removed; it learns only if its distinction
-survives in the UNSTRIPPED domains (drugs, labs, non-Mondo symptoms). Ischemic
-stroke keeps antithrombotics + distinctive management → fed. Breast-carcinoma
-subtypes are distinguished ONLY by their (now-stripped) histology code; everything
-left (chemo, imaging, comorbidities) is shared across all breast cancer →
-indistinguishable → flat. This is honest, CORRECT behaviour — a distinction that is
-purely code-definitional cannot be learned without leakage.
+defining code — and all Mondo codes — removed; it learns only if it can WIN its
+distinctive tokens in the UNSTRIPPED domains (drugs, labs, non-Mondo symptoms)
+against its sharper ancestors. Ischemic stroke keeps antithrombotics + distinctive
+management → fed. The breast-carcinoma subtypes and strep syndromes are flat.
 
-**Consequences, corrected:**
-- **NOT init.** Spectral init cannot seed anchor words that were stripped out — the
-  init-trap hypothesis is refuted, not merely "untested at scale."
-- **The multi-domain direction is vindicated deep in the tree:** the fed deep nodes
-  are fed *because* drugs/labs distinguish them (0062's binding constraint paying
-  off). The remaining lever is richer non-DAG features (procedures, more lab
-  value-states, path/imaging, notes) — extend MixEHR — not init/capacity/PC.
-- The cascade (0071) still helps the *separable* deep nodes (K-room in a branch) but
-  cannot manufacture separability for code-only subtypes.
-- Part of the cliff is a **Mondo-granularity vs EHR-information mismatch**: deep
-  Mondo is histological/anatomical subtypes whose distinction is code-definitional.
+**Correction (2026-09-05, same-session pushback) — do NOT read this as a clean
+information ceiling, and do NOT read it as refuting init. Both were over-reads.**
+The fed/starved split *correlates with* code-separability, but that is consistent
+with several mechanisms this data does NOT separate:
+
+1. **Deflation IS the flat-start trap (so spectral init is a LEADING lever, not
+   refuted).** The gate subtracts nothing; a child topic competes against its sharp
+   high-mass ancestors for the shared tokens in the CAVI responsibility and only
+   wins what the ancestors don't already explain. A child that starts FLAT (random
+   init) cannot win any token against a sharp ancestor → stays flat, self-
+   reinforcing; a child seeded SHARP on its anchor words (spectral init) can win its
+   distinctive tokens. This bites *harder with depth* (a taller ancestor stack to
+   lose to), so 0063's "init is null" — measured on a 170-block SHALLOW DAG — does
+   not transfer; init at whole-Mondo depth is genuinely untested. The fed deep nodes
+   carrying sharp signal are the existence proof that sharp deep topics are
+   achievable, i.e. the trap is escapable.
+2. **The signal probably EXISTS for many "starved" nodes.** A basic K≈80 LDA on one
+   subDAG's patients would likely separate e.g. breast-ca subtypes by treatment
+   intensity / follow-up — which live in the (UNSTRIPPED) drug/lab domains. So the
+   starvation is likely a *modeling artifact* (deflation + random init + the
+   aggressive GLOBAL strip removing comorbidity codes) that a flat LDA sidesteps —
+   NOT an information vacuum. Only genuinely-identical siblings (same disease, two
+   names) are a true ceiling, and they are a subset, not the whole tail.
+3. **Strip SCOPE is a lever.** The global strip drops ALL DAG-node codes, so
+   comorbidity DISEASE codes vanish too (surviving only as drug/lab proxies). A
+   closure-only strip (mask a node's own+ancestor codes per-node in the gated
+   E-step) would keep comorbidity signal; leaving codes in is not an option (a topic
+   anchored on its own code is a leaky SINK that defeats the uncoded-discovery goal
+   — strip is load-bearing, only its scope is negotiable).
+
+**The decisive cheap test:** a basic K≈80 LDA on one subDAG's patients. Clean
+subtype signal ⇒ modeling artifact ⇒ spectral init / closure-strip / softer gate
+become A/B-able levers. No signal ⇒ that slice is a genuine ceiling. Until that
+runs, the mechanism is UNRESOLVED — the earlier "information ceiling / init
+refuted" reading is retracted. The cascade (0071) and multi-domain (0062) points
+still stand.
 
 **Setting context:** exp 0111 episode arm — gated-PC (weight_y 0, unsupervised
 topics + separate L-BFGS readout), whole-Mondo native DAG (C=2714, K=2721,
