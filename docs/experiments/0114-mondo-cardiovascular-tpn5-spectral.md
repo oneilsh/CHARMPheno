@@ -48,12 +48,17 @@ disease: rare_priority
 #
 # COST NOTE (scalable seed). The concatenated multi-domain V (~11.6k = 5000+5000+1601)
 # is >= spectral_max_vocab (8000), so spectral_method routes SCALABLE (dense would be a
-# driver V×V collect — the 0110 disk wall). The current scalable seed issues n_nodes+1
-# SEQUENTIAL corpus passes (gated_init.scalable_block_aligned_lambda: "O(n_nodes) passes
-# is slow for hundreds"); ~298 CV nodes => ~299 upfront filtered passes over the cached
-# corpus. Watch the seed wall-clock in the fit log; if prohibitive, the bounded-slab
-# batched variant (batch nodes within a depth level) must be built before the whole-Mondo
-# cascade — but for one branch it is a one-time upfront cost worth paying to get the read.
+# driver V×V collect — the 0110 disk wall). The seed now uses the BATCHED variant
+# (gated_init.scalable_block_aligned_lambda): it recovers B nodes per projected-
+# cooccurrence pass, batched within a depth level, collapsing ~n_nodes+1 SEQUENTIAL
+# corpus passes into ~n_nodes/B — the fix for the ~1h-per-attempt seed on a lean cluster
+# (the first attempt of this run, pre-batching, was ~2.5h projected). B auto-sizes to a
+# ~400 MB driver-result budget (B≈5 at this V,d); override live with no redeploy via
+# `CHARM_SPECTRAL_BATCH=<n>` in the submit env (lower it, e.g. 2-3, if a lean executor
+# OOMs on the B dense (V,d) group accumulators). Progress prints per batch
+# ("seeded k/N nodes (depth d, Ns elapsed)") so it never looks hung. The seed is
+# batch-size-INVARIANT (a node's sketch is the same docs regardless of its batch), so
+# tuning B changes only speed, not the fitted seed.
 dag_source: mondo_native
 mondo_branch: MONDO:0004995
 tpn: 5
