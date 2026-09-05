@@ -108,13 +108,34 @@ def test_prefers_real_readout_heads_over_cofit(tmp_path):
     np.savez(tmp_path / "readout_heads_gated_pc.npz",
              V=V, b_raw=b, degenerate=degen)
     rep = it.build_report(tmp_path, top_topics=10, top_loadings=3, t_words=5)
-    assert "readout_heads_gated_pc.npz" in rep and "raw-θ L-BFGS heads" in rep
+    assert "readout_heads_gated_pc.npz" in rep and "raw-θ decoder" in rep
+    # no checkpoint present -> loadings fall back to raw V, caveated
+    assert "INFLATED" in rep
     assert "degenerate heads: 1 / " in rep
     # node1's row is marked degenerate, not given a bogus weight
     for line in rep.splitlines():
         if line.startswith("| node1 "):
             assert "degenerate head" in line
     assert "+9.000" in rep                         # node2's real self-weight
+
+
+def test_loadings_prefer_standardized_ckpt_over_raw_heads(tmp_path):
+    _make_run(tmp_path)
+    _, manifest = it.load_run(tmp_path)
+    K, C = manifest["K"], manifest["C"]
+    # raw heads V with an EXPLODED coefficient (the low-variance artifact) ...
+    V = np.zeros((C, K)); V[2, 3] = 99999.0
+    np.savez(tmp_path / "readout_heads_gated_pc.npz",
+             V=V, b_raw=np.zeros(C), degenerate=np.zeros(C, dtype=bool))
+    # ... and a checkpoint whose STANDARDIZED weight for the same cell is modest
+    W = np.zeros((C, K)); W[2, 3] = 1.5
+    np.savez(tmp_path / "readout_ckpt_gated_pc.npz",
+             W_std=W, b_std=np.zeros(C), iter=np.int64(200),
+             fingerprint=np.str_("fp"))
+    rep = it.build_report(tmp_path, top_topics=10, top_loadings=3, t_words=5)
+    # decoder is the raw heads, but loadings come from the standardized ckpt
+    assert "raw-θ decoder" in rep and "standardized W_std from ckpt iter 200" in rep
+    assert "+1.500" in rep and "99999" not in rep   # modest std weight, not exploded raw
 
 
 def test_falls_back_to_checkpoint_when_no_heads(tmp_path):

@@ -145,24 +145,45 @@ def load_readout_heads(run_dir, label="gated_pc"):
     `W` is (C,K) whichever it found; `standardized` says which space it is in.
     """
     run_dir = Path(run_dir)
-    p = run_dir / f"readout_heads_{label}.npz"
-    if p.exists():
-        z = np.load(p)
-        return {"W": np.asarray(z["V"], dtype=np.float64),
-                "b": np.asarray(z["b_raw"], dtype=np.float64),
+    heads_p = run_dir / f"readout_heads_{label}.npz"
+    ckpt_p = run_dir / f"readout_ckpt_{label}.npz"
+
+    # The checkpoint's W_std is the STANDARDIZED weight (per-SD-of-theta), the
+    # honest loadings scale. It survives the calibration sub-fit, so it is on disk
+    # alongside the heads. Load it whenever present, for the loadings column.
+    ckpt_Wstd = ckpt_iter = None
+    if ckpt_p.exists():
+        z = np.load(ckpt_p)
+        ckpt_Wstd = np.asarray(z["W_std"], dtype=np.float64)
+        ckpt_iter = int(z["iter"]) if "iter" in z.files else -1
+
+    if heads_p.exists():
+        z = np.load(heads_p)
+        V = np.asarray(z["V"], dtype=np.float64)
+        # V is raw-theta (V = W_std / sigma_k): coefficients EXPLODE for
+        # low-variance (starved) topics, so V is the scoring decoder but NOT an
+        # honest importance ranking. Prefer the checkpoint's standardized W_std
+        # for the loadings display; fall back to V with a caveat if absent.
+        if ckpt_Wstd is not None and ckpt_Wstd.shape == V.shape:
+            W_load, load_std = ckpt_Wstd, True
+            load_note = f"standardized W_std from ckpt iter {ckpt_iter}"
+        else:
+            W_load, load_std = V, False
+            load_note = ("raw-θ V — INFLATED for low-variance/starved topics; "
+                         "no ckpt W_std to standardize against")
+        return {"W_load": W_load, "b": np.asarray(z["b_raw"], dtype=np.float64),
                 "degenerate": (np.asarray(z["degenerate"], dtype=bool)
                                if "degenerate" in z.files else None),
-                "src": f"readout_heads_{label}.npz (V, raw-θ L-BFGS heads)",
-                "standardized": False}
-    c = run_dir / f"readout_ckpt_{label}.npz"
-    if c.exists():
-        z = np.load(c)
-        it = int(z["iter"]) if "iter" in z.files else -1
-        return {"W": np.asarray(z["W_std"], dtype=np.float64),
+                "src": f"readout_heads_{label}.npz (V raw-θ decoder); "
+                       f"loadings = {load_note}",
+                "standardized": load_std}
+    if ckpt_Wstd is not None:
+        z = np.load(ckpt_p)
+        return {"W_load": ckpt_Wstd,
                 "b": np.asarray(z["b_std"], dtype=np.float64),
                 "degenerate": None,
-                "src": f"readout_ckpt_{label}.npz (W_std, standardized-θ, "
-                       f"checkpoint iter {it})",
+                "src": f"readout_ckpt_{label}.npz (W_std standardized-θ, "
+                       f"checkpoint iter {ckpt_iter})",
                 "standardized": True}
     return None
 
@@ -416,7 +437,7 @@ def build_report(run_dir, *, top_topics, top_loadings, t_words,
     # runs that predate the heads sidecar.
     heads = load_readout_heads(run_dir, readout_label)
     if heads is not None:
-        w_CK = heads["W"]
+        w_CK = heads["W_load"]
         b_CK = heads["b"]
         degenerate = heads["degenerate"]
         decoder_src = heads["src"]
@@ -492,10 +513,21 @@ def build_report(run_dir, *, top_topics, top_loadings, t_words,
     w(f"- domains: {', '.join(f'{n}(V={l.shape[1]})' for n, l in zip(dom_names, lams))}")
     w(f"- alpha: min {alpha.min():.4g} / median {np.median(alpha):.4g} / "
       f"max {alpha.max():.4g} / sum {alpha.sum():.4g}")
-    fg = slice(n_bg, K)
-    flat = np.mean(sh["support_frac"][fg] > 0.5)
-    w(f"- foreground topic flatness: {flat*100:.1f}% of node topics spread over "
-      f">50% of their vocab (near-prior / starved)")
+    fg_frac = sh["support_frac"][n_bg:K]
+    fg_ev = sh["evidence"][n_bg:K]
+    n_fg = fg_frac.size
+    sharp = int(np.sum(fg_frac < 0.2))
+    mid = int(np.sum((fg_frac >= 0.2) & (fg_frac <= 0.5)))
+    flat = int(np.sum(fg_frac > 0.5))
+    w(f"- node-topic sharpness ({n_fg} topics): {sharp} sharp (frac<0.2) / "
+      f"{mid} mid / {flat} flat/starved (frac>0.5) "
+      f"[{100*flat/max(n_fg,1):.0f}% starved]")
+    # Evidence (pseudo-count mass) quantiles say how many topics saw ~no data;
+    # the prior floor is ~min(evidence), so topics near it are starved.
+    q = np.percentile(fg_ev, [10, 50, 90])
+    w(f"- node-topic evidence: min {fg_ev.min():.3g} / p10 {q[0]:.3g} / "
+      f"median {q[1]:.3g} / p90 {q[2]:.3g} / max {fg_ev.max():.3g} "
+      f"(near-min = starved)")
     w(f"- decoder: {decoder_src}")
     if degenerate is not None:
         w(f"- degenerate heads: {int(degenerate.sum())} / {C} nodes had no "
