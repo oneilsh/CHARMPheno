@@ -569,6 +569,35 @@ def build_report(run_dir, *, top_topics, top_loadings, t_words,
     order = order[:top_topics]
 
     have_depth = depths is not None
+    dh = "depth | " if have_depth else ""
+    dsep = "--:|" if have_depth else ""
+
+    def emit_table(topics):
+        w(f"| node topic | {dh}evidence | eff.support | frac | dom | self-w | "
+          "intercept | top borrowed topics |")
+        w(f"|---|{dsep}--:|--:|--:|---|--:|--:|---|")
+        for t in topics:
+            eng = topic2engine[t]
+            d = int(np.argmax(sh["dom_mass"][t]))
+            self_w = borrow = intc = ""
+            deg = (degenerate is not None and eng is not None
+                   and eng < C and degenerate[eng])
+            if deg:
+                self_w = borrow = "(degenerate head)"
+            elif eng is not None and eng < C:
+                row = w_CK[eng]
+                self_w = f"{row[t]:+.3f}"
+                oth = np.argsort(-np.abs(row))
+                picks = [j for j in oth if j != t][:top_loadings]
+                borrow = ", ".join(f"{labels[j]}({row[j]:+.2f})" for j in picks
+                                   if abs(row[j]) > 1e-6)
+                intc = f"{b_CK[eng]:+.3f}"
+            dcol = (f"{depth_of(t)} | " if have_depth else "")
+            w(f"| {labels[t]} | {dcol}{sh['evidence'][t]:.4g} | "
+              f"{sh['support'][t]:.1f} | {sh['support_frac'][t]:.2f} | "
+              f"{dom_names[d]} | {self_w} | {intc} | {borrow} |")
+        w("")
+
     w(f"## Node topics -- top {len(order)} by {sort_by}")
     w("")
     w("evidence = posterior pseudo-count mass; eff.support = exp(entropy) of the "
@@ -577,29 +606,22 @@ def build_report(run_dir, *, top_topics, top_loadings, t_words,
       "borrows = its largest-|w| OTHER topics (ancestor/background/cousin decode)."
       + (" depth = longest path from root." if have_depth else ""))
     w("")
-    dh = "depth | " if have_depth else ""
-    dsep = "--:|" if have_depth else ""
-    w(f"| node topic | {dh}evidence | eff.support | frac | dom | self-w | intercept | top borrowed topics |")
-    w(f"|---|{dsep}--:|--:|--:|---|--:|--:|---|")
-    for t in order:
-        eng = topic2engine[t]
-        d = int(np.argmax(sh["dom_mass"][t]))
-        self_w = borrow = intc = ""
-        deg = degenerate is not None and eng is not None and eng < C and degenerate[eng]
-        if deg:
-            self_w = borrow = "(degenerate head)"
-        elif eng is not None and eng < C:
-            row = w_CK[eng]
-            self_w = f"{row[t]:+.3f}"
-            oth = np.argsort(-np.abs(row))
-            picks = [j for j in oth if j != t][:top_loadings]
-            borrow = ", ".join(f"{labels[j]}({row[j]:+.2f})" for j in picks
-                               if abs(row[j]) > 1e-6)
-            intc = f"{b_CK[eng]:+.3f}"
-        dcol = (f"{depth_of(t)} | " if have_depth else "")
-        w(f"| {labels[t]} | {dcol}{sh['evidence'][t]:.4g} | {sh['support'][t]:.1f} | "
-          f"{sh['support_frac'][t]:.2f} | {dom_names[d]} | {self_w} | {intc} | {borrow} |")
+    emit_table(order)
+
+    # The BEST-FED end -- the topics that actually learned something. The main
+    # table's default (flattest-first) buries these; showing them explicitly is
+    # what lets a reader check the SHARP topics are clinically coherent.
+    n_best = min(len(order), 25)
+    best_order = np.array(sorted(range(n_bg, K),
+                                 key=lambda t: -sh["evidence"][t])[:n_best])
+    w(f"## Best-fed node topics -- top {n_best} by evidence")
     w("")
+    emit_table(best_order)
+
+    # words render for both ends, de-duplicated, main order first
+    seen = set()
+    word_order = [t for t in list(order) + list(best_order)
+                  if not (t in seen or seen.add(t))]
 
     # ---- sharpness-by-depth rollup (the deep-node question, when depth known) ----
     if have_depth:
@@ -626,7 +648,7 @@ def build_report(run_dir, *, top_topics, top_loadings, t_words,
     if inv_maps:
         w(f"## Top {t_words} concepts per topic (dominant domain)")
         w("")
-        for t in order:
+        for t in word_order:
             d = int(np.argmax(sh["dom_mass"][t]))
             if d >= len(inv_maps):
                 continue
