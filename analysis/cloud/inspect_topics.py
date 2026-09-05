@@ -90,6 +90,30 @@ import numpy as np
 # --------------------------------------------------------------------------- #
 # Loading                                                                      #
 # --------------------------------------------------------------------------- #
+def resolve_run_dir(pattern):
+    """Resolve a run dir from an exact path or a glob (e.g. `.../0111-*`).
+
+    Mirrors gated_pc_readout's resolution: an exact dir holding
+    gated_pc_result.npz is used as-is; otherwise the pattern is globbed and
+    filtered to matched dirs that contain the npz, so a shared runs/ dir with a
+    same-numbered run from another experiment does not collide.
+    """
+    import glob as _glob
+    p = Path(pattern)
+    if p.is_dir() and (p / "gated_pc_result.npz").exists():
+        return p
+    hits = [Path(m) for m in _glob.glob(str(pattern))
+            if Path(m).is_dir() and (Path(m) / "gated_pc_result.npz").exists()]
+    if len(hits) == 1:
+        return hits[0]
+    if not hits:
+        raise SystemExit(
+            f"[inspect_topics] no run dir with gated_pc_result.npz matches "
+            f"{pattern!r} (has the fit written its result yet?)")
+    raise SystemExit(f"[inspect_topics] {pattern!r} is ambiguous: "
+                     f"{[str(h) for h in hits]}; pass an exact dir")
+
+
 def load_run(run_dir: Path):
     """Return (npz, manifest). npz is mmap'd; manifest is the parsed JSON dict."""
     run_dir = Path(run_dir)
@@ -592,15 +616,16 @@ def main():
                          "(readout_heads_<label>.npz; default gated_pc).")
     args = ap.parse_args()
 
+    run_dir = resolve_run_dir(args.run_dir)
     report = build_report(
-        args.run_dir, top_topics=args.top_topics, top_loadings=args.top_loadings,
+        run_dir, top_topics=args.top_topics, top_loadings=args.top_loadings,
         t_words=args.top_words, vocab_path=args.vocab_map,
         names_path=args.concept_names, sort_by=args.sort,
         bundle_meta_path=args.bundle_meta, readout_label=args.readout_label)
 
     print(report)
     if args.out != "-":
-        out = Path(args.out) if args.out else Path(args.run_dir) / "topics_report.md"
+        out = Path(args.out) if args.out else Path(run_dir) / "topics_report.md"
         out.write_text(report + "\n")
         print(f"\n[inspect_topics] wrote {out}", flush=True)
 
