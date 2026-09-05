@@ -861,6 +861,8 @@ def build_gated_pc_args(
             "--anchor-scope", str(effective.get("anchor_scope", "closure")),
             "--spectral-topo-order", str(effective.get("spectral_topo_order", "forward")),
         ])
+    if str(effective.get("count_transform", "none")) != "none":
+        args.extend(["--count-transform", str(effective["count_transform"])])
     if effective.get("doc_concentration") is not None:
         args.extend(["--doc-concentration", str(effective["doc_concentration"])])
     if effective.get("dag_source"):

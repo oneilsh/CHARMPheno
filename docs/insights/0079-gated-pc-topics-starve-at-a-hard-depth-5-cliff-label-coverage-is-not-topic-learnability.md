@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-05
 **Topic:** lda
-**Status:** Observed, MECHANISM UNRESOLVED — **the "uniform depth-5 cliff" framing
+**Status:** RESOLVED by exp 0114 / insight 0082 — the mechanism is the FLAT-START / DEFLATION TRAP: flipping only `init: random → spectral` (same branch, budget, index) cut deep-node starvation from 72% to 1% and lifted the depth-4 evidence floor 62 → 1000. Budget (0113) was NOT the lever; strip-scope / rarity are not needed to explain the starvation. The residual is anchor ALIGNMENT (some fed deep topics anchor on a token-mass/demographic bias, not phenotype), a NEW question (insight 0082, exp 0115), not this starvation one. The historical text below is kept as the record of how the mechanism was narrowed; the earlier **"the "uniform depth-5 cliff" framing
 (body) and the later "information ceiling / init-refuted" reading (Refinement) are
 BOTH over-reads. What is established: the fed/starved split tracks code-separability
 after the leakage strip. What is NOT: whether the starved-but-populated nodes starve

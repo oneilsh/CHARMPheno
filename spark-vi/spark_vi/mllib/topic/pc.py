@@ -134,6 +134,30 @@ def _row_to_gated_pc_document(
     )
 
 
+def _transform_counts(doc, mode: str):
+    """Return `doc` with its BOW counts damped per `mode`, length recomputed.
+
+    'binary' -> min(count, 1) (per-doc presence: a code recorded every visit counts
+    ONCE); 'log1p' -> log(1 + count) (softer damping, keeps some repetition). Applied
+    to EVERY document before both the spectral seed and the fit, so the anchor search
+    and the topic evidence see presence/damped volume rather than raw utilization
+    counts. `doc` is a frozen PCDocument/GatedPCDocument dataclass, so replace() makes
+    a new one (indices/y/label_mask/frontier unchanged). 'none' returns doc as-is.
+    """
+    import numpy as np
+    from dataclasses import replace
+    if mode == "none":
+        return doc
+    c = np.asarray(doc.counts, dtype=np.float64)
+    if mode == "binary":
+        c = np.minimum(c, 1.0)
+    elif mode == "log1p":
+        c = np.log1p(c)
+    else:
+        raise ValueError(f"countTransform must be none|binary|log1p, got {mode!r}")
+    return replace(doc, counts=c, length=int(round(float(c.sum()))))
+
+
 class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams):
     """Shared Param surface for OnlinePCLDAEstimator and OnlinePCLDAModel.
 
@@ -393,6 +417,17 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
                               "or 'reverse' (leaves-first, each deflated against its "
                               "descendants)",
                               typeConverter=TypeConverters.toString)
+    countTransform = Param(Params._dummy(), "countTransform",
+                           "per-token count transform applied to EVERY document's BOW "
+                           "before the spectral seed AND the fit: 'none' (default; raw "
+                           "occurrence counts), 'binary' (min(count,1) = per-doc "
+                           "presence, so a code recorded every visit counts once — "
+                           "de-biases the anchor/evidence criteria away from utilization "
+                           "volume toward phenotype, insight 0077's measurement fix "
+                           "extended to all domains), or 'log1p' (log(1+count), a softer "
+                           "damping that keeps some repetition). Applied in-memory at "
+                           "fit time; the cached bundle stays raw (no cache-key change).",
+                           typeConverter=TypeConverters.toString)
     # -- Multi-domain features (MixEHR-style per-domain vocabularies) --------
     featuresCols = Param(
         Params._dummy(), "featuresCols",
@@ -643,6 +678,7 @@ _ONLINE_PCLDA_DEFAULTS = dict(
     frontierCol="frontier",
     init="random", spectralMaxVocab=8000, spectralMethod="auto", spectralD=0,
     spectralMinDocFreq=5, anchorScope="closure", spectralTopoOrder="forward",
+    countTransform="none",
     featuresCols=[],   # domainBounds intentionally omitted: it uses isSet (no default)
 )
 
@@ -704,6 +740,7 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         spectralMinDocFreq: int = 5,
         anchorScope: str = "closure",
         spectralTopoOrder: str = "forward",
+        countTransform: str = "none",
         featuresCols: list[str] | None = None,
         domainBounds: list[int] | None = None,
         warmStartFrom: str = "",
@@ -849,11 +886,16 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
             return _row_to_pc_document(row, _fc, _lc, _mc, _C,
                                        features_cols=_fcs, domain_sizes=_ds)
 
-        pc_rdd = (
-            dataset.select(*select_cols).rdd
-            .map(_to_pc)
-            .persist(StorageLevel.MEMORY_AND_DISK)
-        )
+        _ct = str(self.getOrDefault("countTransform"))
+        pc_rows = dataset.select(*select_cols).rdd.map(_to_pc)
+        if _ct != "none":
+            # De-bias the anchor/evidence criteria off utilization VOLUME: a code
+            # recorded every visit should count once (presence), not N times. Applied
+            # before the seed AND the fit (both consume pc_rdd), in-memory — the cached
+            # bundle stays raw-count (no cache-key change). See insight 0077 (the same
+            # fix already applied to the bursty measurement domain).
+            pc_rows = pc_rows.map(lambda d, _m=_ct: _transform_counts(d, _m))
+        pc_rdd = pc_rows.persist(StorageLevel.MEMORY_AND_DISK)
         pc_rdd.count()  # materialize for VIRunner's strict cache precondition
 
         # Non-random init: seed the gated engine's lambda from block-aligned

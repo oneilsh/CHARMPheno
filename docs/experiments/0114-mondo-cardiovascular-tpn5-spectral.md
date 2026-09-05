@@ -1,7 +1,7 @@
 ---
 id: 114
 slug: mondo-cardiovascular-tpn5-spectral
-status: pending
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -205,8 +205,56 @@ make -C analysis/cloud inspect-topics ID=114 \
 
 ## Run log
 
-*(pending)*
+**2026-09-05 — fit.** Fit-only, 50 iters, K=1498 (8 bg + 298 CV nodes × tpn=5), spectral
+init (scalable, `spectral_d=768`), batch auto-sized to B=7, ~1.5h seed + ~35 min fit on
+the lean cluster (~2h wall). Saved fit-only λ. Same bundle/branch/index/budget as 0113 —
+the ONLY difference is `init: random` → `spectral`.
 
 ## Results
 
-*(pending; model params / counts-of-nodes only, egress floor)*
+**Acceptance criterion — does spectral init LIFT the depth-≥4 evidence floor that `tpn=5`
+(0113) could not? YES, decisively. The flat-start / deflation trap was the binding
+constraint on deep-node topic learning.**
+
+Head-to-head with 0113 (random init, everything else identical):
+
+| | 0113 (random) | 0114 (spectral) |
+|---|--:|--:|
+| **% starved** (frac > 0.5) | **72%** | **1%** |
+| depth-4 median evidence / frac | 62.5 / **0.99** | **1000 / 0.01** |
+| depth-5 median evidence / frac | 61.8 / 0.99 | 719 / 0.00 |
+| depth-7 median evidence | ~61 (prior floor) | 236 |
+| min evidence (worst topic) | ~4 | 10.5 |
+
+Every depth is now sharp (frac ~0–0.05) with real mass; the depth ≥4 floor 0113 sat on
+(~61 = the Dirichlet prior) is gone. Sibling redundancy stays clean: 0 of 81 parents
+collapsed (worst fed-cosine 0.36). Since only the seed differs, this is decisive: **budget
+(0113) did not move the floor; a sharp start does.** This resolves insight 0079's mechanism
+question — it was the flat-start trap, not budget, strip-scope, or rarity.
+
+**But sharp ≠ always the core phenotype (the residual, and the seed of 0115/0116).** Most
+fed deep topics are genuinely coherent — atrial fibrillation (*AF · Chronic/Paroxysmal AF ·
+Atrial flutter // warfarin·metoprolol·diltiazem*), systolic/diastolic heart failure, valve.
+But a real minority are sharp on the *wrong* signal: **intrinsic cardiomyopathy** (d4) and
+**dilated cardiomyopathy** (d5) came back dominated by **pregnancy** codes (trimesters,
+gestation weeks); **cardiomyopathy** (d3) by generic primary-care symptoms. (Peripartum CM →
+pregnancy is correct; DCM/intrinsic-CM is the anchor grabbing a young-female stratum.)
+
+**Mechanism of the misalignment (feeds 0115).** Conditions and drugs are RAW per-visit
+occurrence counts; only the measurement domain is binarized (insight 0077;
+`multi_domain.py:456`). A gestation-week code recorded every prenatal visit gives one
+patient ~20+ pregnancy tokens vs one diagnosis token, and both the anchor search (max
+co-occurrence residual norm) and the topic evidence (token mass) are dominated by whatever
+repeats most. So pregnancy won the intrinsic-CM anchor by VOLUME, not meaning — the same
+bias behind 0113's "fed but generic lab panel" topics. Spectral's criterion is not
+misaligned with node meaning per se; it is aligned with token mass, and raw-count BOWs make
+token mass a proxy for utilization, not phenotype.
+
+**Verdict.** Starvation is solved by init. The residual is an ALIGNMENT question, now
+decomposed: (a) burst / utilization-volume bias — tested cheaply by
+[0115](0115-mondo-cardiovascular-tpn5-spectral-binary.md) (`count_transform: binary`); (b)
+genuine unsupervised-objective misalignment (separability ≠ phenotype) — supervision's job
+(PC, parked, and the regime insight 0066 says PC actually pays: a hidden low-mass signal
+under a dominant one); (c) genuine label heterogeneity (peripartum CM is a real
+subphenotype, not a bug). Deferred: a `gated-pc-readout` on 0114 to see whether the
+misaligned anchors bite DETECTION or the localized head absorbs them.
