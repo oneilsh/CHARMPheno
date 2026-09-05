@@ -1,4 +1,4 @@
-.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail report eval-exp build-dashboard-exp build-covariates lr-readout pc-antidepressant
+.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect inspect-topics smoke-dataproc setup next-exp exp summary summary-tail report eval-exp build-dashboard-exp build-covariates lr-readout pc-antidepressant
 
 REPO_ROOT       := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP    := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
@@ -124,6 +124,9 @@ help:
 	@echo "  summary ID=N            Print summary.md for experiment N."
 	@echo "  summary-tail ID=N       Print only the most-recent ## section of summary.md."
 	@echo "  report ID=N             COMPACT gated_pc digest (flags + fit-health + signal lines)."
+	@echo "  inspect-topics ID=N      OFF-CLUSTER topics view (sharpness + readout loadings)"
+	@echo "                           from the saved fit; no Spark/YARN, safe mid-fit. Add"
+	@echo "                           INSPECT_KEY=<bundle key> for topic words + node depth."
 	@echo "  eval-exp [ID=N]         Re-run eval; if ID omitted, auto-selects most-recently-fit."
 	@echo "  build-dashboard-exp     - build dashboard bundle (auto-picks freshest fit needing build)"
 	@echo "  build-dashboard-exp ID=N - force rebuild for a specific experiment"
@@ -501,6 +504,41 @@ gated-pc-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	    --cache-uri $(GPR_CACHE_URI) \
 	    $(if $(GPR_DOC_MIN_LENGTH),--doc-min-length $(GPR_DOC_MIN_LENGTH),) \
 	    $(GPR_ARGS)
+
+# ---------------------------------------------------------------------------
+# inspect-topics: OFF-CLUSTER topics/readout inspector (pure numpy, NO Spark, NO
+# YARN). Renders per-node topic SHARPNESS + readout LOADINGS from the saved fit
+# (gated_pc_result.npz + the readout heads/ckpt sidecars), so it runs on the
+# MASTER while a fit is still going without touching executors. Add topic WORDS +
+# node DEPTH by pointing --bundle-meta at the bundle's `meta` text file, fetched
+# with a plain `hdfs dfs -cat` -- an HDFS CLIENT read that requests ZERO YARN
+# containers, safe to run mid-fit. Pass INSPECT_KEY=<bundle key> to auto-cat it,
+# or INSPECT_META=<path> if you fetched it yourself. Find the key with:
+#     hdfs dfs -ls $(GPR_CACHE_URI)      # the recent bundle dir
+# Examples:
+#   make inspect-topics ID=111
+#   make inspect-topics ID=111 INSPECT_KEY=<hash> INSPECT_ARGS="--sort depth"
+#   make inspect-topics ID=111 INSPECT_META=/tmp/meta.json INSPECT_ARGS="--top-topics 200"
+INSPECT_CACHE_URI  ?= $(GPR_CACHE_URI)
+INSPECT_META       ?=
+INSPECT_KEY        ?=
+INSPECT_ARGS       ?=
+# QUOTED glob, like GPR_RUN_DIR: inspect_topics.resolve_run_dir keeps the one dir
+# with gated_pc_result.npz. Override with an exact dir via INSPECT_RUN_DIR.
+INSPECT_RUN_DIR    ?= $(RUNS_DIR)/$(shell printf '%04d' $(ID))-*
+inspect-topics: $(WORKSPACE_ENV)
+	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
+	@META="$(INSPECT_META)"; \
+	if [ -z "$$META" ] && [ -n "$(INSPECT_KEY)" ]; then \
+	  META="/tmp/inspect_meta_$(ID).json"; \
+	  echo "[inspect-topics] hdfs dfs -cat $(INSPECT_CACHE_URI)/$(INSPECT_KEY)/meta/part-* -> $$META (off-YARN)"; \
+	  hdfs dfs -cat "$(INSPECT_CACHE_URI)/$(INSPECT_KEY)/meta/part-*" > "$$META" || \
+	    { echo "ERROR: could not fetch bundle meta; check INSPECT_KEY / INSPECT_CACHE_URI"; exit 1; }; \
+	fi; \
+	. ./$(WORKSPACE_ENV) && \
+	python $(REPO_ROOT)/analysis/cloud/inspect_topics.py "$(INSPECT_RUN_DIR)" \
+	    $${META:+--bundle-meta "$$META"} \
+	    $(INSPECT_ARGS)
 
 # Sibling-support diagnostic for residual degenerate nodes (exp 0109): one pass
 # over the cached bundle's train labels, then buckets every degenerate node by
