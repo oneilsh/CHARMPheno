@@ -91,7 +91,7 @@ def test_report_renders_and_flags_starvation(tmp_path):
     # self-weight column shows the node's own-topic readout weight (+2.000)
     assert "+2.000" in rep
     # without a vocab map the words section is explicitly skipped
-    assert "no --vocab-map" in rep
+    assert "--vocab-map" in rep
     # no heads/ckpt sidecar -> falls back to co-fit w_CK, and SAYS so honestly
     assert "NOT the readout decoder" in rep
 
@@ -163,15 +163,38 @@ def test_vocab_words_named_when_map_given(tmp_path):
     rep = it.build_report(tmp_path, top_topics=10, top_loadings=3, t_words=5,
                           vocab_path=tmp_path / "vocab.json", names_path=names)
     assert "Top 5 concepts" in rep
-    # node1 = engine id 1 = the i=0 node, whose topic spikes on vocab index 0,
-    # so concept_0 must be its top word (a wrong topic<->node map would name a
-    # different concept here).
-    for line in rep.splitlines():
-        if line.startswith("**node1**"):
-            assert "concept_0" in line
+    # words render as per-domain sub-bullets under each node bullet (fixture
+    # domains are named dom0/dom1)
+    assert "**dom0:**" in rep and "**dom1:**" in rep
+    # node1 = engine id 1 = the i=0 node, whose topic spikes on vocab index 0 of
+    # domain 0, so concept_0 must be its top dom0 word (a wrong topic<->node map
+    # would name a different concept). Find node1's bullet, then its dom0 line.
+    lines = rep.splitlines()
+    for i, line in enumerate(lines):
+        if "**node1**" in line and line.lstrip().startswith("-"):
+            cond = next(l for l in lines[i + 1:i + 5] if "**dom0:**" in l)
+            assert "concept_0" in cond
             break
     else:
-        pytest.fail("no node1 topic-words line rendered")
+        pytest.fail("no node1 topic-words block rendered")
+
+
+def test_tree_tour_indents_by_depth(tmp_path):
+    _make_run(tmp_path, V=10)
+    meta = {"parent_int": {"1": [0], "2": [1], "3": [2], "4": [1], "5": [1]},
+            "int2cid": {str(e): 1000 + e for e in range(6)},
+            "name_by_id": {str(1000 + e): f"node{e}" for e in range(6)},
+            "vocab_maps": [{str(200 + i): i for i in range(10)},
+                           {str(300 + i): i for i in range(10)}]}
+    (tmp_path / "meta.json").write_text(json.dumps(meta))
+    rep = it.build_report(tmp_path, top_topics=10, top_loadings=3, t_words=5,
+                          bundle_meta_path=tmp_path / "meta.json", tour_per_depth=2)
+    assert "Tree tour" in rep
+    # depth marker + depth-proportional indentation (node2 is at depth 2 -> engine
+    # chain 1->2->3, so node3 at depth 3 is indented deeper than node1 at depth 1)
+    d1 = next(l for l in rep.splitlines() if "**node1**" in l and "`d1`" in l)
+    d3 = next(l for l in rep.splitlines() if "**node3**" in l and "`d3`" in l)
+    assert (len(d1) - len(d1.lstrip())) < (len(d3) - len(d3.lstrip()))
 
 
 def test_bundle_meta_gives_depth_and_words(tmp_path):
