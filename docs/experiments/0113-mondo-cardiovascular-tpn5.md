@@ -1,7 +1,7 @@
 ---
 id: 113
 slug: mondo-cardiovascular-tpn5
-status: pending
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -170,8 +170,76 @@ make -C analysis/cloud inspect-topics ID=113 INSPECT_KEY=<key> RESOLVE_NAMES=1 \
 
 ## Run log
 
-*(pending)*
+**2026-09-05 — fit.** Fit-only, 50 iters, 20 executors, ~1500s. Emergent
+**K=1498** (8 background + 298 CV nodes × tpn=5 = 1490 node-tied topics),
+**C=299** CV label nodes on the native-Mondo CV subtree (MONDO:0004995); the
+corpus stays all-patients (non-CV patients are background-only docs), matching
+0110. Saved fit-only λ (`gated_pc_result.npz`). The end-of-fit banner's
+"299/299 heads DEAD" is expected and irrelevant — the co-fit head is untrained
+at `weight_y=0`; the topics are the artifact of record.
+
+**2026-09-05 — readout + inspection.** `gated-pc-readout` persisted
+`readout_heads_gated_pc.npz`. Inspected off-cluster with `inspect_topics.py`
+(new `--digest` mode + bundle meta for depth/words); figures below are model
+params and counts-of-nodes only.
 
 ## Results
 
-*(pending; model params / counts-of-nodes only, egress floor)*
+**Acceptance criterion — does the depth-≥5 CV evidence floor LIFT under `tpn=5`
+vs 0111's `tpn=1`? NO. Topic budget is falsified as the rescue lever.**
+
+- **72% of the 1490 node topics starved** (eff-support frac > 0.5) — statistically
+  unchanged from 0111's **73%**.
+- The starvation cliff did **not** move down (deeper); if anything it moved **up**
+  one level. Median evidence / eff-support-frac by DAG depth (node counts, not
+  patient counts):
+
+  | depth | n nodes | median evidence | median frac |
+  |--:|--:|--:|--:|
+  | 1 | 5 | 7.5e5 | 0.08 |
+  | 2 | 20 | 4.8e4 | 0.02 |
+  | 3 | 195 | 160 | 0.12 |
+  | 4 | 360 | 62.5 | **0.99** ← cliff |
+  | 5 | 430 | 61.8 | 0.99 |
+  | 6 | 305 | 61.4 | 1.00 |
+  | 7 | 145 | 61.1 | 1.00 |
+  | 8 | 25 | 60.9 | 1.00 |
+  | 9 | 5 | 64.6 | 0.97 |
+
+  The prior floor is ~60.6 (min evidence); depth ≥ 4 sits on it. Four of every
+  five topic slots per deep node stayed flat — the extra budget was not consumed
+  by the deep tail. (0111, `tpn=1`, whole-Mondo: fed through depth 4, cliff at
+  depth 5. The one-level-shallower cliff here is confounded with branch-vs-monolith
+  and the standard-vs-episode index, so read it as "no lift," not "worse.")
+
+- **Budget IS consumed where separable signal exists** (the secondary win):
+  prevalent CV nodes got multiple *differentiated* topics — e.g. `hypertensive
+  disorder` (d4) resolved into 5 fed topics, the sharpest a clean cardiometabolic
+  phenotype (Essential hypertension · Hyperlipidemia · T2DM // hydrochlorothiazide
+  · lisinopril · metformin). **Sibling redundancy: 0 of 16 parents collapsed**
+  (median fed-cosine ≤ 0.32 everywhere) — fed siblings differentiate, they do not
+  degenerately clone. So `tpn > 1` buys resolved variety for the already-fed; it
+  does not conjure signal for the starved.
+
+- **Two observations from the real-names view** (feed the next step; mechanism
+  still under discussion, 0079 not yet updated):
+  1. **Fed deep nodes are fed largely by surviving own-label OMOP *variant*
+     codes.** The leakage strip drops only the exact DAG-node cids
+     (`{vocab_map[c] for c in before_dag.nodes()}`, `case_finding_assembly.py:449`),
+     but the OMOP condition vocabulary carries finer SNOMED variants of the same
+     Mondo node that are not themselves DAG nodes and survive. The AF / MI /
+     mitral-valve / CHF topics are dominated by their own disease's variant family
+     (AF → *Atrial fibrillation · Chronic/Persistent/Paroxysmal AF · Atrial
+     flutter*). So a fed, sharp topic is not evidence of *uncoded* discovery — it
+     is partly residual label vocabulary. (One cheap cluster check would confirm:
+     intersect a fed topic's top cids with `before_dag.nodes()`.)
+  2. **"Fed" (high evidence) ≠ disease-coherent.** Some high-evidence deep topics
+     are generic admission-workup labs / demographic slices, not phenotype (e.g.
+     `dilated cardiomyopathy` d5 = a routine CBC/urinalysis/serology panel), so a
+     fraction of the "sharp" count is sharp on non-specific measurement mass.
+
+**Verdict.** Budget is not the binding constraint on deep-node topic learning.
+Per the pre-registered branch, the live candidates are strip-scope (the strip
+under-strips at OMOP granularity), the flat-start init trap, and minibatch rarity
+(ADR-0027 lazy blocks) — to be separated next. The clean discriminator remains a
+plain K≈80 LDA on one subDAG's patients with a variant-inclusive strip (0079).
