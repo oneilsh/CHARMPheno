@@ -1,0 +1,186 @@
+---
+id: 115
+slug: mondo-cardiovascular-tpn5-spectral-binary
+status: pending
+model_class: gated_pc
+cohort: population_mondo_all
+cohort_def: population_mondo_all
+disease: rare_priority
+# THE BURST-BIAS TEST. 0114's config VERBATIM (CV branch MONDO:0004995, tpn=5, spectral
+# init, fit-only, spectral_d 768) with ONE knob added: count_transform: binary. So
+# 0115-vs-0114 is a CLEAN A/B on the count representation alone.
+#
+# WHY. 0114 (spectral init) lifted the deep-node starvation floor decisively (72% -> 1%
+# starved; depth-4 median evidence 62 -> 1000) — the flat-start trap was the binding
+# constraint, not budget (0113). But a MINORITY of the newly-fed deep topics anchor on the
+# WRONG signal: intrinsic/dilated cardiomyopathy came back dominated by PREGNANCY codes
+# (trimesters, gestation weeks), a cardiomyopathy topic by generic primary-care symptoms —
+# sharp, but on a demographic/utilization stratum, not the phenotype. (peripartum
+# cardiomyopathy -> pregnancy is CORRECT; DCM/intrinsic-CM is the anchor grabbing a
+# young-female subpopulation.)
+#
+# MECHANISM (multi_domain.py:456: domain_binary = [False] + [d=="measurement"]). Only the
+# MEASUREMENT domain is per-doc binary (insight 0077, "bursty"); CONDITIONS and DRUGS are
+# RAW OCCURRENCE COUNTS. A gestation-week code is recorded every prenatal visit — one
+# pregnant patient contributes ~20+ pregnancy tokens vs one diagnosis token. The anchor
+# search maximizes co-occurrence residual norm and the topic evidence maximizes token
+# mass; BOTH are dominated by what REPEATS most per document. So pregnancy won the
+# intrinsic-CM anchor by VOLUME, not meaning — the same bias behind 0113's "fed but
+# generic lab panel" topics. Reframes the misalignment: spectral's criterion is aligned
+# with TOKEN MASS, and raw-count BOWs make token mass a proxy for utilization, not
+# phenotype.
+#
+# FIX (cheap, no supervision, no cache rebuild). count_transform: binary collapses every
+# token to per-doc PRESENCE (min(count,1)) before the seed AND the fit — insight 0077's
+# measurement fix extended to all domains. Applied in-memory in the PC shim
+# (pc.py _transform_counts); the cached bundle stays raw-count, so NOT a cache-key change
+# and it reuses 0114's bundle. A code recorded every visit now counts once, like a dx.
+#
+# FALSIFIABLE PREDICTION. The pregnancy-anchored intrinsic/dilated-CM topics RECEDE
+# (pregnancy -> 1 token/patient); the phenotype-coherent topics (AF, systolic/diastolic
+# HF, valve) HOLD. Whatever misalignment SURVIVES binarization is the genuine residual —
+# the "unsupervised separability != meaning" part that needs supervision (parked PC). So
+# this DECONFOUNDS burst-bias from true objective misalignment; today they are tangled.
+#
+# READ: inspect_topics.py --digest node-for-node vs 0114 (reuse 0113/0114 cached meta):
+#   - starved% + depth rollup: must stay LIFTED (binarization must not re-starve depth).
+#   - --grep the pregnancy-anchored CMs: do intrinsic/dilated cardiomyopathy shed the
+#     gestation terms for cardiac/management signal? does peripartum CM KEEP pregnancy?
+#   - do the AF/HF/valve topics stay coherent?
+# Acceptance: burst-anchored topics re-align toward phenotype (pregnancy recedes where a
+# confound, survives where it IS the disease) WITHOUT re-starving the floor. A null
+# (topics unchanged) => misalignment is NOT burst-bias but genuine objective misalignment
+# => supervision is the lever, not counts. A floor DROP => presence discarded needed
+# repetition => fall back to log1p.
+#
+# COST: identical to 0114 (same bundle, K=1498, spectral seed; the transform is a free
+# in-memory map). ~1.5h seed + ~35 min fit on the lean cluster.
+dag_source: mondo_native
+mondo_branch: MONDO:0004995
+tpn: 5
+max_iter: 50
+diag_only: true
+# --- the ONLY change from 0113: spectral block-aligned seed for the gated engine ---
+init: spectral
+spectral_method: scalable   # concatenated V ~11.6k >= 8000 threshold; dense = driver wall
+spectral_d: 768             # random-projection dim: smaller = faster + bigger safe batch (see COST)
+anchor_scope: closure       # node trained from its whole closure; ancestors deflated by topo order
+spectral_topo_order: forward  # ancestors-first: each node's seed = its increment over ancestors
+count_transform: binary     # THE NEW KNOB: per-doc PRESENCE not raw per-visit counts (burst-bias test)
+# ------------------------------------------------------------------------------------
+preindex_closure: false
+readout_mode: distributed
+readout_theta_topm: 256
+weight_y: 0.0
+weight_y_warmup_iters: 0
+skip_unsup_gated: true
+min_positives: 100
+mondo_version: 2026-06-02
+mondo_cache_dir: data/mondo
+extra_domains: measurement,drug
+label_mask_mode: closure
+localize_head: true
+head_support: path_cousins_kids
+head_intercept: true
+head_standardize: true
+doc_concentration: 0.5
+head_lr: 1.0
+person_mod: 1
+prior_obs_days: 0
+doc_min_length: 10
+min_n: 0
+holdout_frac: 0.2
+vocab_size: 5000
+min_df: 20
+min_patient_count: 20
+window_mode: lookback
+lookback_days: 1825
+label_window_days: 365
+strip_mode: both
+n_bg: 8
+optimize_doc_concentration: true
+head_optimizer: newton
+head_newton_ridge: 0.05
+head_l2: 0.01
+grad_cavi_iters: 15
+topic_trust: 0.05
+subsampling_rate: 0.1
+tau0: 64.0
+kappa: 0.51
+cavi_max_iter: 100
+cavi_tol: 0.001
+with_dag_head: false
+baseline_max_iter: 100
+min_label_count: 20
+eval_every: 0
+num_partitions: 96
+seed: 42
+cache_uri: hdfs:///user/dataproc/charm/case_finding_cache
+spark_conf:
+  # Same geometry as 0113 (from 0110, the whole-Mondo survivor). Over-provisioned and
+  # safe at this branch's K; the scalable spectral seed's sequential passes are the new
+  # cost, not the fit.
+  spark.executor.cores: 2
+  spark.executor.memory: 8g
+  spark.executor.memoryOverhead: 3g
+  spark.dynamicAllocation.enabled: "false"
+  spark.executor.instances: 20
+  spark.excludeOnFailure.timeout: 10m
+  spark.cleaner.periodicGC.interval: "5min"
+---
+
+
+# 0115 — CV branch, spectral init, BINARY counts (the burst-bias test)
+
+0114's exact config with **one knob added — `count_transform: binary`** — so any change is
+attributable to the count representation alone. This deconfounds 0114's misaligned deep
+topics into **burst / utilization-volume bias** (fixable here, cheaply) vs **genuine
+unsupervised-objective misalignment** (supervision's job).
+
+**Grounding.** 0114 lifted the starvation floor (0079's flat-start trap confirmed) but a
+minority of fed deep topics anchored on demographic substructure — intrinsic/dilated
+cardiomyopathy on pregnancy codes — because conditions/drugs are raw per-visit counts
+(only measurements were binarized, 0077), so the anchor and evidence criteria track
+utilization volume, not phenotype. Binary presence removes that lever.
+
+## What it does
+
+`make -C analysis/cloud exp ID=115` → 0114's fit with every document's BOW collapsed to
+per-token presence (`min(count,1)`) before the spectral seed and the fit. Same cached
+bundle, same K, same seed; the transform is an in-memory `.map` in the PC shim.
+
+## Acceptance criterion
+
+Do the burst-anchored deep topics **re-align toward phenotype** — pregnancy receding from
+intrinsic/dilated CM (a confound) while surviving in peripartum CM (correct) — **without
+re-starving** the depth floor 0114 lifted?
+- **Re-align** → the misalignment was largely burst-bias; binary presence is the fix, no
+  supervision needed, and it should become the default count representation.
+- **Null** (topics unchanged) → genuine objective misalignment (separability ≠ phenotype);
+  supervision (parked PC) is the lever, not counts.
+- **Re-starves** (floor drops) → presence discarded discriminative repetition some nodes
+  needed; fall back to `log1p` (softer damping).
+
+## Run
+
+```bash
+cd ~/repos/CHARMPheno && git fetch origin claude/gated-conditional-voi && git checkout claude/gated-conditional-voi && git pull --ff-only
+make -C analysis/cloud exp ID=115
+```
+
+Then (reuse 0113/0114 cached meta/names):
+
+```bash
+make -C analysis/cloud inspect-topics ID=115 \\
+    INSPECT_META=/tmp/inspect_meta_113.json INSPECT_NAMES=/tmp/concept_names_113.csv \\
+    INSPECT_ARGS="--digest --redundancy 30 \\
+      --grep 'cardiomyopathy|atrial fibrillation|heart valve|mitral|aortic|myocardial infarction|heart failure|pregnan|gestation'"
+```
+
+## Run log
+
+*(pending)*
+
+## Results
+
+*(pending; model params / counts-of-nodes only, egress floor)*

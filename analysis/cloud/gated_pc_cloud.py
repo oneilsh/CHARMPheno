@@ -2708,6 +2708,7 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
         spectralMinDocFreq=int(getattr(args, "spectral_min_doc_freq", 5)),
         anchorScope=str(getattr(args, "anchor_scope", "closure")),
         spectralTopoOrder=str(getattr(args, "spectral_topo_order", "forward")),
+        countTransform=str(getattr(args, "count_transform", "none")),
     )
     # Multi-domain: feed per-domain feature columns (features_0..) so the gated
     # engine carries a per-domain lambda and the topic correction scatters per
@@ -3675,6 +3676,13 @@ def parse_args(argv=None):
                    help="deflation order: 'forward' (ancestors-first, node = increment "
                         "over ancestors) or 'reverse' (leaves-first, node = residual "
                         "after descendants).")
+    p.add_argument("--count-transform", choices=["none", "binary", "log1p"],
+                   default="none",
+                   help="per-token BOW count transform before seed+fit: 'none' (raw "
+                        "counts), 'binary' (min(count,1) = per-doc presence; de-biases "
+                        "anchors/evidence off utilization volume, insight 0077 extended "
+                        "to all domains), or 'log1p' (softer damping). In-memory; the "
+                        "cached bundle stays raw (no cache-key change).")
     p.add_argument("--dag-source", choices=["snomed", "mondo", "mondo_native"],
                    default="snomed",
                    help="snomed (default): the disease's SNOMED anchor forest via "
