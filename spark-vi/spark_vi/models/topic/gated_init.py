@@ -21,8 +21,10 @@ findings. Kept for the real-DAG A/B harness and as the extension point for futur
 (e.g. phenotype-profile seeding)."""
 from __future__ import annotations
 
+import itertools
 import logging
 import os
+import time
 
 import numpy as np
 
@@ -315,11 +317,34 @@ class _NodeGroups:
         self.groups = groups
 
 
+def _resolve_batch_size(batch_size: int, V: int, d: int) -> int:
+    """Nodes to sketch per projected-cooccurrence pass (the batched seed's width).
+
+    Each batched node carries a dense ``(V, d)`` float32 group sketch that reaches the
+    driver on the tree-reduce, so B is bounded by a driver-result budget: keep
+    ``B·V·d·4`` bytes under ~400 MB by default — comfortably below the 1 GB
+    ``spark.driver.maxResultSize`` floor, and small enough that a lean cluster's
+    executors hold only B such accumulators per task. ``batch_size > 0`` overrides the
+    auto value; the env var ``CHARM_SPECTRAL_BATCH`` overrides both, for no-redeploy
+    tuning on the cluster. Always >= 1 (B=1 reproduces the per-node path)."""
+    env = os.environ.get("CHARM_SPECTRAL_BATCH")
+    if env:
+        try:
+            return max(1, int(env))
+        except ValueError:
+            pass
+    if batch_size and int(batch_size) > 0:
+        return max(1, int(batch_size))
+    per = 4 * int(V) * int(d)
+    return int(max(1, min(32, (400 * 1024 * 1024) // max(per, 1))))
+
+
 def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                                   seed: int = 0, min_doc_freq: int = 5,
                                   scale: float = SPECTRAL_LAMBDA_SCALE,
                                   anchor_scope: str = "closure",
-                                  topo_order: str = "forward") -> np.ndarray:
+                                  topo_order: str = "forward",
+                                  batch_size: int = 0) -> np.ndarray:
     """Distributed random-projection analogue of `spectral_block_aligned_lambda`.
 
     `rdd` is an RDD of GatedBOWDocument. Never forms a driver V×V matrix (ADR
@@ -491,10 +516,19 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
             _pa_diag = bool(os.environ.get("CHARM_PROBE_PA_DIAG"))
             _pa_diag_rows: dict[int, dict] = {}
 
-        # Step 2: each node, in `topo_order`, its OWN filtered one-slab pass.
+        # Step 2: recover each node's block from its projected co-occurrence sketch,
+        # in `topo_order` (so a node's ancestors/descendants are recovered before it
+        # and feed its deflation seed_rows). TWO code paths, identical output:
+        #  * PROBE MODE (env-gated diagnostics on): one filtered pass PER NODE below —
+        #    the effrank / parallel-analysis probes need per-node n_docs / unigram /
+        #    length_hist, which the group-sketch machinery does not carry.
+        #  * NORMAL MODE (no probes): the BATCHED fast path further down — B nodes per
+        #    pass, collapsing ~n_nodes Spark jobs into ~n_nodes/B (the win a lean
+        #    cluster needs). group_QR[u] from a B-node pass equals this per-node
+        #    filtered pooled_QR, so the seed is unchanged.
         node_anchors: dict[int, list] = {}
         order, relatives = _node_order_and_relatives(lay, topo_order)
-        for u in order:
+        for u in (order if probe_any else ()):
             rdd_u = group_rdd.filter(lambda gd, _u=u: _u in gd.groups)
             res_u = projected_cooccurrence_rdd(rdd_u, no_groups, V, d, seed)
             if int(res_u.df_w.sum()) == 0:
@@ -632,6 +666,62 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
             for j, idx in enumerate(lay.block[u]):
                 if j < fg_beta.shape[0]:
                     beta[idx] = fg_beta[j]
+
+        # NORMAL MODE: the batched fast path. Recover B nodes per projected-cooccurrence
+        # pass, batched WITHIN a depth level so no node shares a batch with an ancestor
+        # or descendant (a proper relative has strictly different longest-path depth, so
+        # same-depth nodes never relate) — its seed_rows only need relatives from earlier
+        # levels, already recovered. Each batch's nodes are recovered and their sketches
+        # DISCARDED before the next pass, so the driver holds at most B·(V·d) at once
+        # (the O(n_nodes·V·d) single-pass accumulation would overflow maxResultSize).
+        # group_QR[u] here is numerically the per-node filtered pooled_QR, so the seed
+        # matches the per-node path exactly; this only cuts the Spark-job count.
+        if not probe_any:
+            def _recover_block(u, QR, pw, dfw):
+                if int(dfw.sum()) == 0:
+                    logger.warning(
+                        "scalable_block_aligned_lambda: node %s has zero training "
+                        "docs; its block stays at the 1e-9 floor (uninitialized).", u)
+                    return
+                seed_rows = list(bg_anchors) + [a for p in relatives(u)
+                                                for a in node_anchors.get(p, [])]
+                fg_anchors = find_anchors_projected(
+                    QR, pw, dfw, lay.tpn, seed_rows=seed_rows,
+                    min_doc_freq=min_doc_freq)
+                if not fg_anchors:
+                    logger.warning(
+                        "scalable_block_aligned_lambda: node %s found no anchors "
+                        "(sparse/degenerate sketch); its block stays at the floor.", u)
+                    return
+                node_anchors[u] = list(fg_anchors)
+                combined_beta = recover_beta_projected(
+                    QR, pw, list(seed_rows) + list(fg_anchors))
+                fg_beta = combined_beta[len(seed_rows):]
+                for j, idx in enumerate(lay.block[u]):
+                    if j < fg_beta.shape[0]:
+                        beta[idx] = fg_beta[j]
+
+            B = _resolve_batch_size(batch_size, V, d)
+            levels = [list(g) for _, g in
+                      itertools.groupby(order, key=lambda u: lay.depth(u))]
+            logger.info(
+                "scalable_block_aligned_lambda: seeding %d node(s) over %d depth "
+                "level(s), batch=%d (V=%d, d=%d)", len(order), len(levels), B, V, d)
+            _t0 = time.time()
+            _done = 0
+            for lv in levels:
+                for i in range(0, len(lv), B):
+                    batch = lv[i:i + B]
+                    r = projected_cooccurrence_rdd(
+                        group_rdd, _NodeGroups(tuple(batch)), V, d, seed)
+                    for u in batch:
+                        _recover_block(u, r.group_QR[u], r.group_p_w[u],
+                                       r.group_df_w[u])
+                    _done += len(batch)
+                    logger.info(
+                        "scalable_block_aligned_lambda: seeded %d/%d node(s) "
+                        "(depth %d, %.0fs elapsed)", _done, len(order),
+                        lay.depth(batch[0]), time.time() - _t0)
 
         if probe_any:
             from spark_vi.models.topic.effective_rank import (

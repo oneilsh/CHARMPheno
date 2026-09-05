@@ -92,6 +92,41 @@ def test_scalable_block_aligned_lambda_is_block_aligned_and_deflated(spark):
     assert not np.allclose(beta1, beta2)
 
 
+def test_scalable_block_aligned_lambda_batch_size_invariant(spark):
+    # The batched seed recovers B nodes per pass, but a node's group sketch is the
+    # same docs regardless of who shares its batch — so the seed MUST NOT depend on
+    # batch_size. A multi-level DAG (so nodes actually land in different depth-batches)
+    # seeded at B=1 (one node per pass) and B=8 (whole levels per pass) must agree.
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.types import GatedBOWDocument
+    from spark_vi.models.topic.gated_init import scalable_block_aligned_lambda
+
+    lay = DagLayout({1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}, n_bg=2, tpn=1)
+    V = 14
+
+    def doc(idx, frontier):
+        idx = sorted(idx)
+        return GatedBOWDocument(indices=np.asarray(idx, dtype=np.int32),
+                                counts=np.ones(len(idx), dtype=np.float64),
+                                length=len(idx), frontier=frozenset(frontier))
+
+    rng = np.random.default_rng(0)
+    rows = []
+    for _ in range(40):
+        rows.append(doc([12, 13], []))
+        for leaf, toks in [(3, [0, 1]), (4, [2, 3]), (5, [4, 5]), (6, [6, 7])]:
+            rows.append(doc(toks + [12], [leaf]))
+    rdd = spark.sparkContext.parallelize(rows, 3)
+
+    lam_b1 = scalable_block_aligned_lambda(rdd, lay, V, seed=0, min_doc_freq=1,
+                                           batch_size=1)
+    lam_b8 = scalable_block_aligned_lambda(rdd, lay, V, seed=0, min_doc_freq=1,
+                                           batch_size=8)
+    assert lam_b1.shape == lam_b8.shape == (lay.K, V)
+    assert np.allclose(lam_b1, lam_b8)          # seed independent of batch width
+
+
 def test_scalable_block_aligned_lambda_deterministic(spark):
     import numpy as np
     from spark_vi.models.topic.dag_placement import DagLayout
