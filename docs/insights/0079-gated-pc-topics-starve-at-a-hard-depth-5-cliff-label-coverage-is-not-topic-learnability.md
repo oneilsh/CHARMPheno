@@ -2,7 +2,9 @@
 
 **Date:** 2026-09-05
 **Topic:** lda
-**Status:** Observed
+**Status:** Observed — **see the Refinement (same day): the cliff is NOT depth or
+prevalence, it is code-separability after the leakage strip (0062's information
+constraint); the "uniform depth-5 cliff" framing is superseded.**
 
 **Relates to:** 0078 (episode anchoring un-starves the LABEL space — this is the
 orthogonal *topic* view), 0071 ("as ONE fit K≈3,800 is not viable — decompose by
@@ -87,8 +89,51 @@ depth and top-1 loses on deep small parents.
   starved topics (V = W_std/σ, σ→0); read standardized W_std, not raw V, for any
   loadings interpretation (`inspect_topics` prefers the ckpt W_std when present).
 
+## Refinement (2026-09-05, with `--grep` on specific high-n deep nodes) — the cliff is code-separability after the leakage strip, not depth/prevalence/init/sampling
+
+A `--grep` lookup of well-POPULATED deep nodes settles the mechanism, and refutes
+the depth/prevalence framing above and the flat-start-init-trap hypothesis floated
+in the same session:
+
+| deep node | depth | n | evidence | frac | verdict |
+|---|--:|--:|--:|--:|---|
+| hemorrhoid | 8 | 2138 | 1.5e4 | 0.01 | fed, sharp |
+| varicella zoster | 8 | 2222 | 3641 | 0.01 | fed |
+| disorder of facial skeleton | 7 | 2482 | 2606 | 0.01 | fed |
+| ischemic stroke | 8 | 2618 | 744 | 0.00 | fed, sharp |
+| female breast carcinoma | 10 | 1161 | **5.2** | **1.00** | starved |
+| invasive ductal / lobular / in-situ / male breast ca | 9–11 | — | **5.1** | **1.00** | starved |
+| strep sore throat / pneumonia (parent "strep infection" is fed, ev 143) | 8–9 | — | **5.1** | **1.00** | starved |
+
+Same depths, same-or-higher n, opposite outcomes — so NOT prevalence, NOT depth,
+NOT a random init trap (systematic, not scattered), NOT minibatch sparsity
+(ischemic stroke n=2618 is fed). **The discriminator is code-separability after the
+leakage strip.** `strip_mode="both"` drops EVERY DAG-node code from the BOW, train
+included (`case_finding_assembly.py:449-452`: `drop_idxs = {vocab_map[c] for c in
+before_dag.nodes()}`). So a node's topic is built from a vocabulary with its own
+defining code — and all Mondo codes — removed; it learns only if its distinction
+survives in the UNSTRIPPED domains (drugs, labs, non-Mondo symptoms). Ischemic
+stroke keeps antithrombotics + distinctive management → fed. Breast-carcinoma
+subtypes are distinguished ONLY by their (now-stripped) histology code; everything
+left (chemo, imaging, comorbidities) is shared across all breast cancer →
+indistinguishable → flat. This is honest, CORRECT behaviour — a distinction that is
+purely code-definitional cannot be learned without leakage.
+
+**Consequences, corrected:**
+- **NOT init.** Spectral init cannot seed anchor words that were stripped out — the
+  init-trap hypothesis is refuted, not merely "untested at scale."
+- **The multi-domain direction is vindicated deep in the tree:** the fed deep nodes
+  are fed *because* drugs/labs distinguish them (0062's binding constraint paying
+  off). The remaining lever is richer non-DAG features (procedures, more lab
+  value-states, path/imaging, notes) — extend MixEHR — not init/capacity/PC.
+- The cascade (0071) still helps the *separable* deep nodes (K-room in a branch) but
+  cannot manufacture separability for code-only subtypes.
+- Part of the cliff is a **Mondo-granularity vs EHR-information mismatch**: deep
+  Mondo is histological/anatomical subtypes whose distinction is code-definitional.
+
 **Setting context:** exp 0111 episode arm — gated-PC (weight_y 0, unsupervised
 topics + separate L-BFGS readout), whole-Mondo native DAG (C=2714, K=2721,
 n_bg=8, tpn=1), 3 domains (condition/measurement/drug), episode index (gap 90d,
 cap 3, 365d label), lookback 1825d, doc_concentration 0.5. Read from the fit's
-own saved globals; the matched-random control (0112) had not yet been fit.
+own saved globals via `inspect_topics.py --grep`; the matched-random control
+(0112) had not yet been fit.
