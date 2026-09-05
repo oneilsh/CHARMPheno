@@ -839,26 +839,43 @@ def build_report(run_dir, *, top_topics, top_loadings, t_words,
     return "\n".join(L)
 
 
+def _trunc(s, n):
+    """Truncate to n chars without leaving a dangling '[unit' fragment (lab
+    names like 'Diastolic blood pressure [measured]' otherwise cut mid-bracket)."""
+    if len(s) <= n:
+        return s
+    s = s[:n].rstrip()
+    if "[" in s and "]" not in s.rsplit("[", 1)[-1]:
+        s = s[:s.rfind("[")].rstrip()
+    return s + "…"
+
+
 def _digest_words(t, lams, sh, inv_maps, names, name_by_id, dom_names, *,
-                  k=6, maxlen=34):
-    """One compact line of a topic's words: dominant-domain top-k names (probs
-    dropped, ·-joined, each truncated), plus the top-3 drug-domain names after
-    `//` when a drug domain exists and is not the dominant one. Empty when no
-    vocab map is supplied. This is the digest's whole word budget -- the verbose
-    report's per-domain probability dump is deliberately NOT reproduced here."""
+                  k=6, maxlen=40):
+    """One compact line summarising a topic as a PHENOTYPE SIGNATURE: the
+    condition-domain top-k names, then the top-3 drug names after `//`. Leads
+    with conditions (the disease identity) rather than the dominant domain,
+    because on these disease nodes the highest-MASS domain is often measurement
+    -- generic lab panels that read as noise in a compact view -- while the
+    interpretable signal a reader wants is diagnoses + drugs. Falls back to the
+    dominant domain only when there is no condition domain. Probabilities are
+    dropped and names truncated; the verbose report keeps the full per-domain
+    mass breakdown. Empty when no vocab map is supplied."""
     if not inv_maps:
         return ""
 
     def render(d, kk):
         inv = inv_maps[d] if d < len(inv_maps) else None
         tw = top_words(np.asarray(lams[d][t]), inv, names, name_by_id, kk)
-        return [nm[:maxlen] for nm, _ in tw]
+        return [_trunc(nm, maxlen) for nm, _ in tw]
 
-    dmax = int(np.argmax(sh["dom_mass"][t]))
-    main = render(dmax, k)
+    cond_d = next((i for i, n in enumerate(dom_names) if "condition" in n.lower()),
+                  None)
+    lead = cond_d if cond_d is not None else int(np.argmax(sh["dom_mass"][t]))
+    main = render(lead, k)
     parts = "·".join(main) if main else "(flat)"
     drug_d = next((i for i, n in enumerate(dom_names) if "drug" in n.lower()), None)
-    if drug_d is not None and drug_d != dmax:
+    if drug_d is not None and drug_d != lead:
         dr = render(drug_d, 3)
         if dr:
             parts += " // " + "·".join(dr)
