@@ -35,9 +35,15 @@ generic-chronic, cardiometabolic), now **confirmed with measurement + drug** —
 
 Two things are genuinely worth flagging:
 
-1. **Sibling redundancy.** ≥3 shallow nodes learned essentially the *same*
-   acute-care archetype (IV fluids + opioids + antiemetics + vitals). The effective
-   number of distinct shallow topics is a handful, not the 182 fed nodes.
+1. **Sibling redundancy — but only the *uniform* kind is a concern.** ≥3 shallow
+   nodes learned essentially the *same* acute-care archetype. Partial redundancy
+   (some of a parent's children differentiate, some don't) is expected and fine —
+   it reflects real heterogeneity in how distinctive each child is. The concerning
+   signal is a parent whose children *uniformly* collapse to one topic, which is
+   capacity starvation at that parent (the `tpn=1` under-capacity below). So the
+   right measurement is per-parent child-differentiation (pairwise topic cosine
+   among a parent's children), flagging uniform collapse and correlating it with
+   fan-out — not "do siblings look alike" in the aggregate.
 2. **Measurement is `[normal]`-panel-dominated** across nearly every topic and all
    8 background topics (evidence 4–7e6, measurement-dominant). Value-state
    tokenization adds little beyond "labs were drawn."
@@ -50,10 +56,17 @@ Two things are genuinely worth flagging:
   disease → acute-care-common" is expected. The right question is whether the
   SPECIFIC descendants receive their specific signal — and 0079 answers no: the
   deep blocks are starved, so the deflation has nothing to hand down.
-- **This is `weight_y=0` (unsupervised), and that is the settled regime.** PC /
-  co-fit topic-shaping is marginal-to-dead (0066; the 0065–0069 convergence saga;
-  "No PC runs" standing constraint). So the topics being unsupervised co-occurrence
-  clusters is expected — NOT motivation to turn on the head.
+- **This is `weight_y=0` (unsupervised), and that is a DELIBERATE post-PC-arc
+  decision, not an oversight.** PC is not "dead" — its scale pathologies were fixed
+  (0072/0073, ADR 0044/0045) — it is PARKED with an explicit revival condition
+  (PC-arc closeout 2026-08-20 §6): the co-fit head as trained scores 0.567, far
+  below the unsupervised gate's own readout (0.739), so shaping topics toward it
+  HURTS by construction (exp 0102: readout 0.688 vs 0.7395, negative in all rarity
+  quartiles incl. the rare tail). Revive PC only when the co-fit head can match the
+  gate (≥~0.74) — which needs a full-K head that beats the O(C·K²) Hessian-collect
+  wall (matrix-free L-BFGS, or MI-selected support; both scaffolded, unbuilt). So
+  the topics being unsupervised co-occurrence clusters is expected, and turning on
+  the head is blocked on head quality, not a quick knob.
 - **Init is a null lever on this engine (0063)** — the DAG gate welds each node's
   topics to its subtree, and 200 SVI iters move off the seed. BUT 0063 was a
   170-block DAG, and the scalable-spectral path is dead code on this branch
@@ -67,8 +80,10 @@ Two things are genuinely worth flagging:
 
 ## Implications
 
-- Do **not** read this as motivation for `weight_y>0` (dead / standing constraint)
-  or an init change (null lever historically; path dead; untested at scale).
+- Do **not** read this as motivation for `weight_y>0` — it is parked on head
+  quality (co-fit 0.567 < gate 0.739; revival needs a full-K head that beats the
+  O(C·K²) collect wall, PC-arc closeout §6), not a quick knob. Nor an init change
+  (null lever historically; scalable path dead; untested at scale).
 - The known-good direction is 0071's **per-body-system cascade** — each branch fit
   at K~few-hundred, the regime where 0019-style phenotype emergence works — not the
   monolithic K≈2714 whole-Mondo fit 0111 runs.
