@@ -225,6 +225,51 @@ def test_bundle_meta_gives_depth_and_words(tmp_path):
     assert body.index("node3") < body.index("node1")
 
 
+def test_sibling_redundancy_flags_uniform_collapse(tmp_path):
+    # 5 node topics over 1 domain (V=6); make two FED siblings identical and one
+    # FED sibling distinct, under a common parent.
+    n_bg, tpn, n_nodes, V = 1, 1, 5, 6
+    K, C = n_bg + n_nodes, n_nodes + 1
+    lam = np.full((K, V), 0.01)
+    # nodes 1,2 (topics 1,2): identical sharp spike on word 0 (redundant)
+    lam[1, 0] += 40.0
+    lam[2, 0] += 40.0
+    # node 3 (topic 3): distinct sharp spike on word 3
+    lam[3, 3] += 40.0
+    # nodes 4,5 (topics 4,5): starved (near-uniform) -> excluded from fed set
+    np.savez(tmp_path / "gated_pc_result.npz", **{"lambda": lam},
+             alpha=np.full(K, 0.5), w_CK=np.zeros((C, K)), b_CK=np.zeros(C))
+    # engine chain: all of 1,2,3,4,5 are children of root 0 (so 0 is the parent)
+    parent_int = {"1": [0], "2": [0], "3": [0], "4": [0], "5": [0]}
+    meta = {"parent_int": parent_int,
+            "int2cid": {str(e): 1000 + e for e in range(C)},
+            "name_by_id": {str(1000 + e): f"node{e}" for e in range(C)},
+            "vocab_maps": [{str(400 + i): i for i in range(V)}]}
+    (tmp_path / "meta.json").write_text(json.dumps(meta))
+    manifest = {"K": K, "C": C, "n_bg": n_bg, "tpn": tpn,
+                "domain_names": ["dom0"], "domain_vocab_sizes": [V],
+                "corpus_manifest": {
+                    "int2cid": {str(e): 1000 + e for e in range(C)},
+                    "name_by_id": {str(1000 + e): f"node{e}" for e in range(C)}}}
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+
+    # direct: parent 0 has fed children {1,2,3}; 1&2 identical (cos~1), 3 distinct
+    _, mani = it.load_run(tmp_path)
+    lams = it.domain_lambdas(np.load(tmp_path / "gated_pc_result.npz"))
+    sh = it.topic_sharpness(lams)
+    labels, t2e = it.topic_labels(mani)
+    pint = {int(k): [int(p) for p in v] for k, v in parent_int.items()}
+    rows = it.sibling_redundancy(pint, t2e, lams, sh, n_bg, K)
+    root = next(r for r in rows if r["parent"] == 0)
+    assert root["n_fed"] == 3               # topics 1,2,3 fed; 4,5 starved out
+    # the identical pair pushes max fed-cos to ~1
+    assert root["max_cos_fed"] > 0.99
+
+    rep = it.build_report(tmp_path, top_topics=10, top_loadings=3, t_words=3,
+                          bundle_meta_path=tmp_path / "meta.json", redundancy=10)
+    assert "Sibling redundancy" in rep and "uniform collapse" in rep
+
+
 def test_wrong_bundle_meta_is_flagged(tmp_path):
     _make_run(tmp_path, V=10)          # run has 2 domains of V=10
     # a meta from a DIFFERENT bundle: vocab sizes 7/7, not 10/10
