@@ -92,6 +92,43 @@ def test_report_renders_and_flags_starvation(tmp_path):
     assert "+2.000" in rep
     # without a vocab map the words section is explicitly skipped
     assert "no --vocab-map" in rep
+    # no heads/ckpt sidecar -> falls back to co-fit w_CK, and SAYS so honestly
+    assert "NOT the readout decoder" in rep
+
+
+def test_prefers_real_readout_heads_over_cofit(tmp_path):
+    _make_run(tmp_path)
+    _, manifest = it.load_run(tmp_path)
+    K, C = manifest["K"], manifest["C"]
+    # a heads sidecar whose decoder differs from the co-fit w_CK: node1 (engine 1,
+    # topic 2) is DEGENERATE, node2 (engine 2, topic 3) loads on topic 3 at +9.
+    V = np.zeros((C, K)); b = np.zeros(C)
+    degen = np.zeros(C, dtype=bool); degen[1] = True
+    V[2, 3] = 9.0
+    np.savez(tmp_path / "readout_heads_gated_pc.npz",
+             V=V, b_raw=b, degenerate=degen)
+    rep = it.build_report(tmp_path, top_topics=10, top_loadings=3, t_words=5)
+    assert "readout_heads_gated_pc.npz" in rep and "raw-θ L-BFGS heads" in rep
+    assert "degenerate heads: 1 / " in rep
+    # node1's row is marked degenerate, not given a bogus weight
+    for line in rep.splitlines():
+        if line.startswith("| node1 "):
+            assert "degenerate head" in line
+    assert "+9.000" in rep                         # node2's real self-weight
+
+
+def test_falls_back_to_checkpoint_when_no_heads(tmp_path):
+    _make_run(tmp_path)
+    _, manifest = it.load_run(tmp_path)
+    K, C = manifest["K"], manifest["C"]
+    W = np.zeros((C, K)); W[2, 3] = 4.0
+    np.savez(tmp_path / "readout_ckpt_gated_pc.npz",
+             W_std=W, b_std=np.zeros(C), iter=np.int64(120),
+             fingerprint=np.str_("fp"))
+    rep = it.build_report(tmp_path, top_topics=10, top_loadings=3, t_words=5)
+    assert "readout_ckpt_gated_pc.npz" in rep
+    assert "checkpoint iter 120" in rep
+    assert "+4.000" in rep
 
 
 def test_vocab_words_named_when_map_given(tmp_path):

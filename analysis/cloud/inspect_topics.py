@@ -19,8 +19,14 @@ What the artifacts give us (and the one thing they do not)
 `gated_pc_result.npz`:
   lambda / lambda_0,lambda_1,...   per-domain topic-word Dirichlet params, (K, V_m)
   alpha                            (K,) topic concentration
-  w_CK                             (C, K) readout head weights, node x topic
-  b_CK                             (C,)  per-node readout intercept
+  w_CK                             (C, K) weightY CO-FIT head (untrained at
+                                   weight_y=0 -- NOT the decoder; fallback only)
+  b_CK                             (C,)  co-fit head intercept
+
+`readout_heads_gated_pc.npz` (the REAL decoder -- preferred when present):
+  V                                (C, K) raw-theta L-BFGS ridge-logistic coeffs
+  b_raw                            (C,)  per-node intercept
+  degenerate                       (C,)  bool: nodes with no fittable head
 
 `manifest.json`:
   K, C, n_bg, tpn, domain_names, domain_vocab_sizes, per_node_domain_mass,
@@ -90,6 +96,50 @@ def load_run(run_dir: Path):
     npz = np.load(run_dir / "gated_pc_result.npz", mmap_mode="r")
     manifest = json.loads((run_dir / "manifest.json").read_text())
     return npz, manifest
+
+
+def load_readout_heads(run_dir, label="gated_pc"):
+    """Return the REAL readout decoder {'W','b','degenerate','src','standardized'}
+    from a run dir, trying two sources in order, or None if neither exists.
+
+    gated_pc_result.npz's `w_CK` is only the weightY co-fit head and is untrained
+    on a weight_y=0 run, so it is NOT the decoder; the decoder is the L-BFGS
+    ridge-logistic heads. Two on-disk forms of them:
+
+    1. `readout_heads_{label}.npz` -- the COMPLETED fit's raw-theta coeffs
+       (`_write_readout_heads`, written right after the solve returns): V (C,K),
+       b_raw (C,), degenerate (C,) bool mask of no-fittable-head nodes (the
+       "detection-skipped" ones). Preferred.
+    2. `readout_ckpt_{label}.npz` -- the solver CHECKPOINT (W_std/b_std, every 10
+       iters). STANDARDIZED-theta weights, not raw, but the ranking of which
+       topics load on a node is unchanged by the per-topic scaling, so it is a
+       fine loadings source. It survives the calibration sub-fit (which runs with
+       no checkpoint_dir), so it is on disk even when the heads sidecar write was
+       missed. Used only when (1) is absent.
+
+    `W` is (C,K) whichever it found; `standardized` says which space it is in.
+    """
+    run_dir = Path(run_dir)
+    p = run_dir / f"readout_heads_{label}.npz"
+    if p.exists():
+        z = np.load(p)
+        return {"W": np.asarray(z["V"], dtype=np.float64),
+                "b": np.asarray(z["b_raw"], dtype=np.float64),
+                "degenerate": (np.asarray(z["degenerate"], dtype=bool)
+                               if "degenerate" in z.files else None),
+                "src": f"readout_heads_{label}.npz (V, raw-θ L-BFGS heads)",
+                "standardized": False}
+    c = run_dir / f"readout_ckpt_{label}.npz"
+    if c.exists():
+        z = np.load(c)
+        it = int(z["iter"]) if "iter" in z.files else -1
+        return {"W": np.asarray(z["W_std"], dtype=np.float64),
+                "b": np.asarray(z["b_std"], dtype=np.float64),
+                "degenerate": None,
+                "src": f"readout_ckpt_{label}.npz (W_std, standardized-θ, "
+                       f"checkpoint iter {it})",
+                "standardized": True}
+    return None
 
 
 def domain_lambdas(npz):
@@ -328,15 +378,30 @@ def top_words(lam_row, inv_map, names, name_by_id, t_words):
 # --------------------------------------------------------------------------- #
 def build_report(run_dir, *, top_topics, top_loadings, t_words,
                  vocab_path=None, names_path=None, sort_by="sharpness",
-                 bundle_meta_path=None):
+                 bundle_meta_path=None, readout_label="gated_pc"):
     npz, manifest = load_run(run_dir)
     lams = domain_lambdas(npz)
     K = int(manifest["K"]); C = int(manifest["C"])
     n_bg = int(manifest["n_bg"]); tpn = int(manifest["tpn"])
     dom_names = manifest.get("domain_names") or [f"dom{i}" for i in range(len(lams))]
     alpha = np.asarray(npz["alpha"], dtype=np.float64)
-    w_CK = np.asarray(npz["w_CK"], dtype=np.float64)
-    b_CK = np.asarray(npz["b_CK"], dtype=np.float64) if "b_CK" in npz.files else np.zeros(C)
+    # The DECODER: prefer the persisted L-BFGS readout heads (V, raw-theta), the
+    # model that actually scored the run. gated_pc_result.npz's w_CK is only the
+    # weightY co-fit head -- untrained at weight_y=0 -- and is the fallback for
+    # runs that predate the heads sidecar.
+    heads = load_readout_heads(run_dir, readout_label)
+    if heads is not None:
+        w_CK = heads["W"]
+        b_CK = heads["b"]
+        degenerate = heads["degenerate"]
+        decoder_src = heads["src"]
+    else:
+        w_CK = np.asarray(npz["w_CK"], dtype=np.float64)
+        b_CK = (np.asarray(npz["b_CK"], dtype=np.float64)
+                if "b_CK" in npz.files else np.zeros(C))
+        degenerate = None
+        decoder_src = ("gated_pc_result.npz w_CK (weightY co-fit head, NOT the "
+                       "readout decoder — heads sidecar absent)")
 
     labels, topic2engine = topic_labels(manifest)
     nnames = node_names(manifest)
@@ -376,6 +441,10 @@ def build_report(run_dir, *, top_topics, top_loadings, t_words,
     flat = np.mean(sh["support_frac"][fg] > 0.5)
     w(f"- foreground topic flatness: {flat*100:.1f}% of node topics spread over "
       f">50% of their vocab (near-prior / starved)")
+    w(f"- decoder: {decoder_src}")
+    if degenerate is not None:
+        w(f"- degenerate heads: {int(degenerate.sum())} / {C} nodes had no "
+          f"fittable head (const fallback; the 'detection-skipped' nodes)")
     w("")
 
     # ---- background topics ----
@@ -428,8 +497,11 @@ def build_report(run_dir, *, top_topics, top_loadings, t_words,
     for t in order:
         eng = topic2engine[t]
         d = int(np.argmax(sh["dom_mass"][t]))
-        self_w = borrow = ""
-        if eng is not None and eng < C:
+        self_w = borrow = intc = ""
+        deg = degenerate is not None and eng is not None and eng < C and degenerate[eng]
+        if deg:
+            self_w = borrow = "(degenerate head)"
+        elif eng is not None and eng < C:
             row = w_CK[eng]
             self_w = f"{row[t]:+.3f}"
             oth = np.argsort(-np.abs(row))
@@ -437,8 +509,6 @@ def build_report(run_dir, *, top_topics, top_loadings, t_words,
             borrow = ", ".join(f"{labels[j]}({row[j]:+.2f})" for j in picks
                                if abs(row[j]) > 1e-6)
             intc = f"{b_CK[eng]:+.3f}"
-        else:
-            intc = ""
         dcol = (f"{depth_of(t)} | " if have_depth else "")
         w(f"| {labels[t]} | {dcol}{sh['evidence'][t]:.4g} | {sh['support'][t]:.1f} | "
           f"{sh['support_frac'][t]:.2f} | {dom_names[d]} | {self_w} | {intc} | {borrow} |")
@@ -517,13 +587,16 @@ def main():
     ap.add_argument("--concept-names", default=None,
                     help="Optional CSV (concept_id,concept_name) for vocab feature "
                          "names not covered by the label DAG's name_by_id.")
+    ap.add_argument("--readout-label", default="gated_pc",
+                    help="Arm label of the readout heads sidecar to read "
+                         "(readout_heads_<label>.npz; default gated_pc).")
     args = ap.parse_args()
 
     report = build_report(
         args.run_dir, top_topics=args.top_topics, top_loadings=args.top_loadings,
         t_words=args.top_words, vocab_path=args.vocab_map,
         names_path=args.concept_names, sort_by=args.sort,
-        bundle_meta_path=args.bundle_meta)
+        bundle_meta_path=args.bundle_meta, readout_label=args.readout_label)
 
     print(report)
     if args.out != "-":
