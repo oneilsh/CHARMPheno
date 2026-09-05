@@ -53,6 +53,18 @@ Two things this settles:
   multi-domain vocab makes the flavors *discriminative* rather than just
   condition-shaped. A genuine, if not novel, win — the shared/pooled representation
   works.
+- **`n_bg` under-capacity spills into the SHALLOW node blocks, not the deep ones —
+  because the gate forbids the deep route.** A puzzle: if `n_bg=8` is too few, why
+  are DEEP node topics *unused* rather than absorbing the overflow? Because a common
+  doc's allowed topics are `background ∪ closure-of-its-frontier`; when the 8
+  background topics cannot hold all the shared structure, the overflow spills into
+  the only other topics that doc is *permitted* to use — its own (shallow) frontier
+  blocks. It cannot reach a rare deep node's block (no common doc is gated there).
+  So "deep-unused + shallow-catch-all" is the SIGNATURE of background under-capacity
+  × the gate: deep topics are doc-starved (0079), not capacity-starved, and shallow
+  blocks look like population catch-alls because they absorbed the background
+  overflow. Implication: more `n_bg` might *sharpen the shallow node increments*
+  (freeing them from carrying the common structure), but cannot feed the deep cliff.
 - **Do NOT reach for `n_bg` as a performance lever.** It is tempting to raise `n_bg`
   for more archetypes, but 0062 tested exactly that (n_bg 40→80) and it is NULL on
   detection — FP 13158→12992 (noise), FN 276→276 (identical), AUC flat — because the
