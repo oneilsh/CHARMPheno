@@ -270,6 +270,15 @@ def test_sibling_redundancy_flags_uniform_collapse(tmp_path):
     assert "Sibling redundancy" in rep and "uniform collapse" in rep
 
 
+def test_grep_looks_up_named_nodes(tmp_path):
+    _make_run(tmp_path)  # nodes node1/node2/node3
+    rep = it.build_report(tmp_path, top_topics=10, top_loadings=3, t_words=3,
+                          grep_pattern="node2")
+    assert "Matched nodes" in rep and "`--grep node2`" in rep
+    # node2 present in the matched section, node1/node3 not forced in by grep
+    assert "node2" in rep.split("Matched nodes")[1]
+
+
 def test_wrong_bundle_meta_is_flagged(tmp_path):
     _make_run(tmp_path, V=10)          # run has 2 domains of V=10
     # a meta from a DIFFERENT bundle: vocab sizes 7/7, not 10/10

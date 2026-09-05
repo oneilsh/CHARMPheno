@@ -82,6 +82,7 @@ import argparse
 import csv
 import json
 import math
+import re
 import sys
 from pathlib import Path
 
@@ -506,7 +507,7 @@ def topic_word_lines(t, lams, inv_maps, names, name_by_id, dom_names, t_words,
 def build_report(run_dir, *, top_topics, top_loadings, t_words,
                  vocab_path=None, names_path=None, sort_by="sharpness",
                  bundle_meta_path=None, readout_label="gated_pc",
-                 tour_per_depth=0, redundancy=0):
+                 tour_per_depth=0, redundancy=0, grep_pattern=None):
     npz, manifest = load_run(run_dir)
     lams = domain_lambdas(npz)
     K = int(manifest["K"]); C = int(manifest["C"])
@@ -713,9 +714,27 @@ def build_report(run_dir, *, top_topics, top_loadings, t_words,
     w("")
     emit_table(best_order)
 
-    # words render for both ends, de-duplicated, main order first
+    # ---- --grep: look up specific nodes by name (evidence vs. depth probe) ----
+    matched = []
+    if grep_pattern:
+        rx = re.compile(grep_pattern, re.I)
+        matched = [t for t in range(n_bg, K) if rx.search(labels[t] or "")]
+        matched = sorted(matched, key=lambda t: -sh["evidence"][t])
+        w(f"## Matched nodes -- `--grep {grep_pattern}` ({len(matched)} match)")
+        w("")
+        w("_Look up specific nodes: is a HIGH-patient-count deep node still starved "
+          "(evidence≈prior floor, frac≈1.0)? If so its topic is a flat-start/deflation "
+          "casualty, not a doc-count one._")
+        w("")
+        if matched:
+            emit_table(matched)
+        else:
+            w("_(no node label matched)_")
+            w("")
+
+    # words render for both ends + grep matches, de-duplicated, main order first
     seen = set()
-    word_order = [t for t in list(order) + list(best_order)
+    word_order = [t for t in list(order) + list(matched) + list(best_order)
                   if not (t in seen or seen.add(t))]
 
     # ---- sharpness-by-depth rollup (the deep-node question, when depth known) ----
@@ -860,6 +879,10 @@ def main():
                          "its fed children's topics (needs --bundle-meta parent_int); "
                          "flags parents whose children uniformly collapse. Shows the "
                          "top N most-collapsed parents. Try --redundancy 30.")
+    ap.add_argument("--grep", default=None, metavar="REGEX",
+                    help="Look up specific node topics by a case-insensitive regex on "
+                         "their name (evidence + depth + words for each match). E.g. "
+                         "--grep 'ischemic stroke|hemorrhoid|varicella'.")
     args = ap.parse_args()
 
     run_dir = resolve_run_dir(args.run_dir)
@@ -868,7 +891,7 @@ def main():
         t_words=args.top_words, vocab_path=args.vocab_map,
         names_path=args.concept_names, sort_by=args.sort,
         bundle_meta_path=args.bundle_meta, readout_label=args.readout_label,
-        tour_per_depth=args.tour, redundancy=args.redundancy)
+        tour_per_depth=args.tour, redundancy=args.redundancy, grep_pattern=args.grep)
 
     print(report)
     if args.out != "-":
