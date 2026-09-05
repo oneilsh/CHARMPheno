@@ -350,6 +350,67 @@ def topic_sharpness(lams):
                 top1=top1, support_frac=support_frac)
 
 
+def _topic_unit_vec(t, lams):
+    """L2-normalized concat of a topic's E[beta] across domains (for cosine).
+
+    Concatenating the per-domain E[beta] (mass-weighted by each domain's share of
+    the topic, since a domain the topic barely emits into contributes a tiny
+    sub-vector) gives one comparable vector per topic. Two topics with the same
+    multi-domain content have cosine ~1; different content ~0. NOTE: two STARVED
+    topics are both ~uniform and so trivially cosine ~1 -- redundancy is only
+    meaningful among FED (sharp) topics, which the caller enforces.
+    """
+    parts = []
+    for lam in lams:
+        row = np.asarray(lam[t], dtype=np.float64)
+        s = row.sum()
+        parts.append(row / s if s > 0 else row)   # E[beta] per domain (sums to 1)
+    v = np.concatenate(parts)
+    n = np.linalg.norm(v)
+    return v / n if n > 0 else v
+
+
+def sibling_redundancy(parent_int, topic2engine, lams, sh, n_bg, K, *,
+                       fed_frac=0.5):
+    """Per-parent differentiation among its children's topics.
+
+    Returns a list of dicts (one per parent with >=2 children), each:
+      parent (engine id), fanout, n_fed, med_cos_all, med_cos_fed, max_cos_fed,
+      fed_children (engine ids). `med_cos_fed` over FED children (support_frac <
+      fed_frac) is the signal: high = the parent's fed children collapse to one
+      topic (capacity starvation at that parent); a spread = healthy heterogeneity.
+    """
+    eng2topic = {e: t for t, e in enumerate(topic2engine) if e is not None}
+    children = {}
+    for c, ps in parent_int.items():
+        for p in ps:
+            children.setdefault(int(p), []).append(int(c))
+    out = []
+    for p, kids in children.items():
+        ktopics = [(e, eng2topic[e]) for e in kids if e in eng2topic]
+        if len(ktopics) < 2:
+            continue
+        fed = [(e, t) for e, t in ktopics if sh["support_frac"][t] < fed_frac]
+        vecs = {t: _topic_unit_vec(t, lams) for _, t in ktopics}
+
+        def _pairwise(items):
+            ts = [t for _, t in items]
+            cs = [float(np.dot(vecs[a], vecs[b]))
+                  for i, a in enumerate(ts) for b in ts[i + 1:]]
+            return cs
+
+        cos_all = _pairwise(ktopics)
+        cos_fed = _pairwise(fed)
+        out.append({
+            "parent": p, "fanout": len(ktopics), "n_fed": len(fed),
+            "med_cos_all": float(np.median(cos_all)) if cos_all else float("nan"),
+            "med_cos_fed": float(np.median(cos_fed)) if cos_fed else float("nan"),
+            "max_cos_fed": float(np.max(cos_fed)) if cos_fed else float("nan"),
+            "fed_children": [e for e, _ in fed],
+        })
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Optional vocab-word rendering                                               #
 # --------------------------------------------------------------------------- #
@@ -445,7 +506,7 @@ def topic_word_lines(t, lams, inv_maps, names, name_by_id, dom_names, t_words,
 def build_report(run_dir, *, top_topics, top_loadings, t_words,
                  vocab_path=None, names_path=None, sort_by="sharpness",
                  bundle_meta_path=None, readout_label="gated_pc",
-                 tour_per_depth=0):
+                 tour_per_depth=0, redundancy=0):
     npz, manifest = load_run(run_dir)
     lams = domain_lambdas(npz)
     K = int(manifest["K"]); C = int(manifest["C"])
@@ -475,7 +536,7 @@ def build_report(run_dir, *, top_topics, top_loadings, t_words,
     sh = topic_sharpness(lams)
 
     inv_maps = names = None
-    depths = None
+    depths = parent_int = None
     name_by_id = {int(k): v for k, v in
                   manifest.get("corpus_manifest", {}).get("name_by_id", {}).items()}
     # The bundle meta (off-YARN `hdfs dfs -cat .../meta/part-*`) supplies BOTH the
@@ -510,6 +571,8 @@ def build_report(run_dir, *, top_topics, top_loadings, t_words,
             meta_mismatch_warn = None
         if "parent_int" in meta:
             depths = node_depths(meta["parent_int"])
+            parent_int = {int(c): [int(p) for p in ps]
+                          for c, ps in meta["parent_int"].items()}
         if "name_by_id" in meta:
             name_by_id = {int(k): v for k, v in meta["name_by_id"].items()} or name_by_id
         if not vocab_path and "vocab_maps" in meta:
@@ -676,6 +739,41 @@ def build_report(run_dir, *, top_topics, top_loadings, t_words,
               f"{np.median(sh['support_frac'][ts]):.2f} |")
         w("")
 
+    # ---- per-parent sibling redundancy (needs parent_int) ----
+    if redundancy and parent_int is not None:
+        rows = sibling_redundancy(parent_int, topic2engine, lams, sh, n_bg, K)
+        scored = [r for r in rows if r["n_fed"] >= 2]
+        w("## Sibling redundancy -- per-parent child differentiation")
+        w("")
+        w("For each parent, cosine of its children's multi-domain topic vectors. "
+          "Restricted to FED children (support_frac<0.5) -- starved children are "
+          "trivially uniform. **High median = the parent's fed children collapse to "
+          "ONE topic (capacity starvation at that parent, the tpn=1 lever); a spread "
+          "= healthy heterogeneity.** Partial redundancy is fine; watch UNIFORM "
+          "collapse, especially at wide parents.")
+        w("")
+        if not scored:
+            w("_(no parent has ≥2 fed children — nothing to compare; the fed nodes "
+              "are too shallow/sparse under this fit.)_")
+            w("")
+        else:
+            n_collapse = sum(1 for r in scored if r["med_cos_fed"] > 0.8)
+            fanouts = np.array([r["fanout"] for r in scored], dtype=float)
+            meds = np.array([r["med_cos_fed"] for r in scored], dtype=float)
+            corr = (float(np.corrcoef(fanouts, meds)[0, 1])
+                    if len(scored) > 2 and fanouts.std() > 0 else float("nan"))
+            w(f"- {len(scored)} parents with ≥2 fed children; "
+              f"**{n_collapse} show uniform collapse (median fed-cosine > 0.8)**; "
+              f"corr(fan-out, median fed-cosine) = {corr:.2f}")
+            w("")
+            w("| parent | fanout | n fed | median fed-cos | max fed-cos |")
+            w("|---|--:|--:|--:|--:|")
+            for r in sorted(scored, key=lambda r: -r["med_cos_fed"])[:redundancy]:
+                w(f"| {nnames.get(r['parent'], 'cid:'+str(r['parent']))} | "
+                  f"{r['fanout']} | {r['n_fed']} | {r['med_cos_fed']:.2f} | "
+                  f"{r['max_cos_fed']:.2f} |")
+            w("")
+
     # ---- topic -> words, ALL domains, one line each ----
     w(f"## Top {t_words} concepts per topic (all domains)")
     w("")
@@ -757,6 +855,11 @@ def main():
                     help="Add a TREE TOUR: the N best-fed node topics at EACH "
                          "depth, indented by level, all domains shown (needs "
                          "--bundle-meta for depth). Try --tour 2.")
+    ap.add_argument("--redundancy", type=int, default=0, metavar="N",
+                    help="Add a SIBLING-REDUNDANCY section: per-parent cosine among "
+                         "its fed children's topics (needs --bundle-meta parent_int); "
+                         "flags parents whose children uniformly collapse. Shows the "
+                         "top N most-collapsed parents. Try --redundancy 30.")
     args = ap.parse_args()
 
     run_dir = resolve_run_dir(args.run_dir)
@@ -765,7 +868,7 @@ def main():
         t_words=args.top_words, vocab_path=args.vocab_map,
         names_path=args.concept_names, sort_by=args.sort,
         bundle_meta_path=args.bundle_meta, readout_label=args.readout_label,
-        tour_per_depth=args.tour)
+        tour_per_depth=args.tour, redundancy=args.redundancy)
 
     print(report)
     if args.out != "-":
