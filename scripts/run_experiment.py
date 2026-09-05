@@ -847,6 +847,20 @@ def build_gated_pc_args(
         args.append("--head-standardize")
     if effective.get("diag_only"):
         args.append("--diag-only")
+    # Spectral (anchor-word) lambda init for the gated engine (insight 0079). Emitted
+    # ONLY for a non-random init: the driver already defaults to "random", so omitting
+    # the flag there keeps every existing gated_pc run's arg string byte-identical (the
+    # shared defaults carry init: random). A spectral run rides its knobs alongside.
+    if str(effective.get("init", "random")) != "random":
+        args.extend([
+            "--init", str(effective["init"]),
+            "--spectral-method", str(effective.get("spectral_method", "auto")),
+            "--spectral-max-vocab", str(effective.get("spectral_max_vocab", 8000)),
+            "--spectral-d", str(effective.get("spectral_d", 0)),
+            "--spectral-min-doc-freq", str(effective.get("spectral_min_doc_freq", 5)),
+            "--anchor-scope", str(effective.get("anchor_scope", "closure")),
+            "--spectral-topo-order", str(effective.get("spectral_topo_order", "forward")),
+        ])
     if effective.get("doc_concentration") is not None:
         args.extend(["--doc-concentration", str(effective["doc_concentration"])])
     if effective.get("dag_source"):

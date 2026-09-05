@@ -2698,6 +2698,16 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
         frontierCol="frontier", gateNBg=args.n_bg, gateTpn=args.tpn,
         localizeHead=bool(getattr(args, "localize_head", False)),
         headSupport=str(getattr(args, "head_support", "siblings")),
+        # Spectral (anchor-word) lambda seed for the gated engine (insight 0079
+        # deep-node flat-start remedy). Default "random" preserves prior behavior;
+        # getattr guards a manifest/older-driver that never set these.
+        init=str(getattr(args, "init", "random")),
+        spectralMethod=str(getattr(args, "spectral_method", "auto")),
+        spectralMaxVocab=int(getattr(args, "spectral_max_vocab", 8000)),
+        spectralD=int(getattr(args, "spectral_d", 0)),
+        spectralMinDocFreq=int(getattr(args, "spectral_min_doc_freq", 5)),
+        anchorScope=str(getattr(args, "anchor_scope", "closure")),
+        spectralTopoOrder=str(getattr(args, "spectral_topo_order", "forward")),
     )
     # Multi-domain: feed per-domain feature columns (features_0..) so the gated
     # engine carries a per-domain lambda and the topic correction scatters per
@@ -3637,6 +3647,34 @@ def parse_args(argv=None):
                         "siblings, default); 'path_cousins' (also the siblings of every ancestor "
                         "on the root-path); 'path_cousins_kids' (also v's own children's blocks, "
                         "the subtype signal). All bounded; exact Newton kept.")
+    # Spectral (anchor-word) lambda init for the gated engine (insight 0079 deep-node
+    # flat-start remedy). Default 'random' preserves prior behavior; 'spectral' seeds
+    # each node's block from block-aligned anchor recovery (gated_init.py, Arora 2013).
+    p.add_argument("--init", choices=["random", "spectral"], default="random",
+                   help="gated-engine lambda init: 'random' (default) or 'spectral' "
+                        "(block-aligned anchor-word seed — breaks the deep-node "
+                        "flat-start starvation trap, insight 0079). Requires the gate.")
+    p.add_argument("--spectral-method", choices=["auto", "dense", "scalable"],
+                   default="auto",
+                   help="spectral routing: auto (dense below --spectral-max-vocab, "
+                        "scalable at/above), dense (driver V×V, exact, small V), or "
+                        "scalable (distributed random-projection, ADR 0032).")
+    p.add_argument("--spectral-max-vocab", type=int, default=8000,
+                   help="'auto' threshold: dense below this total vocab, scalable "
+                        "at/above (a concatenated multi-domain V crosses it easily).")
+    p.add_argument("--spectral-d", type=int, default=0,
+                   help="random-projection dim for scalable init (0 = auto).")
+    p.add_argument("--spectral-min-doc-freq", type=int, default=5,
+                   help="min within-group doc frequency for a scalable anchor candidate.")
+    p.add_argument("--anchor-scope", choices=["closure", "frontier"], default="closure",
+                   help="docs feeding each node's anchor set: 'closure' (default) or "
+                        "'frontier' (node only from docs where it is most-specific — "
+                        "stops ancestors/background stealing a descendant's anchor).")
+    p.add_argument("--spectral-topo-order", choices=["forward", "reverse"],
+                   default="forward",
+                   help="deflation order: 'forward' (ancestors-first, node = increment "
+                        "over ancestors) or 'reverse' (leaves-first, node = residual "
+                        "after descendants).")
     p.add_argument("--dag-source", choices=["snomed", "mondo", "mondo_native"],
                    default="snomed",
                    help="snomed (default): the disease's SNOMED anchor forest via "
