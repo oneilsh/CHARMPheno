@@ -181,6 +181,21 @@ def test_bundle_meta_gives_depth_and_words(tmp_path):
     assert body.index("node3") < body.index("node1")
 
 
+def test_wrong_bundle_meta_is_flagged(tmp_path):
+    _make_run(tmp_path, V=10)          # run has 2 domains of V=10
+    # a meta from a DIFFERENT bundle: vocab sizes 7/7, not 10/10
+    bad = {"parent_int": {"1": [0], "2": [1], "3": [1], "4": [1], "5": [1]},
+           "int2cid": {str(e): 1000 + e for e in range(6)},
+           "name_by_id": {str(1000 + e): f"node{e}" for e in range(6)},
+           "vocab_maps": [{str(700 + i): i for i in range(7)},
+                          {str(800 + i): i for i in range(7)}]}
+    (tmp_path / "bad_meta.json").write_text(json.dumps(bad))
+    rep = it.build_report(tmp_path, top_topics=10, top_loadings=3, t_words=5,
+                          bundle_meta_path=tmp_path / "bad_meta.json")
+    assert "WARNING" in rep and "DIFFERENT bundle" in rep
+    assert "vocab sizes" in rep
+
+
 def test_single_domain_lambda_key(tmp_path):
     # a run that stored a single `lambda` (not lambda_0) still loads
     K, V, C = 4, 6, 3

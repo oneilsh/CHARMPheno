@@ -82,6 +82,7 @@ import argparse
 import csv
 import json
 import math
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -440,6 +441,31 @@ def build_report(run_dir, *, top_topics, top_loadings, t_words,
     # overrides the meta's vocab; --concept-names always supplements the names.
     meta = load_bundle_meta(bundle_meta_path) if bundle_meta_path else None
     if meta:
+        # Guard against a wrong bundle key: the meta must describe THIS run's
+        # bundle, or its vocab_maps would mislabel every topic word and its
+        # parent_int would give wrong depths. Check the two things the run's own
+        # manifest also records -- the label DAG (int2cid) and the per-domain
+        # vocab sizes -- and warn loudly on a mismatch instead of rendering lies.
+        run_int2cid = {int(k): int(v) for k, v in
+                       manifest.get("corpus_manifest", {}).get("int2cid", {}).items()}
+        meta_int2cid = {int(k): int(v) for k, v in meta.get("int2cid", {}).items()}
+        run_vsz = manifest.get("domain_vocab_sizes") or \
+            manifest.get("corpus_manifest", {}).get("domain_vocab_sizes")
+        meta_vsz = [len(vm) for vm in meta.get("vocab_maps", [])]
+        mismatch = []
+        if meta_int2cid and run_int2cid and meta_int2cid != run_int2cid:
+            mismatch.append(f"label DAG differs ({len(meta_int2cid)} vs "
+                            f"{len(run_int2cid)} nodes)")
+        if run_vsz and meta_vsz and list(run_vsz) != meta_vsz:
+            mismatch.append(f"vocab sizes {meta_vsz} != run's {list(run_vsz)}")
+        if mismatch:
+            warn = ("**WARNING: --bundle-meta looks like a DIFFERENT bundle than "
+                    "this run** (" + "; ".join(mismatch) + "). Topic words / depth "
+                    "may be MISLABELLED -- pick the run's own bundle key.")
+            print("[inspect_topics] " + warn, file=sys.stderr)
+            meta_mismatch_warn = warn
+        else:
+            meta_mismatch_warn = None
         if "parent_int" in meta:
             depths = node_depths(meta["parent_int"])
         if "name_by_id" in meta:
@@ -447,6 +473,8 @@ def build_report(run_dir, *, top_topics, top_loadings, t_words,
         if not vocab_path and "vocab_maps" in meta:
             inv_maps = [{int(idx): int(cid) for cid, idx in vm.items()}
                         for vm in meta["vocab_maps"]]
+    else:
+        meta_mismatch_warn = None
     if vocab_path:
         inv_maps = load_vocab_maps(vocab_path, len(lams))
     if names_path:
@@ -456,6 +484,9 @@ def build_report(run_dir, *, top_topics, top_loadings, t_words,
     w = L.append
     w(f"# Topics view -- {Path(run_dir).name}")
     w("")
+    if meta_mismatch_warn:
+        w("> " + meta_mismatch_warn)
+        w("")
     w(f"- K = {K} topics ({n_bg} background + {len(range(n_bg, K))} node-tied, "
       f"tpn={tpn}); C = {C} label nodes")
     w(f"- domains: {', '.join(f'{n}(V={l.shape[1]})' for n, l in zip(dom_names, lams))}")
