@@ -419,12 +419,33 @@ def top_words(lam_row, inv_map, names, name_by_id, t_words):
     return out
 
 
+def topic_word_lines(t, lams, inv_maps, names, name_by_id, dom_names, t_words,
+                     *, indent=""):
+    """Markdown lines for topic t's top words in EVERY domain (one line each).
+
+    Each domain is its own sub-line so the block reads as a list rather than a
+    `·`-run-on, and all domains show (not just the dominant one) so a topic that
+    splits its mass across labs/conditions/drugs is legible. `indent` prefixes
+    every line (for the depth-indented tree tour).
+    """
+    out = []
+    for d, lam in enumerate(lams):
+        inv = inv_maps[d] if (inv_maps and d < len(inv_maps)) else None
+        tw = top_words(np.asarray(lam[t]), inv, names, name_by_id, t_words)
+        body = (" · ".join(f"{nm} ({p:.3f})" for nm, p in tw) if tw
+                else "_(no vocab map — supply --bundle-meta/--vocab-map)_")
+        dom = dom_names[d] if d < len(dom_names) else f"dom{d}"
+        out.append(f"{indent}  - **{dom}:** {body}")
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Report                                                                       #
 # --------------------------------------------------------------------------- #
 def build_report(run_dir, *, top_topics, top_loadings, t_words,
                  vocab_path=None, names_path=None, sort_by="sharpness",
-                 bundle_meta_path=None, readout_label="gated_pc"):
+                 bundle_meta_path=None, readout_label="gated_pc",
+                 tour_per_depth=0):
     npz, manifest = load_run(run_dir)
     lams = domain_lambdas(npz)
     K = int(manifest["K"]); C = int(manifest["C"])
@@ -644,25 +665,47 @@ def build_report(run_dir, *, top_topics, top_loadings, t_words,
               f"{np.median(sh['support_frac'][ts]):.2f} |")
         w("")
 
-    # ---- optional topic -> words ----
-    if inv_maps:
-        w(f"## Top {t_words} concepts per topic (dominant domain)")
-        w("")
-        for t in word_order:
-            d = int(np.argmax(sh["dom_mass"][t]))
-            if d >= len(inv_maps):
-                continue
-            tw = top_words(lams[d][t], inv_maps[d], names, name_by_id, t_words)
-            if not tw:
-                continue
-            w(f"**{labels[t]}** [{dom_names[d]}]  "
-              + " · ".join(f"{nm} ({p:.3f})" for nm, p in tw))
+    # ---- topic -> words, ALL domains, one line each ----
+    w(f"## Top {t_words} concepts per topic (all domains)")
+    w("")
+    if not inv_maps:
+        w("_(no --bundle-meta/--vocab-map: topic word distributions are stored by "
+          "vocab INDEX; supply one to name the words.)_")
         w("")
     else:
-        w("## Top concepts per topic")
+        for t in word_order:
+            w(f"- **{labels[t]}** — ev {sh['evidence'][t]:.3g}, "
+              f"support {sh['support'][t]:.0f}, frac {sh['support_frac'][t]:.2f}")
+            for line in topic_word_lines(t, lams, inv_maps, names, name_by_id,
+                                         dom_names, t_words):
+                w(line)
         w("")
-        w("_(skipped: no --vocab-map. Topic word distributions are stored by vocab "
-          "INDEX; supply the bundle's vocab map to name them.)_")
+
+    # ---- tree tour: topics sampled across depths, indented by level ----
+    if tour_per_depth and have_depth:
+        w(f"## Tree tour -- up to {tour_per_depth} best-fed node(s) per depth")
+        w("")
+        w("_Indented by depth; the highest-evidence nodes at each level (what a "
+          "topic at that depth looks like when it is fed), all domains shown._")
+        w("")
+        by_d = {}
+        for t in range(n_bg, K):
+            by_d.setdefault(depth_of(t), []).append(t)
+        for dep in sorted(k for k in by_d if k >= 0):
+            picks = sorted(by_d[dep], key=lambda t: -sh["evidence"][t])[:tour_per_depth]
+            ind = "  " * min(max(dep - 1, 0), 10)
+            for t in picks:
+                eng = topic2engine[t]
+                deg = (degenerate is not None and eng is not None
+                       and eng < C and degenerate[eng])
+                flag = " · DEGENERATE head" if deg else ""
+                starved = " · STARVED (flat prior)" if sh["support_frac"][t] > 0.5 else ""
+                w(f"{ind}- `d{dep}` **{labels[t]}** — ev {sh['evidence'][t]:.3g}, "
+                  f"support {sh['support'][t]:.0f}/{lams[int(np.argmax(sh['dom_mass'][t]))].shape[1]}"
+                  f"{starved}{flag}")
+                for line in topic_word_lines(t, lams, inv_maps, names, name_by_id,
+                                             dom_names, t_words, indent=ind):
+                    w(line)
         w("")
 
     return "\n".join(L)
@@ -699,6 +742,10 @@ def main():
     ap.add_argument("--readout-label", default="gated_pc",
                     help="Arm label of the readout heads sidecar to read "
                          "(readout_heads_<label>.npz; default gated_pc).")
+    ap.add_argument("--tour", type=int, default=0, metavar="N",
+                    help="Add a TREE TOUR: the N best-fed node topics at EACH "
+                         "depth, indented by level, all domains shown (needs "
+                         "--bundle-meta for depth). Try --tour 2.")
     args = ap.parse_args()
 
     run_dir = resolve_run_dir(args.run_dir)
@@ -706,7 +753,8 @@ def main():
         run_dir, top_topics=args.top_topics, top_loadings=args.top_loadings,
         t_words=args.top_words, vocab_path=args.vocab_map,
         names_path=args.concept_names, sort_by=args.sort,
-        bundle_meta_path=args.bundle_meta, readout_label=args.readout_label)
+        bundle_meta_path=args.bundle_meta, readout_label=args.readout_label,
+        tour_per_depth=args.tour)
 
     print(report)
     if args.out != "-":
