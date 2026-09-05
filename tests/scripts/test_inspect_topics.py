@@ -294,6 +294,58 @@ def test_wrong_bundle_meta_is_flagged(tmp_path):
     assert "vocab sizes" in rep
 
 
+def test_digest_is_compact_and_marks_cliff(tmp_path):
+    # a fit with a fed shallow node (depth 1) and a STARVED deep node (depth 2),
+    # so the digest's depth rollup shows a cliff and the verdict line names it.
+    n_bg, tpn, n_nodes, V = 1, 1, 2, 10
+    K, C = n_bg + n_nodes, n_nodes + 1
+    lam = np.full((K, V), 0.01)          # flat prior floor everywhere
+    lam[n_bg, 0] += 50.0                 # node1's topic is sharp (fed)
+    # node2's topic (index n_bg+1) is left flat -> starved at depth 2
+    np.savez(tmp_path / "gated_pc_result.npz", **{"lambda": lam},
+             alpha=np.full(K, 0.5), w_CK=np.zeros((C, K)), b_CK=np.zeros(C))
+    manifest = {"K": K, "C": C, "n_bg": n_bg, "tpn": tpn,
+                "domain_names": ["condition"], "domain_vocab_sizes": [V],
+                "corpus_manifest": {
+                    "int2cid": {str(e): 1000 + e for e in range(C)},
+                    "name_by_id": {str(1000 + e): f"node{e}" for e in range(C)}}}
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    # node1 at depth 1 (child of root), node2 at depth 2 (child of node1)
+    meta = {"parent_int": {"1": [0], "2": [1]},
+            "int2cid": {str(e): 1000 + e for e in range(C)},
+            "name_by_id": {str(1000 + e): f"node{e}" for e in range(C)},
+            "vocab_maps": [{str(200 + i): i for i in range(V)}]}
+    (tmp_path / "meta.json").write_text(json.dumps(meta))
+    dig = it.build_digest(tmp_path, exemplars=3, t_words=5,
+                          bundle_meta_path=tmp_path / "meta.json")
+    assert "digest" in dig and "fed exemplars" in dig
+    # the compact block is far smaller than the verbose report on the same fit
+    rep = it.build_report(tmp_path, top_topics=10, top_loadings=3, t_words=5,
+                          bundle_meta_path=tmp_path / "meta.json")
+    assert len(dig) < len(rep) / 2
+    # depth rollup present; depth 2 is all-flat -> cliff marker + verdict there
+    assert "med-frac" in dig and "<- cliff" in dig
+    assert "fed through depth 1; depth>=2" in dig
+    # exemplar lines carry compact words (dominant-domain names, ·-joined)
+    assert any("node1" in ln and "fed" in ln for ln in dig.splitlines())
+    assert any("node2" in ln and "STARVED" in ln for ln in dig.splitlines())
+
+
+def test_digest_grep_and_redundancy_one_liners(tmp_path):
+    _make_run(tmp_path, V=10)
+    meta = {"parent_int": {"1": [0], "2": [0], "3": [0], "4": [0], "5": [0]},
+            "int2cid": {str(e): 1000 + e for e in range(6)},
+            "name_by_id": {str(1000 + e): f"node{e}" for e in range(6)},
+            "vocab_maps": [{str(200 + i): i for i in range(10)},
+                           {str(300 + i): i for i in range(10)}]}
+    (tmp_path / "meta.json").write_text(json.dumps(meta))
+    dig = it.build_digest(tmp_path, exemplars=3, t_words=4,
+                          bundle_meta_path=tmp_path / "meta.json",
+                          grep_pattern="node2", redundancy=True)
+    assert "grep 'node2'" in dig and "node2" in dig
+    assert "redundancy:" in dig
+
+
 def test_single_domain_lambda_key(tmp_path):
     # a run that stored a single `lambda` (not lambda_0) still loads
     K, V, C = 4, 6, 3

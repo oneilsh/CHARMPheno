@@ -839,6 +839,165 @@ def build_report(run_dir, *, top_topics, top_loadings, t_words,
     return "\n".join(L)
 
 
+def _digest_words(t, lams, sh, inv_maps, names, name_by_id, dom_names, *,
+                  k=6, maxlen=34):
+    """One compact line of a topic's words: dominant-domain top-k names (probs
+    dropped, ·-joined, each truncated), plus the top-3 drug-domain names after
+    `//` when a drug domain exists and is not the dominant one. Empty when no
+    vocab map is supplied. This is the digest's whole word budget -- the verbose
+    report's per-domain probability dump is deliberately NOT reproduced here."""
+    if not inv_maps:
+        return ""
+
+    def render(d, kk):
+        inv = inv_maps[d] if d < len(inv_maps) else None
+        tw = top_words(np.asarray(lams[d][t]), inv, names, name_by_id, kk)
+        return [nm[:maxlen] for nm, _ in tw]
+
+    dmax = int(np.argmax(sh["dom_mass"][t]))
+    main = render(dmax, k)
+    parts = "·".join(main) if main else "(flat)"
+    drug_d = next((i for i, n in enumerate(dom_names) if "drug" in n.lower()), None)
+    if drug_d is not None and drug_d != dmax:
+        dr = render(drug_d, 3)
+        if dr:
+            parts += " // " + "·".join(dr)
+    return parts
+
+
+def build_digest(run_dir, *, exemplars=8, t_words=6, bundle_meta_path=None,
+                 vocab_path=None, names_path=None, readout_label="gated_pc",
+                 grep_pattern=None, redundancy=False):
+    """A COMPACT single-block digest -- the copy-paste-to-chat view.
+
+    Same inputs as build_report, but emits only: a one-line header (K / starved%
+    / evidence spread / decoder), the sharpness-by-depth table with an auto
+    cliff-marker, the top-`exemplars` best-fed topics (one line each, compact
+    words), an optional `--grep` table (one line per match), and an optional
+    one-line redundancy summary. No per-topic probability dumps, no background
+    section, no borrowed-topics columns -- a few hundred tokens, not thousands.
+    """
+    npz, manifest = load_run(run_dir)
+    lams = domain_lambdas(npz)
+    K = int(manifest["K"]); C = int(manifest["C"])
+    n_bg = int(manifest["n_bg"]); tpn = int(manifest["tpn"])
+    dom_names = manifest.get("domain_names") or [f"dom{i}" for i in range(len(lams))]
+    labels, topic2engine = topic_labels(manifest)
+    sh = topic_sharpness(lams)
+    name_by_id = {int(k): v for k, v in
+                  manifest.get("corpus_manifest", {}).get("name_by_id", {}).items()}
+
+    heads = load_readout_heads(run_dir, readout_label)
+    decoder_src = (heads["src"] if heads is not None
+                   else "co-fit w_CK (no readout heads sidecar)")
+
+    # bundle meta -> depth + words (same guard-lite path as build_report)
+    depths = parent_int = inv_maps = names = None
+    meta = load_bundle_meta(bundle_meta_path) if bundle_meta_path else None
+    if meta:
+        if "parent_int" in meta:
+            depths = node_depths(meta["parent_int"])
+            parent_int = {int(c): [int(p) for p in ps]
+                          for c, ps in meta["parent_int"].items()}
+        if "name_by_id" in meta:
+            name_by_id = {int(k): v for k, v in meta["name_by_id"].items()} or name_by_id
+        if not vocab_path and "vocab_maps" in meta:
+            inv_maps = [{int(idx): int(cid) for cid, idx in vm.items()}
+                        for vm in meta["vocab_maps"]]
+    if vocab_path:
+        inv_maps = load_vocab_maps(vocab_path, len(lams))
+    if names_path:
+        names = load_concept_names(names_path)
+
+    def depth_of(t):
+        eng = topic2engine[t]
+        return depths.get(eng, -1) if (depths and eng is not None) else -1
+
+    def words(t):
+        wl = _digest_words(t, lams, sh, inv_maps, names, name_by_id, dom_names,
+                           k=t_words)
+        return (" | " + wl) if wl else ""
+
+    def line(t):
+        dd = f"d{depth_of(t)} " if depths else ""
+        st = "STARVED" if sh["support_frac"][t] > 0.5 else "fed"
+        return (f"  {(labels[t] or '')[:34].ljust(34)} {dd}"
+                f"ev{sh['evidence'][t]:.3g} f{sh['support_frac'][t]:.2f} {st}"
+                f"{words(t)}")
+
+    fg = np.arange(n_bg, K)
+    frac = sh["support_frac"][fg]
+    ev = sh["evidence"][fg]
+    starved = int(np.sum(frac > 0.5))
+    q = np.percentile(ev, [50, 90])
+
+    L = []
+    w = L.append
+    w(f"# {Path(run_dir).name} — digest")
+    w(f"K={K} ({n_bg} bg + {K - n_bg} node, tpn={tpn}) · C={C} · "
+      f"{100 * starved / max(fg.size, 1):.0f}% starved (frac>0.5) · "
+      f"ev min {ev.min():.3g} / med {q[0]:.3g} / p90 {q[1]:.3g} / max {ev.max():.3g}")
+    w(f"decoder: {decoder_src}")
+    w("")
+
+    # depth rollup with an auto cliff-marker at the first depth whose median frac
+    # crosses 0.5 (fed -> starved) -- the one line that answers the depth question.
+    if depths:
+        by_d = {}
+        for t in fg:
+            by_d.setdefault(depth_of(t), []).append(t)
+        floor = ev.min()
+        cliff = None
+        w("depth ·   n · med-ev · med-frac")
+        for dep in sorted(k for k in by_d if k >= 0):
+            ts = by_d[dep]
+            mfrac = float(np.median(sh["support_frac"][ts]))
+            if cliff is None and mfrac > 0.5:
+                cliff = dep
+            mark = "  <- cliff" if dep == cliff else ""
+            w(f"{dep:>5} · {len(ts):>3} · {np.median(sh['evidence'][ts]):>6.3g} · "
+              f"{mfrac:.2f}{mark}")
+        if cliff is not None:
+            w(f"verdict: fed through depth {cliff - 1}; depth>={cliff} median at "
+              f"prior floor (~{floor:.3g}).")
+        w("")
+
+    order = sorted(fg, key=lambda t: -sh["evidence"][t])[:exemplars]
+    w(f"fed exemplars (top {len(order)} by ev):")
+    for t in order:
+        w(line(t))
+    w("")
+
+    if grep_pattern:
+        rx = re.compile(grep_pattern, re.I)
+        matched = sorted((t for t in fg if rx.search(labels[t] or "")),
+                         key=lambda t: -sh["evidence"][t])
+        w(f"grep '{grep_pattern}' — {len(matched)} match"
+          + (f" (top 25 by ev)" if len(matched) > 25 else "") + ":")
+        for t in matched[:25]:
+            w(line(t))
+        if not matched:
+            w("  (no node label matched)")
+        w("")
+
+    if redundancy and parent_int is not None:
+        rows = sibling_redundancy(parent_int, topic2engine, lams, sh, n_bg, K)
+        scored = [r for r in rows if r["n_fed"] >= 2]
+        if scored:
+            nnames = node_names(manifest)
+            n_col = sum(1 for r in scored if r["med_cos_fed"] > 0.8)
+            worst = max(scored, key=lambda r: r["med_cos_fed"])
+            w(f"redundancy: {len(scored)} parents >=2 fed · {n_col} collapsed "
+              f"(med fed-cos>0.8) · worst "
+              f"{nnames.get(worst['parent'], worst['parent'])} "
+              f"{worst['med_cos_fed']:.2f} (max {worst['max_cos_fed']:.2f})")
+        else:
+            w("redundancy: no parent has >=2 fed children")
+        w("")
+
+    return "\n".join(L).rstrip() + "\n"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -883,19 +1042,40 @@ def main():
                     help="Look up specific node topics by a case-insensitive regex on "
                          "their name (evidence + depth + words for each match). E.g. "
                          "--grep 'ischemic stroke|hemorrhoid|varicella'.")
+    ap.add_argument("--digest", action="store_true",
+                    help="Emit the COMPACT single-block digest (header + "
+                         "sharpness-by-depth + auto cliff-marker + top fed "
+                         "exemplars + optional --grep/--redundancy), a few "
+                         "hundred tokens for copy-paste to chat. Honours "
+                         "--bundle-meta (depth+words), --grep, --redundancy, "
+                         "--top-words; writes <run-dir>/topics_digest.md by "
+                         "default. Suppresses the verbose report.")
+    ap.add_argument("--digest-exemplars", type=int, default=8, metavar="N",
+                    help="How many best-fed topics to line-detail in --digest "
+                         "(default 8).")
     args = ap.parse_args()
 
     run_dir = resolve_run_dir(args.run_dir)
-    report = build_report(
-        run_dir, top_topics=args.top_topics, top_loadings=args.top_loadings,
-        t_words=args.top_words, vocab_path=args.vocab_map,
-        names_path=args.concept_names, sort_by=args.sort,
-        bundle_meta_path=args.bundle_meta, readout_label=args.readout_label,
-        tour_per_depth=args.tour, redundancy=args.redundancy, grep_pattern=args.grep)
+    if args.digest:
+        report = build_digest(
+            run_dir, exemplars=args.digest_exemplars, t_words=args.top_words,
+            bundle_meta_path=args.bundle_meta, vocab_path=args.vocab_map,
+            names_path=args.concept_names, readout_label=args.readout_label,
+            grep_pattern=args.grep, redundancy=bool(args.redundancy))
+        default_out = "topics_digest.md"
+    else:
+        report = build_report(
+            run_dir, top_topics=args.top_topics, top_loadings=args.top_loadings,
+            t_words=args.top_words, vocab_path=args.vocab_map,
+            names_path=args.concept_names, sort_by=args.sort,
+            bundle_meta_path=args.bundle_meta, readout_label=args.readout_label,
+            tour_per_depth=args.tour, redundancy=args.redundancy,
+            grep_pattern=args.grep)
+        default_out = "topics_report.md"
 
     print(report)
     if args.out != "-":
-        out = Path(args.out) if args.out else Path(run_dir) / "topics_report.md"
+        out = Path(args.out) if args.out else Path(run_dir) / default_out
         out.write_text(report + "\n")
         print(f"\n[inspect_topics] wrote {out}", flush=True)
 
