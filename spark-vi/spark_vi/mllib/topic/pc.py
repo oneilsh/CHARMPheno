@@ -354,6 +354,45 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         "doc's topic training to DagLayout.allowed_set(frontier).",
         typeConverter=TypeConverters.toString,
     )
+    # -- Spectral (anchor-word) lambda init for the gated engine -------------
+    # Wires the shipped, EM-validated block-aligned spectral seed (gated_init.py;
+    # Arora et al. 2013) into the Gated-PC path, which otherwise always constructs
+    # its topic engine with init="random". Only consulted when gateParent is set
+    # (there is a per-node block layout to seed); ignored on the ungated head-only
+    # path. Params copied verbatim from the node-affinity estimator
+    # (mllib/topic/gated_lda.py) so the two gated paths cannot drift.
+    init = Param(Params._dummy(), "init",
+                 "gated-engine lambda init strategy: 'random' (default) or "
+                 "'spectral' (block-aligned anchor-word seed, Arora et al. 2013). "
+                 "Only used when gateParent is set.",
+                 typeConverter=TypeConverters.toString)
+    spectralMaxVocab = Param(Params._dummy(), "spectralMaxVocab",
+                             "max vocab for the DENSE spectral init (V x V driver "
+                             "co-occurrence); the spectralMethod='auto' threshold "
+                             "below which dense is used (scalable at/above)",
+                             typeConverter=TypeConverters.toInt)
+    spectralMethod = Param(Params._dummy(), "spectralMethod",
+                           "spectral routing: 'auto'|'dense'|'scalable' "
+                           "(auto -> dense if V < spectralMaxVocab else scalable)")
+    spectralD = Param(Params._dummy(), "spectralD",
+                      "random-projection dim for scalable init (0 = auto: "
+                      "min(V, max(K, 1000)))")
+    spectralMinDocFreq = Param(Params._dummy(), "spectralMinDocFreq",
+                               "min within-group document frequency for a scalable "
+                               "anchor candidate")
+    anchorScope = Param(Params._dummy(), "anchorScope",
+                        "which docs feed each spectral anchor set: 'closure' "
+                        "(default; node u from every doc with u in its closure, "
+                        "background from all docs) or 'frontier' (node u only from "
+                        "docs where u is the most-specific attested node) — "
+                        "'frontier' stops background/ancestors stealing a "
+                        "descendant's anchor")
+    spectralTopoOrder = Param(Params._dummy(), "spectralTopoOrder",
+                              "spectral deflation order: 'forward' (default; nodes "
+                              "ancestors-first, each deflated against its ancestors) "
+                              "or 'reverse' (leaves-first, each deflated against its "
+                              "descendants)",
+                              typeConverter=TypeConverters.toString)
     # -- Multi-domain features (MixEHR-style per-domain vocabularies) --------
     featuresCols = Param(
         Params._dummy(), "featuresCols",
@@ -523,7 +562,8 @@ def _build_model_and_config(
                     f"got {len(doc_conc)}.")
             alpha = np.asarray(doc_conc, dtype=np.float64)
         topic_engine = GatedOnlineLDA(
-            lay, vocab_size, alpha=alpha, eta=1.0 / lay.K,
+            lay, vocab_size, init=str(estimator.getOrDefault("init")),
+            alpha=alpha, eta=1.0 / lay.K,
             domains=domains,                         # None = single fused vocab
             gamma_shape=estimator.getOrDefault("gammaShape"),
             cavi_max_iter=estimator.getOrDefault("caviMaxIter"),
@@ -601,6 +641,8 @@ _ONLINE_PCLDA_DEFAULTS = dict(
     closureParents="", warmStartFrom="",
     gateParent="", gateNBg=2, gateTpn=1, localizeHead=False, headSupport="siblings",
     frontierCol="frontier",
+    init="random", spectralMaxVocab=8000, spectralMethod="auto", spectralD=0,
+    spectralMinDocFreq=5, anchorScope="closure", spectralTopoOrder="forward",
     featuresCols=[],   # domainBounds intentionally omitted: it uses isSet (no default)
 )
 
@@ -655,6 +697,13 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         localizeHead: bool = False,
         headSupport: str = "siblings",
         frontierCol: str = "frontier",
+        init: str = "random",
+        spectralMaxVocab: int = 8000,
+        spectralMethod: str = "auto",
+        spectralD: int = 0,
+        spectralMinDocFreq: int = 5,
+        anchorScope: str = "closure",
+        spectralTopoOrder: str = "forward",
         featuresCols: list[str] | None = None,
         domainBounds: list[int] | None = None,
         warmStartFrom: str = "",
@@ -807,9 +856,78 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         )
         pc_rdd.count()  # materialize for VIRunner's strict cache precondition
 
+        # Non-random init: seed the gated engine's lambda from block-aligned
+        # anchor-word spectral recovery (gated_init.py; Arora et al. 2013) — the
+        # SAME machinery the node-affinity estimator uses (mllib/topic/gated_lda.py),
+        # here wired into the Gated-PC path (which otherwise always fits from a flat
+        # random-Gamma lambda, the deep-node flat-start starvation trap of insight
+        # 0079). Routed dense vs scalable (ADR 0032) by spectralMethod, and handed to
+        # GatedOnlineLDA.initialize_global through data_summary. Only meaningful for
+        # the gated engine (there must be per-node blocks to seed), and incompatible
+        # with resume/warm-start (a checkpoint's lambda would override the seed).
+        data_summary = None
+        init_mode = str(self.getOrDefault("init"))
+        if init_mode != "random":
+            if not gated:
+                raise ValueError(
+                    f"init={init_mode!r} requires gateParent: spectral init seeds the "
+                    "per-node topic blocks, and there are none without the gate.")
+            if resume_path is not None or warm_start_path is not None:
+                raise ValueError(
+                    f"init={init_mode!r} is incompatible with resumeFrom/warmStartFrom: "
+                    "a checkpoint's lambda overrides the spectral seed. Set at most one.")
+            from spark_vi.models.topic.dag_placement import DagLayout
+            from spark_vi.mllib.topic.stm import resolve_spectral_method
+            seed = self.getOrDefault("seed") if self.isSet("seed") else None
+            lay = DagLayout(
+                {int(c): p for c, p in json.loads(str(self.getOrDefault("gateParent"))).items()},
+                n_bg=int(self.getOrDefault("gateNBg")),
+                tpn=int(self.getOrDefault("gateTpn")))
+            resolved = resolve_spectral_method(
+                self.getOrDefault("spectralMethod"), vocab_size,
+                threshold=self.getOrDefault("spectralMaxVocab"))
+            if resolved == "scalable":
+                from spark_vi.models.topic.gated_init import (
+                    scalable_block_aligned_lambda, SPECTRAL_LAMBDA_SCALE,
+                )
+                sd = int(self.getOrDefault("spectralD"))
+                lam0 = scalable_block_aligned_lambda(
+                    pc_rdd, lay, vocab_size,
+                    d=(sd if sd > 0 else None), seed=(seed or 0),
+                    min_doc_freq=int(self.getOrDefault("spectralMinDocFreq")),
+                    anchor_scope=self.getOrDefault("anchorScope"),
+                    topo_order=self.getOrDefault("spectralTopoOrder"))
+                if domain_sizes:
+                    # scalable returns the JOINT (K, V) lambda; the multi-domain engine
+                    # consumes a per-domain dict {m: (K, V_m)}. Convert exactly as the
+                    # node-affinity shim does: split_domains renormalizes each block
+                    # ROW-STOCHASTIC (dropping the joint's scale), so re-apply
+                    # SPECTRAL_LAMBDA_SCALE — a bare split would seed row mass ~1 (looks
+                    # like a fit that simply never concentrates) instead of ~200.
+                    from spark_vi.models.topic.domains import domains_to_bounds
+                    from spark_vi.models.topic.spectral_init import split_domains
+                    blocks = split_domains(lam0, domains_to_bounds(domain_sizes).tolist())
+                    lam0 = {m: blocks[m] * SPECTRAL_LAMBDA_SCALE + 1e-9
+                            for m in range(len(domain_sizes))}
+                data_summary = {"spectral_lambda": lam0}
+            else:  # dense — collect the corpus to the driver (small-V path only)
+                # Build train docs straight off pc_rdd: GatedPCDocument.indices are
+                # already the concatenated global ids the fit consumes, so the seed
+                # sees exactly the fit's vocabulary (no separate _concat re-layout).
+                collected = pc_rdd.map(
+                    lambda d: (np.repeat(d.indices, d.counts.astype(int)), d.frontier)
+                ).collect()
+                data_summary = {
+                    "train_docs": [c[0] for c in collected],
+                    "train_labels": [c[1] for c in collected],
+                    "anchor_scope": self.getOrDefault("anchorScope"),
+                    "topo_order": self.getOrDefault("spectralTopoOrder"),
+                }
+
         try:
             result = VIRunner(model_obj, config=config).fit(
                 pc_rdd,
+                data_summary=data_summary,
                 resume_from=resume_path,
                 warm_start_from=warm_start_path,
                 on_iteration=self._on_iteration,
