@@ -127,3 +127,30 @@ PYTHONPATH=analysis/cloud python3 analysis/cloud/hpoa_profile_survey.py \
 
 Per-node table (public ontology facts): `2026-09-06-hpoa-profile-survey-MONDO_0004995.tsv`
 alongside this report.
+
+## Stage-2 results (2026-09-06, `hpoa-stage2-probe ID=114`; egress-safe figures)
+
+4,330 SNOMED codes → 3,798 standard Condition concepts. **The binding fact is the
+label-space intersection: only 36 of the 299 powered label-DAG nodes carry an HPOA
+profile** — the other 618 profiled branch nodes sit BELOW the min_positives=100 label
+space (HPOA annotates specific OMIM/ORPHA diseases; the powered label nodes are mostly
+mid-level categories HPOA does not key to). Where the prior CAN act, it acts well:
+
+- in-vocab profile tokens per probed node: median 45 (p25 20, p75 92); 27/36 nodes ≥20
+  tokens; zero nodes with none — the strip does NOT hollow profiles out.
+- coverage of observed positive TRAIN docs (15 probed nodes with n_pos ≥ 100): **median
+  0.76**; 14/15 ≥ 0.50, 9 ≥ 0.75, 5 ≥ 0.90. Pooled: 20,702 of 44,469 positive cells
+  carry ≥1 profile token.
+- Exemplars: PAH 0.95, temporal arteritis 0.94, GPA 0.93 (autoimmune/vascular diseases
+  with rich symptom profiles); varicose disease 0.09 (a profile of rare syndromic
+  contexts, not the common condition — the annotation-population mismatch case).
+
+**Implication.** As scoped (own-node profiles only) the eta prior reaches 12% of the
+label space. The natural extension is a **Mondo-descendant profile roll-up**: credit each
+powered label node with the union of its (unpowered, profiled) Mondo-descendants'
+profiles, frequency-max-pooled, flagged self-vs-inherited. This is roll-up along the
+LABEL DAG's own subsumption axis — the same direction the gate pools patients — and is
+NOT the messy HPO-side "infer higher-level terms" inference deliberately deferred in this
+report; there is no lower-level annotation to remove because the descendants are not
+label nodes. Promiscuity/IDF weighting then handles the blur near the root. Decision
+pending.
