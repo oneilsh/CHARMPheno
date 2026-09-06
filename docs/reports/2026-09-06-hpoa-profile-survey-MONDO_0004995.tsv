@@ -1,0 +1,1629 @@
+mondo_id	name	depth	profile_n	not_n	freq_known_n	snomed_direct_n	snomed_closure_n
+MONDO:0000119	congenital heart defects, multiple types	3	0	0	0	0	0
+MONDO:0000153	transposition of the great arteries	3	0	0	0	0	0
+MONDO:0000190	ventricular fibrillation	3	0	0	0	0	0
+MONDO:0000241	Keshan disease	3	0	0	0	0	0
+MONDO:0000453	short QT syndrome	3	9	0	9	9	9
+MONDO:0000465	atrioventricular block	3	0	0	0	0	0
+MONDO:0000466	first-degree atrioventricular block	4	0	0	0	0	0
+MONDO:0000467	second-degree atrioventricular block	4	0	0	0	0	0
+MONDO:0000468	third-degree atrioventricular block	4	0	0	0	0	0
+MONDO:0000469	sinoatrial node disorder	3	0	0	0	0	0
+MONDO:0000470	endocardium disorder	2	0	0	0	0	0
+MONDO:0000471	tricuspid valve disorder	3	0	0	0	0	0
+MONDO:0000473	arterial disorder	2	0	0	0	0	0
+MONDO:0000474	pericardium disorder	2	0	0	0	0	0
+MONDO:0000491	limb ischemia	3	0	0	0	0	0
+MONDO:0000492	chronic venous insufficiency	4	0	0	0	0	0
+MONDO:0000498	arteritic anterior ischemic optic neuropathy	5	0	0	0	0	0
+MONDO:0000565	infective endocarditis	4	0	0	0	0	0
+MONDO:0000591	intrinsic cardiomyopathy	3	0	0	0	0	0
+MONDO:0000603	autoimmune disorder of cardiovascular system	1	0	0	0	0	0
+MONDO:0000610	marantic endocarditis	3	0	0	0	0	0
+MONDO:0000629	cardiovascular organ benign neoplasm	2	0	0	0	0	0
+MONDO:0000700	familial hemiplegic migraine	6	0	0	0	0	0
+MONDO:0000701	ischemic colitis	2	0	0	0	0	0
+MONDO:0000727	scapuloperoneal myopathy	6	0	0	0	0	0
+MONDO:0000745	cardiac arrest	3	0	0	0	0	0
+MONDO:0000758	bacillary angiomatosis	5	0	0	0	0	0
+MONDO:0000811	anomalous left coronary artery from the pulmonary artery	4	0	0	0	0	0
+MONDO:0000813	cardiac tuberculosis	2	0	0	0	0	0
+MONDO:0000831	thrombotic disease	2	0	0	0	0	0
+MONDO:0000898	malignant hemangioma	5	0	0	0	0	0
+MONDO:0000908	arrhythmogenic right ventricular dysplasia 13	5	4	0	4	4	4
+MONDO:0000914	cerebral arteriopathy, autosomal dominant, with subcortical infarcts and leukoencephalopathy, type 1	3	56	0	48	44	45
+MONDO:0000944	cerebral artery occlusion	4	0	0	0	0	0
+MONDO:0000945	venous insufficiency	3	0	0	0	0	0
+MONDO:0000959	malignant hypertensive renal disease	5	0	0	0	0	0
+MONDO:0000960	diabetic peripheral angiopathy	3	0	0	0	0	0
+MONDO:0000980	aortic atherosclerosis	4	0	0	0	0	0
+MONDO:0000981	Histoplasma pericarditis	4	0	0	0	0	0
+MONDO:0000990	acute subendocardial myocardial infarction	5	0	0	0	0	0
+MONDO:0000992	heart conduction disease	2	0	0	0	0	0
+MONDO:0001049	Dressler syndrome	4	0	0	0	0	0
+MONDO:0001065	supine hypotensive syndrome	4	0	0	0	0	0
+MONDO:0001072	mild pre-eclampsia	7	0	0	0	0	0
+MONDO:0001088	acute inferoposterior infarction	5	0	0	0	0	0
+MONDO:0001089	acute inferolateral myocardial infarction	5	0	0	0	0	0
+MONDO:0001090	acute anterolateral myocardial infarction	5	0	0	0	0	0
+MONDO:0001093	colonic lymphangioma	4	0	0	0	0	0
+MONDO:0001105	renal hypertension	5	0	0	0	0	0
+MONDO:0001113	Fiedler's myocarditis	4	0	0	0	0	0
+MONDO:0001114	bacterial myocarditis	4	0	0	0	0	0
+MONDO:0001133	malignant essential hypertension	5	0	0	0	0	0
+MONDO:0001134	essential hypertension	4	0	0	0	0	0
+MONDO:0001138	angiodysplasia of intestine	3	0	0	0	0	0
+MONDO:0001148	iliac vein thrombophlebitis	5	0	0	0	0	0
+MONDO:0001151	benign essential hypertension	5	0	0	0	0	0
+MONDO:0001174	conjunctival vascular disorder	3	0	0	0	0	0
+MONDO:0001200	secondary hypertension	4	0	0	0	0	0
+MONDO:0001221	esophageal varices	4	0	0	0	0	0
+MONDO:0001256	arteriovenous hemangioma/malformation	5	0	0	0	0	0
+MONDO:0001257	retinal microaneurysm	4	0	0	0	0	0
+MONDO:0001258	vertebral artery occlusion	4	0	0	0	0	0
+MONDO:0001261	Mobitz type II atrioventricular block	5	0	0	0	0	0
+MONDO:0001277	cerebral arteritis	4	0	0	0	0	0
+MONDO:0001280	choroiditis	3	0	0	0	0	0
+MONDO:0001290	allergic cutaneous vasculitis	4	0	0	0	0	0
+MONDO:0001297	cardiac tamponade	4	0	0	0	0	0
+MONDO:0001298	congenital mitral valve insufficiency	3	0	0	0	0	0
+MONDO:0001302	hypertensive heart disease	2	0	0	0	0	0
+MONDO:0001322	pericardium cancer	3	0	0	0	0	0
+MONDO:0001339	portal vein thrombosis	3	0	0	0	0	0
+MONDO:0001340	heart cancer	3	0	0	0	0	0
+MONDO:0001370	pericardial effusion	3	0	0	0	0	0
+MONDO:0001481	femoral vein thrombophlebitis	5	0	0	0	0	0
+MONDO:0001492	kyphoscoliotic heart disease	6	0	0	0	0	0
+MONDO:0001493	chronic pulmonary heart disease	5	0	0	0	0	0
+MONDO:0001498	varicocele	5	0	0	0	0	0
+MONDO:0001538	retinal ischemia	3	0	0	0	0	0
+MONDO:0001574	capillary disorder	2	0	0	0	0	0
+MONDO:0001576	telangiectasis	3	0	0	0	0	0
+MONDO:0001612	carotid stenosis	4	0	0	0	0	0
+MONDO:0001613	vertebrobasilar insufficiency	3	0	0	0	0	0
+MONDO:0001630	branch retinal artery occlusion	5	0	0	0	0	0
+MONDO:0001631	vertebral artery insufficiency	3	0	0	0	0	0
+MONDO:0001632	intracranial arteriosclerosis	4	0	0	0	0	0
+MONDO:0001633	central retinal artery occlusion	4	0	0	0	0	0
+MONDO:0001641	severe pre-eclampsia	7	0	0	0	0	0
+MONDO:0001646	benign secondary hypertension	5	0	0	0	0	0
+MONDO:0001647	benign renovascular hypertension	6	0	0	0	0	0
+MONDO:0001660	proliferative diabetic retinopathy	5	0	0	0	0	0
+MONDO:0001661	background diabetic retinopathy	5	0	0	0	0	0
+MONDO:0001666	retinal dystrophies primarily involving Bruch's membrane	3	0	0	0	0	0
+MONDO:0001707	cardiac sarcoidosis	6	0	0	0	0	0
+MONDO:0001715	basilar artery occlusion	4	0	0	0	0	0
+MONDO:0001733	occlusion of tributary of retinal vein	3	0	0	0	0	0
+MONDO:0001754	eclampsia	6	0	0	0	0	0
+MONDO:0001784	malignant renovascular hypertension	6	0	0	0	0	0
+MONDO:0001785	malignant secondary hypertension	5	0	0	0	0	0
+MONDO:0001787	hepatic infarction	3	0	0	0	0	0
+MONDO:0001788	nutmeg liver	3	0	0	0	0	0
+MONDO:0001823	sick sinus syndrome	4	0	0	0	0	0
+MONDO:0001856	splenic artery aneurysm	3	0	0	0	0	0
+MONDO:0001863	aorta atresia	4	0	0	0	0	0
+MONDO:0001876	renal artery atheroma	5	0	0	0	0	0
+MONDO:0001883	blue toe syndrome	3	0	0	0	0	0
+MONDO:0001898	optic choroid disorder	3	0	0	0	0	0
+MONDO:0001899	rheumatic congestive heart failure	3	0	0	0	0	0
+MONDO:0001927	pulmonary valve insufficiency	4	0	0	0	0	0
+MONDO:0001939	skin epithelioid hemangioma	6	0	0	0	0	0
+MONDO:0001954	thrombophlebitis migrans	5	0	0	0	0	0
+MONDO:0001956	capillary leak syndrome	3	23	0	23	20	22
+MONDO:0001974	hemangioma of orbit	5	0	0	0	0	0
+MONDO:0001975	cavernous hemangioma of orbit	4	0	0	0	0	0
+MONDO:0001985	partial arterial retinal occlusion	5	0	0	0	0	0
+MONDO:0001990	malignant cardiac peripheral nerve sheath neoplasm	5	0	0	0	0	0
+MONDO:0001991	malignant cardiac germ cell tumor	4	0	0	0	0	0
+MONDO:0001999	idiopathic pulmonary arterial hypertension	6	16	2	16	13	14
+MONDO:0002004	atheroembolism of kidney	3	0	0	0	0	0
+MONDO:0002013	lymphangioma	3	0	0	0	0	0
+MONDO:0002014	autosomal recessive Ehlers-Danlos syndrome, vascular type	3	0	0	0	0	0
+MONDO:0002064	breast angiomatosis	3	0	0	0	0	0
+MONDO:0002070	ventricular septal defect	3	0	0	0	0	0
+MONDO:0002078	heart septal defect	3	0	0	0	0	0
+MONDO:0002088	partial retinal vein occlusion	5	0	0	0	0	0
+MONDO:0002089	retinal vascular occlusion	3	0	0	0	0	0
+MONDO:0002095	vascular cancer	3	0	0	0	0	0
+MONDO:0002100	cardiovascular cancer	2	0	0	0	0	0
+MONDO:0002133	chronic rheumatic pericarditis	4	0	0	0	0	0
+MONDO:0002192	vulvar angiokeratoma	8	0	0	0	0	0
+MONDO:0002250	basilar artery insufficiency	3	0	0	0	0	0
+MONDO:0002262	capillary lymphangioma	3	0	0	0	0	0
+MONDO:0002275	generalized atherosclerosis	5	0	0	0	0	0
+MONDO:0002277	arteriosclerosis disorder	3	0	0	0	0	0
+MONDO:0002286	renal artery disease	4	0	0	0	0	0
+MONDO:0002303	central retinal vein occlusion	3	16	0	16	9	12
+MONDO:0002311	retinal vascular disorder	3	0	0	0	0	0
+MONDO:0002322	angiodysplasia	2	0	0	0	0	0
+MONDO:0002323	cherry hemangioma	6	0	0	0	0	0
+MONDO:0002327	intracranial cavernous angioma	4	0	0	0	0	0
+MONDO:0002328	intracranial hemangioma	4	0	0	0	0	0
+MONDO:0002337	intra-abdominal hemangioma	5	0	0	0	0	0
+MONDO:0002341	granulomatous angiitis	4	0	0	0	0	0
+MONDO:0002343	splenic hemangioma	6	0	0	0	0	0
+MONDO:0002376	spleen angiosarcoma	5	0	0	0	0	0
+MONDO:0002387	liver angiosarcoma	3	0	0	0	0	0
+MONDO:0002404	liver hemangioma	6	0	0	0	0	0
+MONDO:0002405	hepatic vascular disorder	2	0	0	0	0	0
+MONDO:0002407	capillary hemangioma	5	0	0	0	0	0
+MONDO:0002414	gastric hemangioma	6	0	0	0	0	0
+MONDO:0002526	dermal unilateral segmental cavernous angioma	4	0	0	0	0	0
+MONDO:0002617	bone angiosarcoma	4	0	0	0	0	0
+MONDO:0002641	subclavian artery aneurysm	3	0	0	0	0	0
+MONDO:0002679	cerebral infarction	5	0	0	0	0	0
+MONDO:0002681	choroid plexus cancer	3	0	0	0	0	0
+MONDO:0002685	childhood choroid plexus carcinoma	5	0	0	0	0	0
+MONDO:0002687	superior mesenteric artery syndrome	4	0	0	0	0	0
+MONDO:0002692	intracranial sinus thrombosis	4	0	0	0	0	0
+MONDO:0002693	lateral sinus thrombosis	5	0	0	0	0	0
+MONDO:0002694	cavernous sinus thrombosis	5	0	0	0	0	0
+MONDO:0002695	sagittal sinus thrombosis	5	0	0	0	0	0
+MONDO:0002783	Shwartzman phenomenon	3	0	0	0	0	0
+MONDO:0002800	thrombophlebitis	4	0	0	0	0	0
+MONDO:0002815	acute myocarditis	4	0	0	0	0	0
+MONDO:0002824	extrinsic cardiomyopathy	3	0	0	0	0	0
+MONDO:0002869	heart valve disorder	2	0	0	0	0	0
+MONDO:0002870	tricuspid valve insufficiency	3	0	0	0	0	0
+MONDO:0002907	intracranial thrombosis	3	0	0	0	0	0
+MONDO:0002934	intravascular angioleiomyoma	3	0	0	0	0	0
+MONDO:0002996	cavernous sinus meningioma	3	0	0	0	0	0
+MONDO:0003021	central nervous system angiosarcoma	3	0	0	0	0	0
+MONDO:0003022	pediatric angiosarcoma	5	0	0	0	0	0
+MONDO:0003023	aorta angiosarcoma	5	0	0	0	0	0
+MONDO:0003024	breast angiosarcoma	5	0	0	0	0	0
+MONDO:0003025	conventional angiosarcoma	5	0	0	0	0	0
+MONDO:0003026	gallbladder angiosarcoma	5	0	0	0	0	0
+MONDO:0003027	thyroid gland angiosarcoma	5	0	0	0	0	0
+MONDO:0003029	skin angiosarcoma	5	0	0	0	0	0
+MONDO:0003032	superior vena cava angiosarcoma	3	0	0	0	0	0
+MONDO:0003033	prostate angiosarcoma	5	0	0	0	0	0
+MONDO:0003034	mediastinum angiosarcoma	5	0	0	0	0	0
+MONDO:0003035	ovarian angiosarcoma	5	0	0	0	0	0
+MONDO:0003053	choroid plexus meningioma	4	0	0	0	0	0
+MONDO:0003083	venous hemangioma	2	0	0	0	0	0
+MONDO:0003088	intramuscular hemangioma	6	0	0	0	0	0
+MONDO:0003096	deep hemangioma	5	0	0	0	0	0
+MONDO:0003104	epicardium cancer	4	0	0	0	0	0
+MONDO:0003110	skin hemangioma	5	0	0	0	0	0
+MONDO:0003115	subglottic hemangioma	5	0	0	0	0	0
+MONDO:0003126	breast hemangioma	5	0	0	0	0	0
+MONDO:0003143	angiokeratoma	6	0	0	0	0	0
+MONDO:0003154	hemangioma of peripheral nerve	4	0	0	0	0	0
+MONDO:0003155	cavernous hemangioma	3	0	0	0	0	0
+MONDO:0003159	vascular hemostatic disease	2	0	0	0	0	0
+MONDO:0003172	glomeruloid hemangioma	5	0	0	0	0	0
+MONDO:0003194	hemangioma of lung	5	0	0	0	0	0
+MONDO:0003206	acquired hemangioma	5	0	0	0	0	0
+MONDO:0003241	central nervous system hemangioma	3	0	0	0	0	0
+MONDO:0003254	cardiac granular cell neoplasm	5	0	0	0	0	0
+MONDO:0003258	hobnail hemangioma	5	0	0	0	0	0
+MONDO:0003294	pericardium leiomyoma	4	0	0	0	0	0
+MONDO:0003310	Monckeberg arteriosclerosis	4	0	0	0	0	0
+MONDO:0003343	retinal hemangioblastoma	4	0	0	0	0	0
+MONDO:0003346	central nervous system vasculitis	3	0	0	0	0	0
+MONDO:0003353	heart leiomyosarcoma	5	0	0	0	0	0
+MONDO:0003354	heart sarcoma	4	0	0	0	0	0
+MONDO:0003428	brain hemangioma	5	0	0	0	0	0
+MONDO:0003506	pulmonary artery choriocarcinoma	3	0	0	0	0	0
+MONDO:0003627	rheumatic pulmonary valve disease	2	0	0	0	0	0
+MONDO:0003628	pulmonary valve disorder	3	0	0	0	0	0
+MONDO:0003643	giant hemangioma	4	0	0	0	0	0
+MONDO:0003644	cavernous hemangioma of colon	4	0	0	0	0	0
+MONDO:0003645	cavernous hemangioma of face	4	0	0	0	0	0
+MONDO:0003653	stork bite	3	0	0	0	0	0
+MONDO:0003670	posteroinferior myocardial infarction	4	0	0	0	0	0
+MONDO:0003671	septal myocardial infarction	4	0	0	0	0	0
+MONDO:0003672	posterior myocardial infarction	4	0	0	0	0	0
+MONDO:0003673	apical myocardial infarction	4	0	0	0	0	0
+MONDO:0003674	subendocardial myocardial infarction	4	0	0	0	0	0
+MONDO:0003675	posterolateral myocardial infarction	4	0	0	0	0	0
+MONDO:0003676	inferolateral myocardial infarct	4	0	0	0	0	0
+MONDO:0003677	lateral myocardial infarction	4	0	0	0	0	0
+MONDO:0003678	silent myocardial infarction	4	0	0	0	0	0
+MONDO:0003679	anteroseptal myocardial infarction	4	0	0	0	0	0
+MONDO:0003687	endocardium cancer	4	0	0	0	0	0
+MONDO:0003712	angiokeratoma of mibelli	7	0	0	0	0	0
+MONDO:0003713	angiokeratoma circumscriptum	7	0	0	0	0	0
+MONDO:0003718	occlusion precerebral artery	4	0	0	0	0	0
+MONDO:0003742	heart fibrosarcoma	5	0	0	0	0	0
+MONDO:0003743	heart malignant hemangiopericytoma	3	0	0	0	0	0
+MONDO:0003745	choroid spindle cell melanoma	5	0	0	0	0	0
+MONDO:0003767	mitral valve disorder	3	0	0	0	0	0
+MONDO:0003796	rectum Kaposi sarcoma	7	0	0	0	0	0
+MONDO:0003803	aortic valve disorder	3	0	0	0	0	0
+MONDO:0003805	malignant pericardial mesothelioma	4	0	0	0	0	0
+MONDO:0003840	epicardium lipoma	5	0	0	0	0	0
+MONDO:0003841	heart lipoma	4	0	0	0	0	0
+MONDO:0003878	malignant choroid melanoma	4	0	0	0	0	0
+MONDO:0003896	breast capillary hemangioma	6	0	0	0	0	0
+MONDO:0003897	breast epithelioid hemangioma	6	0	0	0	0	0
+MONDO:0003901	cerebellar hemangioblastoma	4	0	0	0	0	0
+MONDO:0003902	brain stem hemangioblastoma	4	0	0	0	0	0
+MONDO:0003913	choroid mixed cell melanoma	5	0	0	0	0	0
+MONDO:0003917	heart lymphoma	4	0	0	0	0	0
+MONDO:0003945	bone epithelioid hemangioma	6	0	0	0	0	0
+MONDO:0003948	cerebral hemangioma	6	0	0	0	0	0
+MONDO:0003951	scrotal hemangioma	6	0	0	0	0	0
+MONDO:0003954	angiokeratoma of Fordyce	7	0	0	0	0	0
+MONDO:0003997	colon Kaposi sarcoma	7	0	0	0	0	0
+MONDO:0004065	intermediate cell type choroid melanoma	5	0	0	0	0	0
+MONDO:0004085	choroid epithelioid cell melanoma	5	0	0	0	0	0
+MONDO:0004206	pulmonary vein leiomyosarcoma	3	0	0	0	0	0
+MONDO:0004207	pulmonary artery leiomyosarcoma	3	0	0	0	0	0
+MONDO:0004208	superior vena cava leiomyosarcoma	4	0	0	0	0	0
+MONDO:0004348	retinal telangiectasia	4	0	0	0	0	0
+MONDO:0004364	choroid necrotic melanoma	5	0	0	0	0	0
+MONDO:0004432	mature pericardial teratoma	3	0	0	0	0	0
+MONDO:0004450	carotid artery occlusion	4	0	0	0	0	0
+MONDO:0004485	interstitial myocarditis	4	0	0	0	0	0
+MONDO:0004496	myocarditis	3	0	0	0	0	0
+MONDO:0004519	synovial angioma	5	0	0	0	0	0
+MONDO:0004533	perineural angioma	6	0	0	0	0	0
+MONDO:0004539	aortic malignant tumor	4	0	0	0	0	0
+MONDO:0004582	rheumatic myocarditis	3	0	0	0	0	0
+MONDO:0004583	transient retinal arterial occlusion	5	0	0	0	0	0
+MONDO:0004594	puerperal pulmonary embolism	4	0	0	0	0	0
+MONDO:0004596	cor pulmonale	4	0	0	0	0	0
+MONDO:0004598	acute cor pulmonale	5	0	0	0	0	0
+MONDO:0004613	acute intestinal ischemia	4	0	0	0	0	0
+MONDO:0004622	chronic intestinal vascular insufficiency	3	0	0	0	0	0
+MONDO:0004625	phlebitis	3	0	0	0	0	0
+MONDO:0004634	vein disorder	2	0	0	0	0	0
+MONDO:0004648	vascular dementia	4	0	0	0	0	0
+MONDO:0004687	severe nonproliferative diabetic retinopathy	6	0	0	0	0	0
+MONDO:0004717	peliosis hepatis	3	0	0	0	0	0
+MONDO:0004728	diabetic macular edema	5	0	0	0	0	0
+MONDO:0004745	priapism	3	0	0	0	0	0
+MONDO:0004749	myocardium cancer	4	0	0	0	0	0
+MONDO:0004752	neurofibroma of the heart	4	0	0	0	0	0
+MONDO:0004763	carotid artery dissection	4	0	0	0	0	0
+MONDO:0004780	strictly posterior acute myocardial infarction	5	0	0	0	0	0
+MONDO:0004781	acute myocardial infarction	4	0	0	0	0	0
+MONDO:0004802	pulmonary eosinophilia	7	0	0	0	0	0
+MONDO:0004803	disseminated eosinophilic collagen disease	7	0	0	0	0	0
+MONDO:0004851	toxic myocarditis	5	0	0	0	0	0
+MONDO:0004869	pelvic varices	4	0	0	0	0	0
+MONDO:0004871	perianal hematoma	6	0	0	0	0	0
+MONDO:0004872	hemorrhoid	5	0	0	0	0	0
+MONDO:0004873	internal hemorrhoid	6	0	0	0	0	0
+MONDO:0004876	myocardial stunning	4	0	0	0	0	0
+MONDO:0004879	senile atrophy of choroid	4	0	0	0	0	0
+MONDO:0004882	angioid streaks of choroid	4	0	0	0	0	0
+MONDO:0004883	hereditary choroidal atrophy	4	0	0	0	0	0
+MONDO:0004885	choroidal sclerosis	3	0	0	0	0	0
+MONDO:0004886	diffuse secondary choroid atrophy	4	0	0	0	0	0
+MONDO:0004888	partial circumpapillary choroid dystrophy	5	0	0	0	0	0
+MONDO:0004889	total central choroidal atrophy	4	0	0	0	0	0
+MONDO:0004890	partial central choroid dystrophy	5	0	0	0	0	0
+MONDO:0004898	total circumpapillary dystrophy of choroid	5	0	0	0	0	0
+MONDO:0004910	mitral valve prolapse	4	0	0	0	0	0
+MONDO:0004933	hypoplastic left heart syndrome	3	7	0	7	6	6
+MONDO:0004941	eosinophilia-myalgia syndrome	7	0	0	0	0	0
+MONDO:0004981	atrial fibrillation	3	0	0	0	0	0
+MONDO:0004994	cardiomyopathy	2	0	0	0	0	0
+MONDO:0004995	cardiovascular disorder	0	0	0	0	0	0
+MONDO:0005009	congestive heart failure	3	0	0	0	0	0
+MONDO:0005010	coronary artery disorder	2	0	0	0	0	0
+MONDO:0005021	dilated cardiomyopathy	4	0	0	0	0	0
+MONDO:0005025	endocarditis	3	0	0	0	0	0
+MONDO:0005044	hypertensive disorder	3	0	0	0	0	0
+MONDO:0005045	hypertrophic cardiomyopathy	4	0	0	0	0	0
+MONDO:0005053	ischemic disease	2	0	0	0	0	0
+MONDO:0005055	Kaposi's sarcoma	5	26	0	26	22	25
+MONDO:0005068	myocardial infarction	3	0	0	0	0	0
+MONDO:0005080	portal hypertension	3	0	0	0	0	0
+MONDO:0005081	preeclampsia	6	27	0	27	20	22
+MONDO:0005098	stroke disorder	4	0	0	0	0	0
+MONDO:0005099	subarachnoid hemorrhage	6	0	0	0	0	0
+MONDO:0005110	idiopathic cardiomyopathy	3	0	0	0	0	0
+MONDO:0005149	pulmonary hypertension	4	0	0	0	0	0
+MONDO:0005160	aortic aneurysm	4	0	0	0	0	0
+MONDO:0005174	acute hypotension	4	0	0	0	0	0
+MONDO:0005188	iatrogenic Kaposi's sarcoma	6	0	0	0	0	0
+MONDO:0005189	internal carotid artery stenosis	4	0	0	0	0	0
+MONDO:0005200	viral dilated cardiomyopathy	5	0	0	0	0	0
+MONDO:0005201	restrictive cardiomyopathy	4	0	0	0	0	0
+MONDO:0005217	familial cardiomyopathy	3	0	0	0	0	0
+MONDO:0005252	heart failure	2	0	0	0	0	0
+MONDO:0005253	high output heart failure	3	0	0	0	0	0
+MONDO:0005254	symptomatic heart failure	3	0	0	0	0	0
+MONDO:0005255	mild heart failure	4	0	0	0	0	0
+MONDO:0005256	moderate heart failure	4	0	0	0	0	0
+MONDO:0005257	advanced heart failure	4	0	0	0	0	0
+MONDO:0005264	transient ischemic attack	4	0	0	0	0	0
+MONDO:0005266	diabetic retinopathy	4	0	0	0	0	0
+MONDO:0005267	heart disorder	1	0	0	0	0	0
+MONDO:0005269	carotid artery disorder	3	0	0	0	0	0
+MONDO:0005277	migraine disorder	3	0	0	0	0	0
+MONDO:0005279	pulmonary embolism	3	0	0	0	0	0
+MONDO:0005291	brain aneurysm	6	0	0	0	0	0
+MONDO:0005294	peripheral vascular disease	2	0	0	0	0	0
+MONDO:0005295	intermittent vascular claudication	3	0	0	0	0	0
+MONDO:0005299	brain ischemia	3	0	0	0	0	0
+MONDO:0005310	atrial flutter	4	0	0	0	0	0
+MONDO:0005311	atherosclerosis	4	0	0	0	0	0
+MONDO:0005350	abdominal aortic aneurysm	5	0	0	0	0	0
+MONDO:0005355	coronary restenosis	4	0	0	0	0	0
+MONDO:0005356	coronary vasospasm	3	0	0	0	0	0
+MONDO:0005385	vascular disorder	1	0	0	0	0	0
+MONDO:0005386	peripheral arterial disease	3	0	0	0	0	0
+MONDO:0005394	brain infarction	4	0	0	0	0	0
+MONDO:0005396	thoracic aortic aneurysm	5	0	0	0	0	0
+MONDO:0005399	venous thromboembolism	2	0	0	0	0	0
+MONDO:0005418	non-compaction cardiomyopathy	3	0	0	0	0	0
+MONDO:0005426	MRI defined brain infarct	5	0	0	0	0	0
+MONDO:0005430	early onset hypertension	4	0	0	0	0	0
+MONDO:0005436	postoperative ventricular dysfunction	3	0	0	0	0	0
+MONDO:0005449	conduction system disorder	3	0	0	0	0	0
+MONDO:0005453	congenital heart disease	2	0	0	0	0	0
+MONDO:0005463	aortic valve calcification	4	0	0	0	0	0
+MONDO:0005468	hypotensive disorder	3	0	0	0	0	0
+MONDO:0005469	orthostatic hypotension	4	0	0	0	0	0
+MONDO:0005470	postprandial hypotension	4	0	0	0	0	0
+MONDO:0005471	neurally mediated hypotension	4	0	0	0	0	0
+MONDO:0005475	migraine with aura	4	0	0	0	0	0
+MONDO:0005476	atrioventricular node disorder	4	0	0	0	0	0
+MONDO:0005477	ventricular tachycardia	3	0	0	0	0	0
+MONDO:0005478	torsades de pointes	4	0	0	0	0	0
+MONDO:0005479	atrial tachycardia	3	0	0	0	0	0
+MONDO:0005490	large artery stroke	3	0	0	0	0	0
+MONDO:0005491	Chagas cardiomyopathy	3	0	0	0	0	0
+MONDO:0005542	acute coronary syndrome	4	0	0	0	0	0
+MONDO:0005552	ocular vascular disorder	2	0	0	0	0	0
+MONDO:0005561	aortic disorder	3	0	0	0	0	0
+MONDO:0005568	cholesterol embolism	2	0	0	0	0	0
+MONDO:0005584	congenital left-sided heart lesions	3	0	0	0	0	0
+MONDO:0005585	chemotherapy-induced hypertension	4	0	0	0	0	0
+MONDO:0005620	cerebral amyloid angiopathy	4	13	0	13	8	8
+MONDO:0005621	vascular brain injury	4	0	0	0	0	0
+MONDO:0005648	aortic valve insufficiency	3	0	0	0	0	0
+MONDO:0005695	central nervous system AIDS arteritis	4	0	0	0	0	0
+MONDO:0005783	hemopericardium	4	0	0	0	0	0
+MONDO:0005832	lymphangitis	3	0	0	0	0	0
+MONDO:0005852	mitral valve stenosis	4	0	0	0	0	0
+MONDO:0005903	pericardial tuberculosis	4	0	0	0	0	0
+MONDO:0005904	pericarditis	3	0	0	0	0	0
+MONDO:0005928	post-thrombotic syndrome	4	0	0	0	0	0
+MONDO:0005979	thoracic outlet syndrome	2	11	0	11	10	11
+MONDO:0005997	tricuspid valve stenosis	4	0	0	0	0	0
+MONDO:0006021	Prinzmetal angina	4	0	0	0	0	0
+MONDO:0006044	nephrosclerosis	5	0	0	0	0	0
+MONDO:0006061	cervical artery dissection	3	0	0	0	0	0
+MONDO:0006123	cardiac rhabdomyoma	4	0	0	0	0	0
+MONDO:0006267	liver cavernous hemangioma	4	0	0	0	0	0
+MONDO:0006280	lung sclerosing hemangioma	6	0	0	0	0	0
+MONDO:0006291	malignant jugulotympanic paraganglioma	3	0	0	0	0	0
+MONDO:0006375	placental hemangioma	5	0	0	0	0	0
+MONDO:0006500	hemangioma	4	0	0	0	0	0
+MONDO:0006505	basal ganglia cerebrovascular disorder	4	0	0	0	0	0
+MONDO:0006557	hemangioma of subcutaneous tissue	5	0	0	0	0	0
+MONDO:0006639	adrenal cortex carcinoma	4	29	0	29	17	20
+MONDO:0006643	alcoholic cardiomyopathy	4	0	0	0	0	0
+MONDO:0006647	anterior cerebral artery infarction	6	0	0	0	0	0
+MONDO:0006650	anterior spinal artery syndrome	3	0	0	0	0	0
+MONDO:0006652	anterolateral myocardial infarction	4	0	0	0	0	0
+MONDO:0006655	aortic valve prolapse	4	0	0	0	0	0
+MONDO:0006656	aortitis	3	0	0	0	0	0
+MONDO:0006658	arteriolosclerosis	4	0	0	0	0	0
+MONDO:0006659	arteriosclerosis obliterans	4	0	0	0	0	0
+MONDO:0006664	atrial septal defect	3	19	0	19	15	16
+MONDO:0006669	bacterial endocarditis	5	0	0	0	0	0
+MONDO:0006685	brain hypoxia - ischemia	4	0	0	0	0	0
+MONDO:0006686	brain stem infarction	5	0	0	0	0	0
+MONDO:0006690	carotid artery thrombosis	4	0	0	0	0	0
+MONDO:0006693	cerebral arterial disease	5	0	0	0	0	0
+MONDO:0006694	cerebral atherosclerosis	5	0	0	0	0	0
+MONDO:0006700	choroid cancer	3	0	0	0	0	0
+MONDO:0006711	constrictive pericarditis	4	0	0	0	0	0
+MONDO:0006714	coronary aneurysm	3	0	0	0	0	0
+MONDO:0006715	coronary stenosis	3	0	0	0	0	0
+MONDO:0006716	coronary thrombosis	3	0	0	0	0	0
+MONDO:0006727	diastolic heart failure	4	0	0	0	0	0
+MONDO:0006729	discrete subaortic stenosis	6	0	0	0	0	0
+MONDO:0006746	endomyocardial fibrosis	5	0	0	0	0	0
+MONDO:0006761	fibromuscular dysplasia	3	6	0	0	6	6
+MONDO:0006767	gastric antral vascular ectasia	3	0	0	0	0	0
+MONDO:0006779	heart aneurysm	2	0	0	0	0	0
+MONDO:0006786	hepatic vein thrombosis	3	0	0	0	0	0
+MONDO:0006794	hypersensitivity vasculitis	3	0	0	0	0	0
+MONDO:0006796	hypertensive encephalopathy	4	0	0	0	0	0
+MONDO:0006803	inferior myocardial infarction	4	0	0	0	0	0
+MONDO:0006805	intermediate coronary syndrome	3	0	0	0	0	0
+MONDO:0006808	intracranial arterial disease	4	0	0	0	0	0
+MONDO:0006809	intracranial embolism	6	0	0	0	0	0
+MONDO:0006810	intracranial hypertension	3	0	0	0	0	0
+MONDO:0006812	intracranial vasospasm	4	0	0	0	0	0
+MONDO:0006827	lateral medullary syndrome	6	0	0	0	0	0
+MONDO:0006839	Lutembacher syndrome	4	0	0	0	0	0
+MONDO:0006840	lymphangiectasis	3	0	0	0	0	0
+MONDO:0006841	lymphangioendothelioma	4	0	0	0	0	0
+MONDO:0006846	malignant hypertension	4	0	0	0	0	0
+MONDO:0006855	mesenteric vascular occlusion	3	0	0	0	0	0
+MONDO:0006857	middle cerebral artery infarction	6	0	0	0	0	0
+MONDO:0006875	ocular hypertension	4	0	0	0	0	0
+MONDO:0006917	posterior cerebral artery infarction	6	0	0	0	0	0
+MONDO:0006935	pulmonary subvalvular stenosis	5	0	0	0	0	0
+MONDO:0006936	pulmonary valve stenosis	4	0	0	0	0	0
+MONDO:0006945	renal artery obstruction	5	0	0	0	0	0
+MONDO:0006947	renovascular hypertension	6	0	0	0	0	0
+MONDO:0006948	retinal artery occlusion	4	0	0	0	0	0
+MONDO:0006950	retinal vasculitis	3	0	0	0	0	0
+MONDO:0006951	retinal vein occlusion	4	0	0	0	0	0
+MONDO:0006952	retinopathy of prematurity	6	15	0	15	11	12
+MONDO:0006955	rheumatic heart disease	2	0	0	0	0	0
+MONDO:0006978	splenic infarction	3	0	0	0	0	0
+MONDO:0006981	subacute bacterial endocarditis	5	0	0	0	0	0
+MONDO:0006983	subclavian steal syndrome	4	0	0	0	0	0
+MONDO:0006987	subvalvular aortic stenosis	5	0	0	0	0	0
+MONDO:0006993	systolic heart failure	4	0	0	0	0	0
+MONDO:0007001	tricuspid valve prolapse	4	0	0	0	0	0
+MONDO:0007031	familial abdominal aortic aneurysm	6	0	0	0	0	0
+MONDO:0007088	Alzheimer disease type 1	5	7	0	0	5	6
+MONDO:0007098	ACys amyloidosis	5	7	0	4	6	6
+MONDO:0007111	aneurysm, intracranial berry type 1	8	2	0	0	2	2
+MONDO:0007112	interventricular septum aneurysm	3	2	0	0	1	2
+MONDO:0007115	angioma serpiginosum, autosomal dominant	4	1	0	0	1	1
+MONDO:0007116	hereditary neurocutaneous angioma	3	7	0	4	7	7
+MONDO:0007130	congenital total pulmonary venous return anomaly	5	41	0	40	29	30
+MONDO:0007152	arrhythmogenic right ventricular dysplasia 1	5	8	1	7	4	4
+MONDO:0007154	arteriovenous malformations of the brain	6	12	0	11	8	10
+MONDO:0007171	atrial standstill 1	6	7	0	3	5	5
+MONDO:0007172	atrial septal defect 1	4	10	0	0	10	10
+MONDO:0007173	atrial septal defect 7	4	16	0	14	16	16
+MONDO:0007191	Behcet disease	3	93	0	85	78	83
+MONDO:0007194	familial bicuspid aortic valve	3	12	0	12	9	9
+MONDO:0007203	blue rubber bleb nevus	3	25	0	13	17	20
+MONDO:0007240	progressive familial heart block, type 1A	4	9	0	4	8	8
+MONDO:0007263	cardiac rhythm disease	2	0	0	0	0	0
+MONDO:0007265	cardiofaciocutaneous syndrome 1	7	108	9	72	68	75
+MONDO:0007266	hypertrophic cardiomyopathy 2	4	6	1	6	5	5
+MONDO:0007267	hypertrophic cardiomyopathy 3	5	2	0	1	2	2
+MONDO:0007268	hypertrophic cardiomyopathy 4	5	27	0	16	23	23
+MONDO:0007269	dilated cardiomyopathy 1A	6	21	0	21	18	21
+MONDO:0007270	cardiomyopathy, familial restrictive, 1	5	5	0	2	3	4
+MONDO:0007297	ADan amyloidosis	5	9	0	0	8	8
+MONDO:0007318	Alagille syndrome	3	43	0	43	26	31
+MONDO:0007344	cluster headache, familial	5	8	0	0	7	7
+MONDO:0007345	aorta coarctation	4	17	2	16	16	17
+MONDO:0007385	idiopathic spontaneous coronary artery dissection	2	0	0	0	0	0
+MONDO:0007407	Cryoglobulinemic vasculitis	4	35	0	29	31	31
+MONDO:0007414	Gorham-Stout disease	4	36	0	36	18	26
+MONDO:0007432	cerebral arteriopathy with subcortical infarcts and leukoencephalopathy	2	0	0	0	0	0
+MONDO:0007443	congenital unilateral hypoplasia of depressor anguli oris	3	27	0	26	20	26
+MONDO:0007472	basal laminar drusen	4	2	0	0	1	1
+MONDO:0007524	autosomal dominant Ehlers-Danlos syndrome, vascular type	3	52	0	26	28	28
+MONDO:0007534	Beckwith-Wiedemann syndrome	5	92	0	86	60	70
+MONDO:0007568	aortic aneurysm, familial thoracic 4	3	18	0	14	12	13
+MONDO:0007571	primary erythermalgia	4	25	0	15	20	23
+MONDO:0007589	exudative vitreoretinopathy 1	6	15	1	10	12	12
+MONDO:0007672	glomuvenous malformation	3	18	0	16	9	15
+MONDO:0007701	progressive familial heart block type II	4	6	0	0	5	5
+MONDO:0007702	heart-hand syndrome type 3	4	5	0	0	3	3
+MONDO:0007707	hemangiomas of small intestine	5	1	0	0	1	1
+MONDO:0007732	Holt-Oram syndrome	3	116	0	114	62	74
+MONDO:0007781	essential hypertension, genetic	5	3	0	0	0	0
+MONDO:0007864	angioosteohypertrophic syndrome	2	43	0	31	33	40
+MONDO:0007893	Noonan syndrome with multiple lentigines	6	50	0	50	39	45
+MONDO:0007918	microcephaly with or without chorioretinopathy, lymphedema, or intellectual disability	3	92	0	76	67	76
+MONDO:0007919	lymphatic malformation 1	3	26	0	24	17	20
+MONDO:0007920	lymphatic malformation 5	3	24	0	23	16	19
+MONDO:0007921	yellow nail syndrome	3	26	0	24	18	20
+MONDO:0007922	lymphedema-distichiasis syndrome	3	40	0	36	34	38
+MONDO:0007924	Bannayan-Riley-Ruvalcaba syndrome	2	55	0	55	40	50
+MONDO:0007938	46,XY sex reversal 4	6	26	0	25	19	19
+MONDO:0008004	familial mitral valve prolapse	4	0	0	0	0	0
+MONDO:0008056	myotonic dystrophy type 1	5	120	0	108	84	93
+MONDO:0008094	familial multiple nevi flammei	3	23	0	23	19	23
+MONDO:0008095	nevus anemicus	3	0	0	0	0	0
+MONDO:0008102	sick sinus syndrome 2, autosomal dominant	5	18	2	17	13	13
+MONDO:0008104	Noonan syndrome 1	4	57	0	31	43	46
+MONDO:0008209	Char syndrome	3	37	0	28	19	20
+MONDO:0008289	brain small vessel disease 1 with or without ocular anomalies	5	46	0	27	37	38
+MONDO:0008306	ABri amyloidosis	5	7	0	0	6	6
+MONDO:0008343	pulmonary atresia with ventricular septal defect	4	2	0	0	2	2
+MONDO:0008364	Raynaud disease	3	2	0	0	1	2
+MONDO:0008373	retinal arterial tortuosity	3	3	1	3	2	2
+MONDO:0008409	congenital myopathy 7A, myosin storage, autosomal dominant	7	22	1	16	11	11
+MONDO:0008423	sinus node disease and myopia	5	3	0	0	2	3
+MONDO:0008436	Sneddon syndrome	3	66	0	63	43	46
+MONDO:0008504	supravalvular aortic stenosis	3	10	0	7	9	9
+MONDO:0008534	generalized essential telangiectasia	3	2	0	0	2	2
+MONDO:0008535	telangiectasia, hereditary hemorrhagic, type 1	4	49	0	12	30	31
+MONDO:0008538	temporal arteritis	4	72	0	69	59	61
+MONDO:0008542	tetralogy of fallot	3	12	0	12	8	9
+MONDO:0008564	DiGeorge syndrome	3	75	0	32	61	64
+MONDO:0008585	HELLP syndrome	8	29	0	29	24	25
+MONDO:0008638	varicose disease	3	1	0	0	1	1
+MONDO:0008640	vasculitis, lymphocytic, nodular	3	2	0	0	0	1
+MONDO:0008641	retinal vasculopathy with cerebral leukoencephalopathy and systemic manifestations	4	71	0	53	49	55
+MONDO:0008644	velocardiofacial syndrome	3	38	0	17	27	30
+MONDO:0008647	hypertrophic cardiomyopathy 1	5	5	0	0	4	4
+MONDO:0008648	ventricular tachycardia, familial	4	3	1	1	3	3
+MONDO:0008685	Wolff-Parkinson-White syndrome	3	10	0	7	9	9
+MONDO:0008723	very long chain acyl-CoA dehydrogenase deficiency	5	62	0	53	42	44
+MONDO:0008734	adrenocortical carcinoma, hereditary	5	2	0	2	2	2
+MONDO:0008817	arterial calcification, generalized, of infancy, 1	3	18	0	13	10	13
+MONDO:0008818	arterial tortuosity syndrome	2	87	1	76	61	69
+MONDO:0008832	right atrial isomerism	4	20	0	9	15	15
+MONDO:0008848	atrioventricular dissociation	4	1	0	0	0	0
+MONDO:0008889	thromboangiitis obliterans	3	19	0	17	15	15
+MONDO:0008895	hereditary arterial and articular multiple calcification syndrome	2	14	0	11	5	9
+MONDO:0008896	campomelia, Cumming type	3	30	0	26	21	27
+MONDO:0008908	MGAT2-congenital disorder of glycosylation	3	95	2	68	61	66
+MONDO:0008911	cardiac lipidosis, familial	6	4	0	0	3	4
+MONDO:0008915	dilated cardiomyopathy-hypergonadotropic hypogonadism syndrome	3	24	0	19	17	18
+MONDO:0008917	heart defects-limb shortening syndrome	3	13	0	13	6	11
+MONDO:0008922	Sengers syndrome	3	36	0	24	26	28
+MONDO:0008965	CHARGE syndrome	3	94	0	94	63	79
+MONDO:0008982	central areolar choroidal dystrophy	4	17	0	17	7	8
+MONDO:0009010	aortic arch interruption	4	32	0	32	24	26
+MONDO:0009026	Costello syndrome	6	105	0	56	72	80
+MONDO:0009055	cutis marmorata telangiectatica congenita	3	37	0	32	26	32
+MONDO:0009144	Ebstein anomaly	5	29	0	27	24	26
+MONDO:0009159	Ehlers-Danlos syndrome, cardiac valvular type	3	50	0	49	33	34
+MONDO:0009162	Ellis-van Creveld syndrome	3	68	0	51	42	55
+MONDO:0009169	endocardial fibroelastosis	3	16	0	16	11	15
+MONDO:0009265	Gaucher disease type I	5	59	0	53	50	50
+MONDO:0009282	multiple acyl-CoA dehydrogenase deficiency	5	82	0	63	53	57
+MONDO:0009290	glycogen storage disease II	5	72	0	72	49	52
+MONDO:0009301	46,XY sex reversal 7	6	9	0	8	5	6
+MONDO:0009326	congenital heart block	4	35	0	29	27	29
+MONDO:0009329	pulmonary venoocclusive disease 2	3	27	2	24	18	21
+MONDO:0009337	Hennekam lymphangiectasia-lymphedema syndrome 1	4	63	0	12	42	44
+MONDO:0009338	hepatic veno-occlusive disease-immunodeficiency syndrome	4	43	0	39	27	28
+MONDO:0009433	hypoplastic left heart syndrome 1	4	3	0	3	3	3
+MONDO:0009468	pseudotumor cerebri	4	22	0	21	20	21
+MONDO:0009511	Larsen-like syndrome, B3GAT3 type	3	81	0	41	56	58
+MONDO:0009533	Dahlberg-Borer-Newcomer syndrome	3	22	0	17	18	18
+MONDO:0009649	moyamoya disease 1	7	3	0	0	2	2
+MONDO:0009677	autosomal recessive limb-girdle muscular dystrophy type 2C	5	37	1	33	17	18
+MONDO:0009719	familial atrial myxoma	3	18	0	18	17	17
+MONDO:0009760	Norman-Roberts syndrome	3	45	0	38	28	31
+MONDO:0009761	cystic hygroma	4	3	0	0	2	2
+MONDO:0009796	ornithine aminotransferase deficiency	3	22	0	19	16	18
+MONDO:0009820	osteoporosis-pseudoglioma syndrome	6	64	0	55	42	49
+MONDO:0009837	choroid plexus papilloma	4	14	0	10	12	14
+MONDO:0009847	pericardial effusion, chronic	3	0	0	0	0	0
+MONDO:0009856	Peters plus syndrome	3	133	0	89	86	98
+MONDO:0009867	lethal congenital glycogen storage disease of heart	5	34	0	30	30	30
+MONDO:0009931	pulmonary atresia-intact ventricular septum syndrome	5	5	0	4	4	5
+MONDO:0009933	congenital pulmonary lymphangiectasia	4	35	1	21	28	29
+MONDO:0009934	alveolar capillary dysplasia with misalignment of pulmonary veins	3	73	0	70	58	63
+MONDO:0009935	pulmonary hypertension, primary, 5	7	9	0	2	9	9
+MONDO:0009937	pulmonary venoocclusive disease	2	0	0	0	0	0
+MONDO:0009938	pulmonic stenosis	5	1	0	0	1	1
+MONDO:0010029	situs inversus	4	0	0	0	0	0
+MONDO:0010081	subaortic stenosis, membranous	4	0	0	0	0	0
+MONDO:0010179	isolated right ventricular hypoplasia	5	20	0	19	17	18
+MONDO:0010199	white forelock with malformations	2	23	0	19	15	19
+MONDO:0010221	CHIME syndrome	3	114	0	96	74	82
+MONDO:0010226	46,XY sex reversal 2	6	1	0	0	0	0
+MONDO:0010269	Coats disease	5	11	0	8	9	11
+MONDO:0010295	anhidrotic ectodermal dysplasia-immunodeficiency-osteopetrosis-lymphedema syndrome	3	0	0	0	0	0
+MONDO:0010391	angioma serpiginosum, X-linked	4	4	0	1	4	4
+MONDO:0010400	X-linked scapuloperoneal muscular dystrophy	7	15	0	7	12	12
+MONDO:0010401	X-linked myopathy with postural muscle atrophy	7	19	0	16	11	12
+MONDO:0010448	moyamoya angiopathy-short stature-facial dysmorphism-hypergonadotropic hypogonadism syndrome	7	43	0	37	28	32
+MONDO:0010468	aneurysm, intracranial berry, 5	8	0	0	0	0	0
+MONDO:0010481	angioedema	3	0	0	0	0	0
+MONDO:0010542	dilated cardiomyopathy 3B	6	4	0	2	1	1
+MONDO:0010543	Barth syndrome	5	38	0	30	25	27
+MONDO:0010557	choroideremia	3	22	0	22	12	12
+MONDO:0010588	exudative vitreoretinopathy 2, X-linked	5	17	0	11	12	13
+MONDO:0010607	heterotaxy, visceral, 1, X-linked	4	53	0	46	41	42
+MONDO:0010680	X-linked Emery-Dreifuss muscular dystrophy	6	43	1	43	27	30
+MONDO:0010711	TARP syndrome	3	70	0	64	50	57
+MONDO:0010753	cardiac valvular dysplasia, X-linked	3	33	0	29	20	21
+MONDO:0010765	46,XY complete gonadal dysgenesis	5	4	0	4	3	3
+MONDO:0010771	histiocytoid cardiomyopathy	5	44	0	44	40	42
+MONDO:0010772	Leber optic atrophy and dystonia	6	18	0	0	14	16
+MONDO:0010787	Kearns-Sayre syndrome	5	40	0	30	32	35
+MONDO:0010788	Leber hereditary optic neuropathy	5	26	0	21	18	20
+MONDO:0010825	atrioventricular defect-blepharophimosis-radial and anal defect syndrome	2	22	0	22	13	15
+MONDO:0010829	CARASIL syndrome	4	57	1	49	42	44
+MONDO:0010842	multiple cutaneous and mucosal venous malformations	2	2	0	0	2	2
+MONDO:0010880	telangiectasia, hereditary hemorrhagic, type 2	4	38	0	6	22	22
+MONDO:0010889	arterial dissection-lentiginosis syndrome	2	6	0	4	6	6
+MONDO:0010946	hypertrophic cardiomyopathy 6	5	16	0	12	13	13
+MONDO:0010947	Budd-Chiari syndrome	3	25	0	23	21	22
+MONDO:0010951	dilated cardiomyopathy 1B	6	5	0	0	4	4
+MONDO:0010991	laterality defects, autosomal dominant	4	4	0	0	3	4
+MONDO:0010996	hereditary hemorrhagic telangiectasia type 3	4	0	0	0	0	0
+MONDO:0011001	Brugada syndrome 1	4	8	0	6	7	8
+MONDO:0011003	dilated cardiomyopathy 1E	6	15	0	7	12	12
+MONDO:0011017	Naxos disease	4	37	1	28	28	30
+MONDO:0011028	autosomal recessive limb-girdle muscular dystrophy type 2F	5	15	0	11	9	9
+MONDO:0011050	microcephaly-cardiac defect-lung malsegmentation syndrome	2	26	0	23	17	21
+MONDO:0011057	cerebrovascular disorder	3	0	0	0	0	0
+MONDO:0011076	myofibrillar myopathy 1	5	32	0	23	15	17
+MONDO:0011089	patent ductus venosus	3	7	0	0	6	6
+MONDO:0011094	dilated cardiomyopathy 1C	5	9	0	7	7	7
+MONDO:0011095	dilated cardiomyopathy 1D	4	11	1	11	6	6
+MONDO:0011142	Ehlers-Danlos syndrome, musculocontractural type	3	64	0	64	43	54
+MONDO:0011151	exudative vitreoretinopathy 4	6	12	0	0	8	8
+MONDO:0011188	arrhythmogenic right ventricular dysplasia 3	5	4	0	0	1	1
+MONDO:0011189	arrhythmogenic right ventricular dysplasia 4	5	5	0	0	2	2
+MONDO:0011191	capillary infantile hemangioma	6	1	0	1	1	1
+MONDO:0011208	malignant atrophic papulosis	3	37	0	34	29	34
+MONDO:0011232	migraine, familial hemiplegic, 2	7	25	1	16	24	24
+MONDO:0011257	MPI-congenital disorder of glycosylation	3	33	2	27	23	27
+MONDO:0011354	situs inversus totalis with cystic dysplasia of kidneys and pancreas	5	0	0	0	0	0
+MONDO:0011376	ventricular fibrillation, paroxysmal familial, type 1	5	3	0	0	3	3
+MONDO:0011377	long QT syndrome 3	5	9	0	7	8	8
+MONDO:0011400	dilated cardiomyopathy 1G	6	7	0	0	6	6
+MONDO:0011403	left ventricular noncompaction 1	5	15	0	8	11	11
+MONDO:0011423	autosomal recessive limb-girdle muscular dystrophy type 2E	5	22	0	16	12	13
+MONDO:0011425	dilated cardiomyopathy 1H	6	1	0	0	1	1
+MONDO:0011451	cardioencephalomyopathy, fatal infantile, due to cytochrome c oxidase deficiency 1	5	122	0	119	75	82
+MONDO:0011454	patent ductus arteriosus-bicuspid aortic valve-hand anomalies syndrome	3	10	1	7	5	7
+MONDO:0011459	arrhythmogenic right ventricular dysplasia 5	5	10	0	0	8	8
+MONDO:0011460	arrhythmogenic right ventricular dysplasia 6	5	3	0	2	2	2
+MONDO:0011474	progressive familial heart block type IB	4	8	0	2	8	8
+MONDO:0011479	postural orthostatic tachycardia syndrome	3	2	0	2	0	0
+MONDO:0011482	dilated cardiomyopathy 1I	6	5	1	5	3	3
+MONDO:0011484	catecholaminergic polymorphic ventricular tachycardia 1	4	13	0	11	8	8
+MONDO:0011514	tricuspid atresia	3	10	0	10	9	9
+MONDO:0011531	Noonan syndrome 2	4	73	4	69	52	56
+MONDO:0011541	dilated cardiomyopathy 1J	5	9	0	5	7	8
+MONDO:0011546	heterotaxy, visceral, 2, autosomal	4	14	0	8	11	11
+MONDO:0011567	dilated cardiomyopathy 1K	6	3	0	2	2	2
+MONDO:0011583	cerebral amyloid angiopathy, APP-related	5	9	0	7	7	7
+MONDO:0011592	exudative vitreoretinopathy 3	5	6	0	0	5	5
+MONDO:0011659	heterotaxy, visceral, 3, autosomal	4	0	0	0	0	0
+MONDO:0011676	PHACE syndrome	2	51	0	34	36	42
+MONDO:0011702	dilated cardiomyopathy 1L	6	6	1	4	3	3
+MONDO:0011744	primary intraosseous venous malformation	6	11	0	11	8	8
+MONDO:0011766	46,XY gonadal dysgenesis-motor and sensory neuropathy syndrome	6	31	0	31	16	19
+MONDO:0011770	aortic aneurysm, familial thoracic 2	3	0	0	0	0	0
+MONDO:0011784	Moyamoya disease 2	7	2	0	1	0	0
+MONDO:0011827	patent ductus arteriosus	2	0	0	0	0	0
+MONDO:0011831	arrhythmogenic right ventricular dysplasia 8	5	6	1	6	5	5
+MONDO:0011840	dilated cardiomyopathy 1M	6	6	0	4	3	3
+MONDO:0011843	hypertrophic cardiomyopathy 25	5	3	0	3	3	3
+MONDO:0011857	atrial fibrillation, familial, 3	5	6	1	5	4	4
+MONDO:0011895	idiopathic hypereosinophilic syndrome	4	83	0	78	70	73
+MONDO:0011899	Noonan syndrome-like disorder with loose anagen hair	6	29	0	29	18	23
+MONDO:0011914	hypotrichosis-lymphedema-telangiectasia syndrome	3	10	3	10	6	6
+MONDO:0011915	mitral valve prolapse, myxomatous 2	5	2	0	0	2	2
+MONDO:0011927	tufted angioma	6	19	0	16	13	16
+MONDO:0011938	atrial septal defect 2	4	8	0	8	8	8
+MONDO:0011968	autosomal recessive limb-girdle muscular dystrophy type 2D	5	29	0	25	15	17
+MONDO:0012011	coronary artery disease, autosomal dominant, 1	3	7	0	6	6	6
+MONDO:0012016	capillary malformation-arteriovenous malformation syndrome	3	29	0	29	22	25
+MONDO:0012032	Braddock syndrome	5	24	0	24	19	22
+MONDO:0012053	aneurysm, intracranial berry, 2	8	2	0	0	2	2
+MONDO:0012061	familial sick sinus syndrome	4	0	0	0	0	0
+MONDO:0012062	dilated cardiomyopathy 1O	6	4	0	4	3	3
+MONDO:0012066	atrial fibrillation, familial, 1	5	2	0	1	1	1
+MONDO:0012105	granulomatosis with polyangiitis	5	95	0	83	73	78
+MONDO:0012111	hypertrophic cardiomyopathy 8	5	12	1	5	11	11
+MONDO:0012112	hypertrophic cardiomyopathy 10	5	15	0	11	12	12
+MONDO:0012122	moyamoya disease 3	7	0	0	0	0	0
+MONDO:0012167	atrial fibrillation, familial, 2	5	1	0	0	1	1
+MONDO:0012173	long chain 3-hydroxyacyl-CoA dehydrogenase deficiency	5	29	0	25	24	26
+MONDO:0012180	arrhythmogenic right ventricular dysplasia 9	5	12	0	11	9	9
+MONDO:0012194	aneurysm, intracranial berry, 3	8	1	0	0	1	1
+MONDO:0012212	Loeys-Dietz syndrome 1	3	53	6	49	43	45
+MONDO:0012264	preeclampsia/eclampsia 2	7	0	0	0	0	0
+MONDO:0012265	preeclampsia/eclampsia 3	7	0	0	0	0	0
+MONDO:0012266	preeclampsia/eclampsia 4	7	0	0	0	0	0
+MONDO:0012285	left ventricular noncompaction 2	5	1	0	0	0	0
+MONDO:0012306	cardiomyopathy, familial restrictive, 2	5	0	0	0	0	0
+MONDO:0012312	short QT syndrome type 1	4	6	0	0	6	6
+MONDO:0012313	short QT syndrome type 2	4	6	0	1	6	6
+MONDO:0012314	short QT syndrome type 3	4	5	1	5	3	3
+MONDO:0012320	migraine, familial hemiplegic, 3	7	7	0	3	7	7
+MONDO:0012343	aortic aneurysm, familial abdominal, 2	7	0	0	0	0	0
+MONDO:0012362	dilated cardiomyopathy 1P	6	4	0	2	3	3
+MONDO:0012364	dilated cardiomyopathy 1Q	6	1	0	1	1	1
+MONDO:0012371	Noonan syndrome 3	4	50	7	46	44	45
+MONDO:0012427	Loeys-Dietz syndrome 2	3	61	1	51	43	47
+MONDO:0012434	arrhythmogenic right ventricular dysplasia 10	5	12	1	11	8	8
+MONDO:0012439	Alagille syndrome due to a NOTCH2 point mutation	4	18	0	0	12	13
+MONDO:0012443	aneurysm, intracranial berry, 4	8	0	0	0	0	0
+MONDO:0012500	chilblain lupus 1	4	7	2	7	5	5
+MONDO:0012506	arrhythmogenic right ventricular dysplasia 11	5	8	0	4	7	7
+MONDO:0012526	hereditary angioedema type 3	5	7	0	0	4	4
+MONDO:0012532	hereditary hemorrhagic telangiectasia type 4	4	22	0	0	11	12
+MONDO:0012547	Noonan syndrome 4	4	44	0	40	32	35
+MONDO:0012556	DK1-congenital disorder of glycosylation	5	48	0	48	25	29
+MONDO:0012557	cardiomyopathy-hypotonia-lactic acidosis syndrome	5	13	0	11	9	11
+MONDO:0012569	mitral valve prolapse, myxomatous 3	5	2	0	0	2	2
+MONDO:0012586	coronary artery disease, autosomal dominant 2	3	11	0	1	7	8
+MONDO:0012637	COG1-congenital disorder of glycosylation	3	89	0	82	55	60
+MONDO:0012654	atrial septal defect 4	4	3	0	2	3	3
+MONDO:0012667	dilated cardiomyopathy 1W	6	3	0	3	1	1
+MONDO:0012669	Legius syndrome	6	53	5	41	36	43
+MONDO:0012677	atrial fibrillation, familial, 4	5	5	0	5	5	5
+MONDO:0012678	atrial fibrillation, familial, 5	5	1	0	0	1	1
+MONDO:0012684	arrhythmogenic right ventricular dysplasia 12	5	6	2	4	5	5
+MONDO:0012690	Noonan syndrome 5	4	38	0	34	28	31
+MONDO:0012691	LEOPARD syndrome 2	7	18	0	0	14	16
+MONDO:0012699	autosomal recessive limb-girdle muscular dystrophy type 2M	5	18	0	12	9	11
+MONDO:0012704	dilated cardiomyopathy 1X	6	8	0	7	3	3
+MONDO:0012714	early-onset myopathy with fatal cardiomyopathy	5	23	0	22	10	13
+MONDO:0012726	autosomal dominant familial hematuria-retinal arteriolar tortuosity-contractures syndrome	1	14	1	13	8	11
+MONDO:0012727	Kawasaki disease	3	46	0	46	32	33
+MONDO:0012728	Brugada syndrome 2	4	6	0	2	6	6
+MONDO:0012730	aortic aneurysm, familial thoracic 6	3	9	0	4	3	3
+MONDO:0012740	chromosome 22q11.2 deletion syndrome, distal	3	64	0	62	43	46
+MONDO:0012742	Brugada syndrome 3	4	6	0	0	5	5
+MONDO:0012743	Brugada syndrome 4	4	3	0	0	3	3
+MONDO:0012744	dilated cardiomyopathy 1Y	5	8	0	8	6	6
+MONDO:0012745	dilated cardiomyopathy 1Z	6	3	0	3	3	3
+MONDO:0012746	dilated cardiomyopathy 2A	6	4	1	4	2	2
+MONDO:0012751	aortic aneurysm, familial abdominal, 3	7	0	0	0	0	0
+MONDO:0012752	aneurysm, intracranial berry, 6	8	0	0	0	0	0
+MONDO:0012762	catecholaminergic polymorphic ventricular tachycardia 2	4	6	0	2	5	5
+MONDO:0012765	lymphatic malformation 2	3	1	0	0	1	1
+MONDO:0012799	hypertrophic cardiomyopathy 11	5	17	0	17	16	16
+MONDO:0012804	hypertrophic cardiomyopathy 12	5	6	0	6	4	4
+MONDO:0012808	dilated cardiomyopathy 1AA	4	12	0	12	9	9
+MONDO:0012810	aneurysm, intracranial berry, 7	8	0	0	0	0	0
+MONDO:0012811	aneurysm, intracranial berry, 8	8	0	0	0	0	0
+MONDO:0012816	atrial fibrillation, familial, 6	5	3	2	3	1	1
+MONDO:0012828	atrial fibrillation, familial, 7	5	7	0	7	6	6
+MONDO:0012900	cardiomyopathy, familial restrictive, 3	4	8	0	8	4	5
+MONDO:0012949	aneurysm, intracranial berry, 9	8	0	0	0	0	0
+MONDO:0012950	aneurysm, intracranial berry, 10	8	0	0	0	0	0
+MONDO:0013011	atrial septal defect 5	4	1	0	1	1	1
+MONDO:0013015	Brugada syndrome 5	4	3	0	0	3	3
+MONDO:0013024	chronic thromboembolic pulmonary hypertension	5	37	0	37	27	28
+MONDO:0013030	dilated cardiomyopathy 1BB	6	6	0	6	4	4
+MONDO:0013053	microcephaly-facio-cardio-skeletal syndrome, Hadziselimovic type	2	31	0	1	24	25
+MONDO:0013063	ventricular fibrillation, paroxysmal familial, 2	5	3	0	1	3	3
+MONDO:0013066	46,XY sex reversal 3	6	9	0	8	5	5
+MONDO:0013071	Emery-Dreifuss muscular dystrophy 4, autosomal dominant	7	6	0	0	2	2
+MONDO:0013072	Emery-Dreifuss muscular dystrophy 5, autosomal dominant	7	11	0	6	7	7
+MONDO:0013100	atrial fibrillation, familial, 8	5	1	0	0	1	1
+MONDO:0013120	46,XY sex reversal 5	6	2	3	2	0	0
+MONDO:0013123	atrial septal defect 6	4	3	0	3	3	3
+MONDO:0013137	choroidal dystrophy, central areolar 2	3	2	0	0	2	2
+MONDO:0013145	Brugada syndrome 6	4	3	0	1	3	3
+MONDO:0013146	Brugada syndrome 7	4	5	0	3	4	4
+MONDO:0013147	dilated cardiomyopathy 1CC	6	3	0	3	1	1
+MONDO:0013148	Brugada syndrome 8	4	3	0	3	3	3
+MONDO:0013151	choroidal dystrophy, central areolar, 3	5	2	0	1	2	2
+MONDO:0013168	dilated cardiomyopathy 1DD	6	3	1	2	2	2
+MONDO:0013186	Noonan syndrome 6	4	47	0	41	35	39
+MONDO:0013195	hypertrophic cardiomyopathy 13	5	13	1	9	11	11
+MONDO:0013197	hypertrophic cardiomyopathy 14	5	7	0	7	5	5
+MONDO:0013198	dilated cardiomyopathy 1EE	6	4	0	4	2	2
+MONDO:0013200	hypertrophic cardiomyopathy 15	5	10	0	10	5	5
+MONDO:0013211	dilated cardiomyopathy 1FF	6	4	0	4	2	2
+MONDO:0013218	exudative vitreoretinopathy 5	6	7	0	5	5	5
+MONDO:0013261	dilated cardiomyopathy 1R	5	9	1	8	5	5
+MONDO:0013262	dilated cardiomyopathy 1S	5	17	1	16	13	13
+MONDO:0013278	lymphatic malformation 3	3	3	0	0	2	3
+MONDO:0013317	torsade-de-pointes syndrome with short coupling interval	3	0	0	0	0	0
+MONDO:0013324	lymphedema-posterior choanal atresia syndrome	4	4	0	2	4	4
+MONDO:0013339	dilated cardiomyopathy 1GG	6	7	0	7	4	4
+MONDO:0013369	hypertrophic cardiomyopathy 7	5	5	0	4	4	4
+MONDO:0013371	dilated cardiomyopathy 1U	6	8	0	8	6	6
+MONDO:0013373	dilated cardiomyopathy 1V	6	10	0	10	8	8
+MONDO:0013379	Noonan syndrome 7	4	44	2	38	25	28
+MONDO:0013380	LEOPARD syndrome 3	7	32	0	30	22	24
+MONDO:0013403	heterotaxy, visceral, 4, autosomal	4	15	0	15	9	9
+MONDO:0013410	46,XY sex reversal 6	6	9	0	7	7	7
+MONDO:0013412	hypertrophic cardiomyopathy 9	5	1	0	1	1	1
+MONDO:0013418	aortic aneurysm, familial thoracic 7	3	5	0	4	2	2
+MONDO:0013426	aneurysm-osteoarthritis syndrome	3	82	2	80	63	68
+MONDO:0013452	multisystemic smooth muscle dysfunction syndrome	2	20	0	14	13	13
+MONDO:0013455	hypertrophic cardiomyopathy 16	5	11	1	10	10	10
+MONDO:0013458	hyperuricemia-pulmonary hypertension-renal failure-alkalosis syndrome	5	25	0	21	19	19
+MONDO:0013463	congenital heart defects, multiple types, 6	4	14	0	0	11	11
+MONDO:0013474	hypertrophic cardiomyopathy 17	5	7	1	6	6	6
+MONDO:0013475	hypertrophic cardiomyopathy 18	5	5	0	3	5	5
+MONDO:0013476	hypertrophic cardiomyopathy 19	5	0	0	0	0	0
+MONDO:0013477	hypertrophic cardiomyopathy 20	5	3	1	3	3	3
+MONDO:0013479	dilated cardiomyopathy 1HH	6	3	0	3	2	2
+MONDO:0013513	atrial fibrillation, familial, 9	5	3	2	3	3	3
+MONDO:0013529	catecholaminergic polymorphic ventricular tachycardia 3	4	11	1	10	9	9
+MONDO:0013530	atrial fibrillation, familial, 10	5	9	0	9	8	8
+MONDO:0013540	deafness-lymphedema-leukemia syndrome	3	13	0	10	10	12
+MONDO:0013542	Moyamoya disease 5	3	2	0	0	1	1
+MONDO:0013544	atrial fibrillation, familial, 11	5	3	1	3	2	2
+MONDO:0013545	atrial fibrillation, familial, 12	5	1	0	1	1	1
+MONDO:0013567	atrial septal defect 3	4	1	0	0	1	1
+MONDO:0013640	familial retinal arterial macroaneurysm	3	3	0	2	2	2
+MONDO:0013644	Charcot-Marie-Tooth disease axonal type 2O	6	12	0	9	9	10
+MONDO:0013654	aneurysm, intracranial berry, 11	8	0	0	0	0	0
+MONDO:0013664	46,XY disorder of sex development due to testicular 17,20-desmolase deficiency	6	4	0	0	3	3
+MONDO:0013677	Emery-Dreifuss muscular dystrophy 7, autosomal dominant	7	8	0	6	5	5
+MONDO:0013716	aortic aneurysm, familial abdominal, 4	7	0	0	0	0	0
+MONDO:0013739	chilblain lupus 2	4	3	0	3	1	1
+MONDO:0013746	ventricular septal defect 1	4	5	0	5	5	5
+MONDO:0013747	atrioventricular septal defect 4	4	1	0	0	1	1
+MONDO:0013748	ventricular septal defect 2	4	1	0	1	1	1
+MONDO:0013749	ventricular septal defect 3	4	4	0	4	4	4
+MONDO:0013750	atrial septal defect 8	4	2	0	2	2	2
+MONDO:0013752	hypoplastic left heart syndrome 2	4	4	0	1	4	4
+MONDO:0013768	arterial calcification, generalized, of infancy, 2	3	14	0	14	12	13
+MONDO:0013769	atrioventricular septal defect 5	4	3	0	3	3	3
+MONDO:0013770	atrial septal defect 9	4	3	0	3	3	3
+MONDO:0013773	brain small vessel disease 2A, autosomal dominant	5	13	0	10	10	11
+MONDO:0013792	intracerebral hemorrhage	6	0	0	0	0	0
+MONDO:0013805	intellectual disability, autosomal dominant 13	6	26	0	25	16	17
+MONDO:0013806	familial cutaneous telangiectasia and oropharyngeal predisposition cancer syndrome	3	17	0	16	11	11
+MONDO:0013808	Maffucci syndrome	3	26	0	24	26	26
+MONDO:0013817	preeclampsia/eclampsia 5	7	0	0	0	0	0
+MONDO:0013848	dilated cardiomyopathy 2B	6	4	0	4	3	3
+MONDO:0013852	hypertrophic cardiomyopathy 21	5	5	1	4	5	5
+MONDO:0013887	heterotaxy, visceral, 6, autosomal	4	10	0	9	9	9
+MONDO:0013897	Loeys-Dietz syndrome 4	3	40	5	39	28	30
+MONDO:0013902	aortic valve disease 2	4	11	0	11	8	8
+MONDO:0013960	sinoatrial node dysfunction and deafness	3	4	1	4	3	3
+MONDO:0013966	catecholaminergic polymorphic ventricular tachycardia 4	4	7	0	6	7	7
+MONDO:0013968	PGM1-congenital disorder of glycosylation	5	46	0	45	37	38
+MONDO:0013988	congenital heart defects, multiple types, 3	3	9	0	0	9	9
+MONDO:0014000	congenital heart defects, multiple types, 2	3	11	0	7	10	10
+MONDO:0014042	left ventricular noncompaction 7	5	2	0	0	0	0
+MONDO:0014051	cardioencephalomyopathy, fatal infantile, due to cytochrome c oxidase deficiency 2	5	17	0	11	13	14
+MONDO:0014073	dilated cardiomyopathy 1II	6	6	1	6	3	3
+MONDO:0014095	dilated cardiomyopathy 1JJ	6	2	0	2	1	1
+MONDO:0014100	dilated cardiomyopathy 1KK	5	8	0	7	6	6
+MONDO:0014112	cardiofaciocutaneous syndrome 2	7	15	0	0	13	13
+MONDO:0014113	cardiofaciocutaneous syndrome 3	7	22	0	9	20	21
+MONDO:0014114	cardiofaciocutaneous syndrome 4	7	39	0	36	28	30
+MONDO:0014134	pulmonary hypertension, primary, 2	7	3	0	3	1	1
+MONDO:0014135	pulmonary hypertension, primary, 3	7	4	0	0	2	3
+MONDO:0014136	pulmonary hypertension, primary, 4	7	7	1	6	4	5
+MONDO:0014143	Noonan syndrome 8	4	30	0	30	25	27
+MONDO:0014152	left ventricular noncompaction 8	5	7	0	7	4	4
+MONDO:0014155	atrial fibrillation, familial, 13	5	3	0	3	2	2
+MONDO:0014156	atrial fibrillation, familial, 14	5	4	0	4	4	4
+MONDO:0014163	left ventricular noncompaction 10	5	6	0	5	4	4
+MONDO:0014187	aortic aneurysm, familial thoracic 8	3	5	0	5	0	0
+MONDO:0014191	catecholaminergic polymorphic ventricular tachycardia 5	4	6	1	6	4	5
+MONDO:0014217	telangiectasia, hereditary hemorrhagic, type 5	4	4	0	4	3	3
+MONDO:0014236	Ehlers-Danlos syndrome, musculocontractural type 2	4	32	1	19	24	24
+MONDO:0014262	Rienhoff syndrome	3	57	0	54	39	39
+MONDO:0014263	8q24.3 microdeletion syndrome	3	117	0	108	78	84
+MONDO:0014306	deficiency of adenosine deaminase 2	3	59	0	51	47	48
+MONDO:0014329	atrial standstill 2	6	13	0	0	9	9
+MONDO:0014331	Moyamoya disease with early-onset achalasia	7	15	0	14	10	11
+MONDO:0014340	atrial fibrillation, familial, 15	5	5	0	5	4	4
+MONDO:0014344	congenital heart defects, multiple types, 4	4	7	0	7	6	6
+MONDO:0014393	lymphatic malformation 4	3	7	0	6	5	5
+MONDO:0014396	dilated cardiomyopathy 1NN	6	7	0	7	4	5
+MONDO:0014405	STING-associated vasculopathy with onset in infancy	2	38	0	34	22	24
+MONDO:0014454	Hennekam lymphangiectasia-lymphedema syndrome 2	4	19	1	15	12	13
+MONDO:0014459	Adams-Oliver syndrome 5	4	20	0	15	16	16
+MONDO:0014480	46,XY sex reversal 9	6	5	0	5	2	3
+MONDO:0014500	atrial conduction disease	4	0	0	0	0	0
+MONDO:0014514	aortic aneurysm, familial thoracic 9	3	11	0	9	8	8
+MONDO:0014558	autosomal dominant intellectual disability-craniofacial anomalies-cardiac defects syndrome	3	117	1	117	71	78
+MONDO:0014621	Brugada syndrome 9	4	4	0	4	3	3
+MONDO:0014634	46,XY sex reversal 10	6	13	0	11	11	11
+MONDO:0014652	exudative vitreoretinopathy 6	5	17	0	16	12	13
+MONDO:0014667	cardioencephalomyopathy, fatal infantile, due to cytochrome c oxidase deficiency 3	5	3	0	3	1	1
+MONDO:0014668	cardioencephalomyopathy, fatal infantile, due to cytochrome c oxidase deficiency 4	5	14	0	14	11	11
+MONDO:0014676	Emery-Dreifuss muscular dystrophy 3, autosomal recessive	6	45	1	42	27	30
+MONDO:0014691	Noonan syndrome 9	4	17	0	14	14	14
+MONDO:0014693	Noonan syndrome 10	4	41	0	40	32	33
+MONDO:0014762	heterotaxy, visceral, 7, autosomal	4	21	0	7	17	18
+MONDO:0014768	cerebral arteriopathy, autosomal dominant, with subcortical infarcts and leukoencephalopathy, type 2	3	14	0	11	7	8
+MONDO:0014773	cardiac anomalies - developmental delay - facial dysmorphism syndrome	3	76	0	68	50	55
+MONDO:0014784	severe hypotonia-psychomotor developmental delay-strabismus-cardiac septal defect syndrome	3	17	0	1	12	12
+MONDO:0014788	autosomal recessive limb-girdle muscular dystrophy type 2W	5	12	0	0	7	8
+MONDO:0014797	lymphatic malformation 6	3	31	0	11	28	29
+MONDO:0014878	patent ductus arteriosus 2	3	1	1	1	1	1
+MONDO:0014881	transketolase deficiency	3	30	0	30	25	27
+MONDO:0014883	hypertrophic cardiomyopathy 26	5	13	0	12	11	11
+MONDO:0014950	aortic aneurysm, familial thoracic 10	3	20	0	20	15	15
+MONDO:0014967	heterotaxy, visceral, 8, autosomal	4	12	0	12	9	9
+MONDO:0014976	lethal left ventricular non-compaction-seizures-hypotonia-cataract-developmental delay syndrome	3	22	0	22	15	15
+MONDO:0015001	atrial fibrillation, familial, 18	5	6	0	6	6	6
+MONDO:0015009	lymphatic malformation 7	3	15	0	11	14	14
+MONDO:0015033	ABeta amyloidosis, dutch type	6	9	0	9	8	9
+MONDO:0015053	hereditary angioedema type 1	6	26	0	26	17	23
+MONDO:0015054	hereditary angioedema type 2	6	0	0	0	0	0
+MONDO:0015055	acquired angioedema type 2	5	0	0	0	0	0
+MONDO:0015056	acquired angioedema type 1	5	0	0	0	0	0
+MONDO:0015057	renin-angiotensin-aldosterone system-blocker-induced angioedema	5	11	2	11	7	8
+MONDO:0015061	neurogenic thoracic outlet syndrome	3	8	0	8	7	8
+MONDO:0015097	aortic valve dysplasia	6	0	0	0	0	0
+MONDO:0015103	pulmonary valve agenesis-tetralogy of fallot-absence of ductus arteriosus syndrome	5	0	0	0	0	0
+MONDO:0015109	congenital anomaly of the mitral subvalvular apparatus	4	0	0	0	0	0
+MONDO:0015196	vein of Galen aneurysm	3	3	0	3	1	2
+MONDO:0015197	aneurysm of sinus of Valsalva	4	11	0	11	11	11
+MONDO:0015203	coronary artery congenital malformation	3	0	0	0	0	0
+MONDO:0015236	aortic arch defects	4	0	0	0	0	0
+MONDO:0015239	abnormal origin of the pulmonary artery	4	0	0	0	0	0
+MONDO:0015249	mitral atresia disorder	3	0	0	0	0	0
+MONDO:0015257	sino-auricular heart block	3	0	0	0	0	0
+MONDO:0015263	Brugada syndrome	3	12	0	12	12	12
+MONDO:0015273	complete atrioventricular canal	4	34	0	34	24	27
+MONDO:0015275	partial atrioventricular canal	4	25	0	25	20	22
+MONDO:0015280	cardiofaciocutaneous syndrome	6	79	0	79	47	58
+MONDO:0015281	atrial standstill	5	32	0	32	25	26
+MONDO:0015296	cardiac anomalies-heterotaxy syndrome	2	0	0	0	0	0
+MONDO:0015317	laryngotracheal angioma	6	13	0	13	12	12
+MONDO:0015374	primary central nervous system vasculitis	4	30	0	30	24	25
+MONDO:0015400	frontonasal arteriovenous malformation	7	0	0	0	0	0
+MONDO:0015401	maxillary arteriovenous malformation	7	0	0	0	0	0
+MONDO:0015402	mandibular arteriovenous malformation	7	0	0	0	0	0
+MONDO:0015403	non-involuting congenital hemangioma	6	11	1	11	4	4
+MONDO:0015404	rapidly involuting congenital hemangioma	6	13	1	13	6	6
+MONDO:0015405	cerebrofacial arteriovenous metameric syndrome	6	0	0	0	0	0
+MONDO:0015406	cerebrofacial arteriovenous metameric syndrome type 1	7	0	0	0	0	0
+MONDO:0015407	cerebrofacial arteriovenous metameric syndrome type 3	7	0	0	0	0	0
+MONDO:0015408	diffuse lymphatic malformation	4	0	0	0	0	0
+MONDO:0015445	autosomal dominant coarctation of aorta	5	0	0	0	0	0
+MONDO:0015446	atypical coarctation of aorta	5	0	0	0	0	0
+MONDO:0015449	criss-cross heart	3	13	0	13	10	13
+MONDO:0015450	triatrial heart	3	0	0	0	0	0
+MONDO:0015451	univentricular heart	4	14	0	14	12	12
+MONDO:0015487	fatal infantile encephalocardiomyopathy	4	0	0	0	0	0
+MONDO:0015491	immune complex mediated vasculitis	3	0	0	0	0	0
+MONDO:0015492	anti-neutrophil cytoplasmic antibody-associated vasculitis	4	0	0	0	0	0
+MONDO:0015500	facial arteriovenous malformation	6	0	0	0	0	0
+MONDO:0015523	epithelioid hemangioendothelioma	4	0	0	0	0	0
+MONDO:0015529	paroxysmal Hemicrania	4	19	2	19	13	13
+MONDO:0015530	trigeminal autonomic cephalalgia	3	0	0	0	0	0
+MONDO:0015661	dextrocardia	3	26	0	26	17	24
+MONDO:0015664	idiopathic pulmonary artery dilatation	4	0	0	0	0	0
+MONDO:0015666	familial idiopathic dilatation of the right atrium	3	24	0	24	16	19
+MONDO:0015677	cardiac diverticulum	3	42	0	42	36	42
+MONDO:0015691	hypereosinophilic syndrome	6	0	0	0	0	0
+MONDO:0015924	pulmonary arterial hypertension	5	13	0	13	12	13
+MONDO:0015943	eosinophilic granulomatosis with polyangiitis	6	66	0	66	44	50
+MONDO:0015987	scimitar syndrome	4	39	0	39	30	34
+MONDO:0016028	erythromelalgia	3	0	0	0	0	0
+MONDO:0016077	congenital aortopulmonary window	4	0	0	0	0	0
+MONDO:0016078	congenital systemic arteriovenous fistula	3	0	0	0	0	0
+MONDO:0016081	coronary arterial fistulas	4	27	0	27	24	24
+MONDO:0016097	symptomatic form of muscular dystrophy of Duchenne and Becker in female carriers	5	18	2	18	9	10
+MONDO:0016222	spindle cell hemangioma	5	0	0	0	0	0
+MONDO:0016223	infantile hemangioma of rare localization	5	0	0	0	0	0
+MONDO:0016231	capillary malformation	2	0	0	0	0	0
+MONDO:0016236	kaposiform hemangioendothelioma	4	14	0	14	10	10
+MONDO:0016237	diffuse neonatal hemangiomatosis	3	19	0	19	12	18
+MONDO:0016256	Hennekam syndrome	3	51	0	51	38	43
+MONDO:0016301	congenitally corrected transposition of the great arteries	4	49	0	49	39	45
+MONDO:0016302	isolated congenitally uncorrected transposition of the great arteries	4	0	0	0	0	0
+MONDO:0016303	congenitally uncorrected transposition of the great arteries with cardiac malformation	4	0	0	0	0	0
+MONDO:0016311	Bockenheimer syndrome	3	21	0	21	10	15
+MONDO:0016330	non-familial hypertrophic cardiomyopathy	5	0	0	0	0	0
+MONDO:0016332	hypertrophic cardiomyopathy due to intensive athletic training	6	0	0	0	0	0
+MONDO:0016333	familial dilated cardiomyopathy	4	0	0	0	0	0
+MONDO:0016338	non-familial dilated cardiomyopathy	5	0	0	0	0	0
+MONDO:0016340	familial restrictive cardiomyopathy	4	0	0	0	0	0
+MONDO:0016342	familial isolated arrhythmogenic right ventricular dysplasia	4	0	0	0	0	0
+MONDO:0016345	non-familial restrictive cardiomyopathy	5	0	0	0	0	0
+MONDO:0016424	progressive sensorineural hearing loss-hypertrophic cardiomyopathy syndrome	5	0	0	0	0	0
+MONDO:0016460	polyvalvular heart disease syndrome	2	23	0	23	20	20
+MONDO:0016469	Ehlers-Danlos syndrome, vascular-like type	2	0	0	0	0	0
+MONDO:0016475	Beckwith-Wiedemann syndrome due to imprinting defect of 11p15	6	0	0	0	0	0
+MONDO:0016476	Beckwith-Wiedemann syndrome due to CDKN1C mutation	6	0	0	0	0	0
+MONDO:0016477	Beckwith-Wiedemann syndrome due to 11p15 microdeletion	6	0	0	0	0	0
+MONDO:0016478	Beckwith-Wiedemann syndrome due to 11p15 translocation/inversion	6	0	0	0	0	0
+MONDO:0016483	intracranial berry aneurysm	7	15	0	15	12	13
+MONDO:0016547	Beckwith-Wiedemann syndrome due to NSD1 mutation	6	0	0	0	0	0
+MONDO:0016581	conotruncal heart malformations	3	9	0	1	5	7
+MONDO:0016582	congenital mitral malformation	3	0	0	0	0	0
+MONDO:0016587	arrhythmogenic right ventricular cardiomyopathy	4	0	0	0	0	0
+MONDO:0016664	drug-induced vasculitis	4	0	0	0	0	0
+MONDO:0016718	choroid plexus carcinoma	4	0	0	0	0	0
+MONDO:0016748	hemangioblastoma	3	16	0	16	12	13
+MONDO:0016820	Moyamoya disease	6	5	0	5	3	5
+MONDO:0016830	Emery-Dreifuss muscular dystrophy	5	43	1	43	27	30
+MONDO:0016848	juvenile temporal arteritis	4	6	2	6	5	5
+MONDO:0016861	Alagille syndrome due to 20p12 microdeletion	4	0	0	0	0	0
+MONDO:0016862	Alagille syndrome due to a JAG1 point mutation	4	60	0	27	46	48
+MONDO:0016982	angiosarcoma	4	0	0	0	0	0
+MONDO:0017148	heritable pulmonary arterial hypertension	6	0	0	0	0	0
+MONDO:0017149	drug- or toxin-induced pulmonary arterial hypertension	6	0	0	0	0	0
+MONDO:0017157	pulmonary hypertension owing to lung disease and/or hypoxia	5	0	0	0	0	0
+MONDO:0017209	infectious posterior uveitis	4	0	0	0	0	0
+MONDO:0017212	paraneoplastic uveitis	4	0	0	0	0	0
+MONDO:0017215	calciphylaxis	2	13	0	13	7	11
+MONDO:0017216	calciphylaxis cutis	3	0	0	0	0	0
+MONDO:0017217	visceral calciphylaxis	3	0	0	0	0	0
+MONDO:0017242	cutaneous collagenous vasculopathy	3	10	0	10	8	9
+MONDO:0017300	congenital pericardium anomaly	3	0	0	0	0	0
+MONDO:0017309	neonatal Marfan syndrome	2	43	0	43	33	38
+MONDO:0017314	Ehlers-Danlos syndrome, vascular type	2	95	0	95	70	80
+MONDO:0017388	celiac trunk compression syndrome	3	2	0	0	2	2
+MONDO:0017401	familial isolated arrhythmogenic ventricular dysplasia, left dominant form	5	0	0	0	0	0
+MONDO:0017402	familial isolated arrhythmogenic ventricular dysplasia, biventricular form	5	0	0	0	0	0
+MONDO:0017403	familial isolated arrhythmogenic ventricular dysplasia, right dominant form	5	0	0	0	0	0
+MONDO:0017694	glycogen storage disease due to acid maltase deficiency, infantile onset	6	62	0	51	34	39
+MONDO:0017705	congenital pulmonary venous return anomaly	4	0	0	0	0	0
+MONDO:0017727	fixed subaortic stenosis	4	28	0	28	23	23
+MONDO:0017735	congenital aortic valve stenosis	5	17	0	17	12	13
+MONDO:0017816	primary systemic amyloidosis	7	0	0	0	0	0
+MONDO:0017817	primary localized amyloidosis	7	0	0	0	0	0
+MONDO:0017818	lethal arteriopathy syndrome due to fibulin-4 deficiency	2	0	0	0	0	0
+MONDO:0017833	primary hypereosinophilic syndrome	7	0	0	0	0	0
+MONDO:0017834	secondary hypereosinophilic syndrome	7	0	0	0	0	0
+MONDO:0017835	lymphocytic hypereosinophilic syndrome	8	0	0	0	0	0
+MONDO:0017864	congenital pulmonary veins atresia or stenosis	4	0	0	0	0	0
+MONDO:0017865	congenital pulmonary valve stenosis	4	3	0	3	2	3
+MONDO:0017866	subpulmonary stenosis	5	0	0	0	0	0
+MONDO:0017870	supravalvular pulmonary stenosis	5	0	0	0	0	0
+MONDO:0017945	ABetaL34V amyloidosis	6	11	0	11	10	11
+MONDO:0017946	ABeta amyloidosis, Iowa type	6	9	0	9	8	9
+MONDO:0017947	ABeta amyloidosis, Italian type	6	7	0	7	6	7
+MONDO:0017948	ABetaA21G amyloidosis	6	0	0	0	0	0
+MONDO:0017949	ABeta amyloidosis, Arctic type	6	2	0	2	2	2
+MONDO:0017988	multifocal atrial tachycardia	3	25	0	25	16	19
+MONDO:0017989	His bundle tachycardia	3	4	0	4	4	4
+MONDO:0017990	catecholaminergic polymorphic ventricular tachycardia	3	10	0	10	9	9
+MONDO:0017991	Takayasu arteritis	4	54	0	54	43	46
+MONDO:0017993	cerebral sinovenous thrombosis	4	0	0	0	0	0
+MONDO:0018001	inverse Klippel-Trenaunay syndrome	3	0	0	0	0	0
+MONDO:0018008	idiopathic giant cell myocarditis	4	0	0	0	0	0
+MONDO:0018018	wild type ATTR amyloidosis	6	32	0	32	22	26
+MONDO:0018043	Thomas syndrome	2	11	0	11	8	10
+MONDO:0018048	heparin-induced thrombocytopenia	3	15	0	15	12	13
+MONDO:0018054	familial atrial fibrillation	4	11	0	11	10	10
+MONDO:0018072	persistent truncus arteriosus	3	36	0	36	28	32
+MONDO:0018082	aorto-ventricular tunnel	4	8	0	8	6	7
+MONDO:0018084	Uhl anomaly	3	15	1	15	11	11
+MONDO:0018089	double outlet right ventricle	4	28	0	28	24	25
+MONDO:0018090	double outlet left ventricle	4	17	0	17	15	16
+MONDO:0018148	vasoproliferative tumor of retina	3	0	0	0	0	0
+MONDO:0018152	serpiginous choroiditis	4	0	0	0	0	0
+MONDO:0018164	arterial thoracic outlet syndrome	3	0	0	0	0	0
+MONDO:0018165	venous thoracic outlet syndrome	3	0	0	0	0	0
+MONDO:0018203	LMNA-related cardiocutaneous progeria syndrome	3	27	0	27	23	24
+MONDO:0018212	familial cervical artery dissection	4	0	0	0	0	0
+MONDO:0018227	hypocomplementemic urticarial vasculitis	4	47	0	47	40	46
+MONDO:0018332	multiple acyl-CoA dehydrogenase deficiency, severe neonatal type	6	0	0	0	0	0
+MONDO:0018333	multiple acyl-CoA dehydrogenase deficiency, mild type	6	0	0	0	0	0
+MONDO:0018485	glycogen storage disease due to acid maltase deficiency, late-onset	6	10	2	10	4	4
+MONDO:0018498	double outlet right ventricle with subaortic or doubly committed ventricular septal defect	5	0	0	0	0	0
+MONDO:0018499	double outlet right ventricle with atrioventricular septal defect, pulmonary stenosis, heterotaxy	5	0	0	0	0	0
+MONDO:0018554	pulmonary veno-occlusive disease and/or pulmonary capillary haemangiomatosis	6	0	0	0	0	0
+MONDO:0018585	pediatric arterial ischemic stroke	3	0	0	0	0	0
+MONDO:0018592	cutaneous polyarteritis nodosa	6	0	0	0	0	0
+MONDO:0018593	primary polyarteritis nodosa	5	0	0	0	0	0
+MONDO:0018594	secondary polyarteritis nodosa	5	0	0	0	0	0
+MONDO:0018595	single-organ polyarteritis nodosa	6	0	0	0	0	0
+MONDO:0018596	systemic polyarteritis nodosa	6	0	0	0	0	0
+MONDO:0018615	hemicrania continua	4	0	0	0	0	0
+MONDO:0018640	secondary vasculitis	3	0	0	0	0	0
+MONDO:0018664	ectopia cordis	3	0	0	0	0	0
+MONDO:0018677	visceral heterotaxy	3	0	0	0	0	0
+MONDO:0018684	idiopathic neonatal atrial flutter	5	14	0	14	8	11
+MONDO:0018685	incessant infant ventricular tachycardia	3	11	1	11	7	8
+MONDO:0018712	composite hemangioendothelioma	4	0	0	0	0	0
+MONDO:0018713	retiform hemangioendothelioma	4	0	0	0	0	0
+MONDO:0018714	primary intralymphatic angioendothelioma	4	0	0	0	0	0
+MONDO:0018715	congenital hemangioma	5	0	0	0	0	0
+MONDO:0018716	partially involuting congenital hemangioma	6	0	0	0	0	0
+MONDO:0018717	mixed cystic lymphatic malformation	4	0	0	0	0	0
+MONDO:0018734	verrucous hemangioma	6	7	0	7	4	5
+MONDO:0018735	multifocal lymphangioendotheliomatosis-thrombocytopenia syndrome	4	46	0	46	30	39
+MONDO:0018736	kaposiform lymphangiomatosis	3	46	0	46	29	42
+MONDO:0018811	congenital portosystemic shunt	2	0	0	0	0	0
+MONDO:0018827	familial chilblain lupus	3	0	0	0	0	0
+MONDO:0018832	HTRA1-related autosomal dominant cerebral small vessel disease	4	0	0	0	0	0
+MONDO:0018837	postinfectious vasculitis	4	57	0	57	32	39
+MONDO:0018854	acquired purpura fulminans	3	25	0	25	14	20
+MONDO:0018870	arterial calcification of infancy	2	59	0	59	33	37
+MONDO:0018882	vasculitis	2	0	0	0	0	0
+MONDO:0018892	Wyburn-Mason syndrome	3	0	0	0	0	0
+MONDO:0018893	Cobb syndrome	3	20	0	20	16	17
+MONDO:0018901	left ventricular noncompaction	4	0	0	0	0	0
+MONDO:0018920	peripartum cardiomyopathy	6	43	0	43	34	38
+MONDO:0018923	22q11.2 deletion syndrome	2	134	0	131	109	120
+MONDO:0018925	familial or sporadic hemiplegic migraine	5	51	0	51	35	36
+MONDO:0018927	SUNCT syndrome	4	23	0	23	17	17
+MONDO:0018932	cirrhotic cardiomyopathy	6	0	0	0	0	0
+MONDO:0018954	Loeys-Dietz syndrome	2	37	0	37	33	35
+MONDO:0018997	Noonan syndrome	3	70	0	70	47	58
+MONDO:0019013	non-histaminic angioedema	4	0	0	0	0	0
+MONDO:0019018	Tako-tsubo cardiomyopathy	3	33	4	33	23	23
+MONDO:0019073	hypotrichosis-lymphedema-telangiectasia-renal defect syndrome	3	28	0	8	15	17
+MONDO:0019101	retinal capillary malformation	3	19	0	19	17	17
+MONDO:0019122	idiopathic acute eosinophilic pneumonia	5	11	0	11	7	9
+MONDO:0019124	microscopic polyangiitis	4	55	0	55	41	45
+MONDO:0019158	tropical endomyocardial fibrosis	6	48	0	48	31	35
+MONDO:0019159	Loeffler endocarditis	6	27	0	27	18	20
+MONDO:0019167	immunoglobulin A vasculitis	4	34	0	34	32	33
+MONDO:0019170	polyarteritis nodosa	4	28	0	28	21	23
+MONDO:0019180	hereditary hemorrhagic telangiectasia	3	36	0	36	22	26
+MONDO:0019196	Foix-Alajouanine syndrome	6	0	0	0	0	0
+MONDO:0019293	skin vascular disease	2	0	0	0	0	0
+MONDO:0019313	lymphatic malformation	2	0	0	0	0	0
+MONDO:0019328	macrocystic lymphatic malformation	4	0	0	0	0	0
+MONDO:0019329	microcystic lymphatic malformation	4	0	0	0	0	0
+MONDO:0019388	pelvis syndrome	3	17	0	17	16	16
+MONDO:0019438	AL amyloidosis	6	54	1	54	33	38
+MONDO:0019439	AA amyloidosis	6	32	0	32	28	30
+MONDO:0019441	ATTRV122I amyloidosis	5	25	0	25	17	21
+MONDO:0019443	dextro-looped transposition of the great arteries	3	31	0	31	24	28
+MONDO:0019490	progressive familial heart block	3	8	0	8	8	8
+MONDO:0019493	primary adult heart tumor	3	0	0	0	0	0
+MONDO:0019494	primary pediatric heart tumor	3	0	0	0	0	0
+MONDO:0019509	cutaneous leukocytoclastic angiitis	4	14	0	14	11	13
+MONDO:0019512	congenital heart malformation	2	0	0	0	0	0
+MONDO:0019514	hepatic veno-occlusive disease	3	12	0	12	12	12
+MONDO:0019516	exudative vitreoretinopathy	4	27	0	27	18	22
+MONDO:0019526	erythema elevatum diutinum	4	8	0	8	6	7
+MONDO:0019543	acquired aneurysmal subarachnoid hemorrhage	7	34	0	34	25	28
+MONDO:0019557	chilblain lupus	2	18	0	18	12	12
+MONDO:0019623	hereditary angioedema	4	0	0	0	0	0
+MONDO:0019624	acquired angioedema	4	0	0	0	0	0
+MONDO:0019625	familial thoracic aortic aneurysm and aortic dissection	2	41	0	41	29	32
+MONDO:0019726	type II mixed cryoglobulinemia	5	0	0	0	0	0
+MONDO:0019727	mixed cryoglobulinemia type III	5	0	0	0	0	0
+MONDO:0019803	angioma serpiginosum	3	4	0	4	3	4
+MONDO:0019807	mesocardia	3	0	0	0	0	0
+MONDO:0019808	aortic valve atresia	3	0	0	0	0	0
+MONDO:0019809	congenital aortic valve insufficiency	4	0	0	0	0	0
+MONDO:0019811	tricuspid valve agenesis	5	0	0	0	0	0
+MONDO:0019813	congenital tricuspid stenosis	5	6	3	6	6	6
+MONDO:0019814	straddling or overriding tricuspid valve	5	0	0	0	0	0
+MONDO:0019815	accessory tricuspid valve tissue	5	0	0	0	0	0
+MONDO:0019817	congenital mitral valve insufficiency and/or stenosis	4	0	0	0	0	0
+MONDO:0019818	cleft mitral valve	4	0	0	0	0	0
+MONDO:0019819	double-orifice mitral valve	5	0	0	0	0	0
+MONDO:0019820	univentricular cardiopathy	3	0	0	0	0	0
+MONDO:0019821	aneurysm or dilatation of ascending aorta	4	0	0	0	0	0
+MONDO:0019823	premature closure of the arterial duct	4	0	0	0	0	0
+MONDO:0019825	congenital coronary artery aneurysm	4	0	0	0	0	0
+MONDO:0019829	congenital anomaly of superior vena cava	2	0	0	0	0	0
+MONDO:0019830	congenital anomaly of the inferior vena cava	2	0	0	0	0	0
+MONDO:0019836	congenital anomaly of hepatic vein	2	0	0	0	0	0
+MONDO:0019862	levocardia	4	0	0	0	0	0
+MONDO:0019875	Beckwith-Wiedemann syndrome due to 11p15 microduplication	6	0	0	0	0	0
+MONDO:0019923	Beckwith-Wiedemann syndrome due to paternal uniparental disomy of chromosome 11	6	0	0	0	0	0
+MONDO:0019944	Eisenmenger syndrome	6	58	0	58	54	54
+MONDO:0019972	dural sinus malformation	6	48	0	48	36	43
+MONDO:0019993	congenital renal artery stenosis	2	0	0	0	0	0
+MONDO:0020007	absence of the pulmonary artery	3	37	0	37	30	32
+MONDO:0020048	internal carotid agenesis	2	5	0	5	5	5
+MONDO:0020064	pulmonary valve agenesis	4	0	0	0	0	0
+MONDO:0020289	congenital tricuspid malformation	4	0	0	0	0	0
+MONDO:0020290	familial atrioventricular septal defect	3	0	0	0	0	0
+MONDO:0020291	hypoplastic right heart syndrome	4	0	0	0	0	0
+MONDO:0020292	congenital anomaly of the great arteries	3	0	0	0	0	0
+MONDO:0020295	congenital pulmonary veins anomaly	3	0	0	0	0	0
+MONDO:0020296	congenital arteriovenous fistula	2	0	0	0	0	0
+MONDO:0020297	Noonan syndrome and Noonan-related syndrome	5	0	0	0	0	0
+MONDO:0020336	autosomal dominant Emery-Dreifuss muscular dystrophy	6	43	1	43	27	30
+MONDO:0020385	congenitally uncorrected transposition of the great arteries with coarctation	4	0	0	0	0	0
+MONDO:0020386	double outlet right ventricle with subaortic or doubly committed ventricular septal defect with pulmonary stenosis	5	0	0	0	0	0
+MONDO:0020387	double outlet right ventricle with subpulmonary ventricular septal defect	5	0	0	0	0	0
+MONDO:0020388	double outlet right ventricle with non-committed subpulmonary ventricular septal defect	5	0	0	0	0	0
+MONDO:0020389	pulmonary valve agenesis-ventricular septal defect-persistent ductus arteriosus syndrome	5	0	0	0	0	0
+MONDO:0020390	pulmonary artery coming from patent ductus arteriosus	5	0	0	0	0	0
+MONDO:0020391	pulmonary artery coming from the aorta	5	26	0	26	21	23
+MONDO:0020393	discrete fibromuscular subaortic stenosis	5	0	0	0	0	0
+MONDO:0020394	tunnel subaortic stenosis	5	0	0	0	0	0
+MONDO:0020395	valvar pulmonary stenosis	5	0	0	0	0	0
+MONDO:0020396	anomaly of the tricuspid valve chordae	5	0	0	0	0	0
+MONDO:0020397	parachute tricuspid valve	5	0	0	0	0	0
+MONDO:0020398	congenital mitral stenosis	4	0	0	0	0	0
+MONDO:0020399	congenital hypoplasia of the mitral valve annulus	5	0	0	0	0	0
+MONDO:0020400	congenital supravalvular mitral ring	5	0	0	0	0	0
+MONDO:0020401	congenital unguarded mitral orifice	5	0	0	0	0	0
+MONDO:0020402	congenital accessory mitral valve tissue	5	0	0	0	0	0
+MONDO:0020403	congenital mitral valve agenesis	5	0	0	0	0	0
+MONDO:0020404	shone complex	5	0	0	0	0	0
+MONDO:0020405	straddling and/or overriding mitral valve	5	0	0	0	0	0
+MONDO:0020406	complete atrioventricular canal-left heart obstruction syndrome	5	0	0	0	0	0
+MONDO:0020407	complete atrioventricular canal-ventricle hypoplasia syndrome	5	0	0	0	0	0
+MONDO:0020408	complete atrioventricular canal-tetralogy of fallot syndrome	5	0	0	0	0	0
+MONDO:0020409	univentricular heart with single atrio-ventricular valve	5	0	0	0	0	0
+MONDO:0020410	aorto-right ventricular tunnel	5	0	0	0	0	0
+MONDO:0020411	aorto-left ventricular tunnel	5	0	0	0	0	0
+MONDO:0020412	congenital patent ductus arteriosus aneurysm	4	0	0	0	0	0
+MONDO:0020413	encircling double aortic arch	5	0	0	0	0	0
+MONDO:0020414	persistent fifth aortic arch	5	0	0	0	0	0
+MONDO:0020415	Kommerell diverticulum	5	0	0	0	0	0
+MONDO:0020416	Neuhauser anomaly	5	0	0	0	0	0
+MONDO:0020417	right aortic arch	5	0	0	0	0	0
+MONDO:0020418	dysphagia lusoria	5	0	0	0	0	0
+MONDO:0020419	pulmonary artery hypoplasia	4	0	0	0	0	0
+MONDO:0020420	pulmonary branch stenosis	4	0	0	0	0	0
+MONDO:0020421	coronary artery intramyocardial course	4	0	0	0	0	0
+MONDO:0020422	aortopulmonary coronary arterial course	4	0	0	0	0	0
+MONDO:0020423	stenosis or atrophy of the coronary ostium	4	0	0	0	0	0
+MONDO:0020424	intramural coronary arterial course	4	0	0	0	0	0
+MONDO:0020425	abnormal number of coronary ostia	4	0	0	0	0	0
+MONDO:0020426	malposition of the coronary ostium	4	0	0	0	0	0
+MONDO:0020427	Laubry-Pezzi syndrome	3	22	0	22	16	18
+MONDO:0020428	congenital Gerbode defect	3	28	0	28	24	24
+MONDO:0020429	cor triatriatum dexter	4	0	0	0	0	0
+MONDO:0020430	cor triatriatum sinister	4	0	0	0	0	0
+MONDO:0020431	juxtaposition of the atrial appendages	3	0	0	0	0	0
+MONDO:0020432	ectasia of the right atrial appendage	3	0	0	0	0	0
+MONDO:0020433	ectasia of the left appendage	3	0	0	0	0	0
+MONDO:0020434	atrial septal defect, ostium secundum type	4	35	0	35	29	31
+MONDO:0020435	atrial septal defect, coronary sinus type	4	26	0	26	19	19
+MONDO:0020436	atrial septal defect, sinus venosus type	4	27	0	27	23	25
+MONDO:0020437	atrial septal defect, ostium primum type	4	38	0	38	29	32
+MONDO:0020438	atrial septal aneurysm	3	0	0	0	0	0
+MONDO:0020439	patent foramen ovale	4	0	0	0	0	0
+MONDO:0020440	persistent left superior vena cava connecting to the left-sided atrium	3	0	0	0	0	0
+MONDO:0020441	right superior vena cava connecting to left-sided atrium	3	0	0	0	0	0
+MONDO:0020442	left superior vena cava persisting to left-sided atrium	3	0	0	0	0	0
+MONDO:0020443	absence of innominate vein	3	0	0	0	0	0
+MONDO:0020444	subaortic course of innominate vein	3	0	0	0	0	0
+MONDO:0020445	agenesis of the superior vena cava	3	0	0	0	0	0
+MONDO:0020446	coronary sinus stenosis	2	0	0	0	0	0
+MONDO:0020447	coronary sinus atresia	2	0	0	0	0	0
+MONDO:0020448	right inferior vena cava connecting to left-sided atrium	3	0	0	0	0	0
+MONDO:0020449	persistent eustachian valve	3	0	0	0	0	0
+MONDO:0020450	azygos continuation of the inferior vena cava	3	0	0	0	0	0
+MONDO:0020451	congenital stenosis of the inferior vena cava	3	0	0	0	0	0
+MONDO:0020452	inferior vena cava interruption	3	0	0	0	0	0
+MONDO:0020453	congenital partial pulmonary venous return anomaly	5	0	0	0	0	0
+MONDO:0020454	congenital complete agenesis of pericardium	4	0	0	0	0	0
+MONDO:0020455	congenital partial agenesis of pericardium	4	0	0	0	0	0
+MONDO:0020456	pleuro-pericardial cyst	4	0	0	0	0	0
+MONDO:0020496	familial porencephaly	4	0	0	0	0	0
+MONDO:0020531	long chain acyl-CoA dehydrogenase deficiency	5	0	0	0	0	0
+MONDO:0020575	polymorphic ventricular tachycardia	4	0	0	0	0	0
+MONDO:0020576	cutaneous vasculitis	3	0	0	0	0	0
+MONDO:0020589	cardiac germ cell tumor	3	0	0	0	0	0
+MONDO:0020597	angiokeratoma of scrotum	7	0	0	0	0	0
+MONDO:0020672	vascular occlusion disorder	2	0	0	0	0	0
+MONDO:0020673	arterial occlusion	3	0	0	0	0	0
+MONDO:0020674	vascular insufficiency disorder	2	0	0	0	0	0
+MONDO:0020675	ischemic bowel disorder	3	0	0	0	0	0
+MONDO:0020681	Ehlers-Danlos syndrome, musculocontractural type 1	4	73	0	37	57	61
+MONDO:0020688	spinal cord ischemia	5	0	0	0	0	0
+MONDO:0020712	46,XY sex reversal 1	6	15	0	6	7	10
+MONDO:0020713	pulmonary venoocclusive disease 1	3	6	0	3	3	3
+MONDO:0020744	Mobitz type I atrioventricular block	5	0	0	0	0	0
+MONDO:0020745	ventricular arrhythmias due to cardiac ryanodine receptor calcium release deficiency syndrome	3	6	0	2	3	3
+MONDO:0020756	migraine, familial hemiplegic, 1	7	21	0	3	20	20
+MONDO:0020757	sporadic hemiplegic migraine	6	0	0	0	0	0
+MONDO:0020783	capillary malformation-arteriovenous malformation 1	4	4	0	3	3	4
+MONDO:0020785	capillary malformation-arteriovenous malformation 2	4	3	0	2	2	3
+MONDO:0020806	sinoatrial block	3	0	0	0	0	0
+MONDO:0020831	congenital vertebral-cardiac-renal anomalies syndrome	3	0	0	0	0	0
+MONDO:0020983	myocardial rupture	2	0	0	0	0	0
+MONDO:0021080	blood vessel neoplasm	2	0	0	0	0	0
+MONDO:0021121	hemangioendothelioma	3	0	0	0	0	0
+MONDO:0021169	epithelioid hemangioma	5	0	0	0	0	0
+MONDO:0021209	heart neoplasm	2	0	0	0	0	0
+MONDO:0021258	choroid neoplasm	3	0	0	0	0	0
+MONDO:0021281	cavernous hemangioma of retina	4	0	0	0	0	0
+MONDO:0021378	neoplasm of endocardium	3	0	0	0	0	0
+MONDO:0021379	neoplasm of epicardium	3	0	0	0	0	0
+MONDO:0021380	neoplasm of myocardium	3	0	0	0	0	0
+MONDO:0021381	neoplasm of pericardium	2	0	0	0	0	0
+MONDO:0021389	neoplasm of aortic body	3	0	0	0	0	0
+MONDO:0021450	benign neoplasm of heart	3	0	0	0	0	0
+MONDO:0021487	benign neoplasm of choroid	3	0	0	0	0	0
+MONDO:0021505	benign neoplasm of endocardium	4	0	0	0	0	0
+MONDO:0021508	benign neoplasm of epicardium	4	0	0	0	0	0
+MONDO:0021509	benign neoplasm of myocardium	4	0	0	0	0	0
+MONDO:0021514	benign neoplasm of pericardium	3	0	0	0	0	0
+MONDO:0021541	hemangioma of retina	3	0	0	0	0	0
+MONDO:0021542	hemangioma of choroid	4	0	0	0	0	0
+MONDO:0021543	hemangioma of gingiva	5	0	0	0	0	0
+MONDO:0021569	Emery-Dreifuss muscular dystrophy 2, autosomal dominant	7	57	0	49	26	31
+MONDO:0021627	eyelid capillary hemangioma	3	0	0	0	0	0
+MONDO:0021642	vulval varices	5	0	0	0	0	0
+MONDO:0021643	mesenteric varices	4	0	0	0	0	0
+MONDO:0021644	esophageal varices without bleeding	5	0	0	0	0	0
+MONDO:0021645	esophageal varices with bleeding	5	0	0	0	0	0
+MONDO:0021658	vascular ectasia	2	0	0	0	0	0
+MONDO:0021661	coronary atherosclerosis	3	0	0	0	0	0
+MONDO:0021726	abdominal cystic lymphangioma	5	0	0	0	0	0
+MONDO:0021727	aberrant subclavian artery	3	0	0	0	0	0
+MONDO:0021777	acute rheumatic heart disease	3	0	0	0	0	0
+MONDO:0021896	anterior spinal artery stroke	3	0	0	0	0	0
+MONDO:0021902	aortopulmonary window	2	0	0	0	0	0
+MONDO:0022096	pyogenic granuloma	6	0	0	0	0	0
+MONDO:0022293	vascular disorder of penis	2	0	0	0	0	0
+MONDO:0022357	congenital acardia	3	0	0	0	0	0
+MONDO:0022430	persistent fetal circulation syndrome	2	0	0	0	0	0
+MONDO:0022454	angiosarcoma of the scalp	5	0	0	0	0	0
+MONDO:0022471	childhood aortic valve stenosis	5	0	0	0	0	0
+MONDO:0022519	autoimmune myocarditis	3	0	0	0	0	0
+MONDO:0022535	autonomic facial cephalgia	4	0	0	0	0	0
+MONDO:0022559	benign angiitis of the central nervous system	4	0	0	0	0	0
+MONDO:0022653	cardiomyopathy due to anthracyclines	3	0	0	0	0	0
+MONDO:0022737	choroideremia hypopituitarism	4	0	0	0	0	0
+MONDO:0022772	classic Kaposi sarcoma	6	0	0	0	0	0
+MONDO:0022859	cor biloculare	2	0	0	0	0	0
+MONDO:0022985	diffuse cavernous hemangioma of the rectum	5	0	0	0	0	0
+MONDO:0023006	doxorubicin induced cardiomyopathy	3	0	0	0	0	0
+MONDO:0023067	endemic Kaposi sarcoma	6	0	0	0	0	0
+MONDO:0023134	febrile ulceronecrotic Mucha-Habermann disease	5	0	0	0	0	0
+MONDO:0023152	fibrocartilaginous embolism	2	0	0	0	0	0
+MONDO:0023161	viral myocarditis	4	0	0	0	0	0
+MONDO:0023164	viral pericarditis	4	0	0	0	0	0
+MONDO:0023182	Franceschini Vardeu Guala syndrome	6	0	0	0	0	0
+MONDO:0023232	giant cell myocarditis	5	0	0	0	0	0
+MONDO:0023513	Jeune syndrome situs inversus	4	0	0	0	0	0
+MONDO:0023530	kallikrein hypertension	4	0	0	0	0	0
+MONDO:0023650	littoral cell angioma of the spleen	7	0	0	0	0	0
+MONDO:0023660	angioedema, hereditary, 6	5	4	0	4	3	3
+MONDO:0023662	lymphatic malformation 10	3	2	0	2	2	2
+MONDO:0023833	multifocal choroiditis	4	0	0	0	0	0
+MONDO:0024239	congenital anomaly of cardiovascular system	1	0	0	0	0	0
+MONDO:0024249	pityriasis lichenoides	3	0	0	0	0	0
+MONDO:0024250	acute lichenoid pityriasis	4	0	0	0	0	0
+MONDO:0024266	patent ductus arteriosus 3	3	1	0	0	1	1
+MONDO:0024286	benign blood vessel neoplasm	3	0	0	0	0	0
+MONDO:0024287	congenital vascular malformation	3	0	0	0	0	0
+MONDO:0024291	vascular malformation	2	0	0	0	0	0
+MONDO:0024296	vascular neoplasm	2	0	0	0	0	0
+MONDO:0024310	angiodysplasia of stomach	3	0	0	0	0	0
+MONDO:0024461	angiomatosis	4	0	0	0	0	0
+MONDO:0024499	vascular bone neoplasm	3	0	0	0	0	0
+MONDO:0024521	aortic aneurysm, familial abdominal, 1	7	1	0	0	0	0
+MONDO:0024523	aortic valve disease 1	4	8	0	8	8	8
+MONDO:0024529	MVP1	5	8	0	0	6	6
+MONDO:0024533	pulmonary hypertension, primary, 1	7	14	0	11	7	8
+MONDO:0024539	choroidal dystrophy, central areolar, 1	3	3	0	0	2	2
+MONDO:0024559	aortic aneurysm, familial thoracic 1	3	19	0	19	15	15
+MONDO:0024560	PDA1	3	1	0	0	1	1
+MONDO:0024562	sick sinus syndrome 1	5	6	0	0	5	5
+MONDO:0024573	familial hypertrophic cardiomyopathy	4	0	0	0	0	0
+MONDO:0024636	inflammation of heart layer	2	0	0	0	0	0
+MONDO:0024643	myocardial disorder	2	0	0	0	0	0
+MONDO:0024644	myocardial ischemia	3	0	0	0	0	0
+MONDO:0024655	rheumatic pericarditis	3	0	0	0	0	0
+MONDO:0024659	colorectal Kaposi sarcoma	6	0	0	0	0	0
+MONDO:0024664	hypertension, pregnancy-induced	4	0	0	0	0	0
+MONDO:0024673	skin lymphangioma	4	0	0	0	0	0
+MONDO:0024757	cardiovascular neoplasm	1	0	0	0	0	0
+MONDO:0025514	livedoid vasculopathy	3	49	0	49	29	34
+MONDO:0025712	angioedema, hereditary, 4	5	4	0	0	3	3
+MONDO:0025713	angioedema, hereditary, 7	5	5	0	3	2	2
+MONDO:0030062	arrhythmogenic right ventricular dysplasia, familial, 14	5	7	0	6	6	6
+MONDO:0030070	heterotaxy, visceral, 9, autosomal, with male infertility	4	5	0	5	4	4
+MONDO:0030077	vertebral, cardiac, renal, and limb defects syndrome 3	4	14	0	10	12	14
+MONDO:0030270	lymphatic malformation 9	3	2	0	2	0	0
+MONDO:0030293	angioedema, hereditary, 5	5	6	0	1	3	3
+MONDO:0030298	angioedema, hereditary, 8	5	8	0	0	6	6
+MONDO:0030300	cardiomyopathy, dilated, 2D	6	11	0	11	8	8
+MONDO:0030316	lymphatic malformation 11	3	2	0	2	2	2
+MONDO:0030317	cardiomyopathy, familial hypertrophic, 28	5	11	0	11	3	3
+MONDO:0030330	cardiomyopathy, familial restrictive, 6	5	9	0	9	7	7
+MONDO:0030366	cardiomyopathy, dilated, 2E	6	3	0	3	2	2
+MONDO:0030474	heterotaxy, visceral, 10, autosomal, with male infertility	4	8	0	8	6	6
+MONDO:0030475	heterotaxy, visceral, 11, autosomal, with male infertility	4	10	1	10	7	7
+MONDO:0030500	Loeys-Dietz syndrome 6	3	39	10	39	29	32
+MONDO:0030679	Noonan syndrome 14	4	47	0	47	32	33
+MONDO:0030680	cardiomyopathy, dilated, 2F	6	7	0	2	4	4
+MONDO:0030701	autoimmune cardiomyopathy	2	0	0	0	0	0
+MONDO:0030702	autoimmune atherosclerosis	2	0	0	0	0	0
+MONDO:0030703	autoimmune vasculitis	2	0	0	0	0	0
+MONDO:0030731	aortic aneurysm, familial thoracic 12	3	13	0	13	12	12
+MONDO:0030887	cardiomyopathy, dilated, 2G	6	16	0	16	10	11
+MONDO:0031043	lymphatic malformation 12	3	13	0	13	7	8
+MONDO:0032564	hennekam lymphangiectasia-lymphedema syndrome 3	4	13	0	13	12	12
+MONDO:0032592	cardiomyopathy, dilated, 2c	6	5	0	4	3	3
+MONDO:0032783	aortic valve disease 3	4	5	0	5	4	4
+MONDO:0032786	Noonan syndrome 11	4	24	0	24	15	16
+MONDO:0032814	microangiopathy and leukoencephalopathy, pontine, autosomal dominant	4	4	0	4	2	2
+MONDO:0032839	noonan syndrome 12	4	24	0	24	15	19
+MONDO:0032852	myopathy, congenital, with structured cores and z-line abnormalities	4	20	0	5	10	13
+MONDO:0032853	myopathy, distal, 6, adult-onset, autosomal dominant	4	12	0	0	4	4
+MONDO:0032891	aneurysm, intracranial berry, 12	8	5	0	5	4	4
+MONDO:0032907	lymphatic malformation 8	3	5	0	2	5	5
+MONDO:0032915	long QT syndrome 16	4	6	0	6	4	4
+MONDO:0033123	exudative vitreoretinopathy 7	5	6	0	0	5	5
+MONDO:0033669	Noonan syndrome 13	4	67	0	67	45	47
+MONDO:0033946	hereditary angioedema with C1Inh deficiency	5	32	2	28	19	19
+MONDO:0033948	acquired angioedema with C1Inh deficiency	5	0	0	0	0	0
+MONDO:0034556	vibratory angioedema	5	0	0	0	0	0
+MONDO:0035008	isolated splenic vein thrombosis	3	0	0	0	0	0
+MONDO:0035009	isolated mesenteric vein thrombosis	3	19	0	19	14	16
+MONDO:0035149	secondary erythromelalgia	4	0	0	0	0	0
+MONDO:0035220	PLG-related hereditary angioedema with normal C1inh	5	0	0	0	0	0
+MONDO:0035357	portosinusoidal vascular disease	3	0	0	0	0	0
+MONDO:0035500	congenital primary lymphedema of Gordon	3	0	0	0	0	0
+MONDO:0035551	cathepsin a-related arteriopathy-strokes-leukoencephalopathy	4	0	0	0	0	0
+MONDO:0035646	congenital-onset Steinert myotonic dystrophy	6	34	0	34	26	30
+MONDO:0035696	incomplete septal cirrhosis	4	0	0	0	0	0
+MONDO:0035734	hereditary angioedema with normal C1inh not related to F12 or PLG variant	5	0	0	0	0	0
+MONDO:0036870	lymphatic vessel neoplasm	2	0	0	0	0	0
+MONDO:0040676	great vessel cancer	4	0	0	0	0	0
+MONDO:0041093	central retinal vein occlusion with macular edema	4	0	0	0	0	0
+MONDO:0041114	peripheral ischemia	3	0	0	0	0	0
+MONDO:0041259	diphtheritic myocarditis	5	0	0	0	0	0
+MONDO:0041656	ST-elevation myocardial infarction	5	0	0	0	0	0
+MONDO:0042433	mycotic endocarditis	5	0	0	0	0	0
+MONDO:0042495	arteriosclerotic retinopathy	4	0	0	0	0	0
+MONDO:0042966	inherited mitral valve disease	3	0	0	0	0	0
+MONDO:0042967	rheumatic disease of mitral valve	4	0	0	0	0	0
+MONDO:0042981	aortic valve stenosis	4	0	0	0	0	0
+MONDO:0043089	acute posterior multifocal placoid pigment epitheliopathy	5	0	0	0	0	0
+MONDO:0043096	holoacardius amorphus	4	0	0	0	0	0
+MONDO:0043099	Hordnes Engebretsen Knudtson syndrome	3	0	0	0	0	0
+MONDO:0043127	mehta lewis patton syndrome	3	0	0	0	0	0
+MONDO:0043218	neurovascular disorder	2	0	0	0	0	0
+MONDO:0043219	migraine with brainstem aura	5	0	0	0	0	0
+MONDO:0043224	multi-infarct dementia	5	0	0	0	0	0
+MONDO:0043267	rheumatoid vasculitis	3	0	0	0	0	0
+MONDO:0043287	superior vena cava syndrome	2	0	0	0	0	0
+MONDO:0043349	intravascular papillary endothelial hyperplasia	5	0	0	0	0	0
+MONDO:0043361	May-Thurner syndrome	3	0	0	0	0	0
+MONDO:0043475	Adams-Stokes syndrome	5	0	0	0	0	0
+MONDO:0043494	arteritis	3	0	0	0	0	0
+MONDO:0043529	carcinoid heart disease	2	0	0	0	0	0
+MONDO:0043537	cluster headache syndrome	4	0	0	0	0	0
+MONDO:0043576	endarteritis	4	0	0	0	0	0
+MONDO:0043683	Leriche syndrome	4	0	0	0	0	0
+MONDO:0044033	posterior leukoencephalopathy syndrome	5	0	0	0	0	0
+MONDO:0044037	livedo reticularis	3	0	0	0	0	0
+MONDO:0044079	cardio-renal syndrome	3	0	0	0	0	0
+MONDO:0044632	extracranial carotid artery aneurysm	4	28	0	28	21	25
+MONDO:0044649	omphalocele-diaphragmatic hernia-cardiovascular anomalies-radial ray defect syndrome	2	0	0	0	0	0
+MONDO:0044764	benign choroid plexus neoplasm	3	0	0	0	0	0
+MONDO:0044875	coronary microvascular disorder	2	0	0	0	0	0
+MONDO:0045001	cardiac ventricle disorder	2	0	0	0	0	0
+MONDO:0045048	toxemia of pregnancy	5	0	0	0	0	0
+MONDO:0054588	Noonan syndrome-like disorder with loose anagen hair 2	7	78	1	77	54	57
+MONDO:0054637	Noonan syndrome-like disorder with loose anagen hair 1	7	60	0	60	43	47
+MONDO:0054838	cardiomyopathy, familial hypertrophic 27	5	80	0	80	54	60
+MONDO:0054866	sudden arrhythmia death syndrome	3	0	0	0	0	0
+MONDO:0060554	vertebral, cardiac, renal, and limb defects syndrome 1	4	22	0	20	19	19
+MONDO:0060555	vertebral, cardiac, renal, and limb defects syndrome 2	4	19	0	19	14	14
+MONDO:0060663	congenital heart defects, multiple types, 5	3	8	0	6	8	8
+MONDO:0100009	structural congenital heart disease, multiple types - GATA4	3	0	0	0	0	0
+MONDO:0100042	cardiac conduction defect	3	3	0	0	3	3
+MONDO:0100059	hypereosinophilia of undetermined significance	7	0	0	0	0	0
+MONDO:0100077	congenital alveolar dysplasia	4	0	0	0	0	0
+MONDO:0100078	resistant hypertension	4	0	0	0	0	0
+MONDO:0100082	LEOPARD syndrome 1	7	44	0	13	36	39
+MONDO:0100090	congenital alveolar dysplasia due to FGF10	3	0	0	0	0	0
+MONDO:0100097	congenital alveolar dysplasia due to TBX4	3	0	0	0	0	0
+MONDO:0100105	brain small vessel disease 3	5	10	0	10	8	8
+MONDO:0100159	pulmonary hypertension, neonatal	5	0	0	0	0	0
+MONDO:0100234	paroxysmal familial ventricular fibrillation	4	0	0	0	0	0
+MONDO:0100248	rapidly progressive primary central nervous system vasculitis	5	0	0	0	0	0
+MONDO:0100431	migraine without aura	4	0	0	0	0	0
+MONDO:0100467	preeclampsia/eclampsia 1	7	7	0	0	7	7
+MONDO:0100511	sudden cardiac arrest	3	0	0	0	0	0
+MONDO:0100531	Emery-Dreifuss muscular dystrophy 1, X-linked	7	18	0	9	13	13
+MONDO:0100539	hemiplegic migraine-developmental and epileptic encephalopathy spectrum	7	0	0	0	0	0
+MONDO:0100540	GATA6-related congenital heart disease with or without pancreatic agenesis or neonatal diabetes	3	0	0	0	0	0
+MONDO:0100541	GATA5-related congenital heart defects	3	0	0	0	0	0
+MONDO:0100547	cardiogenetic disease	2	0	0	0	0	0
+MONDO:0100557	RBFOX2-related congenital heart disorder	3	0	0	0	0	0
+MONDO:0100567	hereditary angioedema with normal C1Inh	5	11	2	11	8	8
+MONDO:0100614	syndromic congenital heart disease	3	0	0	0	0	0
+MONDO:0500000	episodic angioedema with eosinophilia	7	0	0	0	0	0
+MONDO:0600014	alveolar capillary dysplasia without misalignment of pulmonary veins	4	0	0	0	0	0
+MONDO:0600027	congenital right-sided heart lesions	3	0	0	0	0	0
+MONDO:0700073	glutaric acidemia IIa	6	0	0	0	0	0
+MONDO:0700074	glutaric acidemia IIb	6	0	0	0	0	0
+MONDO:0700076	glutaric acidemia IIc	6	0	0	0	0	0
+MONDO:0700080	EPHB4-associated vascular malformation spectrum	3	0	0	0	0	0
+MONDO:0700112	heterotaxy, visceral, 5, autosomal	4	30	0	29	26	26
+MONDO:0700228	LRP5-related exudative vitreoretinopathy	5	0	0	0	0	0
+MONDO:0700231	TSPAN12-related exudative vitreoretinopathy	5	0	0	0	0	0
+MONDO:0700325	Parkes Weber syndrome	4	44	0	44	28	33
+MONDO:0700335	familial isolated dilated cardiomyopathy	5	13	0	13	11	11
+MONDO:0700349	ACTN2-related cardiac and skeletal myopathy	3	0	0	0	0	0
+MONDO:0700352	ACTC1-related distal arthrogryposis with congenital heart disease	3	0	0	0	0	0
+MONDO:0700388	cardiac conduction disease with or without dilated cardiomyopathy 1	4	13	0	2	12	12
+MONDO:0700389	cardiac conduction disease with or without cardiomyopathy 2	4	20	1	20	14	15
+MONDO:0800107	anterior deviation infundibular septum	4	0	0	0	0	0
+MONDO:0800108	cleft leaflet of tricuspid valve	4	0	0	0	0	0
+MONDO:0800113	necrotizing vasculitis	3	0	0	0	0	0
+MONDO:0800125	disseminated visceral giant cell angiitis	4	0	0	0	0	0
+MONDO:0800175	cardiogenic shock	2	30	0	30	26	26
+MONDO:0800318	Emery-Dreifuss muscular dystrophy 6, X-linked	7	0	0	0	0	0
+MONDO:0800321	congenital heart defects, multiple types, 1, X-linked	3	0	0	0	0	0
+MONDO:0800335	migraine, familial hemiplegic, 4	7	0	0	0	0	0
+MONDO:0800345	atrial fibrillation, familial, 17	5	0	0	0	0	0
+MONDO:0800346	left ventricular noncompaction 9	5	0	0	0	0	0
+MONDO:0800347	cardiomyopathy, familial hypertrophic, 23, with or without ventricular noncompaction	5	0	0	0	0	0
+MONDO:0800349	atrial fibrillation, familial, 16	5	0	0	0	0	0
+MONDO:0800350	left ventricular noncompaction 4	5	0	0	0	0	0
+MONDO:0800351	left ventricular noncompaction 5	5	0	0	0	0	0
+MONDO:0800367	cardiomyopathy, dilated, 1LL	5	0	0	0	0	0
+MONDO:0800368	cardiomyopathy, dilated, 1MM	5	0	0	0	0	0
+MONDO:0800371	cardiomyopathy, familial restrictive, 5	5	0	0	0	0	0
+MONDO:0800374	ventricular tachycardia, catecholaminergic polymorphic 6	4	0	0	0	0	0
+MONDO:0800440	HAND1 related congenital heart defect	3	0	0	0	0	0
+MONDO:0800441	NKX2.5-related congenital, conduction and myopathic heart disease	3	0	0	0	0	0
+MONDO:0800442	MYH-6 related congenital heart defects	3	0	0	0	0	0
+MONDO:0800476	HAND2 related congenital heart defect	3	0	0	0	0	0
+MONDO:0800484	PRKAG2-related cardiomyopathy	4	0	0	0	0	0
+MONDO:0850095	X-linked severe syndromic thoracic aortic aneurysm and dissection	4	0	0	0	0	0
+MONDO:0850223	Libman-Sacks endocarditis	2	0	0	0	0	0
+MONDO:0850371	nonobstructive coronary artery disease	3	0	0	0	0	0
+MONDO:0851102	pulmonary artery disease	3	0	0	0	0	0
+MONDO:0851105	cerebrovascular benign neoplasm	3	0	0	0	0	0
+MONDO:0859151	fibromuscular dysplasia, multifocal	3	31	0	31	22	23
+MONDO:0859173	sick sinus syndrome 4	5	6	4	6	5	5
+MONDO:0859213	congenital heart defects, multiple types, 8, with or without heterotaxy	3	44	0	44	32	32
+MONDO:0859222	heterotaxy, visceral, 12, autosomal	4	26	0	26	20	20
+MONDO:0859358	cardiomyopathy, dilated, 2H	6	6	0	6	5	5
+MONDO:0859368	short QT syndrome 7	4	5	0	0	5	5
+MONDO:0859372	cardiomyopathy, familial hypertrophic, 29, with polyglucosan bodies	5	10	1	10	4	4
+MONDO:0859379	lymphatic malformation 13	3	21	2	21	14	14
+MONDO:0859381	cardiomyopathy, dilated, 100	5	6	0	6	5	5
+MONDO:0859532	congenital heart defects, multiple types, 9	3	16	0	16	11	11
+MONDO:0859565	atrioventricular septal defect	4	0	0	0	0	0
+MONDO:0957433	primary pulmonary vein stenosis	4	0	0	0	0	0
+MONDO:0957452	segmental arterial mediolysis	2	0	0	0	0	0
+MONDO:0957545	cardiomyopathy, dilated, 2I	5	3	0	3	2	2
+MONDO:0957556	congenital pulmonary vein atresia	5	0	0	0	0	0
+MONDO:0957954	lymphatic malformation 14	3	1	0	0	1	1
+MONDO:0957984	cardiomyopathy, dilated, 2j	5	4	0	4	3	3
+MONDO:0958097	primary superior vena cava aneurysm	3	0	0	0	0	0
+MONDO:0958098	primary inferior vena cava aneurysm	3	0	0	0	0	0
+MONDO:0958110	atrophic papulosis	3	0	0	0	0	0
+MONDO:0958123	isolated pulmonary artery sling	5	0	0	0	0	0
+MONDO:0958202	moyamoya disease 7	7	7	0	0	5	5
+MONDO:0958229	bleeding disorder, vascular-type	2	7	0	7	5	5
+MONDO:0958241	cardiomyopathy, familial hypertrophic, 30, atrial	5	7	1	7	3	3
+MONDO:0958274	benign atrophic papulosis	4	0	0	0	0	0
+MONDO:0958334	pulmonary hypertension, primary, 6	7	17	0	17	13	13
+MONDO:0971094	cardiac anomalies-short stature-joint hypermobility-facial dysmorphism syndrome due to TAB2 mutation	3	0	0	0	0	0
+MONDO:0971095	6q25.1 microdeletion syndrome	3	0	0	0	0	0
+MONDO:0971107	common arterial trunk with aortic dominance	4	0	0	0	0	0
+MONDO:0971108	common arterial trunk with pulmonary dominance and interrupted aortic arch	4	0	0	0	0	0
+MONDO:0971115	benign vascular tumor	3	0	0	0	0	0
+MONDO:0971116	borderline vascular tumor	3	0	0	0	0	0
+MONDO:0971123	isolated retinal racemose hemangioma	5	0	0	0	0	0
+MONDO:0971124	perifoveal exudative vascular anomalous complex	4	0	0	0	0	0
+MONDO:0971130	choroidal osteoma	4	0	0	0	0	0
+MONDO:0971133	isolated segmental infantile hemangioma	6	0	0	0	0	0
+MONDO:0971175	cardiomyopathy, dilated, 2K	5	11	0	11	6	6
+MONDO:0971179	arterial tortuosity-bone fragility syndrome	2	60	49	60	35	40
+MONDO:0975752	littoral cell hemangioma of the spleen	3	0	0	0	0	0
+MONDO:0975753	papillary hemangioma	4	0	0	0	0	0
+MONDO:0975754	pseudomyogenic hemangioendothelioma	4	0	0	0	0	0
+MONDO:0975755	eccrine angiomatous hamartoma	4	0	0	0	0	0
+MONDO:0975756	reactive angioendotheliomatosis	4	0	0	0	0	0
+MONDO:0975757	anastomosing haemangioma	4	0	0	0	0	0
+MONDO:0975758	microvenular haemangioma	4	0	0	0	0	0
+MONDO:0975759	acquired elastotic haemangioma	4	0	0	0	0	0
+MONDO:0975910	splenic venous malformation	3	0	0	0	0	0
+MONDO:0976134	heterotaxy, visceral, 13, autosomal	4	27	0	27	15	17
+MONDO:0976135	heterotaxy, visceral, 14, autosomal	4	53	3	53	40	41
+MONDO:0979236	cardiomyopathy, dilated, 2l	5	25	3	25	17	17
+MONDO:0979237	pulmonary hypertension, primary, 7	7	44	2	44	31	31
+MONDO:0979239	cardiomyopathy, dilated, 1QQ	5	5	0	5	1	1
+MONDO:0979243	cardiomyopathy, dilated, 2M	5	32	2	32	19	19
+MONDO:0979258	cerebral proliferative angiopathy	3	0	0	0	0	0
+MONDO:0979271	congenital intrahepatic arterioportal fistula	3	0	0	0	0	0
+MONDO:0979323	carotid web	3	0	0	0	0	0
+MONDO:0979326	Fontan-associated liver disease	3	0	0	0	0	0
+MONDO:0979335	fibro-adipose vascular anomaly	3	0	0	0	0	0
+MONDO:0979571	exudative vitreoretinopathy 8	5	4	0	0	4	4
+MONDO:0979573	cardiomyopathy, familial hypertrophic, 31	5	31	4	31	17	17
+MONDO:0979867	cerebral arteriopathy, autosomal recessive, with subcortical infarcts and leukoencephalopathy 1	3	143	7	143	88	97
+MONDO:0979873	brain small vessel disease 4	5	25	1	25	20	21
+MONDO:0979880	brain small vessel disease 5 with osteoporosis	5	17	0	17	11	12
+MONDO:0980711	brain small vessel disease 6 with leukoencephalopathy	5	24	4	24	17	19
+MONDO:0980715	cardiac conduction disease with or without cardiomyoopathy	3	0	0	0	0	0
+MONDO:0980735	left ventricular failure	4	0	0	0	0	0
+MONDO:0980747	brain small vessel disease 2B, autosomal recessive	5	23	1	23	16	17
+MONDO:0980949	Moyamoya disease 8	7	23	4	23	15	15
+MONDO:0980997	fibromuscular dysplasia of the cervical and intracranial arteries	4	0	0	0	0	0
+MONDO:0980998	fibromuscular dysplasia of the renal arteries	4	0	0	0	0	0
+MONDO:0980999	fibromuscular dysplasia of the coronary arteries	3	0	0	0	0	0
+MONDO:0981000	fibromuscular dysplasia of the visceral arteries	4	0	0	0	0	0
+MONDO:0981001	fibromuscular dysplasia of the arteries of the extremities	4	0	0	0	0	0
+MONDO:0981022	cardiomyopathy, dilated, 3C	5	40	7	40	27	27
+MONDO:1010098	TFAP2B-related congenital heart disease spectrum disorder	3	0	0	0	0	0
+MONDO:1010144	PLD1-related congenital heart disease	3	0	0	0	0	0
+MONDO:1010178	CHD7-related CHARGE syndrome	4	89	0	40	64	71
+MONDO:1010180	cardiogenetic rhythm disorder	3	0	0	0	0	0
+MONDO:1010181	SCN5A-related cardiac rhythm disorder	4	0	0	0	0	0
+MONDO:1010193	TNNT2-related cardiomyopathy	3	0	0	0	0	0
+MONDO:1030007	hypertensive urgency	4	0	0	0	0	0
+MONDO:1030008	mitral valve insufficiency	4	0	0	0	0	0
+MONDO:1030009	persistent atrial fibrillation	4	0	0	0	0	0
+MONDO:1030010	precerebral artery stenosis	4	0	0	0	0	0
+MONDO:1030011	paroxysmal atrial fibrillation	4	0	0	0	0	0
+MONDO:1040011	vertebral artery dissection	4	0	0	0	0	0
+MONDO:1040016	cerebral artery stenosis	4	0	0	0	0	0
+MONDO:1040031	dyneinopathy	5	0	0	0	0	0
+MONDO:1040041	FZD4-related exudative vitreoretinopathy	5	0	0	0	0	0
+MONDO:1060134	atherosclerotic cardiovascular disease	5	0	0	0	0	0
+MONDO:1060150	NOTCH1-related AOS spectrum disorder	3	0	0	0	0	0
+MONDO:1060190	APP-related brain and vascular amyloidosis	4	0	0	0	0	0
+MONDO:1060197	congenital heart disease with heterotaxy syndrome	4	0	0	0	0	0
+MONDO:1060198	ischemic stroke	5	0	0	0	0	0
+MONDO:1060199	hemorrhagic stroke	5	0	0	0	0	0
+MONDO:8000015	46,XY sex reversal 11	6	22	0	14	10	14

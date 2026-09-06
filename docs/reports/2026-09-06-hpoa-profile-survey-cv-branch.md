@@ -1,0 +1,129 @@
+# Scouting: HPOA phenotype profiles as node-topic priors — stage-1 feasibility survey (CV branch)
+
+**Date:** 2026-09-06
+**Feeds:** the alignment-residual question of insight 0082 (exps 0114/0115: spectral
+init fixes starvation; the residual is objective misalignment — separability is not
+phenotype). Candidate fix under evaluation: a knowledge-aligned WORD-side prior —
+boost each node's Dirichlet eta on the OMOP codes its HPO profile maps to, mildly
+downweight NOT-annotated ones. The gate already supplies the patient-side guidance
+(MixEHR-Guided's mechanism, in hard form); what 0114 showed missing is word-side.
+**Tooling:** `analysis/cloud/hpoa_profile_survey.py` (`make -C analysis/cloud
+hpoa-profile-survey`), tests in `analysis/cloud/tests/test_hpoa_profile_survey.py`.
+**Data:** PUBLIC ontology artifacts only — Mondo KGX v2026-06-02 (the fit's pin),
+hp.obo + phenotype.hpoa v2026-06-23. No CDR reads, no patient data, no egress
+exposure anywhere in stage 1.
+
+## Verdict
+
+**Feasible, with a known shape.** 41% of the CV branch carries an HPOA profile;
+~30% of the branch (495/1628 nodes) has >=5 SNOMED-realizable profile terms — and
+coverage HOLDS at the depths where starvation lived. Frequency metadata is
+near-universal (95% of profile terms on profiled nodes), so a frequency-weighted
+prior is on the table, not hypothetical. Two structural caveats below (promiscuity;
+the leakage-strip interaction) shape the design but do not kill it.
+
+## Provenance finding first (time-sensitive)
+
+**HPO removed all ontology xrefs in release v2026-09-01** (release notes: "XREFs
+are no longer maintained in the ontology"; 17,412 mappings dropped, SNOMED CT and
+UMLS included). The maintained successors are SSSOM sets (HP-MeSH, HP-UMLS, HP-MP,
+HP-uPheno at data.monarchinitiative.org/mappings/) — none is HP->SNOMED.
+Consequences:
+
+- **v2026-06-23 is the pin of record** for the HP->SNOMED xref map this project
+  uses (`mondo_usage_core.parse_hpo_xrefs`, the usage-dashboard HPO axis, and this
+  survey). 4,594 SNOMEDCT + 12,816 UMLS xrefs. Anything downloading "latest" hp.obo
+  now silently loses the map (this survey run against latest returned realizability
+  ZERO across the board — that is how the removal was noticed).
+- Future-proofing, if ever needed: HP-UMLS SSSOM (maintained) -> SNOMED via UMLS,
+  a heavier licensed path. Not needed while the frozen xrefs serve.
+
+## Method (one paragraph)
+
+Branch closure from the Mondo KGX edges via the shared disease-only subclass
+adjacency (`mondo_to_omop_mapping`), root MONDO:0004995 -> 1,628 disease nodes with
+BFS min-depth. Node -> HPOA keys via the Mondo `xref` CURIEs (OMIM: as-is,
+`Orphanet:` rewritten to `ORPHA:`, DECIPHER: as-is). HPOA rows: aspect P only;
+polarity NEGATIVE when Qualifier=NOT or frequency resolves to exactly 0 ("Excluded"
+— boosting those would invert the annotation); frequency normalized from all three
+sanctioned shapes (HP frequency term -> range midpoint, n/m ratio, percent);
+sources pooled per (node, term) by max frequency. Realizability: an HP term counts
+as SNOMED-realizable when it or any HPO DESCENDANT carries a SNOMED xref (the
+true-path direction: a patient coded with the more specific phenotype has the
+general one) — computed as ancestor-or-self of the direct-xref set.
+
+## Results (pooled — counts of ontology nodes, no patient data)
+
+| | |
+|---|---|
+| branch closure nodes | 1,628 |
+| nodes with >=1 positive profile term | 665 (40.8%) |
+| nodes with >=1 SNOMED-realizable term | 654 |
+| nodes with >=5 SNOMED-realizable terms | **495 (30.4%)** |
+| nodes with any NOT/excluded annotation | 100 (246 negative rows total) |
+| median profile size (profiled nodes) | 14 (p25 6, p75 30) |
+| median SNOMED-realizable (closure) | 11 |
+| frequency-annotated share of profile terms | 0.95 median per node; 0.85 pooled |
+
+By depth (nodes / with profile / >=5 realizable):
+
+| depth | nodes | with profile | >=5 realizable | >=10 realizable |
+|---|---|---|---|---|
+| 2 | 107 | 28 | 27 | 23 |
+| 3 | 432 | 170 | 139 | 112 |
+| 4 | 461 | 162 | 123 | 89 |
+| 5 | 368 | 166 | 113 | 68 |
+| 6 | 167 | 96 | 60 | 40 |
+| 7 | 71 | 37 | 31 | 23 |
+| 8 | 15 | 5 | 1 | 1 |
+
+**The depth profile is the point:** at depths 4-6 — where 0113's starvation lived
+and 0114's residual misalignment lives — a quarter to a third of nodes carry a
+usable (>=5-term) realizable profile. The knowledge prior reaches the right
+stratum. Nodes without a profile simply keep the current behavior (spectral init,
+flat eta): the prior is per-node additive, so partial coverage costs nothing.
+
+## Structural caveats (design-shaping, not disqualifying)
+
+1. **Promiscuity concentrates in disease-name terms.** 302 of 2,059 realizable
+   terms appear in >=10 profiles; the head is cardiac disease-phenotypes
+   (Congestive heart failure 120 profiles, ASD 90, VSD 83, Dilated cardiomyopathy
+   82, HCM 73, AF 64) plus syndromic giveaways from genetic diseases (Seizure 78,
+   Hypertelorism 72, Global developmental delay 70, Short stature 66, Hypotonia
+   63). A raw boost on these adds no per-node alignment. An IDF-style downweight
+   by profile-frequency within the branch is required, not optional.
+2. **The leakage strip eats the promiscuous head — conveniently.** The fit strips
+   every DAG-node code from the bag-of-words (`strip_mode both`, insight 0079).
+   Profile terms that ARE disease codes (the CHF/DCM/ASD head above) map to
+   stripped tokens, so their boost lands on nothing. What survives the strip is
+   exactly the SNOMED Finding-branch symptom vocabulary (Dyspnea, Syncope,
+   Palpitations, edema...) that insight 0070 showed stays feature-side because
+   Mondo correctly excludes phenotypes. The prior's effective mass therefore
+   self-selects toward the specific, symptom-shaped tail — the aligned part.
+   Stage 2 must split realizable codes into strip-side vs surviving to report the
+   EFFECTIVE realizable count per node.
+3. **NOT is a garnish, as suspected:** 100 nodes, 246 rows branch-wide. Carried
+   (it is nearly free and semantically forced — see polarity rule), but it will
+   not move fits.
+
+## Stage 2 (in-workspace, needs the cluster/BQ)
+
+Per node: (a) map realizable HP terms -> SNOMED source codes -> OMOP standard
+concepts ('Maps to'), (b) split by strip-survival against the fit's label-code
+set, (c) intersect with the corpus vocabulary of the 0113/0114 bundle, (d) count
+distinct persons with >=1 surviving profile code — pooled figures and
+counts-of-nodes only, egress floor respected. That yields the final per-node
+"effective prior support" number and the go/no-go for the eta-boost experiment.
+
+## Repro
+
+```bash
+make -C analysis/cloud hpoa-profile-survey            # defaults: CV branch, pinned versions
+# or directly:
+PYTHONPATH=analysis/cloud python3 analysis/cloud/hpoa_profile_survey.py \
+    --branch MONDO:0004995 --mondo-version 2026-06-02 --hpo-release v2026-06-23 \
+    --cache-dir data/ontology --out-dir /tmp/hpoa_survey
+```
+
+Per-node table (public ontology facts): `2026-09-06-hpoa-profile-survey-MONDO_0004995.tsv`
+alongside this report.

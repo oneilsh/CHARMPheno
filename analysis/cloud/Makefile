@@ -557,6 +557,24 @@ inspect-topics: $(WORKSPACE_ENV)
 	    $${NAMES:+--concept-names "$$NAMES"} \
 	    $(INSPECT_ARGS)
 
+# Stage-1 OFFLINE HPOA profile survey — PUBLIC ontology data only (no CDR, no
+# Spark, no egress exposure; runs anywhere with network + pandas). Gauges
+# whether HPOA disease->phenotype profiles can seed/prior node topics
+# (docs/reports/2026-09-06-hpoa-profile-survey-cv-branch.md).
+# HPO PIN: v2026-06-23 is the LAST release whose hp.obo carries SNOMED xrefs
+# (v2026-09-01 removed all ontology xrefs) — pointing this at "latest" silently
+# returns zero realizability.
+HPOA_BRANCH      ?= MONDO:0004995
+HPOA_MONDO_VER   ?= 2026-06-02
+HPOA_HPO_RELEASE ?= v2026-06-23
+HPOA_OUT         ?= /tmp/hpoa_survey
+HPOA_ARGS        ?=
+hpoa-profile-survey:
+	PYTHONPATH=$(REPO_ROOT)/analysis/cloud python3 $(REPO_ROOT)/analysis/cloud/hpoa_profile_survey.py \
+	    --branch $(HPOA_BRANCH) --mondo-version $(HPOA_MONDO_VER) \
+	    --hpo-release $(HPOA_HPO_RELEASE) --cache-dir $(REPO_ROOT)/data/ontology \
+	    --out-dir $(HPOA_OUT) $(HPOA_ARGS)
+
 # Sibling-support diagnostic for residual degenerate nodes (exp 0109): one pass
 # over the cached bundle's train labels, then buckets every degenerate node by
 # whether its children have any observed support. Requires the bundle to be a
