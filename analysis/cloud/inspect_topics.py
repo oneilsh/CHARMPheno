@@ -1015,6 +1015,73 @@ def build_digest(run_dir, *, exemplars=8, t_words=6, bundle_meta_path=None,
     return "\n".join(L).rstrip() + "\n"
 
 
+def build_auc_slice(run_dir, *, bundle_meta_path=None, grep_pattern=None,
+                    arm="gated_pc"):
+    """Compact per-node readout-AUC slice from `results_readout.json`.
+
+    Answers "which nodes does the readout rank WELL or BADLY?" off-cluster —
+    e.g. whether the 0114/0115 anchor-misaligned node topics (grep their names)
+    underperform the branch, which is the misalignment-cost question the 0114
+    readout was run for. Reports AUC/AP and node counts ONLY; the per-node
+    positive counts in the JSON stay in the run dir (egress floor) — nothing
+    printed here is a patient count.
+    """
+    run_dir = Path(run_dir)
+    res = json.loads((run_dir / "results_readout.json").read_text())
+    if arm not in res:
+        raise SystemExit(f"[inspect_topics] no arm {arm!r} in results_readout.json "
+                         f"(has: {sorted(res)}); run gated-pc-readout first")
+    per_node = {int(k): v for k, v in (res[arm].get("per_node") or {}).items()}
+    if not per_node:
+        raise SystemExit(f"[inspect_topics] arm {arm!r} carries no per_node block")
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    nnames = node_names(manifest)
+    depths = None
+    meta = load_bundle_meta(bundle_meta_path) if bundle_meta_path else None
+    if meta and meta.get("parent_int"):
+        depths = node_depths(meta["parent_int"])
+
+    aucs = {c: float(d["auc"]) for c, d in per_node.items()}
+    vals = sorted(aucs.values())
+
+    def _q(v, p):
+        return v[min(len(v) - 1, int(p * len(v)))]
+
+    L = [f"# readout AUC slice — {run_dir.name} · arm={arm} · "
+         f"{len(vals)} scored node(s)",
+         f"AUC quantiles: p10={_q(vals, .10):.3f} p25={_q(vals, .25):.3f} "
+         f"median={_q(vals, .50):.3f} p75={_q(vals, .75):.3f} "
+         f"p90={_q(vals, .90):.3f}", ""]
+    if depths:
+        by_d: dict = {}
+        for c, a in aucs.items():
+            by_d.setdefault(depths.get(c, -1), []).append(a)
+        L += ["| depth | n scored | median AUC | p25 | p75 |", "|---|---|---|---|---|"]
+        for d in sorted(by_d):
+            v = sorted(by_d[d])
+            L.append(f"| {d} | {len(v)} | {_q(v, .5):.3f} | {_q(v, .25):.3f} | "
+                     f"{_q(v, .75):.3f} |")
+        L.append("")
+    if grep_pattern:
+        rx = re.compile(grep_pattern, re.IGNORECASE)
+        hit = {c: a for c, a in aucs.items() if rx.search(str(nnames.get(c, "")))}
+        rest = sorted(a for c, a in aucs.items() if c not in hit)
+        L.append(f"## grep {grep_pattern!r} — {len(hit)} matched scored node(s)")
+        if hit and rest:
+            hv = sorted(hit.values())
+            L.append(f"matched median AUC={_q(hv, .5):.3f} vs rest "
+                     f"median={_q(rest, .5):.3f}")
+        L.append("")
+        for c, a in sorted(hit.items(), key=lambda kv: kv[1]):
+            ap_ = per_node[c].get("ap")
+            dep = f" d{depths.get(c, '?')}" if depths else ""
+            L.append(f"- AUC={a:.3f}"
+                     f"{'' if ap_ is None else f' AP={float(ap_):.3f}'}{dep} — "
+                     f"{nnames.get(c, f'eng:{c}')}")
+        L.append("")
+    return "\n".join(L).rstrip() + "\n"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1070,10 +1137,21 @@ def main():
     ap.add_argument("--digest-exemplars", type=int, default=8, metavar="N",
                     help="How many best-fed topics to line-detail in --digest "
                          "(default 8).")
+    ap.add_argument("--readout-auc", action="store_true",
+                    help="Emit a compact PER-NODE READOUT-AUC slice from the run's "
+                         "results_readout.json (run gated-pc-readout first): AUC "
+                         "quantiles, by-depth medians (needs --bundle-meta), and "
+                         "--grep'd nodes' AUCs vs the rest. AUC/AP only — no "
+                         "patient counts. Suppresses the other reports.")
     args = ap.parse_args()
 
     run_dir = resolve_run_dir(args.run_dir)
-    if args.digest:
+    if args.readout_auc:
+        report = build_auc_slice(
+            run_dir, bundle_meta_path=args.bundle_meta,
+            grep_pattern=args.grep, arm=args.readout_label)
+        default_out = "readout_auc_slice.md"
+    elif args.digest:
         report = build_digest(
             run_dir, exemplars=args.digest_exemplars, t_words=args.top_words,
             bundle_meta_path=args.bundle_meta, vocab_path=args.vocab_map,
