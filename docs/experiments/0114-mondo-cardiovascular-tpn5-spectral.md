@@ -285,3 +285,15 @@ cannot say spectral helped or hurt case-finding; and the misalignment-cost quest
 the per-node slice (`inspect_topics.py --readout-auc --grep 'cardiomyopath'`), not the
 macro, since 3-4 anchored-wrong nodes cannot move a 193-node mean. Both are queued as the
 follow-up.
+
+**A/B RESOLVED (2026-09-06, vs 0113's recorded readout — insight 0083).** The 0113
+readout had already run (09-05, numbers recorded in `results_readout.json` but never
+logged; now in 0113's doc). Same bundle/split/readout code, 193 shared scored nodes:
+random init BEATS spectral on case-finding across the board — macro 0.7813 vs 0.7567,
+detection 0.6347 vs 0.5723, per-node median 0.791 vs 0.761, deficit widening with depth
+(d5 −0.061, d7 −0.081), and the pregnancy-anchored nodes paying directly (intrinsic CM
+0.890→0.797, dilated CM 0.909→0.772; lone gainer Tako-tsubo 0.767→0.911, the one
+phenotype whose meaning IS the demographic stratum). So this experiment's evidence-floor
+win is a LEGIBILITY win, not a detection win: spectral is demoted to a diagnostic tool
+(it *named* the misalignment this readout then priced), and the live init candidate is
+random + HPO-profile eta prior (2026-09-06 survey + insight 0083).

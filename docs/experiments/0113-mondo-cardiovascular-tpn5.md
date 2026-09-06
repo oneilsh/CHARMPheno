@@ -243,3 +243,17 @@ Per the pre-registered branch, the live candidates are strip-scope (the strip
 under-strips at OMOP granularity), the flat-start init trap, and minibatch rarity
 (ADR-0027 lazy blocks) — to be separated next. The clean discriminator remains a
 plain K≈80 LDA on one subDAG's patients with a variant-inclusive strip (0079).
+
+## Readout (ran 2026-09-05; numbers recovered from `results_readout.json` 2026-09-06 via `inspect_topics.py --readout-auc`)
+
+| gated_pc (pc_topics_lr) | |
+|---|--:|
+| macro ranking AUC / AP (193 scored nodes) | **0.7813 / 0.5255** |
+| detection (case-vs-bg) AUC / AP | 0.6347 / 0.7156 |
+| per-node AUC median (p25/p75) | 0.791 (0.735 / 0.842) |
+
+Median AUC by depth: d2 0.829, d3 0.802, d4 0.783, d5 0.816, d6 0.778, d7 0.754.
+Cardiomyopathy-family matched median 0.876 vs rest 0.788. These are the RANDOM-init
+baseline numbers for the 0114 A/B — see insight 0083: random init beats spectral on
+every case-finding axis despite 72% starved topics, because a starved flat topic leaves
+θ on ancestors/background that the localized head reads as honest signal.
