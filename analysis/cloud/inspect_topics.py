@@ -1047,11 +1047,24 @@ def build_auc_slice(run_dir, *, bundle_meta_path=None, grep_pattern=None,
     def _q(v, p):
         return v[min(len(v) - 1, int(p * len(v)))]
 
+    def _fmt(d, keys):
+        return " ".join(f"{k}={d[k]:.4f}" if isinstance(d.get(k), float)
+                        else f"{k}={d.get(k)}" for k in keys if d.get(k) is not None)
+
     L = [f"# readout AUC slice — {run_dir.name} · arm={arm} · "
-         f"{len(vals)} scored node(s)",
-         f"AUC quantiles: p10={_q(vals, .10):.3f} p25={_q(vals, .25):.3f} "
-         f"median={_q(vals, .50):.3f} p75={_q(vals, .75):.3f} "
-         f"p90={_q(vals, .90):.3f}", ""]
+         f"{len(vals)} scored node(s)"]
+    # Recall the recorded macro lines too, so this one command recovers a
+    # readout whose terminal output is gone (results_readout.json is durable
+    # precisely for that — see run_readout's docstring).
+    rk = res[arm].get("ranking") or {}
+    det = res[arm].get("detection") or {}
+    if rk:
+        L.append(f"recorded macro ranking: {_fmt(rk, ('auc', 'ap', 'n_nodes'))}")
+    if det:
+        L.append(f"recorded detection: {_fmt(det, ('auc', 'ap', 'prev', 'n'))}")
+    L += [f"AUC quantiles: p10={_q(vals, .10):.3f} p25={_q(vals, .25):.3f} "
+          f"median={_q(vals, .50):.3f} p75={_q(vals, .75):.3f} "
+          f"p90={_q(vals, .90):.3f}", ""]
     if depths:
         by_d: dict = {}
         for c, a in aucs.items():
