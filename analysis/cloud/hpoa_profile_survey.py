@@ -18,8 +18,11 @@ possible depends on facts this survey measures:
 
 Stage 1 reads PUBLIC ontology artifacts only (Mondo KGX nodes/edges,
 `hp.obo`, `phenotype.hpoa`) — no CDR, no patient data, no Spark; it runs
-off-cluster. Stage 2 (separate, in-workspace) intersects the realizable codes
-with the corpus vocabulary and counts persons under the egress floor.
+off-cluster. Stage 2 (`hpoa_stage2_probe.py`, in-workspace) intersects the
+realizable codes with the corpus vocabulary and counts persons under the
+egress floor; `--emit-codes` writes its input — one row per (node, term,
+SNOMED code) over each profile term's descendant-or-self closure, still pure
+ontology data.
 
 Driver-owned file: it IMPORTS the source-hashed mapping modules
 (`mondo_to_omop_mapping`, `mondo_usage_core`) and never edits them, so no
@@ -218,6 +221,58 @@ def survey_rows(profiles, closure_ids, depth, names, snomed_direct, snomed_closu
     return pd.DataFrame(rows)
 
 
+def profile_code_rows(profiles, hp_parents, xref_rows, vocabs=("SNOMED",)) -> pd.DataFrame:
+    """One row per (mondo_id, hp_id, vocab, code): the codes that EVIDENCE a
+    profile term, collected over the term's HPO descendant-OR-SELF closure.
+
+    WHY descendant-or-self: the true-path rule, in the emit direction. A patient
+    coded with a MORE specific phenotype instantiates the profile's more general
+    term, so a term's evidence set is every SNOMED xref at or below it — exactly
+    the codes `hpo_realizability`'s closure rule counted as realizable, now made
+    explicit for stage 2 to intersect with the corpus vocabulary. Siblings must
+    NOT leak: a code below a sibling evidences the sibling's ancestors only,
+    which the downward walk guarantees by construction.
+
+    Negative terms (NOT / frequency-0) are CARRIED with ``neg=True`` — the eta
+    prior wants to downweight them, and dropping them here would force stage 2
+    back into the HPOA parse. ``freq`` stays NaN (a blank TSV cell) when no
+    source reported one. A term with no code in its closure yields no rows."""
+    children: dict[str, list] = {}
+    for child, ps in hp_parents.items():
+        for parent in ps:
+            children.setdefault(parent, []).append(child)
+    codes_by_term: dict[str, set] = {}
+    for hp, _name, vocab, code in xref_rows:
+        if vocab in vocabs:
+            codes_by_term.setdefault(hp, set()).add((vocab, code))
+
+    memo: dict[str, tuple] = {}
+
+    def _closure_codes(term):
+        if term not in memo:
+            seen = {term}
+            out = set(codes_by_term.get(term, ()))
+            stack = list(children.get(term, ()))
+            while stack:
+                t = stack.pop()
+                if t in seen:
+                    continue
+                seen.add(t)
+                out |= codes_by_term.get(t, set())
+                stack.extend(children.get(t, ()))
+            memo[term] = tuple(sorted(out))
+        return memo[term]
+
+    rows = []
+    for r in profiles.itertuples(index=False):
+        for vocab, code in _closure_codes(r.hpo_id):
+            rows.append({"mondo_id": r.mondo_id, "hp_id": r.hpo_id,
+                         "neg": bool(r.neg), "freq": r.freq,
+                         "vocab": vocab, "code": code})
+    return pd.DataFrame(
+        rows, columns=["mondo_id", "hp_id", "neg", "freq", "vocab", "code"])
+
+
 def promiscuity(profiles, snomed_closure, hp_labels, top_n: int = 15):
     """(per-term node counts Counter, top rows) over REALIZABLE positive profile
     terms. A term in hundreds of branch profiles cannot align any single node."""
@@ -302,6 +357,10 @@ def main(argv=None) -> int:
     p.add_argument("--cache-dir", default="data/ontology")
     p.add_argument("--out-dir", required=True)
     p.add_argument("--top-promiscuous", type=int, default=15)
+    p.add_argument("--emit-codes", default=None, metavar="PATH",
+                   help="also write a per-(node, term, code) TSV of the SNOMED "
+                        "codes evidencing each profile term (descendant-or-self "
+                        "closure; negatives carried) — stage 2's input")
     args = p.parse_args(argv)
 
     cache = Path(args.cache_dir)
@@ -344,6 +403,21 @@ def main(argv=None) -> int:
     (out / f"hpoa_profile_survey_{slug}.md").write_text(
         build_report(rows, prom_counts, prom_top, meta), encoding="utf-8")
     sys.stderr.write(f"[hpoa-survey] wrote survey to {out}\n")
+
+    if args.emit_codes:
+        # Re-parse the DAG rather than threading it out of hpo_realizability:
+        # the existing outputs (and their tests) stay byte-identical, at the
+        # cost of one extra seconds-scale obo parse in an offline tool.
+        _labels, hp_parents = parse_hpo_dag(obo_text)
+        codes = profile_code_rows(profiles, hp_parents,
+                                  parse_hpo_xrefs(obo_text))
+        dest = Path(args.emit_codes)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        codes.to_csv(dest, sep="\t", index=False)
+        sys.stderr.write(
+            f"[hpoa-survey] emit-codes: {len(codes)} rows, "
+            f"{codes['mondo_id'].nunique()} nodes, "
+            f"{codes['code'].nunique()} distinct codes -> {dest}\n")
     return 0
 
 
