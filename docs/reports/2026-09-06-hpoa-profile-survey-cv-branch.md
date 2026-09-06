@@ -154,3 +154,30 @@ NOT the messy HPO-side "infer higher-level terms" inference deliberately deferre
 report; there is no lower-level annotation to remove because the descendants are not
 label nodes. Promiscuity/IDF weighting then handles the blur near the root. Decision
 pending.
+
+## Stage-2b results (2026-09-06, `--rollup` profiles, rebuilt bundle; egress-safe figures)
+
+(Cluster restart wiped the HDFS bundle cache; `gated-pc-readout ID=114` rebuilt it from
+the manifest and reproduced the recorded readout EXACTLY — macro 0.7567/0.5031,
+detection 0.5723 — a clean byte-stability check on the rebuild path.)
+
+Rolled-up profiles (838 credited branch nodes, 374,136 code rows): **nodes probed
+36 → 132 of 299** (44% of the label space; the remaining 167 have no realizable
+profiled descendant). And inheritance did NOT dilute:
+
+- in-vocab tokens per node: median 82 (p25 38, p75 274); 113/132 nodes ≥20.
+- coverage (101 nodes with n_pos ≥ 100): **median 0.87**; 96 ≥ 0.50, 76 ≥ 0.75,
+  35 ≥ 0.90. Pooled: 877,174 of 1,087,885 positive cells carry ≥1 profile token.
+- The low tail is INFORMATIVE, not noise — the annotation-population mismatch class:
+  varicose disease 0.09, vascular occlusion disorder 0.18, **mitral valve disorder
+  0.23** — labels whose HPOA evidence comes from rare congenital/syndromic contexts
+  while the corpus population is the common acquired disease. For these the prior
+  would push toward the wrong (rare-syndromic) presentation; being soft it cannot
+  dominate, and the per-node coverage table (workspace-internal) supports gating the
+  boost on coverage if wanted.
+
+**GO.** Reach 44% of the label space at median 0.87 coverage clears the bar. Next
+build: the eta-prior mechanism in the fit path (node-specific eta from the rolled-up
+profile codes: freq x IDF weights, IDF over the 132 credited label nodes; NOT rows
+mildly downweighted; nodes without profiles keep flat eta), then the record arm
+**random init x profile-eta vs 0113** (macro 0.7813 to beat).
