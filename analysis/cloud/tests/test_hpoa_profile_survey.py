@@ -205,3 +205,97 @@ def test_branch_closure_depths_and_survey_rows():
     assert (a["snomed_direct_n"], a["snomed_closure_n"]) == (1, 1)
     # disease B's only term went negative (0%), so its positive profile is empty
     assert rows.loc["MONDO:3", "profile_n"] == 0
+
+
+# --- descendant profile roll-up (--rollup) ------------------------------------
+
+# A deeper toy branch than _NODES/_EDGES: root -> {A, sib}, A -> leaf.
+_RU_ADJ = {"MONDO:1": ["MONDO:2", "MONDO:3"], "MONDO:2": ["MONDO:4"]}
+_RU_CLOSURE = {"MONDO:1", "MONDO:2", "MONDO:3", "MONDO:4"}
+
+
+def _ru(profiles):
+    return s.rollup_profiles(pd.DataFrame(profiles), _RU_ADJ, _RU_CLOSURE)
+
+
+def test_rollup_credits_descendants_to_ancestors_inherited_true():
+    """A leaf's profile is credited to EVERY branch ancestor (multi-level) with
+    inherited=True; the leaf's own row keeps inherited=False."""
+    g = _ru({"mondo_id": ["MONDO:4"], "hpo_id": ["HP:0001635"],
+             "neg": [False], "freq": [0.5]}).set_index("mondo_id")
+    assert set(g.index) == {"MONDO:1", "MONDO:2", "MONDO:4"}
+    assert bool(g.loc["MONDO:1", "inherited"]) is True
+    assert bool(g.loc["MONDO:2", "inherited"]) is True
+    assert bool(g.loc["MONDO:4", "inherited"]) is False
+    # the annotation itself rides along unchanged
+    assert g.loc["MONDO:1", "freq"] == 0.5
+    assert bool(g.loc["MONDO:1", "neg"]) is False
+
+
+def test_rollup_self_plus_inherited_merge_takes_freq_max_inherited_false():
+    """When the credited node has its OWN annotation for the term, the merged
+    row is inherited=False and freq pools by max over contributors (NaN only
+    if ALL contributors lack one)."""
+    g = _ru({"mondo_id": ["MONDO:2", "MONDO:4"],
+             "hpo_id": ["HP:0001635"] * 2,
+             "neg": [False, False], "freq": [0.2, 0.9]}).set_index("mondo_id")
+    assert g.loc["MONDO:2", "freq"] == 0.9          # descendant's max wins
+    assert bool(g.loc["MONDO:2", "inherited"]) is False  # own annotation
+    # a self-NaN freq still pools to the descendant's value; all-NaN stays NaN
+    g2 = _ru({"mondo_id": ["MONDO:2", "MONDO:4"],
+              "hpo_id": ["HP:0001635"] * 2,
+              "neg": [False, False],
+              "freq": [float("nan"), 0.9]}).set_index("mondo_id")
+    assert g2.loc["MONDO:2", "freq"] == 0.9
+    g3 = _ru({"mondo_id": ["MONDO:4"], "hpo_id": ["HP:0001635"],
+              "neg": [False], "freq": [float("nan")]}).set_index("mondo_id")
+    assert pd.isna(g3.loc["MONDO:1", "freq"])
+
+
+def test_rollup_neg_unanimity_positive_anywhere_wins():
+    """neg=True only if ALL contributors are negative; one positive contributor
+    anywhere in the subtree makes the union row positive."""
+    unanimous = _ru({"mondo_id": ["MONDO:2", "MONDO:4"],
+                     "hpo_id": ["HP:0099999"] * 2,
+                     "neg": [True, True],
+                     "freq": [None, None]}).set_index("mondo_id")
+    assert bool(unanimous.loc["MONDO:1", "neg"]) is True
+    split = _ru({"mondo_id": ["MONDO:2", "MONDO:4"],
+                 "hpo_id": ["HP:0099999"] * 2,
+                 "neg": [True, False],
+                 "freq": [None, None]}).set_index("mondo_id")
+    assert bool(split.loc["MONDO:1", "neg"]) is False
+    assert bool(split.loc["MONDO:2", "neg"]) is False  # own NOT overridden too
+
+
+def test_rollup_sibling_profile_never_credited():
+    """Credit flows strictly descendant -> ancestor: a SIBLING's profile must
+    not appear on MONDO:2 (only on the shared ancestor and the sibling)."""
+    g = _ru({"mondo_id": ["MONDO:3"], "hpo_id": ["HP:0001635"],
+             "neg": [False], "freq": [0.7]})
+    assert set(g["mondo_id"]) == {"MONDO:1", "MONDO:3"}
+    assert "MONDO:2" not in set(g["mondo_id"])
+    assert "MONDO:4" not in set(g["mondo_id"])
+
+
+def test_rollup_off_emission_columns_and_rows_unchanged():
+    """Without --rollup, profile_code_rows sees no `inherited` column and its
+    emission keeps the OLD six-column contract, row for row; a rolled-up frame
+    appends `inherited` after `code`."""
+    labels, parents = s.parse_hpo_dag(_HP_OBO)
+    xrefs = s.parse_hpo_xrefs(_HP_OBO)
+    profiles = _profiles()
+    old = s.profile_code_rows(profiles, parents, xrefs)
+    assert list(old.columns) == ["mondo_id", "hp_id", "neg", "freq",
+                                 "vocab", "code"]
+    rolled = s.rollup_profiles(
+        profiles, {"MONDO:1": ["MONDO:2", "MONDO:3"]},
+        {"MONDO:1", "MONDO:2", "MONDO:3"})
+    new = s.profile_code_rows(rolled, parents, xrefs)
+    assert list(new.columns) == ["mondo_id", "hp_id", "neg", "freq",
+                                 "vocab", "code", "inherited"]
+    # here no descendant shares a self-annotated term, so the self-credited
+    # rows survive the roll-up byte-for-byte (in general max-pool/unanimity
+    # may change a self row's freq/neg when descendants share the term)
+    assert old.equals(new[new["inherited"] == False]  # noqa: E712
+                      [old.columns].reset_index(drop=True))
