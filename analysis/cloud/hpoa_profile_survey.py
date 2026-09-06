@@ -22,7 +22,9 @@ off-cluster. Stage 2 (`hpoa_stage2_probe.py`, in-workspace) intersects the
 realizable codes with the corpus vocabulary and counts persons under the
 egress floor; `--emit-codes` writes its input — one row per (node, term,
 SNOMED code) over each profile term's descendant-or-self closure, still pure
-ontology data.
+ontology data. `--rollup` additionally credits every branch node with the
+union of its branch descendants' profiles (see `rollup_profiles`) — stage 2
+found most profiled nodes sit below the powered label space.
 
 Driver-owned file: it IMPORTS the source-hashed mapping modules
 (`mondo_to_omop_mapping`, `mondo_usage_core`) and never edits them, so no
@@ -32,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 import urllib.request
 from collections import Counter
 from pathlib import Path
@@ -177,6 +180,78 @@ def build_profiles(hpoa_df: pd.DataFrame, keys_df: pd.DataFrame) -> pd.DataFrame
     return g
 
 
+def rollup_profiles(profiles: pd.DataFrame, child_adj: dict, closure: set) -> pd.DataFrame:
+    """Union each branch node's profile with all its branch DESCENDANTS'
+    profiles -> one row per (credited mondo_id, hpo_id), plus an ``inherited``
+    provenance bit.
+
+    WHY: stage 2 found only 36 of the 299 powered label-DAG nodes carry an OWN
+    HPOA profile — the other 618 profiled branch nodes sit BELOW the label
+    space. The true-path rule already applied on the HPO side applies on the
+    Mondo side too: a patient with the more specific disease instantiates the
+    ancestor label, so an ancestor's effective phenotype profile is the union
+    over its subtree.
+
+    Merge semantics mirror `build_profiles`' across-source pooling, with
+    "contributor" now the node itself (if profiled) plus every profiled branch
+    descendant carrying the term: ``freq`` pools by max (NaN only when every
+    contributor lacks one); ``neg`` is True only if EVERY contributor is
+    negative — a term positive anywhere in the subtree is positive for the
+    union; ``inherited`` is False iff the credited node has its OWN annotation
+    for the term. A sibling can never be credited: credit flows strictly along
+    (descendant -> ancestor-or-self) pairs within the branch closure.
+
+    Implemented as pair expansion + ONE pandas group-by, no per-row Python
+    loops (~100k base rows x ~4-6 ancestors -> up to ~1M merged rows)."""
+    t0 = time.perf_counter()
+    # Parent map restricted to the branch closure, so credit stops at the root.
+    parents: dict[str, list] = {}
+    for u, cs in child_adj.items():
+        if u not in closure:
+            continue
+        for c in cs:
+            if c in closure:
+                parents.setdefault(c, []).append(u)
+    # Ancestors-or-self of each PROFILED node (memoized iterative DFS over the
+    # in-closure parent map — nodes-scale work, not rows-scale).
+    anc: dict[str, set] = {}
+    profiled = profiles["mondo_id"].unique()
+    for n0 in profiled:
+        stack = [n0]
+        while stack:
+            t = stack[-1]
+            if t in anc:
+                stack.pop()
+                continue
+            pending = [q for q in parents.get(t, ()) if q not in anc]
+            if pending:
+                stack.extend(pending)
+                continue
+            anc[t] = set().union({t}, *(anc[q] for q in parents.get(t, ())))
+            stack.pop()
+    pairs = pd.DataFrame(
+        [(n, a) for n in profiled for a in anc[n]],
+        columns=["mondo_id", "credited"])
+    sys.stderr.write(f"[hpoa-survey] rollup ancestor pairs: {len(pairs)} "
+                     f"for {len(profiled)} profiled nodes "
+                     f"({time.perf_counter() - t0:.1f}s)\n")
+
+    t0 = time.perf_counter()
+    m = profiles.merge(pairs, on="mondo_id")
+    m["own"] = m["mondo_id"] == m["credited"]
+    g = m.groupby(["credited", "hpo_id"]).agg(
+        neg=("neg", "min"),        # negative only if unanimously negative
+        freq=("freq", "max"),      # optimistic pool; NaN only if all NaN
+        inherited=("own", "max"),  # inverted below: own-anywhere => False
+    ).reset_index().rename(columns={"credited": "mondo_id"})
+    g["neg"] = g["neg"].astype(bool)
+    g["inherited"] = ~g["inherited"].astype(bool)
+    sys.stderr.write(f"[hpoa-survey] rollup union: {len(profiles)} -> {len(g)} "
+                     f"(node, term) rows, {g['mondo_id'].nunique()} credited "
+                     f"nodes ({time.perf_counter() - t0:.1f}s)\n")
+    return g
+
+
 def hpo_realizability(obo_text: str) -> "tuple[set, set, dict]":
     """(snomed_direct, snomed_closure, hp_labels) from ``hp.obo``.
 
@@ -236,7 +311,11 @@ def profile_code_rows(profiles, hp_parents, xref_rows, vocabs=("SNOMED",)) -> pd
     Negative terms (NOT / frequency-0) are CARRIED with ``neg=True`` — the eta
     prior wants to downweight them, and dropping them here would force stage 2
     back into the HPOA parse. ``freq`` stays NaN (a blank TSV cell) when no
-    source reported one. A term with no code in its closure yields no rows."""
+    source reported one. A term with no code in its closure yields no rows.
+
+    If ``profiles`` carries an ``inherited`` column (the `rollup_profiles`
+    output), it is passed through APPENDED after ``code``; otherwise the
+    emitted columns are byte-identical to the pre-rollup contract."""
     children: dict[str, list] = {}
     for child, ps in hp_parents.items():
         for parent in ps:
@@ -263,14 +342,20 @@ def profile_code_rows(profiles, hp_parents, xref_rows, vocabs=("SNOMED",)) -> pd
             memo[term] = tuple(sorted(out))
         return memo[term]
 
+    carry_inherited = "inherited" in profiles.columns
     rows = []
     for r in profiles.itertuples(index=False):
         for vocab, code in _closure_codes(r.hpo_id):
-            rows.append({"mondo_id": r.mondo_id, "hp_id": r.hpo_id,
-                         "neg": bool(r.neg), "freq": r.freq,
-                         "vocab": vocab, "code": code})
-    return pd.DataFrame(
-        rows, columns=["mondo_id", "hp_id", "neg", "freq", "vocab", "code"])
+            row = {"mondo_id": r.mondo_id, "hp_id": r.hpo_id,
+                   "neg": bool(r.neg), "freq": r.freq,
+                   "vocab": vocab, "code": code}
+            if carry_inherited:
+                row["inherited"] = bool(r.inherited)
+            rows.append(row)
+    cols = ["mondo_id", "hp_id", "neg", "freq", "vocab", "code"]
+    if carry_inherited:
+        cols.append("inherited")
+    return pd.DataFrame(rows, columns=cols)
 
 
 def promiscuity(profiles, snomed_closure, hp_labels, top_n: int = 15):
@@ -361,6 +446,12 @@ def main(argv=None) -> int:
                    help="also write a per-(node, term, code) TSV of the SNOMED "
                         "codes evidencing each profile term (descendant-or-self "
                         "closure; negatives carried) — stage 2's input")
+    p.add_argument("--rollup", action="store_true",
+                   help="--emit-codes only: credit every branch node with the "
+                        "union of its OWN profile and all branch descendants' "
+                        "profiles (freq pools by max, neg by unanimity), "
+                        "appending an `inherited` provenance column; without "
+                        "it, emission is byte-identical to the old contract")
     args = p.parse_args(argv)
 
     cache = Path(args.cache_dir)
@@ -409,8 +500,20 @@ def main(argv=None) -> int:
         # the existing outputs (and their tests) stay byte-identical, at the
         # cost of one extra seconds-scale obo parse in an offline tool.
         _labels, hp_parents = parse_hpo_dag(obo_text)
-        codes = profile_code_rows(profiles, hp_parents,
+        emit_profiles = profiles
+        if args.rollup:
+            # The Mondo-descendant profile roll-up (semantics + timing lines
+            # in `rollup_profiles`); adjacency recomputed rather than threaded
+            # out of `mondo_branch_closure` so its signature (and the survey
+            # outputs above) stay untouched — seconds-scale, offline.
+            emit_profiles = rollup_profiles(
+                profiles, _disease_child_adjacency(edges_df, nodes_df), closure)
+        t0 = time.perf_counter()
+        codes = profile_code_rows(emit_profiles, hp_parents,
                                   parse_hpo_xrefs(obo_text))
+        if args.rollup:
+            sys.stderr.write(f"[hpoa-survey] rollup code rows: {len(codes)} "
+                             f"({time.perf_counter() - t0:.1f}s)\n")
         dest = Path(args.emit_codes)
         dest.parent.mkdir(parents=True, exist_ok=True)
         codes.to_csv(dest, sep="\t", index=False)
