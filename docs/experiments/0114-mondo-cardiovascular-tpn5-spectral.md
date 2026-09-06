@@ -258,3 +258,30 @@ genuine unsupervised-objective misalignment (separability ≠ phenotype) — sup
 under a dominant one); (c) genuine label heterogeneity (peripartum CM is a real
 subphenotype, not a bug). Deferred: a `gated-pc-readout` on 0114 to see whether the
 misaligned anchors bite DETECTION or the localized head absorbs them.
+
+## Readout (2026-09-06, `make gated-pc-readout ID=114 GPR_ARGS="--readout-mode distributed"`)
+
+Post-hoc case-finding readout on the saved fit-only λ (no re-fit): fresh batched L-BFGS
+heads on θ (top-m 256, max_iter 200 from the manifest), 259/299 fittable nodes (40
+degenerate → constant fallback), 129/259 converged at gtol by iter 200 (max|grad| 3.4, no
+line-search failures — the rest are slow-tail, not divergent). Incident arm SKIPPED (corpus
+predates `--preindex-closure`). Heads persisted to `readout_heads_gated_pc.npz`.
+
+| gated_pc (pc_topics_lr) | |
+|---|--:|
+| macro ranking AUC / AP (193 scored nodes) | **0.7567 / 0.5031** |
+| node-macro P@R0.5 / 0.8 / 0.9 | 0.487 / 0.378 / 0.344 |
+| node-macro R@FDR0.1 / 0.25 / 0.5 | 0.230 / 0.362 / 0.519 |
+| detection (case-vs-bg, 54,753 persons, prev 0.635) AUC / AP | 0.5723 / 0.6725 |
+
+**Read.** Per-node ranking is healthy — 0.757 macro over 193 CV-branch nodes from a purely
+unsupervised spectral-init fit sits at/above the program's historical two-stage readouts
+(0069: 0.724 on the AoU antidepressant setup; 0102's gate arm 0.739 on gated-CV — different
+configs, so context not comparison). Pooled case-vs-background detection is thin (0.572
+against a 0.635-prevalence pool), consistent with the known shape: topics separate WHICH
+node a case ranks on far better than case-vs-noncase overall. CAVEATS: no 0113 (random-init)
+readout exists yet, so the init's effect ON THE READOUT is unmeasured — this number alone
+cannot say spectral helped or hurt case-finding; and the misalignment-cost question needs
+the per-node slice (`inspect_topics.py --readout-auc --grep 'cardiomyopath'`), not the
+macro, since 3-4 anchored-wrong nodes cannot move a 193-node mean. Both are queued as the
+follow-up.
