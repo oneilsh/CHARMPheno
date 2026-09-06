@@ -138,6 +138,55 @@ def test_snomed_closure_is_ancestor_or_self_no_sibling_leak():
     assert labels["HP:0031547"] == "Very specific unxreffed finding"
 
 
+# --- emit-codes closure collection -------------------------------------------
+
+def test_profile_code_rows_descendant_pickup_no_sibling_leak_negatives_carried():
+    """A profile term collects SNOMED codes from its descendant-OR-SELF closure
+    (true-path, emit direction); a sibling's code must NOT leak sideways; NOT
+    terms are carried with neg=True; a term with no code yields no rows."""
+    labels, parents = s.parse_hpo_dag(_HP_OBO)
+    xrefs = s.parse_hpo_xrefs(_HP_OBO)
+    profiles = pd.DataFrame({
+        # the ANCESTOR of the xreffed term: picks the descendant code up
+        "mondo_id": ["MONDO:2", "MONDO:2", "MONDO:2", "MONDO:3"],
+        "hpo_id": ["HP:0001626", "HP:0031547", "HP:0099999", "HP:0001635"],
+        "neg": [False, False, True, False],
+        "freq": [0.9, None, None, 0.5],
+    })
+    rows = s.profile_code_rows(profiles, parents, xrefs)
+    got = set(zip(rows["mondo_id"], rows["hp_id"], rows["neg"], rows["code"]))
+    # ancestor picks up the descendant's code; self-xref term keeps its own
+    assert ("MONDO:2", "HP:0001626", False, "42343007") in got
+    assert ("MONDO:3", "HP:0001635", False, "42343007") in got
+    # SIBLING of the xreffed term (HP:0031547) must not leak the code in
+    assert not any(hp == "HP:0031547" for _m, hp, _n, _c in got)
+    # negative term carried — but HP:0099999's closure holds no code, so it
+    # yields no rows either; a negative WITH a code keeps neg=True
+    neg_rows = s.profile_code_rows(
+        pd.DataFrame({"mondo_id": ["MONDO:2"], "hpo_id": ["HP:0001635"],
+                      "neg": [True], "freq": [0.0]}), parents, xrefs)
+    assert list(neg_rows["neg"]) == [True]
+    # column contract for stage 2
+    assert list(rows.columns) == ["mondo_id", "hp_id", "neg", "freq",
+                                  "vocab", "code"]
+    assert set(rows["vocab"]) == {"SNOMED"}
+
+
+def test_profile_code_rows_freq_blank_when_unknown(tmp_path):
+    """NaN freq round-trips to a BLANK TSV cell (stage 2 reads 'empty when
+    unknown', not the string 'nan')."""
+    labels, parents = s.parse_hpo_dag(_HP_OBO)
+    xrefs = s.parse_hpo_xrefs(_HP_OBO)
+    profiles = pd.DataFrame({"mondo_id": ["MONDO:2"], "hpo_id": ["HP:0001635"],
+                             "neg": [False], "freq": [float("nan")]})
+    rows = s.profile_code_rows(profiles, parents, xrefs)
+    path = tmp_path / "codes.tsv"
+    rows.to_csv(path, sep="\t", index=False)
+    line = path.read_text().splitlines()[1]
+    assert "nan" not in line
+    assert line.split("\t")[3] == ""        # the freq cell, blank
+
+
 # --- survey rows + branch closure --------------------------------------------
 
 def test_branch_closure_depths_and_survey_rows():

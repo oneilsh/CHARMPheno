@@ -575,6 +575,47 @@ hpoa-profile-survey:
 	    --hpo-release $(HPOA_HPO_RELEASE) --cache-dir $(REPO_ROOT)/data/ontology \
 	    --out-dir $(HPOA_OUT) $(HPOA_ARGS)
 
+# Stage-2 IN-WORKSPACE HPOA probe — gates the "random init + HPO-profile eta
+# prior" experiment. Maps the stage-1 --emit-codes TSV (SNOMED codes per node
+# profile) through BigQuery 'Maps to' onto standard Condition concepts, into
+# the cached bundle's condition vocab (membership there IS the leakage-strip/
+# min_df/cap survivorship test), then one treeAggregate over TRAIN counts, per
+# node, its observed positives and how many carry >=1 profile token. Per-node
+# table (patient counts) stays in the run dir, WORKSPACE-INTERNAL; stdout and
+# the sidecar .md carry only the pooled egress-safe summary (floor 20).
+# Requires the bundle to be a cache HIT (run the fit or gated-pc-readout
+# first) and the stage-1 codes TSV (see the error text). The script rides in
+# --py-files so the partition kernel resolves on the executors however
+# cloudpickle chooses to ship it (same rationale as diag-incident-census).
+# Example:
+#   make hpoa-stage2-probe ID=116
+HPOA_PROFILE_CODES ?= $(REPO_ROOT)/data/ontology/profile_codes_MONDO_0004995.tsv
+hpoa-stage2-probe: zip cluster-overlay $(WORKSPACE_ENV)
+	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
+	@if [ ! -s "$(HPOA_PROFILE_CODES)" ]; then \
+	  echo "ERROR: profile-codes TSV missing: $(HPOA_PROFILE_CODES)"; \
+	  echo "  Generate it (offline, public ontology data) with:"; \
+	  echo "  make hpoa-profile-survey HPOA_ARGS=\"--emit-codes $(HPOA_PROFILE_CODES)\""; \
+	  exit 1; fi
+	. ./$(WORKSPACE_ENV) && \
+	PYTHONPATH=$(REPO_ROOT):$$PYTHONPATH spark-submit \
+	    --master yarn \
+	    --deploy-mode client \
+	    --driver-memory 4g \
+	    --conf spark.executor.cores=2 \
+	    --conf spark.executor.memory=4g \
+	    --conf spark.executor.memoryOverhead=2g \
+	    --conf spark.task.maxFailures=8 \
+	    --conf spark.excludeOnFailure.enabled=true \
+	    --conf spark.dynamicAllocation.enabled=false \
+	    --conf spark.executor.instances=12 \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/hpoa_stage2_probe.py \
+	    $(REPO_ROOT)/analysis/cloud/hpoa_stage2_probe.py \
+	    --run-dir "$(RUNS_DIR)/$(shell printf '%04d' $(ID))-*" \
+	    --profile-codes "$(HPOA_PROFILE_CODES)" \
+	    $(if $(GPR_CACHE_URI),--cache-uri $(GPR_CACHE_URI),) \
+	    $(GPR_ARGS)
+
 # Sibling-support diagnostic for residual degenerate nodes (exp 0109): one pass
 # over the cached bundle's train labels, then buckets every degenerate node by
 # whether its children have any observed support. Requires the bundle to be a
