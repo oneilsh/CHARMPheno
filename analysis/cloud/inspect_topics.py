@@ -463,7 +463,9 @@ def load_concept_names(path):
 
 
 def top_words(lam_row, inv_map, names, name_by_id, t_words):
-    """Top-t (concept, E[beta]) for one topic's domain row, named if possible."""
+    """Top-t (concept, E[beta], vocab_idx) for one topic's domain row, named if
+    possible. The vocab index rides along so callers can cross-reference the
+    word against index sets (e.g. the HPO-profile marker in `_digest_words`)."""
     row = np.asarray(lam_row, dtype=np.float64)
     s = row.sum()
     if s <= 0:
@@ -477,7 +479,7 @@ def top_words(lam_row, inv_map, names, name_by_id, t_words):
         if cid is not None:
             nm = (names.get(cid) if names else None) or name_by_id.get(cid)
         label = nm or (f"cid:{cid}" if cid is not None else f"idx:{int(i)}")
-        out.append((label, float(beta[i])))
+        out.append((label, float(beta[i]), int(i)))
     return out
 
 
@@ -494,7 +496,7 @@ def topic_word_lines(t, lams, inv_maps, names, name_by_id, dom_names, t_words,
     for d, lam in enumerate(lams):
         inv = inv_maps[d] if (inv_maps and d < len(inv_maps)) else None
         tw = top_words(np.asarray(lam[t]), inv, names, name_by_id, t_words)
-        body = (" · ".join(f"{nm} ({p:.3f})" for nm, p in tw) if tw
+        body = (" · ".join(f"{nm} ({p:.3f})" for nm, p, _ in tw) if tw
                 else "_(no vocab map — supply --bundle-meta/--vocab-map)_")
         dom = dom_names[d] if d < len(dom_names) else f"dom{d}"
         out.append(f"{indent}  - **{dom}:** {body}")
@@ -851,7 +853,7 @@ def _trunc(s, n):
 
 
 def _digest_words(t, lams, sh, inv_maps, names, name_by_id, dom_names, *,
-                  k=6, maxlen=40):
+                  k=6, maxlen=40, profile_idx=None):
     """One compact line summarising a topic as a PHENOTYPE SIGNATURE: the
     condition-domain top-k names, then the top-3 drug names after `//`. Leads
     with conditions (the disease identity) rather than the dominant domain,
@@ -864,15 +866,20 @@ def _digest_words(t, lams, sh, inv_maps, names, name_by_id, dom_names, *,
     if not inv_maps:
         return ""
 
-    def render(d, kk):
-        inv = inv_maps[d] if d < len(inv_maps) else None
-        tw = top_words(np.asarray(lams[d][t]), inv, names, name_by_id, kk)
-        return [_trunc(nm, maxlen) for nm, _ in tw]
-
     cond_d = next((i for i, n in enumerate(dom_names) if "condition" in n.lower()),
                   None)
+
+    def render(d, kk, mark=False):
+        inv = inv_maps[d] if d < len(inv_maps) else None
+        tw = top_words(np.asarray(lams[d][t]), inv, names, name_by_id, kk)
+        # `*` marks a token in the node's own HPO profile (condition domain
+        # only) — so profile tokens vs EMERGENT co-riders are one glance apart.
+        return [_trunc(nm, maxlen) + ("*" if mark and profile_idx is not None
+                                      and i in profile_idx else "")
+                for nm, _, i in tw]
+
     lead = cond_d if cond_d is not None else int(np.argmax(sh["dom_mass"][t]))
-    main = render(lead, k)
+    main = render(lead, k, mark=(lead == cond_d))
     parts = "·".join(main) if main else "(flat)"
     drug_d = next((i for i, n in enumerate(dom_names) if "drug" in n.lower()), None)
     if drug_d is not None and drug_d != lead:
@@ -884,7 +891,7 @@ def _digest_words(t, lams, sh, inv_maps, names, name_by_id, dom_names, *,
 
 def build_digest(run_dir, *, exemplars=8, t_words=6, bundle_meta_path=None,
                  vocab_path=None, names_path=None, readout_label="gated_pc",
-                 grep_pattern=None, redundancy=False):
+                 grep_pattern=None, redundancy=False, profile_file=None):
     """A COMPACT single-block digest -- the copy-paste-to-chat view.
 
     Same inputs as build_report, but emits only: a one-line header (K / starved%
@@ -930,9 +937,20 @@ def build_digest(run_dir, *, exemplars=8, t_words=6, bundle_meta_path=None,
         eng = topic2engine[t]
         return depths.get(eng, -1) if (depths and eng is not None) else -1
 
+    # HPO-profile marker (`*` on a top word that is in the node's own positive
+    # profile — insight 0084's legibility read, inline): needs the emit-eta TSV
+    # and the meta's condition vocab map. Profile tokens vs EMERGENT co-riders
+    # then read apart at a glance; the co-riders are the discovery signal.
+    prof = None
+    if profile_file and meta and "vocab_maps" in meta:
+        vm0 = {str(kk): int(v) for kk, v in meta["vocab_maps"][0].items()}
+        prof = _profile_vocab_sets(profile_file, manifest, vm0)
+
     def words(t):
+        eng = topic2engine[t]
+        pidx = prof.get(eng) if (prof and eng is not None) else None
         wl = _digest_words(t, lams, sh, inv_maps, names, name_by_id, dom_names,
-                           k=t_words)
+                           k=t_words, profile_idx=pidx)
         return (" | " + wl) if wl else ""
 
     def line(t):
@@ -955,6 +973,10 @@ def build_digest(run_dir, *, exemplars=8, t_words=6, bundle_meta_path=None,
       f"{100 * starved / max(fg.size, 1):.0f}% starved (frac>0.5) · "
       f"ev min {ev.min():.3g} / med {q[0]:.3g} / p90 {q[1]:.3g} / max {ev.max():.3g}")
     w(f"decoder: {decoder_src}")
+    if prof:
+        w(f"`*` = token in the node's own HPO profile "
+          f"({Path(profile_file).name}; {len(prof)} profiled nodes) — "
+          f"unmarked condition terms are EMERGENT co-riders")
     w("")
 
     # depth rollup with an auto cliff-marker at the first depth whose median frac
@@ -1044,6 +1066,137 @@ def _credited_engine_ids(credited_file, manifest):
                 cids.add(int(s[len("MONDO:"):]))
     _, int2cid = node_order(manifest)
     return {e for e, c in int2cid.items() if c in cids}
+
+
+def _profile_vocab_sets(profile_file, manifest, vocab_map0):
+    """{engine id: frozenset of CONDITION-domain vocab indices} of each profiled
+    node's POSITIVE profile concepts (neg rows excluded — a NOT term is not what
+    the topic should look like). ``profile_file`` is the probe's --emit-eta TSV
+    (mondo_id, concept_id, weight, neg, coverage); ``vocab_map0`` is the bundle
+    meta's condition-domain {concept_id: idx}. Concepts outside the vocab are
+    dropped (they cannot appear in a topic either)."""
+    header, rows = None, {}
+    with open(profile_file) as fh:
+        for line in fh:
+            parts = line.rstrip("\n").split("\t")
+            if header is None:
+                header = parts
+                for col in ("mondo_id", "concept_id", "neg"):
+                    if col not in header:
+                        raise SystemExit(
+                            f"[inspect_topics] {profile_file} has no {col} "
+                            f"column (columns: {header}) — --profile-align "
+                            f"needs the probe's --emit-eta TSV")
+                mi, ci, ni = (header.index(c)
+                              for c in ("mondo_id", "concept_id", "neg"))
+                continue
+            if str(parts[ni]).strip().lower() in ("1", "true"):
+                continue
+            s = str(parts[mi])
+            if not (s.startswith("MONDO:") and s[len("MONDO:"):].isdigit()):
+                continue
+            idx = vocab_map0.get(str(parts[ci])) or vocab_map0.get(
+                int(parts[ci]) if str(parts[ci]).isdigit() else -1)
+            if idx is not None:
+                rows.setdefault(int(s[len("MONDO:"):]), set()).add(int(idx))
+    _, int2cid = node_order(manifest)
+    return {e: frozenset(rows[c]) for e, c in int2cid.items() if c in rows}
+
+
+def _align_scores(lam0, topic, prof_idx, top_m):
+    """(profile mass, top-m overlap) of one topic against one profile set.
+
+    Mass = sum of E[beta] (the topic's normalized condition-domain row) on the
+    profile indices; overlap = fraction of the topic's top-m tokens that are
+    profile tokens. Both in [0,1]; the flat-topic baseline for mass is
+    |profile| / V_0 (printed for context by the caller)."""
+    row = np.asarray(lam0[topic], dtype=np.float64)
+    s = row.sum()
+    beta = row / s if s > 0 else row
+    idx = np.fromiter(prof_idx, dtype=np.int64)
+    mass = float(beta[idx].sum())
+    top = np.argsort(beta)[::-1][:top_m]
+    overlap = float(len(set(int(i) for i in top) & prof_idx) / top_m)
+    return mass, overlap
+
+
+def build_profile_align(run_dir, profile_file, *, bundle_meta_path,
+                        compare_dir=None, top_m=15, starved_frac=0.5):
+    """Compact profile-ALIGNMENT scorecard: does each credited node's BOOSTED
+    topic look like its HPO profile? (The quantitative form of 0116's eyeball
+    finding that starved deep topics became phenotype-legible — insight 0084.)
+
+    Per credited node, scores the FIRST topic of its block (the boosted one
+    under `profile_eta_topics: 1`) against the node's positive profile tokens:
+    E[beta] mass on the profile and top-`top_m` overlap. Pools medians over
+    STARVED (support_frac > `starved_frac`, the digest's flatness read) vs FED
+    topics, and — with ``compare_dir`` — recomputes the SAME topics/profiles on
+    a baseline run so the alignment delta is paired. ~10 lines instead of a
+    pasted digest; model params and counts-of-topics only (egress-safe)."""
+    run_dir = Path(run_dir)
+    npz, manifest = load_run(run_dir)
+    meta = load_bundle_meta(bundle_meta_path) if bundle_meta_path else None
+    if not meta or "vocab_maps" not in meta:
+        raise SystemExit("[inspect_topics] --profile-align needs the bundle "
+                         "meta (INSPECT_KEY auto-discovery or --bundle-meta)")
+    vm0 = {str(k): int(v) for k, v in meta["vocab_maps"][0].items()}
+    v0 = len(vm0)
+    prof = _profile_vocab_sets(profile_file, manifest, vm0)
+    if not prof:
+        raise SystemExit("[inspect_topics] no profiled node maps into this "
+                         "run's DAG/vocab — wrong TSV or wrong bundle?")
+    nodes, _ = node_order(manifest)
+    n_bg, tpn = int(manifest["n_bg"]), int(manifest["tpn"])
+    boosted_topic = {e: n_bg + i * tpn for i, e in enumerate(nodes)}
+    lams = domain_lambdas(npz)
+    sh = topic_sharpness(lams)
+    nnames = node_names(manifest)
+
+    base_lam0 = None
+    if compare_dir:
+        cmp_dir = Path(resolve_run_dir(str(compare_dir)))
+        base_lam0 = domain_lambdas(load_run(cmp_dir)[0])[0]
+
+    rows = []
+    for e, pidx in sorted(prof.items()):
+        t = boosted_topic.get(e)
+        if t is None:
+            continue
+        mass, ov = _align_scores(lams[0], t, pidx, top_m)
+        r = {"eng": e, "topic": t, "n_prof": len(pidx),
+             "starved": bool(sh["support_frac"][t] > starved_frac),
+             "mass": mass, "overlap": ov, "flat_mass": len(pidx) / v0}
+        if base_lam0 is not None:
+            r["mass_b"], r["overlap_b"] = _align_scores(base_lam0, t, pidx,
+                                                        top_m)
+        rows.append(r)
+
+    def _med(vs):
+        return sorted(vs)[len(vs) // 2] if vs else float("nan")
+
+    L = [f"# profile alignment — {run_dir.name} · {len(rows)} credited "
+         f"node(s) scored · boosted topic vs its positive profile "
+         f"(top-{top_m} overlap; mass = E[beta] on profile tokens; flat "
+         f"baseline ≈ {_med([r['flat_mass'] for r in rows]):.4f})"]
+    for tag in ("starved", "fed"):
+        grp = [r for r in rows if r["starved"] == (tag == "starved")]
+        if not grp:
+            L.append(f"{tag}: 0 topics")
+            continue
+        line = (f"{tag}: n={len(grp)} median mass="
+                f"{_med([r['mass'] for r in grp]):.3f} "
+                f"overlap@{top_m}={_med([r['overlap'] for r in grp]):.2f}")
+        if base_lam0 is not None:
+            line += (f"  |  baseline mass={_med([r['mass_b'] for r in grp]):.3f} "
+                     f"overlap={_med([r['overlap_b'] for r in grp]):.2f}")
+        L.append(line)
+    worst = sorted(rows, key=lambda r: r["overlap"])[:3]
+    best = sorted(rows, key=lambda r: -r["overlap"])[:3]
+    L.append("least aligned: " + "; ".join(
+        f"{nnames.get(r['eng'], r['eng'])} ov={r['overlap']:.2f}" for r in worst))
+    L.append("most aligned:  " + "; ".join(
+        f"{nnames.get(r['eng'], r['eng'])} ov={r['overlap']:.2f}" for r in best))
+    return "\n".join(L) + "\n"
 
 
 def build_auc_slice(run_dir, *, bundle_meta_path=None, grep_pattern=None,
@@ -1268,11 +1421,29 @@ def main():
                     help="(--readout-auc) baseline run dir (same arm in its "
                          "results_readout.json): add PAIRED per-node AUC "
                          "deltas on shared scored nodes, split by "
-                         "--credited-file when given.")
+                         "--credited-file when given. (--profile-align) "
+                         "baseline run for paired alignment scores.")
+    ap.add_argument("--profile-align", action="store_true",
+                    help="Emit the ~10-line profile-ALIGNMENT scorecard "
+                         "(insight 0084's legibility read, quantified): each "
+                         "credited node's boosted topic scored against its "
+                         "positive profile tokens (E[beta] mass + top-15 "
+                         "overlap), pooled starved vs fed, paired vs "
+                         "--compare-run. Needs --credited-file (the emit-eta "
+                         "TSV) and the bundle meta. Suppresses other reports.")
     args = ap.parse_args()
 
     run_dir = resolve_run_dir(args.run_dir)
-    if args.readout_auc:
+    if args.profile_align:
+        if not args.credited_file:
+            raise SystemExit("[inspect_topics] --profile-align needs "
+                             "--credited-file (the probe's --emit-eta TSV; "
+                             "CREDITED=1 via the Makefile)")
+        report = build_profile_align(
+            run_dir, args.credited_file, bundle_meta_path=args.bundle_meta,
+            compare_dir=args.compare_run)
+        default_out = "profile_align.md"
+    elif args.readout_auc:
         report = build_auc_slice(
             run_dir, bundle_meta_path=args.bundle_meta,
             grep_pattern=args.grep, arm=args.readout_label,
@@ -1283,7 +1454,8 @@ def main():
             run_dir, exemplars=args.digest_exemplars, t_words=args.top_words,
             bundle_meta_path=args.bundle_meta, vocab_path=args.vocab_map,
             names_path=args.concept_names, readout_label=args.readout_label,
-            grep_pattern=args.grep, redundancy=bool(args.redundancy))
+            grep_pattern=args.grep, redundancy=bool(args.redundancy),
+            profile_file=args.credited_file)
         default_out = "topics_digest.md"
     else:
         report = build_report(
