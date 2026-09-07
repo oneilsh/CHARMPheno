@@ -125,9 +125,12 @@ help:
 	@echo "  summary-tail ID=N       Print only the most-recent ## section of summary.md."
 	@echo "  report ID=N             COMPACT gated_pc digest (flags + fit-health + signal lines)."
 	@echo "  inspect-topics ID=N      OFF-CLUSTER topics view (sharpness + readout loadings)"
-	@echo "                           from the saved fit; no Spark/YARN, safe mid-fit. Add"
-	@echo "                           INSPECT_KEY=<bundle key> for topic words + node depth,"
-	@echo "                           and RESOLVE_NAMES=1 to name the words (off-YARN bq lookup)."
+	@echo "                           from the saved fit; no Spark/YARN, safe mid-fit."
+	@echo "                           Bundle key auto-discovered (override INSPECT_KEY=<hash>,"
+	@echo "                           skip with NO_META=1); RESOLVE_NAMES=1 names the words"
+	@echo "                           (off-YARN bq lookup); COMPARE=M / CREDITED=1 slice the"
+	@echo "                           --readout-auc report."
+	@echo "  readout-ab ID=N BASE=M  paired readout-AUC A/B (credited split + deltas vs run M)."
 	@echo "  eval-exp [ID=N]         Re-run eval; if ID omitted, auto-selects most-recently-fit."
 	@echo "  build-dashboard-exp     - build dashboard bundle (auto-picks freshest fit needing build)"
 	@echo "  build-dashboard-exp ID=N - force rebuild for a specific experiment"
@@ -513,16 +516,28 @@ gated-pc-readout: zip cluster-overlay $(WORKSPACE_ENV)
 # MASTER while a fit is still going without touching executors. Add topic WORDS +
 # node DEPTH by pointing --bundle-meta at the bundle's `meta` text file, fetched
 # with a plain `hdfs dfs -cat` -- an HDFS CLIENT read that requests ZERO YARN
-# containers, safe to run mid-fit. Pass INSPECT_KEY=<bundle key> to auto-cat it,
-# or INSPECT_META=<path> if you fetched it yourself. Find the key with:
-#     hdfs dfs -ls $(GPR_CACHE_URI)      # the recent bundle dir
+# containers, safe to run mid-fit. The bundle key is AUTO-DISCOVERED (newest
+# bundle dir in the cache; the report flags a shape mismatch if it's the wrong
+# one) — override with INSPECT_KEY=<hash>, provide INSPECT_META=<path> if you
+# fetched the meta yourself, or NO_META=1 to skip meta entirely.
+# Conveniences:
+#   COMPARE=113    paired per-node AUC deltas vs run 0113 (--readout-auc)
+#   CREDITED=1     credited/uncredited split from the default profile-eta TSV
+#                  (data/ontology/, the probe's --emit-eta output); or
+#   CREDITED=path  an explicit TSV with a mondo_id column
 # Examples:
 #   make inspect-topics ID=111
+#   make inspect-topics ID=116 INSPECT_ARGS="--readout-auc" COMPARE=113 CREDITED=1
 #   make inspect-topics ID=111 INSPECT_KEY=<hash> INSPECT_ARGS="--sort depth"
 #   make inspect-topics ID=111 INSPECT_META=/tmp/meta.json INSPECT_ARGS="--top-topics 200"
 INSPECT_CACHE_URI  ?= $(GPR_CACHE_URI)
 INSPECT_META       ?=
 INSPECT_KEY        ?=
+NO_META            ?=
+COMPARE            ?=
+COMPARE_PAD         = $(shell printf '%04d' $(COMPARE))
+CREDITED           ?=
+CREDITED_FILE       = $(if $(filter 1,$(CREDITED)),$(REPO_ROOT)/data/ontology/profile_eta_$(subst :,_,$(HPOA_BRANCH)).tsv,$(CREDITED))
 INSPECT_NAMES      ?=
 # RESOLVE_NAMES=1: before rendering, run resolve_vocab_names (targeted `bq query`
 # on the CDR concept table, off-YARN) to name the topic WORDS -- measurement/drug
@@ -535,11 +550,19 @@ INSPECT_ARGS       ?=
 INSPECT_RUN_DIR    ?= $(RUNS_DIR)/$(shell printf '%04d' $(ID))-*
 inspect-topics: $(WORKSPACE_ENV)
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
-	@META="$(INSPECT_META)"; \
-	if [ -z "$$META" ] && [ -n "$(INSPECT_KEY)" ]; then \
+	@META="$(INSPECT_META)"; KEY="$(INSPECT_KEY)"; \
+	if [ -z "$$META" ] && [ -z "$$KEY" ] && [ -z "$(NO_META)" ] && command -v hdfs >/dev/null 2>&1; then \
+	  KEY=$$(hdfs dfs -ls -t "$(INSPECT_CACHE_URI)" 2>/dev/null | awk '$$1 ~ /^d/ {print $$NF; exit}' | sed 's|.*/||'); \
+	  if [ -n "$$KEY" ]; then \
+	    echo "[inspect-topics] auto-selected bundle key $$KEY (newest in $(INSPECT_CACHE_URI); wrong-bundle shape mismatches are flagged in the report — override with INSPECT_KEY=<hash> or NO_META=1)"; \
+	  else \
+	    echo "[inspect-topics] no bundle dir found in $(INSPECT_CACHE_URI); continuing without meta (no depth/words)"; \
+	  fi; \
+	fi; \
+	if [ -z "$$META" ] && [ -n "$$KEY" ]; then \
 	  META="/tmp/inspect_meta_$(ID).json"; \
-	  echo "[inspect-topics] hdfs dfs -cat $(INSPECT_CACHE_URI)/$(INSPECT_KEY)/meta/part-* -> $$META (off-YARN)"; \
-	  hdfs dfs -cat "$(INSPECT_CACHE_URI)/$(INSPECT_KEY)/meta/part-*" > "$$META" || \
+	  echo "[inspect-topics] hdfs dfs -cat $(INSPECT_CACHE_URI)/$$KEY/meta/part-* -> $$META (off-YARN)"; \
+	  hdfs dfs -cat "$(INSPECT_CACHE_URI)/$$KEY/meta/part-*" > "$$META" || \
 	    { echo "ERROR: could not fetch bundle meta; check INSPECT_KEY / INSPECT_CACHE_URI"; exit 1; }; \
 	fi; \
 	. ./$(WORKSPACE_ENV) && \
@@ -555,7 +578,18 @@ inspect-topics: $(WORKSPACE_ENV)
 	python $(REPO_ROOT)/analysis/cloud/inspect_topics.py "$(INSPECT_RUN_DIR)" \
 	    $${META:+--bundle-meta "$$META"} \
 	    $${NAMES:+--concept-names "$$NAMES"} \
+	    $(if $(CREDITED),--credited-file "$(CREDITED_FILE)") \
+	    $(if $(COMPARE),--compare-run "$(RUNS_DIR)/$(COMPARE_PAD)-*") \
 	    $(INSPECT_ARGS)
+
+# The exp 0116 primary read in one line: paired --readout-auc of run ID against
+# run BASE, split by the credited profile-eta set (defaults to the probe's
+# --emit-eta TSV under data/ontology/). Bundle key auto-discovered as above.
+#   make readout-ab ID=116 BASE=113
+readout-ab:
+	@if [ -z "$(ID)" ] || [ -z "$(BASE)" ]; then echo "ERROR: provide ID=N BASE=M"; exit 1; fi
+	$(MAKE) inspect-topics ID=$(ID) COMPARE=$(BASE) CREDITED=$(or $(CREDITED),1) \
+	    INSPECT_ARGS="--readout-auc $(INSPECT_ARGS)"
 
 # Stage-1 OFFLINE HPOA profile survey — PUBLIC ontology data only (no CDR, no
 # Spark, no egress exposure; runs anywhere with network + pandas). Gauges

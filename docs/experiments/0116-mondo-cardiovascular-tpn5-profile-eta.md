@@ -170,14 +170,18 @@ make -C analysis/cloud exp ID=116
 make -C analysis/cloud gated-pc-readout ID=116 GPR_ARGS="--readout-mode distributed"
 ```
 
-Read (off-cluster safe):
+Read (off-YARN safe; the bundle key is auto-discovered from the cache — see the
+Makefile's inspect-topics notes):
 
 ```bash
-make -C analysis/cloud inspect-topics ID=116 INSPECT_KEY=<key> RESOLVE_NAMES=1 \
-    INSPECT_ARGS="--readout-auc"
-make -C analysis/cloud inspect-topics ID=116 INSPECT_KEY=<key> RESOLVE_NAMES=1 \
+make -C analysis/cloud readout-ab ID=116 BASE=113
+make -C analysis/cloud inspect-topics ID=116 RESOLVE_NAMES=1 \
     INSPECT_ARGS="--digest --grep 'cardiomyopath'"
 ```
+
+`readout-ab` is the pre-registered primary read in one line: the paired
+per-node AUC deltas vs 0113, split credited (132) vs uncredited (167, the
+internal control), plus by-depth delta medians.
 
 ## Run log
 
