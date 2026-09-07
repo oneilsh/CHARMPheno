@@ -280,9 +280,10 @@ def test_elbo_matches_manual_boosted_prior_multidomain():
     ({-1: (np.array([1]), np.array([1.0]))}, "outside"),
     ({3.5: (np.array([1]), np.array([1.0]))}, "integer"),
     ({7: (np.array([1, 1]), np.array([1.0, 2.0]))}, "duplicate"),
-    ({7: (np.array([1]), np.array([0.0]))}, "finite and > 0"),
-    ({7: (np.array([1]), np.array([-1.0]))}, "finite and > 0"),
-    ({7: (np.array([1]), np.array([np.nan]))}, "finite and > 0"),
+    ({7: (np.array([1]), np.array([0.0]))}, "finite and nonzero"),
+    ({7: (np.array([1]), np.array([-1.0]))}, "effective"),   # eta + w = -0.98 <= 0
+    ({7: (np.array([1]), np.array([-0.02]))}, "effective"),  # eta + w = 0 exactly
+    ({7: (np.array([1]), np.array([np.nan]))}, "finite and nonzero"),
     ({7: (np.array([1, 2]), np.array([1.0]))}, "shape"),
     ({7: (np.array([1.5]), np.array([1.0]))}, "integer array"),
     ({7: (np.array([-1]), np.array([1.0]))}, "condition"),
@@ -311,13 +312,51 @@ def test_eta_boost_indices_validated_against_condition_domain_width():
 def test_resolve_eta_boost_copies_and_coerces_dtypes():
     idx = np.array([3, 1], dtype=np.int32)
     w = np.array([2.0, 1.0])
-    out = _resolve_eta_boost({np.int64(4): (idx, w)}, K=8, boost_v=30)
+    out = _resolve_eta_boost({np.int64(4): (idx, w)}, K=8, boost_v=30, eta=0.02)
     (oi, ow) = out[4]
     assert oi.dtype == np.int64 and ow.dtype == np.float64
     idx[0] = 9
     w[0] = 99.0
     np.testing.assert_array_equal(oi, [3, 1])   # detached from caller arrays
     np.testing.assert_array_equal(ow, [2.0, 1.0])
+
+
+def test_negative_weights_allowed_iff_effective_prior_stays_positive():
+    """WP-3's NOT downweights are NEGATIVE deltas: legal exactly when the
+    effective prior eta + w stays strictly positive. The builder's floor
+    (0.1 * eta_base) keeps eta + w >= 0.1 * eta, so the accepted case below is
+    the shape real deltas take; eta + w <= 0 stays a fail-fast rejection."""
+    lay = _lay()
+    # The exact NOT delta for a neg-only concept: -0.5 * eta -> eta + w = 0.5*eta.
+    m = GatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0,
+                       eta_boost={STARVED_TOPIC: (np.array([1]),
+                                                  np.array([-0.01]))})
+    np.testing.assert_allclose(m._eta_boost[STARVED_TOPIC][1], [-0.01])
+    # ... and the update sites are sign-agnostic: at lr=1.0 the starved row
+    # lands exactly on the (downweighted, still positive) effective prior.
+    gp = m.initialize_global(None)
+    stats = m.local_update(_docs(), gp)
+    new_gp = m.update_global(gp, stats, learning_rate=1.0)
+    floor = np.full(V, 0.02)
+    floor[1] -= 0.01
+    np.testing.assert_array_equal(new_gp["lambda"][STARVED_TOPIC], floor)
+    assert new_gp["lambda"][STARVED_TOPIC].min() > 0.0
+
+
+def test_negative_weight_positivity_checked_against_domain0_eta():
+    """Multi-domain: the effective-prior check uses DOMAIN 0's eta_m (the only
+    domain a boost can land on), not the scalar mean or another domain's."""
+    lay = _lay()
+    # eta_0 = 0.5: w = -0.4 keeps eta_0 + w = 0.1 > 0 (though the forwarded
+    # scalar mean is 0.255 and eta_1 = 0.01 would both fail other checks).
+    m = GatedOnlineLDA(lay, V, domains=[20, 10], eta=[0.5, 0.01],
+                       eta_boost={7: (np.array([1]), np.array([-0.4]))})
+    assert m._eta_boost is not None
+    # eta_0 = 0.05: w = -0.1 drives eta_0 + w < 0 even though eta_1 = 0.5
+    # could absorb it — domain 0 is what counts.
+    with pytest.raises(ValueError, match="effective"):
+        GatedOnlineLDA(lay, V, domains=[20, 10], eta=[0.05, 0.5],
+                       eta_boost={7: (np.array([1]), np.array([-0.1]))})
 
 
 # -- ADR 0047: the boost must not ride a task closure -------------------------

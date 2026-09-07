@@ -863,6 +863,20 @@ def build_gated_pc_args(
         ])
     if str(effective.get("count_transform", "none")) != "none":
         args.extend(["--count-transform", str(effective["count_transform"])])
+    # Profile-eta word-side prior (plan 2026-09-06, exp 0116). Emitted ONLY when
+    # `profile_eta` is set — the driver defaults to '' (no prior), so omitting
+    # the flags keeps every existing gated_pc run's arg string byte-identical
+    # (the spectral-init emission pattern above). A profile-eta run rides its
+    # knobs alongside.
+    if effective.get("profile_eta"):
+        args.extend([
+            "--profile-eta", str(effective["profile_eta"]),
+            "--profile-eta-strength",
+            str(effective.get("profile_eta_strength", 1.0)),
+            "--profile-eta-topics", str(effective.get("profile_eta_topics", 1)),
+            "--profile-eta-min-coverage",
+            str(effective.get("profile_eta_min_coverage", 0.0)),
+        ])
     if effective.get("doc_concentration") is not None:
         args.extend(["--doc-concentration", str(effective["doc_concentration"])])
     if effective.get("dag_source"):

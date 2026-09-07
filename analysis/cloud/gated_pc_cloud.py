@@ -2709,6 +2709,18 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
         anchorScope=str(getattr(args, "anchor_scope", "closure")),
         spectralTopoOrder=str(getattr(args, "spectral_topo_order", "forward")),
         countTransform=str(getattr(args, "count_transform", "none")),
+        # Profile-eta word-side prior (plan WP-3): the four Params are the
+        # provenance record (path + knobs); the boost itself is built
+        # driver-side (profile_eta.build_profile_eta_boost, from the TSV +
+        # bundle meta) and handed over via setEtaBoost below — the spectral
+        # precedent's split between "what the estimator records" and "what the
+        # driver computes", except the data cannot be derived from the RDD so
+        # it arrives pre-built (plan D4). getattr guards older namespaces.
+        profileEta=str(getattr(args, "profile_eta", "") or ""),
+        profileEtaStrength=float(getattr(args, "profile_eta_strength", 1.0)),
+        profileEtaTopics=int(getattr(args, "profile_eta_topics", 1)),
+        profileEtaMinCoverage=float(
+            getattr(args, "profile_eta_min_coverage", 0.0)),
     )
     # Multi-domain: feed per-domain feature columns (features_0..) so the gated
     # engine carries a per-domain lambda and the topic correction scatters per
@@ -2724,6 +2736,13 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
         est._set(docConcentration=[float(dc)])
     if gated:
         est.setGateParent(args._parent_int)      # JSON-encodes the DAG map
+        # The built profile-eta boost (main stashes it on args after the
+        # bundle/layout exist). Gated arms only — the boost is a per-NODE-TOPIC
+        # prior over the gate layout's blocks; the ungated dag_head arm has no
+        # blocks (and _build_model_and_config would reject etaBoost there).
+        pe_boost = getattr(args, "_profile_eta_boost", None)
+        if pe_boost:
+            est.setEtaBoost(pe_boost)
     if closure_parents is not None:
         est.setClosureParents(closure_parents)
     return est
@@ -3683,6 +3702,33 @@ def parse_args(argv=None):
                         "anchors/evidence off utilization volume, insight 0077 extended "
                         "to all domains), or 'log1p' (softer damping). In-memory; the "
                         "cached bundle stays raw (no cache-key change).")
+    # Profile-eta word-side prior (plan 2026-09-06 D1-D5, exp 0116). The TSV is
+    # hpoa_stage2_probe's --emit-eta output (concept ids, bundle-agnostic,
+    # WORKSPACE-INTERNAL — its coverage column is train-derived); the driver
+    # maps it into the bundle's condition vocab / gate blocks and hands the
+    # built boost to the estimator. A fit parameter only: no bundle/corpus
+    # cache-key change. Default '' preserves prior behavior byte-identically.
+    p.add_argument("--profile-eta", default="", metavar="PATH",
+                   help="profile-eta prior TSV (hpoa_stage2_probe --emit-eta: "
+                        "mondo_id, concept_id, weight, neg, coverage). Each "
+                        "credited node's block gets a persistent word-side "
+                        "Dirichlet boost on its profile's condition tokens. "
+                        "'' (default) = flat eta. Requires the gate; "
+                        "incompatible with resume/warm-start (D5).")
+    p.add_argument("--profile-eta-strength", type=float, default=1.0,
+                   help="D3 scale: each boosted topic's positive boost vector "
+                        "is normalized to sum to strength * eta_base * "
+                        "V_condition added pseudo-mass (default 1.0 = double "
+                        "the topic's prior mass, concentrated on its profile).")
+    p.add_argument("--profile-eta-topics", type=int, default=1,
+                   help="D1 targeting: boost the FIRST N topics of each "
+                        "credited node's block (default 1; the rest stay "
+                        "flat/free — one aligned + tpn-1 free).")
+    p.add_argument("--profile-eta-min-coverage", type=float, default=0.0,
+                   help="D4 gate: drop a node's boost when its train "
+                        "positive-doc coverage (the TSV column) is below this "
+                        "(default 0 = off; targets the annotation-population-"
+                        "mismatch tail).")
     p.add_argument("--dag-source", choices=["snomed", "mondo", "mondo_native"],
                    default="snomed",
                    help="snomed (default): the disease's SNOMED anchor forest via "
@@ -4046,6 +4092,55 @@ def main() -> int:
         args._parent_int = bundle.parent_int
         args._recall_targets = [float(x) for x in args.recall_targets.split(",") if x]
         args._fdr_targets = [float(x) for x in args.fdr_targets.split(",") if x]
+
+        # Profile-eta word-side prior (plan D1-D5, exp 0116): read the probe's
+        # --emit-eta TSV, resolve mondo curie -> engine id exactly as the probe
+        # does (mondo_native_dag.mondo_cid + bundle.cid2int; import-only — that
+        # module is source-hashed), map concept ids into the CONDITION-domain
+        # vocab, and build the sparse per-topic boost over DagLayout's blocks.
+        # eta_base MUST equal the engine's flat prior: _build_model_and_config
+        # constructs the gated engine with eta = 1.0 / lay.K. Driver-side only;
+        # every gated arm built from these args (the PC fit AND the unsup_gated
+        # twin) then carries the same prior, mirroring how the spectral init
+        # applies to both. EGRESS: pe_stats is counts-of-nodes/concepts only —
+        # the TSV's coverage column is never printed.
+        args._profile_eta_boost = None
+        if getattr(args, "profile_eta", ""):
+            with _phase("build profile-eta boost (driver-side)"):
+                import pandas as pd
+                from mondo_native_dag import mondo_cid
+                from profile_eta import build_profile_eta_boost
+                eta_df = pd.read_csv(args.profile_eta, sep="\t")
+                eid_by_mondo = {}
+                for mid in eta_df["mondo_id"].astype(str).unique():
+                    try:
+                        eid = bundle.cid2int.get(mondo_cid(mid))
+                    except ValueError:
+                        eid = None            # not a Mondo curie — skip, counted
+                    if eid is not None:
+                        eid_by_mondo[str(mid)] = int(eid)
+                if not eid_by_mondo:
+                    raise ValueError(
+                        "--profile-eta: no profiled node maps into this run's "
+                        "label DAG — is this a mondo_native run? (cid2int keys "
+                        "must be Mondo numeric ids)")
+                pe_boost, pe_stats = build_profile_eta_boost(
+                    eta_df, eid_by_mondo=eid_by_mondo, block_of=lay.block,
+                    vocab_index_by_concept=vocab_maps[0],
+                    eta_base=1.0 / lay.K, v_condition=len(vocab_maps[0]),
+                    strength=args.profile_eta_strength,
+                    topics=args.profile_eta_topics,
+                    min_coverage=args.profile_eta_min_coverage)
+                if not pe_boost:
+                    raise ValueError(
+                        "--profile-eta produced an EMPTY boost (no credited "
+                        "node survived mapping/gating) — the run's one knob "
+                        "would be silently absent; check the TSV and "
+                        "--profile-eta-min-coverage")
+                args._profile_eta_boost = pe_boost
+                args._profile_eta_stats = pe_stats
+                print(f"[driver]   profile-eta: {json.dumps(pe_stats)}",
+                      flush=True)
         v_desc = " + ".join(f"{n}:{len(vm)}"
                             for n, vm in zip(args._domain_names, vocab_maps))
         print(f"[driver]   corpus: V=({v_desc}) vocab, "
@@ -4340,6 +4435,17 @@ def main() -> int:
                 "int2cid": {str(i): c for i, c in bundle.int2cid.items()},
                 "name_by_id": {str(c): n for c, n in bundle.name_by_id.items()}},
         }
+        # Profile-eta provenance (plan D5: a FIT parameter recorded in the run
+        # manifest — no cache-key change). Added ONLY when set, so every
+        # existing run's manifest stays byte-identical.
+        if getattr(args, "profile_eta", ""):
+            manifest_fields["profile_eta"] = {
+                "path": args.profile_eta,
+                "strength": float(args.profile_eta_strength),
+                "topics": int(args.profile_eta_topics),
+                "min_coverage": float(args.profile_eta_min_coverage),
+                **args._profile_eta_stats,      # counts only (egress-safe)
+            }
 
         with _phase(f"gated_pc fit (weightY={args.weight_y}, K={lay.K})"):
             pc_est = _build_pc_estimator(args, weight_y=args.weight_y, gated=True)

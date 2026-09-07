@@ -146,19 +146,26 @@ def node_affinity(theta: np.ndarray, lay: DagLayout) -> dict[int, float]:
 #   zero changes to pc.py.
 # ---------------------------------------------------------------------------
 
-def _resolve_eta_boost(eta_boost, K: int, boost_v: int):
+def _resolve_eta_boost(eta_boost, K: int, boost_v: int, eta: float):
     """Validate a sparse per-topic eta boost into {topic: (idx int64, w float64)}.
 
     ``eta_boost`` maps a topic index k to a pair (vocab_idx_array, weight_array)
     of equal length: the effective Dirichlet prior for topic k becomes
-    eta_vec_k = (scalar/per-domain) eta + boost, i.e. the weights are ADDED
-    pseudo-mass on top of the flat eta — never a replacement — so the resolved
-    prior stays strictly positive by construction (eta > 0 is already enforced)
-    and the D3 scale normalization is the CALLER's job (the weights arrive
-    final). CONDITION DOMAIN (domain 0) ONLY: indices are domain-0-local ids,
-    which equal concatenated global ids because domain 0 opens the
-    concatenation; ``boost_v`` is that domain's width (V_0, or V when
-    domains=None and the whole vocabulary is one domain).
+    eta_vec_k = (scalar/per-domain) eta + boost, i.e. the weights are SIGNED
+    DELTAS on top of the flat eta — positive entries are added pseudo-mass (the
+    D3-normalized profile boost), negative entries are the D2 NOT downweight
+    (effective prior = max(0.1*eta, 0.5*(eta + pos_boost)), stored here as its
+    delta from eta + pos_boost) — never a replacement. Because a negative delta
+    could drive a Dirichlet parameter nonpositive, strict positivity of the
+    effective prior is validated HERE, elementwise, against ``eta`` — the
+    condition-domain flat prior the deltas ride on (the constructor's scalar
+    eta, or domain 0's eta_m in multi-domain mode). The D3 scale normalization
+    and the NOT order-of-operations are the CALLER's job (the weights arrive
+    final; see analysis/cloud/profile_eta.py's builder). CONDITION DOMAIN
+    (domain 0) ONLY: indices are domain-0-local ids, which equal concatenated
+    global ids because domain 0 opens the concatenation; ``boost_v`` is that
+    domain's width (V_0, or V when domains=None and the whole vocabulary is one
+    domain).
 
     None or {} resolve to None — the byte-identical no-boost path.
 
@@ -175,11 +182,18 @@ def _resolve_eta_boost(eta_boost, K: int, boost_v: int):
         duplicate would silently lose mass; the WP-2 emitter takes
         max-over-terms per concept and never emits duplicates, so one here is
         always a caller bug;
-      * nonpositive / nonfinite weights — a zero adds nothing and a negative
-        could drive the effective prior toward/below 0 (improper Dirichlet).
+      * zero / nonfinite weights — a zero adds nothing (the WP-3 builder drops
+        exact-zero merged deltas rather than emitting them), and NaN/inf poison
+        every downstream lambda target;
+      * negative weights with eta + w <= 0 — an improper (nonpositive)
+        Dirichlet parameter. Negative weights themselves are LEGAL (they are
+        the NOT downweight deltas); the builder's floor (0.1 * eta) keeps
+        eta + w >= 0.1 * eta > 0, so tripping this guard is always a caller
+        bug, not a tuning question.
     """
     if eta_boost is None or len(eta_boost) == 0:
         return None
+    eta = float(eta)
     if not isinstance(eta_boost, dict):
         raise ValueError(
             f"eta_boost must be a dict {{topic_index: (vocab_idx_array, "
@@ -221,10 +235,17 @@ def _resolve_eta_boost(eta_boost, K: int, boost_v: int):
             raise ValueError(
                 f"eta_boost[{k}] weights shape {w.shape} != indices shape "
                 f"{idx.shape}")
-        if not np.all(np.isfinite(w)) or np.any(w <= 0.0):
+        if not np.all(np.isfinite(w)) or np.any(w == 0.0):
             raise ValueError(
-                f"eta_boost[{k}] weights must be finite and > 0 (they are "
-                f"added Dirichlet pseudo-mass)")
+                f"eta_boost[{k}] weights must be finite and nonzero (a zero "
+                f"adds nothing — drop it upstream — and a nonfinite value "
+                f"poisons the lambda target)")
+        if np.any(eta + w <= 0.0):
+            raise ValueError(
+                f"eta_boost[{k}] has a negative weight driving the effective "
+                f"Dirichlet prior eta + w to {float((eta + w).min()):g} <= 0 "
+                f"(eta={eta:g}); NOT downweights must keep eta + w > 0 (the "
+                f"builder floors the effective prior at 0.1 * eta)")
         out[k] = (idx, w)
     return out
 
@@ -318,7 +339,12 @@ class GatedOnlineLDA(OnlineLDA):
         # wash out or lock a wrong basin. Fixed for the life of the fit, like
         # _eta_domains (optimize_eta is rejected below).
         boost_v = self.domains[0] if self.domains is not None else self.V
-        self._eta_boost = _resolve_eta_boost(eta_boost, self.K, boost_v)
+        # Effective-prior positivity is checked against the CONDITION domain's
+        # flat prior — the only domain a boost can land on: scalar self.eta
+        # (domains=None) or domain 0's eta_m.
+        eta_cond = (float(self._eta_domains[0]) if self._eta_domains is not None
+                    else float(self.eta))
+        self._eta_boost = _resolve_eta_boost(eta_boost, self.K, boost_v, eta_cond)
         # Per-domain modality weight omega (see _resolve_omega). None (the default)
         # = the unweighted MixEHR-faithful path, byte-identical to pre-omega code.
         self.omega = self._resolve_omega(omega)

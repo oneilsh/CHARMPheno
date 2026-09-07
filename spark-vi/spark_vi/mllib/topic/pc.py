@@ -349,9 +349,10 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         "listed CONDITION-DOMAIN (domain 0) vocab indices, re-entering every "
         "lambda update (lambda_target = eta_vec + counts), so a zero-count topic "
         "keeps a tilted E[log beta] on its profile tokens while real counts "
-        "dominate it. Weights are final added pseudo-mass (scale/IDF folded "
-        "upstream). Empty (default) = flat eta, byte-identical to the un-boosted "
-        "fit.",
+        "dominate it. Weights are final SIGNED deltas (scale/IDF folded "
+        "upstream; negatives are the NOT downweights, validated to keep "
+        "eta + w > 0). Empty (default) = flat eta, byte-identical to the "
+        "un-boosted fit.",
         typeConverter=TypeConverters.toString,
     )
     gateNBg = Param(
@@ -442,6 +443,40 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
                            "damping that keeps some repetition). Applied in-memory at "
                            "fit time; the cached bundle stays raw (no cache-key change).",
                            typeConverter=TypeConverters.toString)
+    # -- Profile-eta word-side prior (plan 2026-09-06, exp 0116) -------------
+    # Provenance/recording Params for the HPO-profile eta prior. The boost
+    # itself arrives PRE-BUILT through `setEtaBoost` (the FIT driver reads the
+    # emitted TSV, maps concept ids into the condition-domain vocab via the
+    # bundle meta it already holds, and builds the sparse per-topic boost —
+    # plan D4; unlike the spectral seed there is no way to build it from the
+    # RDD alone). These four record WHICH file and knobs produced that boost,
+    # so the run manifest / model params carry the full provenance, and the
+    # D5 resume/warm-start guard in `_fit` keys off them.
+    profileEta = Param(Params._dummy(), "profileEta",
+                       "path to the profile-eta prior TSV (hpoa_stage2_probe "
+                       "--emit-eta: mondo_id, concept_id, weight, neg, "
+                       "coverage) this fit's etaBoost was built from; empty "
+                       "(default) = no profile prior. Requires gateParent (via "
+                       "etaBoost); incompatible with resumeFrom/warmStartFrom.",
+                       typeConverter=TypeConverters.toString)
+    profileEtaStrength = Param(Params._dummy(), "profileEtaStrength",
+                               "D3 scale: each boosted topic's positive boost "
+                               "vector is normalized to sum to strength * "
+                               "eta_base * V_condition added pseudo-mass. "
+                               "Default 1.0 (doubles the topic's prior mass, "
+                               "concentrated on its profile tokens).",
+                               typeConverter=TypeConverters.toFloat)
+    profileEtaTopics = Param(Params._dummy(), "profileEtaTopics",
+                             "D1 targeting: the boost lands on the FIRST N "
+                             "topics of each credited node's block (the rest "
+                             "stay flat/free). Default 1.",
+                             typeConverter=TypeConverters.toInt)
+    profileEtaMinCoverage = Param(Params._dummy(), "profileEtaMinCoverage",
+                                  "D4 coverage gate: drop a node's boost "
+                                  "entirely when its train positive-doc "
+                                  "coverage (the TSV's coverage column) is "
+                                  "below this. Default 0.0 = off.",
+                                  typeConverter=TypeConverters.toFloat)
     # -- Multi-domain features (MixEHR-style per-domain vocabularies) --------
     featuresCols = Param(
         Params._dummy(), "featuresCols",
@@ -737,6 +772,8 @@ _ONLINE_PCLDA_DEFAULTS = dict(
     init="random", spectralMaxVocab=8000, spectralMethod="auto", spectralD=0,
     spectralMinDocFreq=5, anchorScope="closure", spectralTopoOrder="forward",
     countTransform="none",
+    profileEta="", profileEtaStrength=1.0, profileEtaTopics=1,
+    profileEtaMinCoverage=0.0,
     featuresCols=[],   # domainBounds intentionally omitted: it uses isSet (no default)
 )
 
@@ -800,6 +837,10 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         anchorScope: str = "closure",
         spectralTopoOrder: str = "forward",
         countTransform: str = "none",
+        profileEta: str = "",
+        profileEtaStrength: float = 1.0,
+        profileEtaTopics: int = 1,
+        profileEtaMinCoverage: float = 0.0,
         featuresCols: list[str] | None = None,
         domainBounds: list[int] | None = None,
         warmStartFrom: str = "",
@@ -901,6 +942,21 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
                     f"No manifest.json at warmStartFrom path: {warm_start}"
                 )
             warm_start_path = Path(warm_start)
+
+        # Profile-eta boost guard (plan D5) — the exact twin of the spectral-init
+        # guard below: the boost is a FIT-LONG prior re-entering every lambda
+        # update, and a checkpoint's lambda was fit without it (or under another
+        # one), so resuming/warm-starting under a different eta prior silently
+        # mixes objectives mid-schedule. Keyed on BOTH the provenance Param
+        # (profileEta) and the mechanism Param (etaBoost) so neither route can
+        # slip past.
+        if (str(self.getOrDefault("profileEta"))
+                or str(self.getOrDefault("etaBoost"))):
+            if resume_path is not None or warm_start_path is not None:
+                raise ValueError(
+                    "profileEta/etaBoost is incompatible with resumeFrom/"
+                    "warmStartFrom: the boost is a fit-long word-side prior and "
+                    "the checkpoint's lambda was fit without it. Set at most one.")
 
         label_col = self.getOrDefault("labelCol") if self.isSet("labelCol") else None
         label_mask_col = (
