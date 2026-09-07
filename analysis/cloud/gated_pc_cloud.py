@@ -2710,7 +2710,9 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
         learningOffset=args.tau0, learningDecay=args.kappa,
         gammaShape=args.gamma_shape, caviMaxIter=args.cavi_max_iter,
         caviTol=args.cavi_tol, gradCaviIters=args.grad_cavi_iters,
-        topicTrust=args.topic_trust, weightYWarmupIters=args.weight_y_warmup_iters,
+        topicTrust=args.topic_trust,
+        headTrustMove=float(getattr(args, "head_trust_move", 0.0)),
+        weightYWarmupIters=args.weight_y_warmup_iters,
         headOptimizer=args.head_optimizer, headLr=args.head_lr,
         headNewtonRidge=args.head_newton_ridge, headL2=args.head_l2,
         headIntercept=bool(getattr(args, "head_intercept", False)),
@@ -3875,6 +3877,12 @@ def parse_args(argv=None):
                         "0.0 BLOWS UP on the separable topics PC creates.")
     p.add_argument("--grad-cavi-iters", type=int, default=20)
     p.add_argument("--topic-trust", type=float, default=0.1)
+    p.add_argument("--head-trust-move", type=float, default=0.0,
+                   help="scale-free trust-region radius on the supervised lambda "
+                        "move: cap the EG step when its relative move exceeds this "
+                        "(0.0=off; e.g. 0.03 holds corr_relDlambda in the healthy "
+                        "band regardless of weight_y/K — the K-invariant fix for "
+                        "the over-drive exp 0099/0118/0119 hit at large K).")
     p.add_argument("--weight-y-warmup-iters", type=int, default=10)
     p.add_argument("--max-iter", type=int, default=100)
     p.add_argument("--subsampling-rate", type=float, default=0.05)
@@ -4380,6 +4388,7 @@ def main() -> int:
             "head_l2": args.head_l2, "head_lr": args.head_lr,
             "weight_y_warmup_iters": args.weight_y_warmup_iters,
             "grad_cavi_iters": args.grad_cavi_iters, "topic_trust": args.topic_trust,
+            "head_trust_move": float(getattr(args, "head_trust_move", 0.0)),
             "subsampling_rate": args.subsampling_rate, "tau0": args.tau0,
             "kappa": args.kappa, "max_iter": args.max_iter,
             "min_label_count": args.min_label_count,

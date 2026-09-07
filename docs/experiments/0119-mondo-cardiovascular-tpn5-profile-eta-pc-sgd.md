@@ -51,7 +51,8 @@ head_intercept: true
 head_standardize: true
 doc_concentration: 0.5
 head_lr: 1.0                 # INERT under head_optimizer: sgd (Newton-step damping only)
-head_optimizer: sgd         # the one knob vs 0118 — O(C·K) gradient, no Hessian collect
+head_optimizer: sgd         # O(C·K) gradient, no Hessian collect (vs 0118's newton)
+head_trust_move: 0.03       # SCALE-FREE trust cap: pins corr_relΔλ ≤ 0.03 regardless of K — the fix for the first-attempt over-drive (grad_y 988→10k). Added 2026-09-07.
 person_mod: 1
 prior_obs_days: 0
 doc_min_length: 10
@@ -153,8 +154,22 @@ make -C analysis/cloud inspect-topics ID=119 CREDITED=1 RESOLVE_NAMES=1 INSPECT_
 
 ## Run log
 
-(pending)
+**2026-09-07 — first attempt KILLED (over-drove): grad_y 988 → >10k over the
+10-iter warmup.** The SGD head diverged — by design grad_y should SHRINK as the
+head converges (spark_vi/models/topic/pc.py), so a climbing grad_y is the
+RM↔weight_y coupling runaway (big head gradient → big λ move → topics shift →
+head chases → bigger gradient). This is the SAME K-scale over-drive exp 0099 hit
+at K=444 (corr_relΔλ → 1.83): weight_y that is "controlled" at small K
+over-drives at K=1498. Root cause was a wiring gap, not the config — the engine's
+scale-free `head_trust_move` cap (built precisely for this, docstring: "0.03
+holds corr_relΔλ in the healthy band regardless of weight_y / K") was never
+threaded to front matter, so 0118/0119 could not set it. Wired 2026-09-07
+(pc.py Param → gated_pc_cloud argparse → run_experiment emission, default 0.0 =
+inert; test pins the estimator→engine thread) and set `head_trust_move: 0.03`
+above. Re-run below. The trust cap does NOT weaken the (already-weak) SGD head —
+it caps the λ MOVE, stabilizing what the head fits so it converges, while the
+head keeps its full step.
 
 ## Results
 
-(pending)
+(pending — first attempt killed on over-drive; re-running with the trust cap)
