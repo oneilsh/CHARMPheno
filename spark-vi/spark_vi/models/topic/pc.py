@@ -741,6 +741,8 @@ class OnlinePCLDA(VIModel):
         head_standardize: bool = False,
         head_std_floor: float = 0.0,
         head_trust_move: float = 0.0,
+        head_inner_iters: int = 3,
+        head_history_reset: bool = True,
         topic_support: "list[np.ndarray] | None" = None,
         alpha: float | np.ndarray | None = None,
         eta: float | None = None,
@@ -771,14 +773,17 @@ class OnlinePCLDA(VIModel):
             raise ValueError(
                 f"weight_y_warmup_iters must be >= 0, got {weight_y_warmup_iters}"
             )
-        if head_optimizer not in ("sgd", "newton"):
+        if head_optimizer not in ("sgd", "newton", "lbfgs"):
             raise ValueError(
-                f"head_optimizer must be 'sgd' or 'newton', got {head_optimizer!r}"
+                "head_optimizer must be 'sgd', 'newton' or 'lbfgs', got "
+                f"{head_optimizer!r}"
             )
         if head_lr <= 0:
             raise ValueError(f"head_lr must be > 0, got {head_lr}")
         if head_newton_ridge < 0:
             raise ValueError(f"head_newton_ridge must be >= 0, got {head_newton_ridge}")
+        if head_inner_iters < 1:
+            raise ValueError(f"head_inner_iters must be >= 1, got {head_inner_iters}")
 
         # The topic engine. Every LDA global (λ, α, η) and every topic-side update
         # is owned by this delegate, so at weight_y == 0 OnlinePCLDA IS the delegate
@@ -890,6 +895,32 @@ class OnlinePCLDA(VIModel):
         # weight_y-only behavior). Set e.g. 0.03 to hold the shaping in the healthy band
         # regardless of weight_y / K / standardization.
         self.head_trust_move = float(head_trust_move)
+        # 'lbfgs' head (matrix-free amortized co-fit head, exp 0120 / plan D2). Unlike
+        # 'newton' (one O(C·K²)-collect quadratic step) it re-uses the FROZEN-θ readout
+        # solver (`spark_vi.models.topic.batched_lr.solve_batched_lr`) against the
+        # WITHIN-ITER-FIXED θ, warm-started from the current w_CK/b_CK, for a few
+        # curvature-building passes — O(C·K) shuffle per pass, no Hessian. Two knobs:
+        #   head_inner_iters — solver iterations (batched-L-BFGS passes) per OUTER SVI
+        #     iter (default 3; amortized, not run-to-convergence — θ moves under it).
+        #   head_history_reset — whether to DISCARD the L-BFGS (s,y) curvature history
+        #     between outer iters (True) or CARRY it forward (False). Carrying re-uses
+        #     curvature from the PREVIOUS θ's objective — the non-stationary-curvature
+        #     risk the local simulator gate (plan WP1(b)) decides; True is the robust
+        #     default (fresh curvature each iter). Inert unless head_optimizer=='lbfgs'.
+        self.head_inner_iters = int(head_inner_iters)
+        self.head_history_reset = bool(head_history_reset)
+        # DRIVER-SIDE re-scoring seam (ADR-0047 clean: the head object never crosses a
+        # partition boundary; this provider is injected on the DRIVER only, never
+        # pickled into a task). `provider(global_params) -> (stats_fn, mu, sd, n_obs,
+        # n_pos)` builds the batched-LR data seam for the CURRENT θ so update_global can
+        # re-score candidate heads without shipping per-doc θ through the summed-stat
+        # dict. In-memory locally (`make_head_stats_provider_inmemory`); a scored-df /
+        # treeAggregate twin is the WP2/WP3 cluster wiring. None => the lbfgs branch
+        # degrades to the one-step sgd move (a safe, announced fallback).
+        self._head_stats_provider = None
+        # Persistent L-BFGS curvature carried across outer iters when
+        # head_history_reset is False (mutated in place by solve_batched_lr's `state`).
+        self._lbfgs_state: "dict[str, Any] | None" = None
         # LOCALIZED head (topic-side hierarchy in the HEAD's support, ADR 0042 done
         # right): per-node topic support — node c's logistic reads ONLY topic_support[c]
         # (its gated block + ancestors' blocks + background, e.g. DagLayout.allowed(c)),
@@ -933,6 +964,7 @@ class OnlinePCLDA(VIModel):
         self._corr_relchg = 0.0        # supervised λ-correction magnitude (diagnostic)
         self._grad_topics_norm = 0.0   # ||∂loss_y/∂expElogbeta|| — is the shaping grad alive?
         self._eff_wy = 0.0             # effective weight_y this step (after warmup ramp)
+        self._grad_y = 0.0             # lbfgs head: incoming head-gradient inf-norm (should SHRINK)
         # Supervised-head flavor (the label-side seam). Default = the flat C-way
         # logistic head (Hughes). A DAG-closure head (Mondo, label-side hierarchy)
         # slots in here without touching the SVI math or the increment-1 gate.
@@ -1296,6 +1328,17 @@ class OnlinePCLDA(VIModel):
         #              needs no raw θ on the driver. This also feeds the topic correction
         #              a VALID head signal each iter (the correction's ∂loss_y/∂θ flows
         #              through w_CK).
+        #   'lbfgs'  — the matrix-free amortized co-fit head (plan D2). Re-uses the
+        #              FROZEN-θ readout solver against the within-iter-fixed θ (via the
+        #              injected re-scoring seam), warm-started from the current w_CK/b_CK,
+        #              for head_inner_iters passes — O(C·K) shuffle, no Hessian collect
+        #              (the whole point vs 'newton'). Only w_CK/b_CK change; the EG
+        #              λ-correction above and the head_trust_move cap are UNTOUCHED.
+
+        if self.head_optimizer == "lbfgs":
+            new_gp["w_CK"], new_gp["b_CK"] = self._lbfgs_head_step(
+                global_params, target_stats, rho, wy)
+            return new_gp
 
         if (self.head_optimizer == "newton" and self.head_intercept
                 and "head_irls_hess_stat" in target_stats):
@@ -1427,6 +1470,188 @@ class OnlinePCLDA(VIModel):
         frac = min(1.0, self._update_calls / float(self.weight_y_warmup_iters))
         return self.weight_y * frac
 
+    # -- lbfgs co-fit head: the driver-side re-scoring seam ------------------
+
+    def set_head_stats_provider(self, provider) -> None:
+        """Inject the driver-side batched-LR re-scoring seam for the lbfgs head.
+
+        ``provider(global_params) -> (stats_fn, mu, sd, n_obs, n_pos)`` builds, for
+        the CURRENT θ (the label-free doc-topic mix the head reads and predicts on),
+        the same ``(loss, gW_std, gb)`` stats seam
+        :func:`spark_vi.models.topic.batched_lr.solve_batched_lr` consumes for the
+        FROZEN-θ readout — here evaluated against the θ implied by ``global_params``.
+        Injected on the DRIVER only (never pickled into a Spark task — the head object
+        stays off the closure per ADR 0047). ``None`` clears it. Without a provider the
+        lbfgs branch degrades to the one-step sgd move, announced once."""
+        self._head_stats_provider = provider
+
+    def _plain_cavi_theta(self, eb_d, counts, alpha_vec, n_iters) -> np.ndarray:
+        """Plain-numpy twin of :func:`_cavi_theta_anp` — the head's label-free θ.
+
+        The head trains and predicts through a FIXED, short unroll of the mean-field
+        CAVI fixed point from the deterministic init ``gamma = alpha`` (autograd's
+        ``_cavi_theta_anp``). The lbfgs re-scoring seam must read the IDENTICAL θ, so
+        this reproduces that recurrence in plain numpy (no autograd box needed on the
+        driver). Deterministic and init-independent (the fixed point is), so it matches
+        the differentiated θ to roundoff."""
+        gamma = np.asarray(alpha_vec, dtype=np.float64).copy()
+        for _ in range(int(n_iters)):
+            expElogthetad = np.exp(digamma(gamma) - digamma(gamma.sum()))
+            phi_norm = eb_d.T @ expElogthetad + 1e-100
+            gamma = alpha_vec + expElogthetad * (eb_d @ (counts / phi_norm))
+        return gamma / gamma.sum()
+
+    def make_head_stats_provider_inmemory(self, rows):
+        """Build an in-memory lbfgs re-scoring provider from a materialized corpus.
+
+        The local-simulator seam for the co-fit head (plan WP1(b)): given the fit's
+        documents, returns ``provider(global_params)`` that scores every doc's
+        label-free θ under the CURRENT global params and hands back the batched-LR
+        data seam over the OBSERVED (doc, node) cells — exactly what the FROZEN-θ
+        readout builds from a persisted scored-df, only re-derived each outer iter
+        because θ moves. ``mu``/``sd`` are the per-node masked θ moments when
+        ``head_standardize`` is on (identity otherwise), matching the readout's
+        per-node ``StandardScaler`` on that node's own observed rows.
+
+        The cluster twin (WP2/WP3) replaces the doc loop with a distributed
+        treeAggregate over a scored θ DataFrame; the seam's contract — the same
+        ``(stats_fn, mu, sd, n_obs, n_pos)`` tuple — is identical."""
+        from spark_vi.models.topic.batched_lr import (
+            make_inmemory_stats_fn, standardization_moments)
+
+        rows = list(rows)
+        C, K = self.C, self.K
+        Y = np.zeros((len(rows), C), dtype=np.float64)
+        OBS = np.zeros((len(rows), C), dtype=np.float64)
+        for d, doc in enumerate(rows):
+            Y[d] = np.asarray(doc.y, dtype=np.float64)
+            OBS[d] = np.asarray(doc.label_mask, dtype=np.float64)
+
+        def provider(global_params):
+            alpha_vec = np.asarray(global_params["alpha"], dtype=np.float64)
+            expElogbeta = self._expElogbeta_from_lambda(global_params["lambda"])
+            Pi = np.empty((len(rows), K), dtype=np.float64)
+            for d, doc in enumerate(rows):
+                idx = np.asarray(doc.indices)
+                eb_d = expElogbeta[:, idx]
+                Pi[d] = self._plain_cavi_theta(
+                    eb_d, np.asarray(doc.counts, dtype=np.float64),
+                    alpha_vec, self.grad_cavi_iters)
+            obs_bool = OBS.astype(bool)
+            n_obs = OBS.sum(axis=0)                              # (C,)
+            n_pos = (Y * OBS).sum(axis=0)                        # (C,)
+            if self.head_standardize:
+                mu, sd, _ = standardization_moments(Pi, obs_bool)
+                if self.head_std_floor > 0.0:
+                    sd = np.maximum(sd, self.head_std_floor)
+            else:
+                mu = np.zeros((C, K), dtype=np.float64)
+                sd = np.ones((C, K), dtype=np.float64)
+            stats_fn = make_inmemory_stats_fn(Pi, Y, obs_bool, mu, sd)
+            return stats_fn, mu, sd, n_obs, n_pos
+
+        return provider
+
+    def _lbfgs_head_step(self, global_params, target_stats, rho, wy):
+        """The 'lbfgs' co-fit head M-step: amortized batched-L-BFGS on the CURRENT θ.
+
+        Re-uses :func:`spark_vi.models.topic.batched_lr.solve_batched_lr` — the SAME
+        solver the FROZEN-θ readout runs — against the within-iter-fixed θ the injected
+        provider re-scores, warm-started from the current ``w_CK``/``b_CK`` and run for
+        ``head_inner_iters`` passes. No Hessian is collected or inverted (the point vs
+        'newton'); curvature comes from the L-BFGS (s, y) history, optionally carried
+        across outer iters (``head_history_reset=False``). Returns the new
+        ``(w_CK, b_CK)`` in RAW-θ coordinates; the caller has already applied the
+        (unchanged) EG λ-correction and carries ``b_CK`` on the other return paths.
+
+        Degenerate nodes (empty / single-class observed set — the readout oracle's
+        constant-prediction fallback) and, for a LOCALIZED head, off-support topic
+        coordinates are pinned at the warm start by zeroing their data gradient: exactly
+        the readout's degenerate-node masking and the localized head's "w_c is 0 off its
+        support" identity, so the solve is O(|support|) work without a per-node ragged
+        design. ``head_l2`` enters as a per-doc-MEAN absolute ridge (``l2 = head_l2 *
+        n_docs`` on the SUMMED seam), matching the newton head's ``inv_n`` rescale so
+        ``head_l2`` stays corpus-invariant (ADR 0045)."""
+        from spark_vi.models.topic.batched_lr import (
+            fold_standardization, solve_batched_lr, unfold_standardization)
+
+        w_CK = np.asarray(global_params["w_CK"], dtype=np.float64)
+        b_CK = np.asarray(
+            global_params.get("b_CK", np.zeros(self.C)), dtype=np.float64)
+        n_docs = float(target_stats.get("n_docs", np.array(1.0)))
+
+        provider = self._head_stats_provider
+        if provider is None:
+            # No re-scoring seam -> degrade to the one-step sgd move so the engine stays
+            # runnable (the driver/local harness injects a provider; announced once).
+            if not getattr(self, "_lbfgs_fallback_warned", False):
+                import warnings
+                warnings.warn(
+                    "head_optimizer='lbfgs' but no head stats provider is injected; "
+                    "falling back to the one-step sgd head move. Call "
+                    "set_head_stats_provider(...) on the driver.",
+                    RuntimeWarning, stacklevel=2)
+                self._lbfgs_fallback_warned = True
+            grad_wCK = (np.asarray(target_stats["grad_wCK_stat"], np.float64)
+                        / max(n_docs, 1.0))
+            head_grad = grad_wCK + self.lambda_w * 2.0 * w_CK
+            self._grad_y = float(np.abs(head_grad).max())
+            return w_CK - rho * self.head_lr_scale * wy * head_grad, b_CK
+
+        stats_fn, mu, sd, n_obs, n_pos = provider(global_params)
+        l2_eff = max(self.head_l2, 0.0) * max(n_docs, 1.0)
+
+        # Warm start: RAW-θ params -> this θ's standardized basis (exact via unfold).
+        W_std0, b_std0 = unfold_standardization(w_CK, b_CK, mu, sd)
+
+        active = (n_pos > 0.0) & (n_pos < n_obs)          # both classes observed
+        if self._topic_support is None:
+            keep_cols = None
+        else:
+            keep_cols = np.zeros((self.C, self.K), dtype=bool)
+            for c, sup in enumerate(self._topic_support):
+                keep_cols[c, np.asarray(sup, dtype=np.intp)] = True
+
+        def masked_stats_fn(W_std, b_std, node_mask=None):
+            loss, gW, gb = stats_fn(W_std, b_std, node_mask=node_mask)
+            loss = np.where(active, loss, 0.0)
+            gW = gW * active[:, None]
+            gb = np.where(active, gb, 0.0)
+            if keep_cols is not None:
+                gW = gW * keep_cols                       # pin off-support weights at 0
+            return loss, gW, gb
+
+        # Zero the warm start of pinned coordinates so the bare ridge does not spend
+        # passes walking them back to 0 (the readout's x0-zeroing obligation).
+        W_std0 = W_std0 * active[:, None]
+        b_std0 = np.where(active, b_std0, 0.0)
+        if keep_cols is not None:
+            W_std0 = W_std0 * keep_cols
+
+        # DIAGNOSTIC (the coupling gate's key signal): the head gradient inf-norm at the
+        # INCOMING head, summed-scale like exp 0119's grad_y. It should SHRINK across
+        # outer iters as the head converges; a GROWING grad_y is the head chasing a θ
+        # that drifts faster than it tracks (the sgd failure mode).
+        _loss0, gW0, gb0 = masked_stats_fn(W_std0, b_std0)
+        G0 = np.abs(gW0 + l2_eff * W_std0).max(axis=1)
+        G0 = np.maximum(G0, np.abs(gb0))
+        self._grad_y = float(G0[active].max()) if active.any() else 0.0
+
+        state = None if self.head_history_reset else self._lbfgs_state
+        W_std, b_std, info = solve_batched_lr(
+            masked_stats_fn, self.C, self.K, l2=l2_eff,
+            max_iter=self.head_inner_iters, history=6,
+            x0=(W_std0, b_std0), state=state)
+        if not self.head_history_reset:
+            self._lbfgs_state = info.get("state")
+
+        V, b_raw = fold_standardization(W_std, b_std, mu, sd)
+        if keep_cols is not None:
+            V = V * keep_cols                             # 0 off-support (belt-and-braces)
+        new_w = np.where(active[:, None], V, w_CK)        # frozen nodes keep warm start
+        new_b = np.where(active, b_raw, b_CK)
+        return new_w, new_b
+
     def combine_stats(
         self,
         a: dict[str, np.ndarray],
@@ -1496,4 +1721,8 @@ class OnlinePCLDA(VIModel):
         diag = self._lda.iteration_diagnostics(global_params)
         if self.weight_y != 0.0:
             diag["w_CK_absmax"] = float(np.abs(global_params["w_CK"]).max())
+            diag["corr_relchg"] = float(getattr(self, "_corr_relchg", 0.0))
+            if self.head_optimizer == "lbfgs":
+                # grad_y should SHRINK as the co-fit head converges; growing = chasing θ.
+                diag["grad_y"] = float(getattr(self, "_grad_y", 0.0))
         return diag
