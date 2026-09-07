@@ -379,6 +379,67 @@ def test_preindex_closure_is_mondo_only_in_the_spec(monkeypatch):
         parsed, ())["preindex_closure"] is False
 
 
+def test_profile_eta_flags_thread_and_absent_keys_emit_nothing(monkeypatch):
+    """Profile-eta wiring (plan 2026-09-06 WP-3), the spectral-emission pattern:
+    `profile_eta` front matter -> the four CLI flags -> the driver parses them ->
+    the shim estimator carries the four provenance Params AND the driver-built
+    boost lands via setEtaBoost. Absent front matter emits NOTHING, so every
+    existing gated_pc run's arg string stays byte-identical."""
+    mod = _run_exp(monkeypatch)
+    eff = {**_base_eff(), "profile_eta": "data/ontology/profile_eta.tsv",
+           "profile_eta_strength": 3.0, "profile_eta_topics": 2,
+           "profile_eta_min_coverage": 0.25}
+    args = mod.build_gated_pc_args(eff, "/out")
+    assert args[args.index("--profile-eta") + 1] == "data/ontology/profile_eta.tsv"
+    assert args[args.index("--profile-eta-strength") + 1] == "3.0"
+    assert args[args.index("--profile-eta-topics") + 1] == "2"
+    assert args[args.index("--profile-eta-min-coverage") + 1] == "0.25"
+    # a bare profile_eta key rides the knob DEFAULTS alongside (like spectral)
+    bare = mod.build_gated_pc_args(
+        {**_base_eff(), "profile_eta": "x.tsv"}, "/out")
+    assert bare[bare.index("--profile-eta-strength") + 1] == "1.0"
+    assert bare[bare.index("--profile-eta-topics") + 1] == "1"
+    assert bare[bare.index("--profile-eta-min-coverage") + 1] == "0.0"
+
+    # absent (or empty) key: none of the four flags appear at all
+    plain = mod.build_gated_pc_args(_base_eff(), "/out")
+    empty = mod.build_gated_pc_args({**_base_eff(), "profile_eta": ""}, "/out")
+    assert plain == empty
+    for flag in ("--profile-eta", "--profile-eta-strength",
+                 "--profile-eta-topics", "--profile-eta-min-coverage"):
+        assert flag not in plain
+
+    cloud = str(Path(mod.__file__).resolve().parent.parent / "analysis" / "cloud")
+    if cloud not in sys.path:
+        sys.path.insert(0, cloud)
+    import json
+
+    import gated_pc_cloud
+    parsed = gated_pc_cloud.parse_args(args)
+    assert parsed.profile_eta == "data/ontology/profile_eta.tsv"
+    assert parsed.profile_eta_strength == 3.0
+    assert parsed.profile_eta_topics == 2
+    assert parsed.profile_eta_min_coverage == 0.25
+    # ... and the driver defaults are off (byte-identical old behavior)
+    off = gated_pc_cloud.parse_args(plain)
+    assert off.profile_eta == "" and off.profile_eta_strength == 1.0
+    assert off.profile_eta_topics == 1 and off.profile_eta_min_coverage == 0.0
+
+    # estimator threading: the four provenance Params + the pre-built boost
+    parsed._C = 3
+    parsed._parent_int = {1: 0, 2: 0}
+    parsed._profile_eta_boost = {2: ([0, 1], [0.5, -0.05])}
+    est = gated_pc_cloud._build_pc_estimator(parsed, weight_y=0.0, gated=True)
+    assert est.getOrDefault("profileEta") == "data/ontology/profile_eta.tsv"
+    assert est.getOrDefault("profileEtaStrength") == 3.0
+    assert est.getOrDefault("profileEtaTopics") == 2
+    assert est.getOrDefault("profileEtaMinCoverage") == 0.25
+    assert json.loads(est.getOrDefault("etaBoost")) == {"2": [[0, 1], [0.5, -0.05]]}
+    # ungated arm (dag_head): provenance Params ride, the boost does NOT
+    dh = gated_pc_cloud._build_pc_estimator(parsed, weight_y=0.0, gated=False)
+    assert dh.getOrDefault("etaBoost") == ""
+
+
 def test_the_0110_front_matter_asks_for_the_preindex_column():
     """The census (E-census) is a property of 0110's CORPUS and has to be measured
     on the corpus the record run reports — so the flag lives in 0110's own front
