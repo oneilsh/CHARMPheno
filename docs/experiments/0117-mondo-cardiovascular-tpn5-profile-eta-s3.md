@@ -1,7 +1,7 @@
 ---
 id: 117
 slug: mondo-cardiovascular-tpn5-profile-eta-s3
-status: planned
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -126,8 +126,48 @@ make -C analysis/cloud inspect-topics ID=117 RESOLVE_NAMES=1 \
 
 ## Run log
 
-(pending)
+**2026-09-07 — fit + readout + reads.** Fit and distributed readout landed
+(readout persisted; 71% starved, cliff at d4 — geometry unchanged from
+0113/0116). `readout-ab ID=117 BASE=113`, `--profile-align` (its first record
+use), and the starred digest all read; numbers below.
 
 ## Results
 
-(pending)
+**Pre-registered outcome: the dose distorts before it helps — the strength
+ladder STOPS. Alignment answers monotonically to dose; discriminability does
+not, and the global numbers start paying. See insight
+[0085](../insights/0085-eta-dose-buys-alignment-monotonically-but-no-auc-the-prior-is-an-interpretability-lever.md).**
+
+- **Alignment (--profile-align vs the 0113 baseline):** starved credited
+  topics (n=43) median E[β] profile-mass 0.303 / top-15 overlap **1.00**
+  (baseline 0.039 / 0.13 — a starved topic's top-15 IS its profile at S=3);
+  fed credited (n=89) mass 0.302 / overlap 0.60 (baseline 0.014 / 0.13). The
+  fed shift is the mechanism tell: ~10 pseudo-mass cannot move a Σλ≈10⁴
+  topic's β directly, so counts followed the tilt through θ reallocation —
+  the boost DOES buy θ at this dose.
+- **Discriminability (paired vs 0113, 193 shared nodes):** credited median
+  dAUC **−0.0021** (mean +0.0005, 42/49) — still no gain; uncredited control
+  −0.0046 (mean −0.0071, 43/59); macro 0.7778/0.5197 (−0.0035/−0.0058);
+  detection 0.6221/0.7071 (−0.0126/−0.0085, giving back 0116's small gain);
+  by-depth deltas d6 −0.009, d7 −0.005 (0116's noise-level positive hint
+  flips sign).
+- **On the "uncredited moved → wiring bug" failure read:** ruled OUT as
+  wiring — 0116's control was clean on byte-identical wiring, only S changed,
+  and the drift is dose-scaled and directionally consistent. It is real
+  SPILLOVER: θ drained from honest topics into aligned ones through the
+  shared documents each gate admits.
+- Least-aligned at S=3 = the big common-acquired nodes (hypertensive
+  disorder, coronary artery disorder, vascular occlusion — ov 0.00): real
+  counts dominate and the HPOA rare-syndromic profile is not the corpus
+  presentation. Most-aligned = heart disorder / congenital CV anomaly /
+  endocardium disorder (ov 1.00).
+
+**Verdict.** Dose-response answered in two directions at once: eta strength is
+an INTERPRETABILITY lever (monotone, dramatic) and not an AUC lever (flat at
+best, mildly costly at 3×). Operating point going forward: **strength 1.0**
+(0116's free legibility at zero readout cost). Do not run S≈30 ("one canonical
+patient") as an AUC experiment; the doc-units reparameterization remains
+worthwhile as an interpretability dose control only. The θ-allocation levers
+still open for case-finding: label-side pull (PC revival, 0103 bar co-fit
+≳ 0.758 — now with an aligned target the 0096–0103 era lacked) or moving the
+frontier (index, cascade).
