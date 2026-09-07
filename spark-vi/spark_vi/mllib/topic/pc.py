@@ -275,6 +275,19 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         "extra multiplier on the head SGD step (RM <-> weightY decoupling knob); default 1.0",
         typeConverter=TypeConverters.toFloat,
     )
+    headTrustMove = Param(
+        Params._dummy(), "headTrustMove",
+        "SCALE-FREE trust-region radius on the supervised lambda move: cap the "
+        "EG step when its relative move ||lam_sup - lam_unsup|| / ||lam_unsup|| "
+        "exceeds this, else pass through (Robbins-Monro-preserving — a converged "
+        "head's move decays below the radius uncapped). The principled, "
+        "K/sigma/standardization-INVARIANT replacement for hunting weightY per "
+        "scale (exp 0099 over-drove at the same weightY that was healthy at "
+        "K=20). 0.0 (default) = no cap (legacy weightY-only); e.g. 0.03 holds "
+        "corr_relDlambda in the healthy band regardless of weightY / K. Inert "
+        "at weightY=0.",
+        typeConverter=TypeConverters.toFloat,
+    )
     topicTrust = Param(
         Params._dummy(), "topicTrust",
         "trust-region fraction capping the supervised topic correction on lambda to "
@@ -723,6 +736,7 @@ def _build_model_and_config(
         lambda_w=float(estimator.getOrDefault("lambdaW")),
         grad_cavi_iters=int(estimator.getOrDefault("gradCaviIters")),
         head_lr_scale=float(estimator.getOrDefault("headLrScale")),
+        head_trust_move=float(estimator.getOrDefault("headTrustMove")),
         topic_trust=float(estimator.getOrDefault("topicTrust")),
         weight_y_warmup_iters=int(estimator.getOrDefault("weightYWarmupIters")),
         head_optimizer=str(estimator.getOrDefault("headOptimizer")),
@@ -762,7 +776,8 @@ _ONLINE_PCLDA_DEFAULTS = dict(
     optimizeDocConcentration=True, optimizeTopicConcentration=False,
     gammaShape=100.0, caviMaxIter=100, caviTol=1e-3,
     numLabels=1, weightY=0.0, probabilityCol="probability",
-    lambdaW=0.001, gradCaviIters=20, headLrScale=1.0, topicTrust=0.1,
+    lambdaW=0.001, gradCaviIters=20, headLrScale=1.0, headTrustMove=0.0,
+    topicTrust=0.1,
     weightYWarmupIters=0, headOptimizer="sgd", headLr=0.05, headNewtonRidge=0.01,
     headL2=1e-3, headIntercept=False, headStandardize=False,
     closureParents="", warmStartFrom="",
@@ -813,6 +828,7 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         lambdaW: float = 0.001,
         gradCaviIters: int = 20,
         headLrScale: float = 1.0,
+        headTrustMove: float = 0.0,
         topicTrust: float = 0.1,
         weightYWarmupIters: int = 0,
         headOptimizer: str = "sgd",

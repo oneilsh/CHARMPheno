@@ -117,6 +117,23 @@ def test_pc_shim_weight_y_default_zero_and_settable():
     assert est2.getOrDefault("numLabels") == 2
 
 
+def test_pc_shim_head_trust_move_defaults_off_and_threads_to_engine():
+    """headTrustMove defaults 0.0 (off — legacy weightY-only) and reaches the
+    engine's head_trust_move so a run can pin corr_relΔλ scale-free (the K=1498
+    over-drive fix, exps 0118/0119). Verified through _build_model_and_config
+    so the estimator seam and the engine agree."""
+    from spark_vi.mllib.topic.pc import (
+        OnlinePCLDAEstimator, _build_model_and_config)
+    est = OnlinePCLDAEstimator(k=3, numLabels=2)
+    assert est.getOrDefault("headTrustMove") == 0.0
+    model_off, _ = _build_model_and_config(est, vocab_size=20, domains=None)
+    assert float(model_off.head_trust_move) == 0.0
+    est2 = OnlinePCLDAEstimator(k=3, numLabels=2, headTrustMove=0.03)
+    assert est2.getOrDefault("headTrustMove") == 0.03
+    model_on, _ = _build_model_and_config(est2, vocab_size=20, domains=None)
+    assert float(model_on.head_trust_move) == 0.03
+
+
 def test_pc_shim_weight_y_positive_requires_label_col(spark):
     # Supervised fit without labels is a user error (the head would see no
     # signal); fail fast rather than silently run an unsupervised fit under a

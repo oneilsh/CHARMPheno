@@ -824,6 +824,7 @@ def build_gated_pc_args(
         "--head-l2", str(effective.get("head_l2", 1e-3)),
         "--grad-cavi-iters", str(effective.get("grad_cavi_iters", 20)),
         "--topic-trust", str(effective.get("topic_trust", 0.1)),
+        "--head-trust-move", str(effective.get("head_trust_move", 0.0)),
         "--weight-y-warmup-iters", str(effective.get("weight_y_warmup_iters", 10)),
         "--max-iter", str(effective["max_iter"]),
         "--subsampling-rate", str(effective.get("subsampling_rate", 0.05)),
