@@ -25,6 +25,15 @@ codes) -> 'Maps to' via `concept_relationship` -> standard Condition concepts
 instead of Mondo same_as xrefs) -> the cached bundle's condition vocab index
 space -> ONE treeAggregate over the TRAIN split.
 
+``--emit-eta PATH`` additionally writes the profile-eta prior table for the
+fit side (plan D2/D4, exp 0116): per (node, standard Condition concept_id)
+rows with ``freq x IDF`` already folded into ``weight``, the ``neg`` flag
+carried, and the node's positive-doc ``coverage`` fraction from the SAME
+support pass — no extra cluster pass, no extra BigQuery reads, and without
+the flag the probe's behavior and outputs are unchanged. Concept ids, not
+vocab indices, so the file is bundle-agnostic. WORKSPACE-INTERNAL (the
+coverage column is train-derived), written under gitignored ``data/``.
+
 Bundle located exactly like `gated_pc_readout` / `diag_sibling_support`:
 recompute the cache key from the run's manifest and REQUIRE a HIT (a probe
 never pays a rebuild — run the fit or readout first).
@@ -70,6 +79,14 @@ COVERAGE_THRESHOLDS = (0.10, 0.25, 0.50, 0.75, 0.90)
 # Pure logic (no Spark, no BigQuery) — unit-tested in                          #
 # tests/test_hpoa_stage2_probe.py                                              #
 # --------------------------------------------------------------------------- #
+def _neg_mask(series):
+    """Boolean polarity of the ``neg`` column, whatever a TSV round-trip made
+    of it (bool dtype, or "True"/"False"/"1"/"0" strings)."""
+    if series.dtype != bool:
+        return series.astype(str).str.lower().isin(("true", "1"))
+    return series
+
+
 def profile_token_sets(codes_df, eid_by_mondo, code_to_std, vocab_map):
     """Per-node in-vocab token-index sets from the emit-codes TSV.
 
@@ -87,10 +104,7 @@ def profile_token_sets(codes_df, eid_by_mondo, code_to_std, vocab_map):
     n_profile_concepts, n_in_vocab, tokens frozenset of vocab indices); skipped
     is the sorted list of mondo_ids with no engine id (nodes the label DAG
     dropped as unpowered/collapsed — expected, counted, not an error)."""
-    neg = codes_df["neg"]
-    if neg.dtype != bool:  # a TSV round-trip stringifies bools
-        neg = neg.astype(str).str.lower().isin(("true", "1"))
-    pos = codes_df[~neg]
+    pos = codes_df[~_neg_mask(codes_df["neg"])]
     per_node, skipped = {}, []
     for mid, g in pos.groupby("mondo_id"):
         eid = eid_by_mondo.get(mid)
@@ -106,6 +120,79 @@ def profile_token_sets(codes_df, eid_by_mondo, code_to_std, vocab_map):
                          "n_in_vocab": len(tokens),
                          "tokens": tokens}
     return per_node, sorted(skipped)
+
+
+def credited_idf(codes_df, eid_by_mondo):
+    """``(N, idf_by_term)`` over the CREDITED label nodes (plan D2).
+
+    Credited = a label node (its mondo_id resolves to an engine id in this
+    run's DAG) whose rolled-up profile emitted at least one code row — the
+    nodes that "resolved a non-empty profile in this probe run". df(t) counts
+    the credited nodes whose profile CONTAINS term t, EITHER polarity: a NOT
+    term is still part of the profile. df is deliberately counted over the
+    ROLLED-UP profiles — roll-up inflates df on inherited high-level terms,
+    and that inflation is the point: roll-up and IDF are a package, so a term
+    every ancestor donated everywhere carries little weight. idf(t) =
+    log(N / df(t)) >= 0; a term in every credited profile weighs exactly 0 by
+    design (it discriminates nothing)."""
+    cred = codes_df[codes_df["mondo_id"].astype(str).isin(eid_by_mondo)]
+    n = int(cred["mondo_id"].nunique())
+    if n == 0:
+        return 0, {}
+    df_t = cred.groupby("hp_id")["mondo_id"].nunique()
+    return n, {str(t): float(np.log(n / int(d))) for t, d in df_t.items()}
+
+
+def profile_eta_rows(codes_df, eid_by_mondo, code_to_std, coverage_by_mondo,
+                     *, default_freq=0.5):
+    """The ``--emit-eta`` table (plan D2/D4): one row per (credited node,
+    standard Condition concept, polarity), columns ``mondo_id, concept_id,
+    weight, neg, coverage``.
+
+    Per (node k, HP term t): ``w = freq_k(t) * idf(t)`` with idf from
+    `credited_idf`; an unknown/blank freq defaults to ``default_freq`` (0.5).
+    The weight lands on each standard concept that evidences the term (the
+    union of `code_to_std` over the term's codes); a concept claimed by
+    several terms of the same polarity for the same node takes the MAX weight.
+    Zero-weight rows (idf 0, or a frequency-0 NOT term) are KEPT — whether to
+    skip a zero boost is the fit side's call, and a neg row's flag is
+    information even at weight 0.
+
+    DIVISION OF LABOR on NOT terms: they are kept as ``neg=1`` rows with
+    freq x IDF folded into ``weight`` exactly like positive rows — the
+    multiplicative downweight (eta * 0.5, floored at 0.1 * eta_base) is
+    applied at FIT time from the ``neg`` flag (WP-1/WP-3), never here, so it
+    cannot be double-applied.
+
+    ``concept_id`` is the OMOP standard concept_id, never a vocab index, so
+    the file is bundle-agnostic; the fit driver maps concept_id -> vocab
+    index via the bundle meta it already holds. ``coverage`` is the node's
+    positive-doc coverage fraction from the probe's support pass (0.0 for a
+    node the pass observed no positives for) — train-derived, which is why
+    the emitted file stays WORKSPACE-INTERNAL."""
+    n_credited, idf = credited_idf(codes_df, eid_by_mondo)
+    work = codes_df.assign(
+        neg=_neg_mask(codes_df["neg"]).astype(bool).values,
+        freq=pd.to_numeric(codes_df["freq"],
+                           errors="coerce").fillna(default_freq).values)
+    work = work[work["mondo_id"].astype(str).isin(eid_by_mondo)]
+    best: dict[tuple, float] = {}
+    for (mid, hp, is_neg), g in work.groupby(["mondo_id", "hp_id", "neg"]):
+        w = float(g["freq"].max()) * idf[str(hp)]
+        concepts = set()
+        for code in set(g["code"].astype(str)):
+            concepts |= code_to_std.get(code, set())
+        for c in concepts:
+            key = (str(mid), int(c), int(is_neg))
+            if key not in best or w > best[key]:
+                best[key] = w
+    rows = [{"mondo_id": m, "concept_id": c, "weight": w, "neg": g,
+             "coverage": float(coverage_by_mondo.get(m, 0.0))}
+            for (m, c, g), w in best.items()]
+    out = pd.DataFrame(
+        rows, columns=["mondo_id", "concept_id", "weight", "neg", "coverage"])
+    return (out.sort_values(["mondo_id", "concept_id", "neg"])
+               .reset_index(drop=True))
 
 
 def _bow_index_set(v):
@@ -285,6 +372,11 @@ def main(argv=None) -> int:
     p.add_argument("--out-dir", default=None,
                    help="where the per-node TSV + summary land "
                         "(default: the run dir)")
+    p.add_argument("--emit-eta", default=None, metavar="PATH",
+                   help="also write the profile-eta prior table (mondo_id, "
+                        "concept_id, weight, neg, coverage) with freq x IDF "
+                        "folded (plan D2/D4) — same pass, no extra BQ reads; "
+                        "WORKSPACE-INTERNAL (coverage is train-derived)")
     args = p.parse_args(argv)
     configure_logging()
 
@@ -451,6 +543,30 @@ def main(argv=None) -> int:
                 fh.write(summary)
             print(summary, flush=True)
             print(f"[probe] wrote {md_path}", flush=True)
+
+        if args.emit_eta:
+            with _phase("emit eta prior table"):
+                # Coverage from the SAME support pass above — no second
+                # cluster pass; 0.0 where the pass observed no positives.
+                coverage_by_mondo = {
+                    mid: (float(n_hit[j] / n_pos[j]) if n_pos[j] > 0 else 0.0)
+                    for j, mid in enumerate(order)}
+                n_credited, _ = credited_idf(codes_df, eid_by_mondo)
+                eta_df = profile_eta_rows(codes_df, eid_by_mondo, code_to_std,
+                                          coverage_by_mondo)
+                eta_dir = os.path.dirname(os.path.abspath(args.emit_eta))
+                os.makedirs(eta_dir, exist_ok=True)
+                eta_df.to_csv(args.emit_eta, sep="\t", index=False)
+                # Counts of nodes/terms/concepts/rows only — no fractions, no
+                # patient counts (the coverage COLUMN stays in the file).
+                print(f"[probe] emit-eta: {n_credited} credited label nodes "
+                      f"(IDF base N), {eta_df['mondo_id'].nunique()} nodes "
+                      f"with >=1 mapped concept, "
+                      f"{eta_df['concept_id'].nunique()} distinct concepts, "
+                      f"{int((eta_df['neg'] == 1).sum())} neg rows, "
+                      f"{len(eta_df)} rows -> {args.emit_eta} "
+                      "(WORKSPACE-INTERNAL: the coverage column is "
+                      "train-derived)", flush=True)
     return 0
 
 
