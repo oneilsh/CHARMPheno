@@ -1,7 +1,7 @@
 ---
 id: 116
 slug: mondo-cardiovascular-tpn5-profile-eta
-status: planned
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -208,6 +208,45 @@ credited-vs-uncredited paired split — `inspect_topics --readout-auc` gained
 `--credited-file` (the probe's emit-eta TSV) and `--compare-run` for exactly
 this read (below).
 
+**2026-09-07 — primary read (`readout-ab ID=116 BASE=113`) + digest.** Numbers
+in Results.
+
 ## Results
 
-(pending)
+**Pre-registered outcome: failure read #2 — everything flat, strength too low.
+Non-inferiority MET; no win; internal control clean; the boost verifiably
+reached the starved floor. Next rung: strength 3.0 (exp 0117).**
+
+- **Paired per-node dAUC vs 0113 (193 shared scored nodes):** all n=193 median
+  −0.0012 mean −0.0009, up/down 90/103. **Credited** (n=91 scored of 132):
+  median **−0.0009** mean +0.0025, up/down 43/48. **Uncredited internal
+  control** (n=102 of 167): median −0.0022 mean −0.0039, up/down 47/55. No
+  effect on either side of the credit line — and the flat control validates
+  the block-targeted wiring (no leakage; the plan's failure read #3 is
+  excluded).
+- By-depth delta medians: d2 −0.002, d3 −0.001, d4 −0.000, d5 −0.002,
+  **d6 +0.005, d7 +0.004** — a noise-level hint in the predicted direction
+  exactly where starvation is total.
+- **Secondary (legibility): starvation 72%, cliff at d4 — unchanged.** But the
+  digest shows the boost landed precisely where designed: STARVED deep
+  cardiomyopathy topics (ev ≈ 65 against the 60.7 flat floor — i.e. sitting on
+  the boosted prior) now lead with their own phenotype — hypertrophic CM d5:
+  "Hypertrophic cardiomyopathy · HOCM · Dyspnea"; restrictive CM d5:
+  "Amyloidosis · muscle weakness"; non-familial restrictive CM d6:
+  "Amyloidosis · Fibrosis of lung · Interstitial lung disease". In 0113 these
+  rows were anonymous flat topics. Fed-but-misaligned topics unchanged
+  (dilated CM's ev 1.7e5 topic still pregnancy-anchored): real counts dominate
+  the prior, by design.
+- Cross-sectional credited median AUC 0.807 vs uncredited 0.773 is SELECTION
+  (HPOA annotates different diseases), not effect; the paired deltas above are
+  the causal read.
+
+**Verdict.** At strength 1.0 the prior is a free legibility upgrade for
+starved topics (their top-words become their phenotype) at zero readout cost,
+but ~3.3 added pseudo-mass per topic cannot buy θ against topics with real
+evidence (Σλ 10²–10⁶) in per-doc CAVI. Mechanism verified at both ends (mass
+arithmetic + starved-row top-words + flat control); dose insufficient. See
+insight
+[0084](../insights/0084-profile-eta-strength-1-tilts-the-floor-legibly-but-cannot-buy-theta.md);
+the pre-registered ladder continues at `profile_eta_strength: 3.0`
+([0117](0117-mondo-cardiovascular-tpn5-profile-eta-s3.md)).
