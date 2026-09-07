@@ -1,7 +1,7 @@
 ---
 id: 119
 slug: mondo-cardiovascular-tpn5-profile-eta-pc-sgd
-status: planned
+status: abandoned  # SGD head too weak at head_lr_scale=1 (corr_relΔλ ~6e-6, non-converging). PC needs a scalable STRONG head (L-BFGS / bounded-Newton) — the real fix.
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -170,6 +170,29 @@ above. Re-run below. The trust cap does NOT weaken the (already-weak) SGD head �
 it caps the λ MOVE, stabilizing what the head fits so it converges, while the
 head keeps its full step.
 
+**2026-09-07 — capped re-run showed the OPPOSITE: SGD head too WEAK, and my
+over-drive read was wrong.** With `head_trust_move: 0.03` on, the trajectory was
+corr_relΔλ 1.1e-6 (it4) → 1.7e-6 (it5) → 6.3e-6 (it11, warmup complete) — FOUR
+orders below the 0.02–0.05 band, with |w_CK|max only 0.0056 and grad_y STILL
+growing (2.5e3 → 1.8e4). The trust cap never engaged (a 6e-6 move is nowhere near
+the 0.03 radius). Reading: the SGD head at `head_lr_scale=1` builds w_CK far too
+slowly to shape λ meaningfully, and grad_y grows because the head chases a θ that
+drifts under it faster than the tiny steps track. **Correction to the first-attempt
+call:** the uncapped grad_y 988→10k was almost certainly this SAME weak-head /
+moving-θ chase, NOT the over-drive runaway I diagnosed — with corr this small,
+attempt 1's λ move was also negligible. The trust cap remains correct, now-wired
+infrastructure (it guards the over-drive side and cost nothing here), but it was
+not the operative issue; I pattern-matched to 0099 too fast.
+
 ## Results
 
-(pending — first attempt killed on over-drive; re-running with the trust cap)
+Abandoned — no readout. The finding of record: **the stock SGD head is too weak
+to test PC at K=1498** (corr ~6e-6, non-converging), and cranking `head_lr_scale`
+into the thousands to compensate is the fragile per-scale hunt the 2026-08-20
+closeout warned against ("the solver is the +0.065 lever"). Combined with 0118
+(Newton head O(C·K²) OOMs at this K), both stock solvers fail: Newton is
+right-sized but doesn't scale; SGD scales but isn't right-sized. **Decision
+(2026-09-07): build the scalable STRONG head** the closeout prescribed — a
+matrix-free amortized L-BFGS (or dynamic MI-selected bounded-support exact
+Newton) co-fit head: O(C·K) shuffle, curvature-aware, no Hessian collect. That is
+the real fix and the prerequisite for any fair PC read; see the build plan.
