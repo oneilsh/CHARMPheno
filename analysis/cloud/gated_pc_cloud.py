@@ -60,6 +60,23 @@ from disk_telemetry import start_disk_telemetry
 import distributed_readout as _dr
 
 
+def _cprint(msg, **kw) -> None:
+    """print() through term_colors.highlight_line (ERROR/WARN/HIT/MISS/
+    rebuild/macro-AUC/eta-boost -- see term_colors.py). Identity when color
+    is disabled or nothing matches, so this is safe on every "[driver]"/
+    "[episode]"/"[mondo]" status line in this module, not just the ones that
+    happen to light up.
+
+    LOCAL import, not module-level: this module is reachable transitively
+    from `gated_pc_readout.py`'s top-level import (itself imported at module
+    level by `hpoa_stage2_probe.py`, which rides Spark's `--py-files` for its
+    own mapPartitions kernel) -- term_colors must never become a top-level
+    dependency an executor could be asked to resolve. See term_colors.py's
+    module docstring."""
+    from term_colors import highlight_line
+    print(highlight_line(msg), **kw)
+
+
 # --------------------------------------------------------------------------- #
 # Pure scoring (no SparkSession; unit-tested numpy-level).                     #
 # --------------------------------------------------------------------------- #
@@ -492,7 +509,11 @@ def score_arm(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, C, *, recall_targets,
 
 def format_arm_readout(name, arm):
     """Render one arm's score_arm() result as driver log lines (ranking + PR@recall +
-    recall@FDR + detection)."""
+    recall@FDR + detection). The two headline lines (macro AUC=.../detection
+    (case vs bg)...) are bold-green (term_colors.highlight_line, local import
+    -- see `_cprint`'s docstring) so the run's bottom-line numbers are
+    findable in a long log without hunting through node-macro/PR detail."""
+    from term_colors import highlight_line
     r, pr, det = arm["ranking"], arm["pr"], arm["detection"]
     auc = "n/a" if r["auc"] is None else f"{r['auc']:.4f}"
     ap = "n/a" if r["ap"] is None else f"{r['ap']:.4f}"
@@ -520,7 +541,7 @@ def format_arm_readout(name, arm):
         units = f" ({n_units} {grain}s)" if n_units is not None else f" ({grain}-grain)"
         lines.append(f"{name}: detection (case vs bg){units} AUC={det['auc']:.4f} "
                      f"AP={det['ap']:.4f} prev={det['prevalence']:.3f}  {dpar}{const}")
-    return "\n".join("[driver]   " + ln for ln in lines)
+    return "\n".join(highlight_line("[driver]   " + ln) for ln in lines)
 
 
 def _dag_children_and_depth(parent_int, C):
@@ -1035,14 +1056,14 @@ def _print_headline(results):
         d = arm["detection"]
         return None if d.get("skipped") else d.get(k)
 
-    print("[driver]   HEADLINE (gated_pc vs unsup_gated):", flush=True)
-    print(f"[driver]     pc_topics_lr  AUC {_d(g['ranking']['auc'], u['ranking']['auc'])}",
+    _cprint("[driver]   HEADLINE (gated_pc vs unsup_gated):", flush=True)
+    _cprint(f"[driver]     pc_topics_lr  AUC {_d(g['ranking']['auc'], u['ranking']['auc'])}",
           flush=True)
-    print(f"[driver]     pc_topics_lr  AP  {_d(g['ranking']['ap'], u['ranking']['ap'])}",
+    _cprint(f"[driver]     pc_topics_lr  AP  {_d(g['ranking']['ap'], u['ranking']['ap'])}",
           flush=True)
-    print(f"[driver]     node P@R0.9        {_d(_par9(g), _par9(u))}", flush=True)
-    print(f"[driver]     detection AP       {_d(_det(g, 'ap'), _det(u, 'ap'))}", flush=True)
-    print("[driver]     (PC should help in the hidden-low-mass regime — insight 0066; "
+    _cprint(f"[driver]     node P@R0.9        {_d(_par9(g), _par9(u))}", flush=True)
+    _cprint(f"[driver]     detection AP       {_d(_det(g, 'ap'), _det(u, 'ap'))}", flush=True)
+    _cprint("[driver]     (PC should help in the hidden-low-mass regime — insight 0066; "
           "AP/P@R are the honest case-finding read — insight 0064.)", flush=True)
 
     # RARITY SPLIT (insight 0066 direct test): does supervision help the LOW-POSITIVE
@@ -1068,16 +1089,16 @@ def _print_headline(results):
         bins = {q: [] for q in range(4)}
         for c in both:
             bins[_qbin(c)].append(c)
-        print(f"[driver]   RARITY SPLIT by test-+ct QUARTILE ({len(both)} shared nodes, "
+        _cprint(f"[driver]   RARITY SPLIT by test-+ct QUARTILE ({len(both)} shared nodes, "
               f"+ct edges {[int(e) for e in edges]}):", flush=True)
         for q, lbl in enumerate(("Q1 rarest", "Q2       ", "Q3       ", "Q4 common")):
             nodes = bins[q]
             ns = sorted(gpn[c]["n_pos"] for c in nodes)
             rng = f"+ct {ns[0]}-{ns[-1]}" if ns else "-"
-            print(f"[driver]     {lbl} n={len(nodes):<3} ({rng:<12}) "
+            _cprint(f"[driver]     {lbl} n={len(nodes):<3} ({rng:<12}) "
                   f"AUC {_d(_mac(nodes, gpn, 'auc'), _mac(nodes, upn, 'auc'))}"
                   f"   AP {_d(_mac(nodes, gpn, 'ap'), _mac(nodes, upn, 'ap'))}", flush=True)
-        print("[driver]     (a POSITIVE Q1 delta = PC rescues the extreme low-mass tail; "
+        _cprint("[driver]     (a POSITIVE Q1 delta = PC rescues the extreme low-mass tail; "
               "flat/negative across ALL quartiles = the gate already serves even the rarest.)",
               flush=True)
 
@@ -1088,12 +1109,12 @@ def _print_headline(results):
         def _mean(d, key, coll="edges"):
             vals = [r[key] for r in d[coll] if r.get(key) is not None]
             return float(np.mean(vals)) if vals else None
-        print("[driver]   CONDITIONAL sharpening (gated_pc vs unsup_gated):", flush=True)
-        print(f"[driver]     cond AP (child|parent) {_d(_mean(gc,'cond_ap'), _mean(uc,'cond_ap'))}",
+        _cprint("[driver]   CONDITIONAL sharpening (gated_pc vs unsup_gated):", flush=True)
+        _cprint(f"[driver]     cond AP (child|parent) {_d(_mean(gc,'cond_ap'), _mean(uc,'cond_ap'))}",
               flush=True)
-        print(f"[driver]     cond AUC               {_d(_mean(gc,'cond_auc'), _mean(uc,'cond_auc'))}",
+        _cprint(f"[driver]     cond AUC               {_d(_mean(gc,'cond_auc'), _mean(uc,'cond_auc'))}",
               flush=True)
-        print(f"[driver]     multiclass top1        {_d(_mean(gc,'top1','parents'), _mean(uc,'top1','parents'))}",
+        _cprint(f"[driver]     multiclass top1        {_d(_mean(gc,'top1','parents'), _mean(uc,'top1','parents'))}",
               flush=True)
 
 
@@ -1676,7 +1697,7 @@ def _write_readout_ckpt(path, W_std, b_std, it, fingerprint):
         tmp.replace(path)
         return True
     except Exception as exc:                     # pragma: no cover - I/O failure
-        print(f"[driver]   readout checkpoint write FAILED ({exc}); the solve "
+        _cprint(f"[driver]   readout checkpoint write FAILED ({exc}); the solve "
               "continues uncheckpointed", flush=True)
         try:
             tmp.unlink(missing_ok=True)
@@ -1702,7 +1723,7 @@ def _read_readout_ckpt(path, fingerprint):
         with np.load(path, allow_pickle=False) as z:
             got = str(z["fingerprint"].item())
             if got != fingerprint:
-                print(f"[driver]   readout checkpoint {path.name} IGNORED: "
+                _cprint(f"[driver]   readout checkpoint {path.name} IGNORED: "
                       f"fingerprint {got[:12]} != {fingerprint[:12]} — it belongs "
                       "to a different arm/corpus/basis. Starting cold.", flush=True)
                 return None
@@ -1710,7 +1731,7 @@ def _read_readout_ckpt(path, fingerprint):
                     np.asarray(z["b_std"], dtype=np.float64),
                     int(z["iter"]))
     except Exception as exc:
-        print(f"[driver]   readout checkpoint {path.name} UNREADABLE ({exc}); "
+        _cprint(f"[driver]   readout checkpoint {path.name} UNREADABLE ({exc}); "
               "starting cold", flush=True)
         return None
 
@@ -1795,13 +1816,13 @@ def _write_readout_heads(run_dir, label, V, b_raw, const, degenerate, C, K,
                      theta_topm=np.int64(int(theta_topm)),
                      fingerprint=np.str_(fp))
         tmp.replace(path)
-        print(f"[driver]   wrote readout heads {path.name} "
+        _cprint(f"[driver]   wrote readout heads {path.name} "
               f"(C={int(C)} K={int(K)} topm={int(theta_topm)}) — "
               "conversion_analysis --deciles on scores from this, no re-fit",
               flush=True)
         return True
     except Exception as exc:                         # pragma: no cover - I/O failure
-        print(f"[driver]   readout heads write FAILED ({exc}); the fit is "
+        _cprint(f"[driver]   readout heads write FAILED ({exc}); the fit is "
               "unaffected, but conversion_analysis --deciles on will need a "
               "re-readout to persist them", flush=True)
         try:
@@ -1829,7 +1850,7 @@ def _read_readout_heads(run_dir, label, *, C=None, K=None, theta_topm=None):
         with np.load(path, allow_pickle=False) as z:
             ver = str(z["version"].item())
             if ver != _HEADS_VERSION:
-                print(f"[driver]   readout heads {path.name} IGNORED: version "
+                _cprint(f"[driver]   readout heads {path.name} IGNORED: version "
                       f"{ver!r} != {_HEADS_VERSION!r}", flush=True)
                 return None
             gC, gK, gm = int(z["C"]), int(z["K"]), int(z["theta_topm"])
@@ -1838,18 +1859,18 @@ def _read_readout_heads(run_dir, label, *, C=None, K=None, theta_topm=None):
             const = np.asarray(z["const"], dtype=np.float64)
             degenerate = np.asarray(z["degenerate"], dtype=bool)
     except Exception as exc:
-        print(f"[driver]   readout heads {path.name} UNREADABLE ({exc})",
+        _cprint(f"[driver]   readout heads {path.name} UNREADABLE ({exc})",
               flush=True)
         return None
     for name, want, got in (("C", C, gC), ("K", K, gK),
                             ("theta_topm", theta_topm, gm)):
         if want is not None and int(want) != got:
-            print(f"[driver]   readout heads {path.name} IGNORED: {name}={got} "
+            _cprint(f"[driver]   readout heads {path.name} IGNORED: {name}={got} "
                   f"!= manifest {name}={int(want)} — a different arm/run",
                   flush=True)
             return None
     if V.shape != (gC, gK):
-        print(f"[driver]   readout heads {path.name} IGNORED: V shape {V.shape} "
+        _cprint(f"[driver]   readout heads {path.name} IGNORED: V shape {V.shape} "
               f"!= (C={gC}, K={gK})", flush=True)
         return None
     return V, b_raw, const, degenerate, gC, gK, gm
@@ -1956,7 +1977,7 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
         # carries the evidence for (or against) the setting it used.
         cov = _dr.theta_topm_coverage(train_scored, K, topic_col=topic_col,
                                       depth=depth)
-        print(f"[driver]   {tag}theta top-m mass: "
+        _cprint(f"[driver]   {tag}theta top-m mass: "
               + " ".join(f"m={m}:{mean:.3f}/{p10:.3f}"
                          for m, (mean, p10) in sorted(cov.items()))
               + " (mean/p10)", flush=True)
@@ -1989,10 +2010,10 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
             # them at zero — the fingerprint pins the degenerate mask — so this is
             # a belt-and-braces restatement of the contract, not a fixup.)
             x0 = (np.where(keep[:, None], W_ck, 0.0), np.where(keep, b_ck, 0.0))
-            print(f"[driver]   {tag}resuming batched solve from checkpoint "
+            _cprint(f"[driver]   {tag}resuming batched solve from checkpoint "
                   f"(iter {ck_iter} recorded); curvature history is not carried, "
                   "early iterations re-learn it", flush=True)
-    print(f"[driver]   {tag}distributed readout fit: C={C} K={K}, "
+    _cprint(f"[driver]   {tag}distributed readout fit: C={C} K={K}, "
           f"{int(keep.sum())} fittable nodes, {int(degenerate.sum())} degenerate "
           f"(constant fallback), observed train cells={int(n_obs.sum())}"
           f"{' (warm start)' if x0 is not None else ''}"
@@ -2056,7 +2077,7 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
             conv = max(0, p["n_converged"] - _ndeg)
             d_iter = max(1, p["iter"] - _prev["iter"])
             d_pass = p["n_stats_calls"] - _prev["passes"]
-            print(f"[driver]   {_tag}batched L-BFGS iter {p['iter']}: "
+            _cprint(f"[driver]   {_tag}batched L-BFGS iter {p['iter']}: "
                   f"{(now - _prev['t']) / d_iter:.1f}s/iter, "
                   f"{d_pass / d_iter:.1f} passes/iter "
                   f"(avg {p['n_node_evals'] / max(p['n_stats_calls'], 1):.0f} "
@@ -2082,14 +2103,14 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
         try:
             ckpt_path.unlink(missing_ok=True)
         except OSError as exc:                   # pragma: no cover - I/O failure
-            print(f"[driver]   {tag}could not remove readout checkpoint "
+            _cprint(f"[driver]   {tag}could not remove readout checkpoint "
                   f"{ckpt_path.name} ({exc})", flush=True)
     V, b_raw = fold_standardization(W_std, b_std, mu, sd)
     gmax = float(info["grad_inf_norm"][keep].max()) if keep.any() else 0.0
     # `converged` = gtol OR the principled numerical stall; at gtol=1e-4 (sklearn's
     # own tol) every node should stop on the gradient, so a nonzero stalled count is
     # the diagnostic that the summed-loss roundoff floor was hit first.
-    print(f"[driver]   {tag}batched L-BFGS: {int(info['n_stats_calls'])} data passes "
+    _cprint(f"[driver]   {tag}batched L-BFGS: {int(info['n_stats_calls'])} data passes "
           f"({int(info['n_node_evals'])} node-passes, "
           f"{info['n_node_evals'] / max(int(info['n_stats_calls']), 1):.0f} avg), "
           f"{int(info['converged'][keep].sum())}/{int(keep.sum())} converged "
@@ -2361,7 +2382,7 @@ def readout_ab_report(train_scored, test_scored, C, K, *, recall_targets,
         train_scored = _doc_key_sample(train_scored, sample_frac, seed).cache()
         test_scored = _doc_key_sample(test_scored, sample_frac, seed).cache()
         sampled = [train_scored, test_scored]
-        print(f"[driver]   A/B gate: both paths restricted to the SAME "
+        _cprint(f"[driver]   A/B gate: both paths restricted to the SAME "
               f"{sample_frac:g} doc-key sample (seed={seed})", flush=True)
         distributed = None                    # the passed-in fit saw all the rows
     if distributed is None:
@@ -2664,11 +2685,11 @@ def _make_eval_logger(bundle, C, args):
             auc = arm["ranking"]["auc"]
             det = arm["detection"]
             detap = None if det.get("skipped") else det.get("ap")
-            print(f"[driver]   eval@iter{iter_num}: pc_topics_lr AUC="
+            _cprint(f"[driver]   eval@iter{iter_num}: pc_topics_lr AUC="
                   f"{'n/a' if auc is None else f'{auc:.4f}'}  detection AP="
                   f"{'n/a' if detap is None else f'{detap:.4f}'}", flush=True)
         except Exception as exc:                       # noqa: BLE001 — never kill the fit
-            print(f"[driver]   eval@iter{iter_num}: FAILED "
+            _cprint(f"[driver]   eval@iter{iter_num}: FAILED "
                   f"({type(exc).__name__}: {exc})", flush=True)
 
     return _cb
@@ -3037,9 +3058,9 @@ def _load_or_build_first_attestation(spark, spec, *, sidecar_uri, code_map_norm,
         code_map_identity=code_map_identity)
     first = try_load_sidecar(spark, sidecar_uri, key)
     if first is not None:
-        print(f"[episode]   sidecar HIT ({sidecar_uri})", flush=True)
+        _cprint(f"[episode]   sidecar HIT ({sidecar_uri})", flush=True)
         return first
-    print(f"[episode]   sidecar MISS — building first-attestation once "
+    _cprint(f"[episode]   sidecar MISS — building first-attestation once "
           f"({sidecar_uri})", flush=True)
     from charmpheno.omop import load_omop_bigquery
     cond = load_omop_bigquery(
@@ -3049,7 +3070,7 @@ def _load_or_build_first_attestation(spark, spec, *, sidecar_uri, code_map_norm,
     try:
         save_sidecar(first, sidecar_uri, key)
     except Exception as exc:                                    # noqa: BLE001
-        print(f"[episode]   WARNING: sidecar write to {sidecar_uri} failed "
+        _cprint(f"[episode]   WARNING: sidecar write to {sidecar_uri} failed "
               f"({type(exc).__name__}: {exc}); proceeding with the in-memory "
               "frame (next MISS rebuilds it).", flush=True)
     return first
@@ -3564,7 +3585,7 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
                                dag_source="mondo"))
             provider = make_mondo_attested_provider(
                 climb_sdf, doc_spec=provider_doc_spec)
-            print(f"[mondo]   powered terminals={len(terminal_cids)}, "
+            _cprint(f"[mondo]   powered terminals={len(terminal_cids)}, "
                   f"class nodes={reduced['n_classes']}, "
                   f"branch={branch or 'ALL'}", flush=True)
             if spec.get("dag_collapse"):
@@ -4025,7 +4046,7 @@ def main() -> int:
         start_disk_telemetry(
             extra_dirs=[d for d in spark.sparkContext.getConf()
                         .get("spark.local.dir", "").split(",") if d],
-            log=lambda msg: print(f"[driver] {msg}", flush=True))
+            log=lambda msg: _cprint(f"[driver] {msg}", flush=True))
         if args.dag_source in _MONDO_DAG_SOURCES or extra_domains:
             # MULTI-DOMAIN corpus (per-domain vocabularies, features_0..N-1), in
             # either of its two flavours, both CACHED through the same seam:
@@ -4060,7 +4081,7 @@ def main() -> int:
                 vocab_maps = bundle.vocab_maps
                 args._domain_cols = [f"features_{i}" for i in range(len(vocab_maps))]
                 args._domain_names = ["condition", *extra_domains]
-            print(f"[driver]   ledger: {json.dumps(bundle.ledger)}", flush=True)
+            _cprint(f"[driver]   ledger: {json.dumps(bundle.ledger)}", flush=True)
         else:
             with _phase("assemble corpus (cached, emit_labels)"):
                 bundle = load_or_build_case_finding_bundle(
@@ -4083,7 +4104,7 @@ def main() -> int:
                 vocab_maps = [bundle.vocab_map]
                 args._domain_cols = None
                 args._domain_names = ["condition"]
-            print(f"[driver]   ledger: {json.dumps(bundle.ledger)}", flush=True)
+            _cprint(f"[driver]   ledger: {json.dumps(bundle.ledger)}", flush=True)
 
         lay = DagLayout(bundle.parent_int, n_bg=args.n_bg, tpn=args.tpn)
         C = len(bundle.int2cid)               # label heads = engine nodes incl. root
@@ -4139,11 +4160,11 @@ def main() -> int:
                         "--profile-eta-min-coverage")
                 args._profile_eta_boost = pe_boost
                 args._profile_eta_stats = pe_stats
-                print(f"[driver]   profile-eta: {json.dumps(pe_stats)}",
+                _cprint(f"[driver]   profile-eta: {json.dumps(pe_stats)}",
                       flush=True)
         v_desc = " + ".join(f"{n}:{len(vm)}"
                             for n, vm in zip(args._domain_names, vocab_maps))
-        print(f"[driver]   corpus: V=({v_desc}) vocab, "
+        _cprint(f"[driver]   corpus: V=({v_desc}) vocab, "
               f"K={lay.K} gated topics ({args.n_bg} bg + {len(lay.nodes)} nodes x "
               f"{args.tpn} tpn), C={C} label heads", flush=True)
         # PRE-FLIGHT cost profile at the data-build boundary: fan-out / support sizes /
@@ -4156,14 +4177,14 @@ def main() -> int:
         print("\n".join("[cost] " + ln for ln in _prof.splitlines()), flush=True)
         # Readout routing, decided once for every arm (see resolve_readout_mode).
         readout_mode = resolve_readout_mode(args.readout_mode, C)
-        print(f"[driver]   readout_mode={args.readout_mode} -> {readout_mode} "
+        _cprint(f"[driver]   readout_mode={args.readout_mode} -> {readout_mode} "
               f"(C={C}, driver-collect ceiling C<={_DRIVER_READOUT_MAX_C})", flush=True)
         if readout_mode == "distributed" and args.readout_sample_frac < 1.0:
             # The flag exists only to bound the driver collect; the distributed path
             # has no collect to bound, and uniform row sampling would still gut the
             # rare tail the quartile split reports on. Say so rather than silently
             # honouring a knob that would now change the FIT.
-            print(f"[driver]   readout_sample_frac={args.readout_sample_frac} IGNORED "
+            _cprint(f"[driver]   readout_sample_frac={args.readout_sample_frac} IGNORED "
                   "under readout_mode=distributed (it bounded a driver collect that "
                   "no longer happens; the fit uses every row). It still applies "
                   "inside --readout-ab-check, where the driver path is the thing "
@@ -4173,13 +4194,13 @@ def main() -> int:
         # in the run's log next to the mode, not buried in a fit banner.
         theta_topm = int(getattr(args, "readout_theta_topm", 0) or 0)
         if theta_topm > 0 and readout_mode != "distributed":
-            print(f"[driver]   readout_theta_topm={theta_topm} IGNORED under "
+            _cprint(f"[driver]   readout_theta_topm={theta_topm} IGNORED under "
                   "readout_mode=driver (the truncation lives in the distributed "
                   "path's ingest adapters; the driver collect fits full theta)",
                   flush=True)
             theta_topm = 0
         elif theta_topm > 0:
-            print(f"[driver]   readout_theta_topm={theta_topm}: the readout fits and "
+            _cprint(f"[driver]   readout_theta_topm={theta_topm}: the readout fits and "
                   f"scores each doc's top-{theta_topm} theta entries (truncated, not "
                   "renormalized) — see the per-fit 'theta top-m mass' line for the "
                   "measured coverage this is buying against", flush=True)
@@ -4194,35 +4215,35 @@ def main() -> int:
             # arms); scoring a top-m fit on full θ would evaluate a model on features
             # it was never fit on. Keep the truncation and fall back to the driver
             # collect for the eval rather than silently mixing feature maps.
-            print(f"[driver]   eval_path=distributed IGNORED because "
+            _cprint(f"[driver]   eval_path=distributed IGNORED because "
                   f"readout_theta_topm={theta_topm}>0 (the cell explode is dense-θ "
                   "only); using the driver collect for the eval.", flush=True)
             eval_path = "driver"
         if getattr(args, "eval_path", "driver") == "distributed":
             if eval_path == "distributed":
-                print("[driver]   eval_path=distributed (WP-B): the gated_pc ranking "
+                _cprint("[driver]   eval_path=distributed (WP-B): the gated_pc ranking "
                       "arms score via score_cells_arms_df/per_node_metric_arms_rows "
                       "(no O(N.C) driver collect) and the calibrator fits on BINNED "
                       "stats. The conditional/detection/PR axes need the collect and "
                       "are SKIPPED on this path.", flush=True)
             else:
-                print("[driver]   eval_path=distributed IGNORED under "
+                _cprint("[driver]   eval_path=distributed IGNORED under "
                       f"readout_mode={readout_mode!r} (the cell explode reads the "
                       "distributed fit's scored frame; there is none on the driver "
                       "path). Re-run with --readout-mode distributed.", flush=True)
         run_calibration = resolve_readout_calibration(
             getattr(args, "readout_calibration", "on"))
         if not run_calibration:
-            print("[driver]   readout_calibration=off: skipping the post-hoc "
+            _cprint("[driver]   readout_calibration=off: skipping the post-hoc "
                   "isotonic calibration block (a second batched solve + two lean "
                   "collects). Its output is the conditional ECE diagnostic, not a "
                   "ranking signal — final numbers come from a full run.", flush=True)
         ab_check = bool(args.readout_ab_check) and readout_mode == "distributed"
         if bool(args.readout_ab_check) and not ab_check:
-            print("[driver]   readout_ab_check ignored (readout_mode resolved to "
+            _cprint("[driver]   readout_ab_check ignored (readout_mode resolved to "
                   "driver — there is nothing to compare against)", flush=True)
         elif ab_check and C > _DRIVER_READOUT_MAX_C:
-            print(f"[driver]   readout_ab_check SKIPPED: C={C} exceeds the driver "
+            _cprint(f"[driver]   readout_ab_check SKIPPED: C={C} exceeds the driver "
                   f"path's own ceiling ({_DRIVER_READOUT_MAX_C}); the gate is meant "
                   "to run at cardiovascular scale (C=444)", flush=True)
             ab_check = False
@@ -4241,7 +4262,7 @@ def main() -> int:
             bundle.train_df = bundle.train_df.repartition(args.num_partitions).cache()
             bundle.test_df = bundle.test_df.repartition(args.num_partitions).cache()
             bundle.train_df.count(); bundle.test_df.count()   # materialize the spread
-            print(f"[driver]   repartitioned corpus {before} -> "
+            _cprint(f"[driver]   repartitioned corpus {before} -> "
                   f"{args.num_partitions} partitions (train+test cached)", flush=True)
 
         rt, ft = args._recall_targets, args._fdr_targets
@@ -4257,7 +4278,7 @@ def main() -> int:
         _pw = bundle_preindex_witness(bundle)
         elig_col = str(_pw.get("col_name")) if _pw else None
         if elig_col is None:
-            print("[driver]   INCIDENT arm (E2) SKIPPED: this corpus carries no "
+            _cprint("[driver]   INCIDENT arm (E2) SKIPPED: this corpus carries no "
                   "pre-index closure witness. Rebuild the corpus with "
                   "--preindex-closure (a different bundle cache key — nothing "
                   "already cached is invalidated) to get the incident block. The "
@@ -4267,13 +4288,13 @@ def main() -> int:
             # distributed path performs. At C <= 500 (the driver path's own
             # ceiling) the incident arm is not wired; whole-Mondo, where this
             # program lives, resolves to distributed.
-            print(f"[driver]   INCIDENT arm (E2) SKIPPED: readout_mode resolved to "
+            _cprint(f"[driver]   INCIDENT arm (E2) SKIPPED: readout_mode resolved to "
                   f"{readout_mode!r} and the eligibility column rides the LEAN "
                   "(distributed) collect. Re-run with --readout-mode distributed "
                   "for the incident block.", flush=True)
             elig_col = None
         else:
-            print(f"[driver]   INCIDENT arm (E2) ON: eligibility from bundle column "
+            _cprint(f"[driver]   INCIDENT arm (E2) ON: eligibility from bundle column "
                   f"{elig_col!r} ({_pw.get('version')}) — a CORPUS property (spec "
                   "R2.3); {INCIDENT}".replace("{INCIDENT}", INCIDENT_NAMING),
                   flush=True)
@@ -4460,7 +4481,7 @@ def main() -> int:
             # this run from the npz alone.
             _save_fit(out, pc_model.result.global_params, C, manifest_fields,
                       partial="fit-only")
-            print(f"[driver]   saved FIT-ONLY result to {out} (readout pending; "
+            _cprint(f"[driver]   saved FIT-ONLY result to {out} (readout pending; "
                   "re-scoreable with gated_pc_readout)", flush=True)
             if args.diag_only:
                 # FAST head-starvation probe: skip every θ-collect / readout / baseline
@@ -4558,7 +4579,7 @@ def main() -> int:
             # skipped with a note. It is a co-fit / VOI diagnostic, not the ranking
             # headline the WP-B parity gate proves; run --eval-path driver for it.
             if proba_gp is None:
-                print("[driver]   conditional 'sharpening' + incident-conditional "
+                _cprint("[driver]   conditional 'sharpening' + incident-conditional "
                       "readouts SKIPPED under eval_path=distributed (they score the "
                       "full (D,C) proba against an all-ones mask — the collect this "
                       "path avoids; run --eval-path driver on a corpus the collect "
@@ -4589,7 +4610,7 @@ def main() -> int:
             # diagnostic, not part of the headline readout, so it stays on the driver
             # and is skipped when the θ collect it needs is the thing we are avoiding.
             if getattr(args, "localize_head", False) and readout_mode != "driver":
-                print("[driver]   oracle-localized readout + head-formulation ladder "
+                _cprint("[driver]   oracle-localized readout + head-formulation ladder "
                       "SKIPPED under readout_mode=distributed (they fit per-node "
                       "SUPPORT-restricted LRs on a driver-side θ collect; re-run with "
                       "--readout-mode driver at a C the collect fits)", flush=True)
@@ -4658,7 +4679,7 @@ def main() -> int:
                     "note": "pooled equal-width reliability ECE on the TEST slice "
                             "(collect-free); the conditional-edge ECE needs the "
                             "driver collect and is on --eval-path driver"}
-                print(f"[driver]   BINNED isotonic calibration (WP-B, collect-free): "
+                _cprint(f"[driver]   BINNED isotonic calibration (WP-B, collect-free): "
                       f"{_n_cal} nodes calibrated (min_pos=20); pooled reliability "
                       f"ECE-on-test raw={_f(_ece_raw).strip()} -> "
                       f"calibrated={_f(_ece_cal).strip()}", flush=True)
@@ -4723,7 +4744,7 @@ def main() -> int:
                                                bundle.parent_int, C,
                                                min_count=args.min_label_count)
                 results["gated_pc_conditional_cal"] = cond_cal
-                print(f"[driver]   conditional ECE (VOI readiness, held-out isotonic): raw="
+                _cprint(f"[driver]   conditional ECE (VOI readiness, held-out isotonic): raw="
                       f"{_f(cond_raw.get('ece')).strip()} -> "
                       f"calibrated={_f(cond_cal.get('ece')).strip()}", flush=True)
             # co-fit head's own per-node P(node) readout (secondary), from the SAME
@@ -4745,7 +4766,7 @@ def main() -> int:
             _head_wy = float(getattr(args, "weight_y", 0.0) or 0.0)
             _head_col = "probability" in test_scored.columns
             if _head_wy == 0.0 or not _head_col:
-                print(f"[driver]   co-fit head readout + conditional SKIPPED "
+                _cprint(f"[driver]   co-fit head readout + conditional SKIPPED "
                       f"(weight_y={_head_wy:g}, probability column "
                       f"{'present' if _head_col else 'absent'}): an unsupervised fit "
                       "has no co-fit head to read out — its transform appends no "
@@ -4773,7 +4794,7 @@ def main() -> int:
                 # is the reference.
                 results["gated_pc_head_conditional"] = _conditional(
                     hp, hy, hm, "gated_pc co-fit head")
-                print(f"[driver]   co-fit head |w_CK|max="
+                _cprint(f"[driver]   co-fit head |w_CK|max="
                       f"{float(np.abs(pc_model.headWeights()).max()):.4g} "
                       f"(head_l2={args.head_l2})", flush=True)
             # HEAD-FORMULATION LADDER: step the co-fit head's EXACT formulation toward
@@ -4825,11 +4846,11 @@ def main() -> int:
                     ("full-K readout (all K, sklearn)",
                      _mean_cauc(results["gated_pc_conditional"])),
                 ]
-                print("[driver]   HEAD-FORMULATION LADDER  cond_AUC (frozen θ, "
+                _cprint("[driver]   HEAD-FORMULATION LADDER  cond_AUC (frozen θ, "
                       "localized support):", flush=True)
                 for _name, _v in ladder:
-                    print(f"[driver]     {_name:46s} {_v:.3f}", flush=True)
-                print("[driver]     |w|max — engine rel=%.4g  fixed=%.4g  fixed+icpt=%.4g"
+                    _cprint(f"[driver]     {_name:46s} {_v:.3f}", flush=True)
+                _cprint("[driver]     |w|max — engine rel=%.4g  fixed=%.4g  fixed+icpt=%.4g"
                       % (float(np.abs(w_rel).max()), float(np.abs(w_fix).max()),
                          float(np.abs(w_fxi).max())), flush=True)
             train_scored.unpersist(); test_scored.unpersist()
@@ -4948,7 +4969,7 @@ def main() -> int:
             # domain mass, which needed no readout but is reported next to it).
             _save_fit(out, gp, C, manifest_fields, results=results,
                       domain_mass=domain_mass)
-            print(f"[driver]   saved gated_pc result to {out}", flush=True)
+            _cprint(f"[driver]   saved gated_pc result to {out}", flush=True)
     return 0
 
 

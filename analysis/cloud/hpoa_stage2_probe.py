@@ -344,6 +344,21 @@ def build_summary(rows, meta, *, min_den=MIN_DENOMINATOR,
 # --------------------------------------------------------------------------- #
 # The driver.                                                                  #
 # --------------------------------------------------------------------------- #
+def _cprint(msg, **kw) -> None:
+    """print() through term_colors.highlight_line (ERROR/HIT/MISS/rebuild --
+    see term_colors.py). Identity when color is disabled or nothing matches.
+
+    LOCAL import, not module-level: THIS module rides Spark's `--py-files`
+    for its own mapPartitions kernel (`support_partial`/`support_combine`
+    via the `_local` closure in `main`), so its top-level imports must stay
+    executor-resolvable -- term_colors must never join that list. `_cprint`
+    itself is only ever called from `main()`, driver-side, so the deferred
+    import never runs on an executor. See term_colors.py's module
+    docstring."""
+    from term_colors import highlight_line
+    print(highlight_line(msg), **kw)
+
+
 def _resolve_env(args, manifest):
     """(cdr, billing) from args > the manifest's corpus record > the sourced
     .workspace_env — the same fallback chain `gated_pc_readout`'s rebuild path
@@ -388,7 +403,7 @@ def main(argv=None) -> int:
     key = bundle_key_from_manifest(manifest)
     cdr, billing = _resolve_env(args, manifest)
     if not cdr or not billing:
-        print("[probe] ERROR: need a CDR and billing project (pass --cdr/"
+        _cprint("[probe] ERROR: need a CDR and billing project (pass --cdr/"
               "--billing, or source .workspace_env — make setup).", flush=True)
         return 2
 
@@ -396,7 +411,7 @@ def main(argv=None) -> int:
                            dtype={"code": str, "vocab": str})
     snomed_codes = sorted(
         set(codes_df.loc[codes_df["vocab"] == "SNOMED", "code"].astype(str)))
-    print(f"[probe] profile TSV: {len(codes_df)} rows, "
+    _cprint(f"[probe] profile TSV: {len(codes_df)} rows, "
           f"{codes_df['mondo_id'].nunique()} nodes, "
           f"{len(snomed_codes)} distinct SNOMED codes", flush=True)
 
@@ -409,7 +424,7 @@ def main(argv=None) -> int:
         with _phase("load cached bundle"):
             bundle = try_load(spark, cache_uri, key)
             if bundle is None:
-                print(f"[probe] ERROR: cache MISS at {cache_uri}/{key} — this "
+                _cprint(f"[probe] ERROR: cache MISS at {cache_uri}/{key} — this "
                       "probe never rebuilds; run the fit or gated_pc_readout "
                       "first so the bundle is cached.", flush=True)
                 return 2
@@ -419,7 +434,7 @@ def main(argv=None) -> int:
                 vocab_map, feat_col = bundle.vocab_maps[0], "features_0"
             else:
                 vocab_map, feat_col = bundle.vocab_map, "features"
-            print(f"[probe] bundle HIT: C={C}, condition vocab "
+            _cprint(f"[probe] bundle HIT: C={C}, condition vocab "
                   f"|V|={len(vocab_map)}, feature col {feat_col}", flush=True)
 
         # SNOMED source codes -> standard Condition concept ids: the same
@@ -433,7 +448,7 @@ def main(argv=None) -> int:
                              & F.col("concept_code").isin(snomed_codes))
                       .toPandas())
             source_ids = [int(x) for x in src_pd["concept_id"].unique()]
-            print(f"[probe] {len(src_pd)} SNOMED source concepts for "
+            _cprint(f"[probe] {len(src_pd)} SNOMED source concepts for "
                   f"{src_pd['concept_code'].nunique()} of "
                   f"{len(snomed_codes)} codes", flush=True)
 
@@ -460,7 +475,7 @@ def main(argv=None) -> int:
                 if std:
                     code_to_std.setdefault(str(code), set()).update(std)
             n_std = len(set().union(*code_to_std.values())) if code_to_std else 0
-            print(f"[probe] {len(code_to_std)} codes map to {n_std} standard "
+            _cprint(f"[probe] {len(code_to_std)} codes map to {n_std} standard "
                   "Condition concepts", flush=True)
 
         with _phase("map profiles into the vocab index space"):
@@ -475,12 +490,12 @@ def main(argv=None) -> int:
             per_node, skipped = profile_token_sets(
                 codes_df, eid_by_mondo, code_to_std, vocab_map)
             if not per_node:
-                print("[probe] ERROR: no profiled node maps into this run's "
+                _cprint("[probe] ERROR: no profiled node maps into this run's "
                       "label DAG — is this a mondo_native run? (cid2int keys "
                       "must be Mondo numeric ids)", flush=True)
                 return 3
             n_zero = sum(1 for v in per_node.values() if v["n_in_vocab"] == 0)
-            print(f"[probe] {len(per_node)} nodes probed; {len(skipped)} not "
+            _cprint(f"[probe] {len(per_node)} nodes probed; {len(skipped)} not "
                   f"in the label DAG; {n_zero} with zero in-vocab tokens",
                   flush=True)
 
@@ -530,7 +545,7 @@ def main(argv=None) -> int:
             # WORKSPACE-INTERNAL: per-node patient counts, many under the
             # floor. Never committed, never pasted out of the workbench.
             pd.DataFrame(rows).to_csv(tsv_path, sep="\t", index=False)
-            print(f"[probe] wrote per-node table (WORKSPACE-INTERNAL, cells "
+            _cprint(f"[probe] wrote per-node table (WORKSPACE-INTERNAL, cells "
                   f"< {MIN_CELL} not disclosable): {tsv_path}", flush=True)
 
             meta = {"run": run_dir.name, "C": C,
@@ -542,7 +557,7 @@ def main(argv=None) -> int:
             with open(md_path, "w", encoding="utf-8") as fh:
                 fh.write(summary)
             print(summary, flush=True)
-            print(f"[probe] wrote {md_path}", flush=True)
+            _cprint(f"[probe] wrote {md_path}", flush=True)
 
         if args.emit_eta:
             with _phase("emit eta prior table"):
@@ -559,7 +574,7 @@ def main(argv=None) -> int:
                 eta_df.to_csv(args.emit_eta, sep="\t", index=False)
                 # Counts of nodes/terms/concepts/rows only — no fractions, no
                 # patient counts (the coverage COLUMN stays in the file).
-                print(f"[probe] emit-eta: {n_credited} credited label nodes "
+                _cprint(f"[probe] emit-eta: {n_credited} credited label nodes "
                       f"(IDF base N), {eta_df['mondo_id'].nunique()} nodes "
                       f"with >=1 mapped concept, "
                       f"{eta_df['concept_id'].nunique()} distinct concepts, "
