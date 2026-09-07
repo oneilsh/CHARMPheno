@@ -22,9 +22,17 @@ groups here:
      (descendant xref pickup, no sibling leak, negatives carried) feeds
      straight into the token-set builder. The parse itself is covered in
      test_hpoa_profile_survey.py, next to the function.
+  5. **The --emit-eta table** (plan D2/D4): IDF over credited label nodes on a
+     hand-computed fixture, freq x IDF weights with max-over-terms per
+     concept, NOT rows kept as neg=1 and NOT downweighted at emit (the fit
+     side applies eta*0.5 from the flag), unknown freq -> 0.5, and the
+     five-column output contract.
 """
+import math
+
 import numpy as np
 import pandas as pd
+import pytest
 
 import hpoa_profile_survey as s
 import hpoa_stage2_probe as p
@@ -202,3 +210,100 @@ def test_emit_codes_rows_feed_token_sets():
     per_node, _ = p.profile_token_sets(
         codes, {"MONDO:0000001": 1}, {"42343007": {99}}, {99: 4})
     assert per_node["MONDO:0000001"]["tokens"] == frozenset({4})
+
+
+# --- 5. the --emit-eta table (plan D2/D4) -------------------------------------
+
+def _eta_codes_df():
+    # N = 2 credited label nodes (0000001, 0000002); 0000009 resolves no
+    # engine id, so it counts in NOTHING (not N, not df, not the output).
+    # df: HP:0000010 in both credited profiles (idf = log(2/2) = 0);
+    # HP:0000020/30/40/50 in 0000001 only (idf = log 2 each — the NOT term
+    # HP:0000030 is still profile membership for df purposes).
+    return pd.DataFrame([
+        ("MONDO:0000001", "HP:0000010", False, 0.9,  "SNOMED", "111"),
+        # HP20 and HP40 both evidence concept 20, at different weights.
+        ("MONDO:0000001", "HP:0000020", False, 1.0,  "SNOMED", "222"),
+        ("MONDO:0000001", "HP:0000040", False, 0.25, "SNOMED", "555"),
+        # blank freq -> the 0.5 default.
+        ("MONDO:0000001", "HP:0000050", False, "",   "SNOMED", "666"),
+        # NOT term with an explicit freq: kept, weighted, not downweighted.
+        ("MONDO:0000001", "HP:0000030", True,  0.8,  "SNOMED", "444"),
+        ("MONDO:0000002", "HP:0000010", False, "",   "SNOMED", "111"),
+        ("MONDO:0000009", "HP:0000010", False, 0.9,  "SNOMED", "111"),
+    ], columns=["mondo_id", "hp_id", "neg", "freq", "vocab", "code"])
+
+
+_ETA_CODE_TO_STD = {"111": {10}, "222": {20, 30}, "555": {20},
+                    "666": {60}, "444": {50}}
+_ETA_COVERAGE = {"MONDO:0000001": 0.87, "MONDO:0000002": 0.5}
+_LN2 = math.log(2.0)
+
+
+def _eta_rows():
+    return p.profile_eta_rows(_eta_codes_df(), _EID, _ETA_CODE_TO_STD,
+                              _ETA_COVERAGE)
+
+
+def _weight(eta, mid, cid, neg):
+    sel = eta[(eta["mondo_id"] == mid) & (eta["concept_id"] == cid)
+              & (eta["neg"] == neg)]
+    assert len(sel) == 1
+    return float(sel["weight"].iloc[0])
+
+
+def test_emit_eta_idf_math_over_credited_nodes():
+    n, idf = p.credited_idf(_eta_codes_df(), _EID)
+    assert n == 2                                    # 0000009 has no engine id
+    assert idf["HP:0000010"] == 0.0                  # df=2: log(2/2)
+    assert idf["HP:0000020"] == pytest.approx(_LN2)  # df=1: log(2/1)
+    assert idf["HP:0000030"] == pytest.approx(_LN2)  # NOT term counts for df
+    assert idf["HP:0000050"] == pytest.approx(_LN2)
+
+
+def test_emit_eta_max_over_terms_per_concept():
+    eta = _eta_rows()
+    # concept 20 is claimed by HP20 (1.0 * ln2) and HP40 (0.25 * ln2): the
+    # MAX wins, and _weight's len==1 assert shows one row per claim, not two.
+    assert _weight(eta, "MONDO:0000001", 20, 0) == pytest.approx(_LN2)
+    assert _weight(eta, "MONDO:0000001", 30, 0) == pytest.approx(_LN2)
+
+
+def test_emit_eta_not_rows_kept_neg1_weighted_not_downweighted():
+    eta = _eta_rows()
+    # The NOT term's concept 50 survives as a neg=1 row, weighted by the SAME
+    # freq x IDF (0.8 * ln2) — no eta*0.5 downweight at emit time; the fit
+    # applies that from the neg flag (WP-1/WP-3), so it can't double-apply.
+    assert _weight(eta, "MONDO:0000001", 50, 1) == pytest.approx(0.8 * _LN2)
+    assert int((eta["neg"] == 1).sum()) == 1
+
+
+def test_emit_eta_unknown_freq_defaults_to_half():
+    eta = _eta_rows()
+    assert _weight(eta, "MONDO:0000001", 60, 0) == pytest.approx(0.5 * _LN2)
+
+
+def test_emit_eta_output_column_contract_and_scope():
+    eta = _eta_rows()
+    assert list(eta.columns) == ["mondo_id", "concept_id", "weight",
+                                 "neg", "coverage"]
+    assert set(eta["neg"].unique()) <= {0, 1}
+    # non-DAG node emits nothing; credited nodes carry their coverage on
+    # every row; zero-idf rows are KEPT (weight 0), the fit decides.
+    assert "MONDO:0000009" not in set(eta["mondo_id"])
+    a = eta[eta["mondo_id"] == "MONDO:0000001"]
+    assert set(a["coverage"]) == {0.87}
+    assert _weight(eta, "MONDO:0000002", 10, 0) == 0.0
+    assert float(eta.loc[eta["mondo_id"] == "MONDO:0000002",
+                         "coverage"].iloc[0]) == 0.5
+
+
+def test_emit_eta_tsv_roundtrip_stringified_bools(tmp_path):
+    # The driver reads codes_df back from a TSV; "True"/"False" strings in
+    # neg must not flip polarity in the eta table.
+    path = tmp_path / "codes.tsv"
+    _eta_codes_df().astype({"neg": str}).to_csv(path, sep="\t", index=False)
+    back = pd.read_csv(path, sep="\t", dtype={"code": str})
+    eta = p.profile_eta_rows(back, _EID, _ETA_CODE_TO_STD, _ETA_COVERAGE)
+    assert _weight(eta, "MONDO:0000001", 50, 1) == pytest.approx(0.8 * _LN2)
+    assert _weight(eta, "MONDO:0000001", 20, 0) == pytest.approx(_LN2)
