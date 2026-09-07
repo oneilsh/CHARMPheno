@@ -111,7 +111,7 @@ committed artifact. Per-step timings ("X.Xs"), never cumulative "elapsed".
 ```bash
 cd ~/repos/CHARMPheno && git fetch origin claude/gated-conditional-voi && git checkout claude/gated-conditional-voi && git pull --ff-only
 make -C analysis/cloud hpoa-stage2-probe ID=114 GPR_ARGS="--emit-eta ~/repos/CHARMPheno/data/ontology/profile_eta_MONDO_0004995.tsv"   # after WP-2
-make exp ID=116                                                                                                                        # after WP-3/4
+make -C analysis/cloud exp ID=116                                                                                                      # after WP-3/4
 make -C analysis/cloud gated-pc-readout ID=116 GPR_ARGS="--readout-mode distributed"
 ```
 
