@@ -181,7 +181,28 @@ make -C analysis/cloud inspect-topics ID=116 INSPECT_KEY=<key> RESOLVE_NAMES=1 \
 
 ## Run log
 
-(pending)
+**2026-09-07 — fit + readout.** Fit-only, 50 iters, ~27s/iter. **Boost verified
+deployed and correctly sized**: per-iter `η_boost[topics=132 nnz=28883
+mass=440.1]` — 132 credited nodes exactly matching the stage-2b count, and mass
+≈ theory (strength 1.0 × eta_base 1/1498 = 0.0006676, matching the logged η_m,
+× V_condition ≈ 5000/1498 ≈ 3.34/topic × 132 ≈ 440.6; the small deficit is the
+NOT deltas). `gated-pc-readout` (distributed, 1198s): 259 fittable / 40
+degenerate nodes, 81/259 L-BFGS-converged at the 200-iter cap, results persisted
+to `results_readout.json` (the manifest's `partial='fit-only'` note is expected
+for a `diag_only` run — the numbers of record are this readout's).
+
+Headline vs 0113 (same bundle key/split/readout code):
+
+| gated_pc (pc_topics_lr) | 0116 profile-eta | 0113 flat | delta |
+|---|--:|--:|--:|
+| macro ranking AUC / AP (193 nodes) | 0.7804 / 0.5268 | 0.7813 / 0.5255 | −0.0009 / +0.0013 |
+| detection (case-vs-bg) AUC / AP | 0.6362 / 0.7173 | 0.6347 / 0.7156 | +0.0015 / +0.0017 |
+
+**Primary non-inferiority: MET at the macro level** (−0.0009 macro AUC is well
+inside noise; contrast spectral's −0.025). The WIN determination needs the
+credited-vs-uncredited paired split — `inspect_topics --readout-auc` gained
+`--credited-file` (the probe's emit-eta TSV) and `--compare-run` for exactly
+this read (below).
 
 ## Results
 

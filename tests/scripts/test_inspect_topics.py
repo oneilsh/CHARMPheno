@@ -362,3 +362,90 @@ def test_single_domain_lambda_key(tmp_path):
     assert len(it.domain_lambdas(npz)) == 1
     rep = it.build_report(tmp_path, top_topics=5, top_loadings=2, t_words=3)
     assert "node topics" in rep.lower()
+
+
+# --- the --readout-auc credited split + paired compare (exp 0116's primary read)
+
+
+def _make_readout_run(tmp_path, name, aucs_by_eng, *, mondo_cids):
+    """Run dir with manifest + results_readout.json only (what build_auc_slice
+    reads). Engine id e maps to concept id mondo_cids[e] — the numeric part of
+    a Mondo curie, as in a mondo_native run."""
+    d = tmp_path / name
+    d.mkdir()
+    manifest = {
+        "K": 4, "C": len(mondo_cids), "n_bg": 1, "tpn": 1,
+        "corpus_manifest": {
+            "int2cid": {str(e): c for e, c in mondo_cids.items()},
+            "name_by_id": {str(c): f"node{e}" for e, c in mondo_cids.items()},
+        },
+    }
+    (d / "manifest.json").write_text(json.dumps(manifest))
+    res = {"gated_pc": {
+        "ranking": {"auc": 0.75, "ap": 0.5, "n_nodes": len(aucs_by_eng)},
+        "per_node": {str(e): {"auc": a, "ap": a - 0.1}
+                     for e, a in aucs_by_eng.items()},
+    }}
+    (d / "results_readout.json").write_text(json.dumps(res))
+    return d
+
+
+_MONDO_CIDS = {0: 1, 1: 4995, 2: 5010, 3: 7777, 4: 8888}
+
+
+def _credited_tsv(tmp_path):
+    p = tmp_path / "profile_eta.tsv"
+    p.write_text(
+        "mondo_id\tconcept_id\tweight\tneg\tcoverage\n"
+        "MONDO:0004995\t101\t0.5\t0\t0.9\n"
+        "MONDO:0004995\t102\t0.4\t1\t0.9\n"     # dup node: still one credit
+        "MONDO:0005010\t103\t0.3\t0\t0.8\n"
+        "MONDO:9999999\t104\t0.3\t0\t0.8\n"     # not in this run's DAG: skipped
+        "OMIM:123456\t105\t0.2\t0\t0.5\n")      # non-Mondo row: skipped
+    return p
+
+
+def test_auc_slice_credited_split(tmp_path):
+    run = _make_readout_run(tmp_path, "r1",
+                            {1: 0.9, 2: 0.8, 3: 0.6, 4: 0.5},
+                            mondo_cids=_MONDO_CIDS)
+    rep = it.build_auc_slice(run, credited_file=str(_credited_tsv(tmp_path)))
+    assert "2 credited / 2 uncredited scored node(s)" in rep
+    assert "credited: median AUC=0.900" in rep       # sorted [0.8, 0.9] -> _q .5
+    assert "uncredited: median AUC=0.600" in rep
+
+
+def test_auc_slice_paired_compare_splits_deltas(tmp_path):
+    base = _make_readout_run(tmp_path, "base",
+                             {1: 0.85, 2: 0.75, 3: 0.6, 4: 0.5},
+                             mondo_cids=_MONDO_CIDS)
+    run = _make_readout_run(tmp_path, "r2",
+                            {1: 0.9, 2: 0.8, 3: 0.6, 4: 0.5},
+                            mondo_cids=_MONDO_CIDS)
+    rep = it.build_auc_slice(run, credited_file=str(_credited_tsv(tmp_path)),
+                             compare_dir=str(base))
+    assert "4 shared scored node(s)" in rep
+    assert "credited: n=2 median dAUC=+0.0500" in rep
+    assert "up/down=2/0" in rep
+    # the internal control is exactly flat
+    assert "uncredited (internal control): n=2 median dAUC=+0.0000" in rep
+    assert "up/down=0/0" in rep
+
+
+def test_auc_slice_compare_without_credited_file(tmp_path):
+    base = _make_readout_run(tmp_path, "base", {1: 0.8, 2: 0.7},
+                             mondo_cids=_MONDO_CIDS)
+    run = _make_readout_run(tmp_path, "r3", {1: 0.7, 2: 0.7},
+                            mondo_cids=_MONDO_CIDS)
+    rep = it.build_auc_slice(run, compare_dir=str(base))
+    assert "all: n=2" in rep
+    assert "up/down=0/1" in rep
+    assert "credited:" not in rep
+
+
+def test_auc_slice_credited_file_needs_mondo_id_column(tmp_path):
+    run = _make_readout_run(tmp_path, "r4", {1: 0.8}, mondo_cids=_MONDO_CIDS)
+    bad = tmp_path / "bad.tsv"
+    bad.write_text("node\tweight\nMONDO:0004995\t1.0\n")
+    with pytest.raises(SystemExit, match="mondo_id"):
+        it.build_auc_slice(run, credited_file=str(bad))

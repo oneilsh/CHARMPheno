@@ -1015,8 +1015,39 @@ def build_digest(run_dir, *, exemplars=8, t_words=6, bundle_meta_path=None,
     return "\n".join(L).rstrip() + "\n"
 
 
+def _credited_engine_ids(credited_file, manifest):
+    """Engine ids of the nodes named in a TSV's `mondo_id` column.
+
+    ``credited_file`` is typically the probe's ``--emit-eta`` table (the fit's
+    own credited set — plan D5's internal-control split for exp 0116), but any
+    TSV with a `mondo_id` column works. Curie -> engine id mirrors
+    `mondo_native_dag.mondo_cid` (the numeric part of `MONDO:%07d`; stable by
+    construction) so this off-cluster tool needs no extra imports, then engine
+    ids come from the manifest's int2cid — so the slice matches exactly the
+    nodes the fit driver credited. Non-Mondo rows and nodes outside this run's
+    DAG are silently skipped (they were never credited here either)."""
+    header = None
+    cids = set()
+    with open(credited_file) as fh:
+        for line in fh:
+            parts = line.rstrip("\n").split("\t")
+            if header is None:
+                header = parts
+                if "mondo_id" not in header:
+                    raise SystemExit(
+                        f"[inspect_topics] {credited_file} has no mondo_id "
+                        f"column (columns: {header})")
+                mi = header.index("mondo_id")
+                continue
+            s = str(parts[mi])
+            if s.startswith("MONDO:") and s[len("MONDO:"):].isdigit():
+                cids.add(int(s[len("MONDO:"):]))
+    _, int2cid = node_order(manifest)
+    return {e for e, c in int2cid.items() if c in cids}
+
+
 def build_auc_slice(run_dir, *, bundle_meta_path=None, grep_pattern=None,
-                    arm="gated_pc"):
+                    arm="gated_pc", credited_file=None, compare_dir=None):
     """Compact per-node readout-AUC slice from `results_readout.json`.
 
     Answers "which nodes does the readout rank WELL or BADLY?" off-cluster —
@@ -1025,6 +1056,15 @@ def build_auc_slice(run_dir, *, bundle_meta_path=None, grep_pattern=None,
     readout was run for. Reports AUC/AP and node counts ONLY; the per-node
     positive counts in the JSON stay in the run dir (egress floor) — nothing
     printed here is a patient count.
+
+    ``credited_file`` (a TSV with a `mondo_id` column, e.g. the probe's
+    --emit-eta table) splits every view into CREDITED vs UNCREDITED scored
+    nodes, and ``compare_dir`` (a baseline run dir with the same arm in its
+    results_readout.json) adds PAIRED per-node AUC deltas on the shared scored
+    nodes — together they are exp 0116's pre-registered primary read: credited
+    nodes up, uncredited (the internal control) ~0. Deltas are AUC arithmetic
+    on already-disclosable per-node AUCs plus counts of nodes; nothing new is
+    disclosed.
     """
     run_dir = Path(run_dir)
     res = json.loads((run_dir / "results_readout.json").read_text())
@@ -1065,6 +1105,69 @@ def build_auc_slice(run_dir, *, bundle_meta_path=None, grep_pattern=None,
     L += [f"AUC quantiles: p10={_q(vals, .10):.3f} p25={_q(vals, .25):.3f} "
           f"median={_q(vals, .50):.3f} p75={_q(vals, .75):.3f} "
           f"p90={_q(vals, .90):.3f}", ""]
+
+    credited = (_credited_engine_ids(credited_file, manifest)
+                if credited_file else None)
+
+    def _split(ids):
+        cred = sorted(aucs[c] for c in ids if c in credited)
+        uncr = sorted(aucs[c] for c in ids if c not in credited)
+        return cred, uncr
+
+    if credited is not None:
+        cred, uncr = _split(aucs)
+        L.append(f"## credited split ({Path(credited_file).name}) — "
+                 f"{len(cred)} credited / {len(uncr)} uncredited scored node(s)")
+        for tag, v in (("credited", cred), ("uncredited", uncr)):
+            if v:
+                L.append(f"{tag}: median AUC={_q(v, .5):.3f} "
+                         f"(p25={_q(v, .25):.3f} p75={_q(v, .75):.3f})")
+        L.append("")
+
+    if compare_dir:
+        # The baseline only needs results_readout.json (no fit npz required
+        # for a paired compare), so resolve leniently: a directory that
+        # carries it is taken as-is; otherwise fall through to the normal
+        # run-dir resolution (IDs / globs).
+        cmp_dir = Path(compare_dir)
+        if not (cmp_dir.is_dir() and (cmp_dir / "results_readout.json").exists()):
+            cmp_dir = Path(resolve_run_dir(str(compare_dir)))
+        res_b = json.loads((cmp_dir / "results_readout.json").read_text())
+        if arm not in res_b:
+            raise SystemExit(f"[inspect_topics] no arm {arm!r} in "
+                             f"{cmp_dir}/results_readout.json")
+        base = {int(k): float(v["auc"])
+                for k, v in (res_b[arm].get("per_node") or {}).items()}
+        shared = sorted(set(aucs) & set(base))
+        deltas = {c: aucs[c] - base[c] for c in shared}
+
+        def _delta_line(tag, cs):
+            dv = sorted(deltas[c] for c in cs)
+            if not dv:
+                return f"{tag}: 0 shared node(s)"
+            up = sum(1 for d in dv if d > 0)
+            dn = sum(1 for d in dv if d < 0)
+            return (f"{tag}: n={len(dv)} median dAUC={_q(dv, .5):+.4f} "
+                    f"mean={sum(dv) / len(dv):+.4f} "
+                    f"(p25={_q(dv, .25):+.4f} p75={_q(dv, .75):+.4f}) "
+                    f"up/down={up}/{dn}")
+
+        L.append(f"## paired vs {cmp_dir.name} — {len(shared)} shared "
+                 f"scored node(s) (this run minus baseline)")
+        L.append(_delta_line("all", shared))
+        if credited is not None:
+            L.append(_delta_line("credited", [c for c in shared
+                                              if c in credited]))
+            L.append(_delta_line("uncredited (internal control)",
+                                 [c for c in shared if c not in credited]))
+        if depths:
+            by_d: dict = {}
+            for c in shared:
+                by_d.setdefault(depths.get(c, -1), []).append(deltas[c])
+            L.append("by depth (median dAUC): " + "  ".join(
+                f"d{d}={_q(sorted(v), .5):+.3f}(n={len(v)})"
+                for d, v in sorted(by_d.items())))
+        L.append("")
     if depths:
         by_d: dict = {}
         for c, a in aucs.items():
@@ -1156,13 +1259,24 @@ def main():
                          "quantiles, by-depth medians (needs --bundle-meta), and "
                          "--grep'd nodes' AUCs vs the rest. AUC/AP only — no "
                          "patient counts. Suppresses the other reports.")
+    ap.add_argument("--credited-file", default=None, metavar="TSV",
+                    help="(--readout-auc) TSV with a mondo_id column (e.g. the "
+                         "probe's --emit-eta table): split the slice into "
+                         "CREDITED vs UNCREDITED scored nodes — exp 0116's "
+                         "internal-control read.")
+    ap.add_argument("--compare-run", default=None, metavar="RUN_DIR",
+                    help="(--readout-auc) baseline run dir (same arm in its "
+                         "results_readout.json): add PAIRED per-node AUC "
+                         "deltas on shared scored nodes, split by "
+                         "--credited-file when given.")
     args = ap.parse_args()
 
     run_dir = resolve_run_dir(args.run_dir)
     if args.readout_auc:
         report = build_auc_slice(
             run_dir, bundle_meta_path=args.bundle_meta,
-            grep_pattern=args.grep, arm=args.readout_label)
+            grep_pattern=args.grep, arm=args.readout_label,
+            credited_file=args.credited_file, compare_dir=args.compare_run)
         default_out = "readout_auc_slice.md"
     elif args.digest:
         report = build_digest(
