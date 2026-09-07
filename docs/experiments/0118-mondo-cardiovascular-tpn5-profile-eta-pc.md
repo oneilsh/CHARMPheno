@@ -1,7 +1,7 @@
 ---
 id: 118
 slug: mondo-cardiovascular-tpn5-profile-eta-pc
-status: planned
+status: abandoned  # Newton head hit the O(C·K²) collect wall at K=1498 (steady 1450s/iter + driver OOM); model was stable. Continued as 0119 with an SGD head.
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -164,8 +164,36 @@ make -C analysis/cloud inspect-topics ID=118 CREDITED=1 RESOLVE_NAMES=1 INSPECT_
 
 ## Run log
 
-(pending)
+**2026-09-07 — ABANDONED at iter 7: Newton head hit the O(C·K²) collect wall.**
+Two clean, separable findings:
+
+- **The model was healthy — a positive data point on the closeout's open
+  question.** At iter 7 (weight_y ramping through warmup, eff_wy 1.4)
+  `corr_relΔλ = 0.050` — top of the pre-registered healthy 2–5% band — ELBO
+  finite (no detonation; the EG mass-preserving correction held), Σλ neither
+  starved nor bloated, `η_boost[topics=132 mass=440.1]` on. So **controlled
+  shaping at weight_y=2 on this base is model-stable**, which weight_y=16
+  never was (0098/0103). |w_CK|max 2.89e5 is the expected standardization
+  cosmetic.
+- **The infrastructure hit the exact wall the closeout named.** Steady-state
+  **1450s/iter** (54× the unsupervised 27s — confirmed steady, not a
+  node-loss spike) and a **driver `OutOfMemoryError: Java heap`** in
+  `task-result-getter`: the co-fit Newton head's per-node Hessian collect is
+  O(C·K²), and at K=1498 on the 8g gated_pc driver it does not fit and does
+  not finish (50 iters ≈ 20h, exposed to preemptible-worker loss with
+  `--resume-from` still a no-op). No config knob fixes 1450s/iter; the
+  closeout's real fix is the matrix-free amortized L-BFGS full-K head
+  (O(C·K), no Hessian collect — stash-branch scaffold), a deliberate engine
+  build.
+
+**Decision (2026-09-07):** rather than build the matrix-free head speculatively,
+probe first whether controlled shaping helps the readout AT ALL via a cheap
+**SGD head** (O(C·K), no Hessian, no OOM) — [exp 0119](0119-mondo-cardiovascular-tpn5-profile-eta-pc-sgd.md).
+A clear positive there greenlights the head build; a clear negative closes PC
+without it. Only a mild null stays ambiguous (weak-head confound).
 
 ## Results
 
-(pending)
+Abandoned before readout — no case-finding numbers. The two findings above are
+the record: controlled PC is model-stable on the aligned base, and the Newton
+head is not runnable at this K. Continued as 0119.
