@@ -449,3 +449,106 @@ def test_auc_slice_credited_file_needs_mondo_id_column(tmp_path):
     bad.write_text("node\tweight\nMONDO:0004995\t1.0\n")
     with pytest.raises(SystemExit, match="mondo_id"):
         it.build_auc_slice(run, credited_file=str(bad))
+
+
+# --- the --profile-align scorecard (insight 0084's legibility read, quantified)
+
+
+def _make_align_run(tmp_path, name, *, tilt_profile):
+    """2 nodes (cids 4995, 5010), n_bg=1, tpn=2, V0=10. Node 4995's boosted
+    topic (t=1) is STARVED: flat floor, plus (if tilt_profile) a boost-shaped
+    tilt on its profile indices {2, 3}. Node 5010's boosted topic (t=3) is FED
+    on off-profile index 7."""
+    d = tmp_path / name
+    d.mkdir()
+    V = 10
+    lam0 = np.full((5, V), 0.01)
+    if tilt_profile:
+        lam0[1, [2, 3]] += 0.02   # mild tilt: sharp enough to see, flat enough to stay STARVED (frac>0.5)
+    lam0[3, 7] += 500.0
+    np.savez(d / "gated_pc_result.npz", lambda_0=lam0,
+             lambda_1=np.full((5, 4), 0.01), alpha=np.full(5, 0.5),
+             w_CK=np.zeros((3, 5)), b_CK=np.zeros(3))
+    manifest = {
+        "K": 5, "C": 3, "n_bg": 1, "tpn": 2,
+        "domain_names": ["condition", "drug"], "domain_vocab_sizes": [V, 4],
+        "corpus_manifest": {
+            "int2cid": {"0": 1, "1": 4995, "2": 5010},
+            "name_by_id": {"1": "root", "4995": "nodeA", "5010": "nodeB"}},
+    }
+    (d / "manifest.json").write_text(json.dumps(manifest))
+    return d
+
+
+def _align_meta(tmp_path):
+    p = tmp_path / "meta.json"
+    p.write_text(json.dumps({
+        "int2cid": {"0": 1, "1": 4995, "2": 5010},
+        "vocab_maps": [{str(100 + i): i for i in range(10)},
+                       {str(900 + i): i for i in range(4)}],
+        "parent_int": {"1": [0], "2": [0]},
+    }))
+    return p
+
+
+def _align_tsv(tmp_path):
+    p = tmp_path / "eta.tsv"
+    p.write_text(
+        "mondo_id\tconcept_id\tweight\tneg\tcoverage\n"
+        "MONDO:0004995\t102\t0.5\t0\t0.9\n"      # vocab idx 2
+        "MONDO:0004995\t103\t0.4\t0\t0.9\n"      # vocab idx 3
+        "MONDO:0004995\t105\t0.4\t1\t0.9\n"      # NOT row: excluded
+        "MONDO:0005010\t102\t0.3\t0\t0.8\n"      # nodeB claims idx 2 too
+        "MONDO:0005010\t104\t0.3\t0\t0.8\n")
+    return p
+
+
+def test_profile_align_scores_boosted_starved_topic(tmp_path):
+    run = _make_align_run(tmp_path, "r_tilt", tilt_profile=True)
+    rep = it.build_profile_align(run, str(_align_tsv(tmp_path)),
+                                 bundle_meta_path=str(_align_meta(tmp_path)))
+    # nodeA's starved boosted topic holds ~all mass on its 2 profile tokens.
+    assert "starved: n=1" in rep
+    assert "median mass=0.429" in rep      # (0.03+0.03)/0.14
+    # nodeB's fed topic concentrates on off-profile idx 7 -> ~zero mass.
+    assert "fed: n=1 median mass=0.000" in rep
+    assert "most aligned:  nodeA" in rep
+
+
+def test_profile_align_paired_baseline_shows_flat(tmp_path):
+    run = _make_align_run(tmp_path, "r2", tilt_profile=True)
+    base = _make_align_run(tmp_path, "b2", tilt_profile=False)
+    rep = it.build_profile_align(run, str(_align_tsv(tmp_path)),
+                                 bundle_meta_path=str(_align_meta(tmp_path)),
+                                 compare_dir=str(base))
+    # baseline starved topic is exactly flat: mass = |profile|/V = 0.2.
+    assert "baseline mass=0.200" in rep     # flat: 2 profile tokens / V=10
+    assert "median mass=0.429" in rep
+
+
+def test_profile_align_requires_emit_eta_columns(tmp_path):
+    run = _make_align_run(tmp_path, "r3", tilt_profile=True)
+    bad = tmp_path / "bad.tsv"
+    bad.write_text("mondo_id\tweight\nMONDO:0004995\t1.0\n")
+    with pytest.raises(SystemExit, match="concept_id"):
+        it.build_profile_align(run, str(bad),
+                               bundle_meta_path=str(_align_meta(tmp_path)))
+
+
+def test_digest_marks_profile_tokens_and_legend(tmp_path):
+    run = _make_align_run(tmp_path, "r_dig", tilt_profile=True)
+    rep = it.build_digest(run, bundle_meta_path=str(_align_meta(tmp_path)),
+                          profile_file=str(_align_tsv(tmp_path)),
+                          grep_pattern="nodeA")
+    assert "EMERGENT co-riders" in rep                  # legend line
+    assert "cid:102*" in rep                            # profile token marked
+    # nodeA's NOT-term concept (105 -> idx 5) must never be marked, and
+    # off-profile tokens stay unmarked.
+    assert "cid:105*" not in rep
+
+
+def test_digest_without_profile_file_is_unchanged(tmp_path):
+    run = _make_align_run(tmp_path, "r_dig2", tilt_profile=True)
+    rep = it.build_digest(run, bundle_meta_path=str(_align_meta(tmp_path)))
+    assert "EMERGENT" not in rep
+    assert "*" not in rep.replace("**", "")             # no markers anywhere
