@@ -79,6 +79,22 @@ from gated_pc_cloud import (
 _LEGACY_READOUT_MAX_ITER = 200
 
 
+def _cprint(msg, **kw) -> None:
+    """print() through term_colors.highlight_line (ERROR/WARN/HIT/MISS/
+    rebuild/macro-AUC/eta-boost -- see term_colors.py). Identity when color
+    is disabled or nothing matches, so this is safe on every "[readout]"
+    status line in this module.
+
+    LOCAL import, not module-level: this module rides in a self-referencing
+    `--py-files` chain from other diagnostics (`hpoa_stage2_probe.py` imports
+    it at module level and itself ships its own mapPartitions kernel on
+    `--py-files`) -- term_colors must never become a top-level dependency an
+    executor could be asked to resolve. See term_colors.py's module
+    docstring."""
+    from term_colors import highlight_line
+    print(highlight_line(msg), **kw)
+
+
 def resolve_readout_max_iter(cli_value, manifest):
     """Pick the batched-L-BFGS iteration cap for a re-readout, and say who won.
 
@@ -609,15 +625,15 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
     if mode == "distributed" and not K:
         # Only the batched solver needs K, so only it pays for the peek.
         K = int(train_scored.select("topicDistribution").head()[0].size)
-    print(f"[readout]   readout_mode={readout_mode} -> {mode} (C={C}, "
+    _cprint(f"[readout]   readout_mode={readout_mode} -> {mode} (C={C}, "
           f"K={K or 'n/a'}, driver-collect ceiling C<={_DRIVER_READOUT_MAX_C})",
           flush=True)
     ab = bool(ab_check) and mode == "distributed"
     if bool(ab_check) and not ab:
-        print("[readout]   readout_ab_check ignored (readout_mode resolved to driver "
+        _cprint("[readout]   readout_ab_check ignored (readout_mode resolved to driver "
               "— there is nothing to compare against)", flush=True)
     elif ab and C > _DRIVER_READOUT_MAX_C:
-        print(f"[readout]   readout_ab_check SKIPPED: C={C} exceeds the driver path's "
+        _cprint(f"[readout]   readout_ab_check SKIPPED: C={C} exceeds the driver path's "
               f"own ceiling ({_DRIVER_READOUT_MAX_C}); the gate is meant to run at "
               "cardiovascular scale (C=444)", flush=True)
         ab = False
@@ -634,13 +650,13 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
     # carries it. Both misses print a line here rather than failing later: the
     # incident arm is an ADDITION to this tool's output, never a precondition of it.
     if elig_col is not None and mode != "distributed":
-        print(f"[readout]   INCIDENT arm (E2) SKIPPED: readout_mode resolved to "
+        _cprint(f"[readout]   INCIDENT arm (E2) SKIPPED: readout_mode resolved to "
               f"{mode!r} and the eligibility column rides the LEAN (distributed) "
               "collect. Re-run with --readout-mode distributed for the incident "
               "block.", flush=True)
         elig_col = None
     elif elig_col is None:
-        print("[readout]   INCIDENT arm (E2) SKIPPED: this corpus carries no "
+        _cprint("[readout]   INCIDENT arm (E2) SKIPPED: this corpus carries no "
               "pre-index closure witness (built without --preindex-closure). The "
               "prevalent arms below are unaffected.", flush=True)
     if mode == "distributed":
@@ -654,21 +670,21 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
         if theta_topm is None:
             theta_topm = int(manifest.get("readout_theta_topm", 0) or 0)
             if theta_topm:
-                print(f"[readout]   theta top-m={theta_topm} (from manifest)",
+                _cprint(f"[readout]   theta top-m={theta_topm} (from manifest)",
                       flush=True)
         else:
             theta_topm = int(theta_topm)
-            print(f"[readout]   theta top-m={theta_topm} (CLI OVERRIDE — deltas vs "
+            _cprint(f"[readout]   theta top-m={theta_topm} (CLI OVERRIDE — deltas vs "
                   "the recorded run price the truncation)", flush=True)
         # Only the batched solver has an iteration cap, so this is the only place
         # the resolution matters — and the log line lands right where the number is
         # about to be spent, next to top-m's.
         readout_max_iter, _mi_src = resolve_readout_max_iter(readout_max_iter, manifest)
-        print(f"[readout]   readout max_iter={readout_max_iter} (from {_mi_src})",
+        _cprint(f"[readout]   readout max_iter={readout_max_iter} (from {_mi_src})",
               flush=True)
         _epath = resolve_eval_path(eval_path, mode)
         if _epath == "distributed" and int(theta_topm or 0) > 0:
-            print(f"[readout]   eval_path=distributed IGNORED (readout_theta_topm="
+            _cprint(f"[readout]   eval_path=distributed IGNORED (readout_theta_topm="
                   f"{theta_topm}>0; the cell explode is dense-θ only)", flush=True)
             _epath = "driver"
         if _epath == "distributed":
@@ -676,7 +692,7 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
             # cell explode (no (D_te,C) proba reaches the driver — audit §5f). This
             # is the `make gated-pc-readout ID=110 --eval-path distributed` path the
             # orchestrator points at the real 0110 corpus for the CLUSTER parity run.
-            print("[readout]   eval_path=distributed (WP-B): ranking arms via "
+            _cprint("[readout]   eval_path=distributed (WP-B): ranking arms via "
                   "score_cells_arms_df/per_node_metric_arms_rows (no driver "
                   "collect); conditional/detection/PR axes need the collect and are "
                   "skipped — run --eval-path driver for them.", flush=True)
@@ -749,7 +765,7 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
     # covers a manifest too old to record weight_y).
     weight_y = float(manifest.get("weight_y", 1.0))
     if weight_y == 0.0 or "probability" not in test_scored.columns:
-        print(f"[readout]   co-fit head arm SKIPPED (weight_y={weight_y:g}, "
+        _cprint(f"[readout]   co-fit head arm SKIPPED (weight_y={weight_y:g}, "
               f"probability column "
               f"{'present' if 'probability' in test_scored.columns else 'absent'}): "
               "an unsupervised gate has no co-fit head to read out.", flush=True)
@@ -779,7 +795,7 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging()
     run_dir = resolve_run_dir(args.run_dir)
-    print(f"[readout]   run dir: {run_dir}", flush=True)
+    _cprint(f"[readout]   run dir: {run_dir}", flush=True)
     manifest = json.loads((run_dir / "manifest.json").read_text())
     C = int(manifest["C"])
     rt = [float(x) for x in args.recall_targets.split(",") if x]
@@ -811,7 +827,7 @@ def main(argv=None) -> int:
         start_disk_telemetry(
             extra_dirs=[d for d in spark.sparkContext.getConf()
                         .get("spark.local.dir", "").split(",") if d],
-            log=lambda msg: print(f"[readout] {msg}", flush=True))
+            log=lambda msg: _cprint(f"[readout] {msg}", flush=True))
 
         from _case_finding_cache import try_load
 
@@ -822,13 +838,13 @@ def main(argv=None) -> int:
                 cache_uri, key = base.rsplit("/", 1)
             else:
                 if not cache_uri:
-                    print("[readout] ERROR: pass --cache-uri or --bundle-path.",
+                    _cprint("[readout] ERROR: pass --cache-uri or --bundle-path.",
                           flush=True)
                     return 1
                 spec = corpus_spec_from_manifest(
                     manifest, doc_min_length=args.doc_min_length, **spec_over)
                 if native_spec_mismatch(spec, manifest):
-                    print("[readout] ERROR: the saved fit is an exp-0110 NATIVE "
+                    _cprint("[readout] ERROR: the saved fit is an exp-0110 NATIVE "
                           "Mondo run (corpus_manifest.dag_source=mondo_native), "
                           "but the rebuild spec resolved dag_source="
                           f"{spec['dag_source']!r} — that keys, and on the MISS "
@@ -836,7 +852,7 @@ def main(argv=None) -> int:
                           "or pass --dag-source mondo_native.", flush=True)
                     return 2
                 if mondo_spec_mismatch(spec, manifest):
-                    print("[readout] ERROR: the saved fit's label space is MONDO "
+                    _cprint("[readout] ERROR: the saved fit's label space is MONDO "
                           "ids, but the rebuild spec resolved dag_source="
                           f"{spec['dag_source']!r} — this manifest predates "
                           "corpus_manifest recording the Mondo build inputs, so "
@@ -844,7 +860,7 @@ def main(argv=None) -> int:
                           "guarantees, rebuild) the WRONG corpus. Pass the fit's "
                           "own values from the experiment doc's front matter, "
                           "e.g. for exp 0104:", flush=True)
-                    print("[readout]   --dag-source mondo --mondo-version "
+                    _cprint("[readout]   --dag-source mondo --mondo-version "
                           "2026-06-02 --min-positives 100", flush=True)
                     return 2
                 key = bundle_key_from_manifest(
@@ -853,7 +869,7 @@ def main(argv=None) -> int:
             if bundle is None and (args.no_rebuild or spec is None):
                 # --no-rebuild, or a --bundle-path whose dir does not hold a bundle
                 # (there is no spec to rebuild FROM in that case).
-                print(f"[readout] ERROR: bundle cache MISS at {cache_uri}/{key}. "
+                _cprint(f"[readout] ERROR: bundle cache MISS at {cache_uri}/{key}. "
                       "The assembly source may have changed since the fit, or a "
                       "key field differs. Pass --bundle-path at the exact cached "
                       "dir, or --doc-min-length if it was omitted"
@@ -865,7 +881,7 @@ def main(argv=None) -> int:
                 # a fit that predates the corpus being cached at all) is not a reason
                 # to lose a finished fit. Rebuild through the fit's own seam and
                 # write it through, so this is paid once.
-                print("[readout] cache MISS — rebuilding bundle from manifest "
+                _cprint("[readout] cache MISS — rebuilding bundle from manifest "
                       "params (~20 min at whole-Mondo)", flush=True)
                 # billing/cdr are ENVIRONMENT, not corpus identity: the fit takes
                 # them from the sourced .workspace_env, and manifests from before
@@ -881,18 +897,18 @@ def main(argv=None) -> int:
                         env_val = os.environ.get(env_var)
                         if env_val:
                             spec[field] = env_val
-                            print(f"[readout]   {field} not in the manifest; "
+                            _cprint(f"[readout]   {field} not in the manifest; "
                                   f"using {env_var} from the environment (the "
                                   "same source the fit used)", flush=True)
                         else:
-                            print(f"[readout] ERROR: a rebuild needs {field}, "
+                            _cprint(f"[readout] ERROR: a rebuild needs {field}, "
                                   "but the manifest predates recording it and "
                                   f"{env_var} is unset"
                                   + (f" — pass {flag}." if flag else
                                      " — source .workspace_env (make setup)."),
                                   flush=True)
                             return 2
-                print(f"[readout]   corpus: dag_source={spec['dag_source']} "
+                _cprint(f"[readout]   corpus: dag_source={spec['dag_source']} "
                       f"extra_domains={spec['extra_domains']} "
                       f"index_mode={spec['index_mode']} min_n={spec['min_n']} "
                       f"mondo_branch={spec['mondo_branch'] or 'ALL'} "
@@ -902,13 +918,13 @@ def main(argv=None) -> int:
                 bundle = rebuild_bundle(
                     spark, spec,
                     cache_uri=(cache_uri if args.cache_write == "on" else None))
-                print(f"[readout]   bundle REBUILT"
+                _cprint(f"[readout]   bundle REBUILT"
                       + (f" and written to {cache_uri}/{key} (the next readout of "
                          "this run is a HIT)" if args.cache_write == "on"
                          else " (--cache-write off: not persisted)")
                       + f"; C={C}", flush=True)
             else:
-                print(f"[readout]   bundle loaded ({cache_uri}/{key}); C={C}",
+                _cprint(f"[readout]   bundle loaded ({cache_uri}/{key}); C={C}",
                       flush=True)
 
         with _phase("reconstruct model + transform"):
@@ -920,12 +936,12 @@ def main(argv=None) -> int:
             drift = bundle_drift_report(
                 bundle, manifest, lambda_vocab_sizes(model.result.global_params))
             if drift:
-                print("[readout] ERROR: the corpus does not match the saved fit — "
+                _cprint("[readout] ERROR: the corpus does not match the saved fit — "
                       "it has DRIFTED since the fit (a data refresh, or an "
                       "assembly-source change). Refusing to score:", flush=True)
                 for line in drift:
-                    print(f"[readout]     - {line}", flush=True)
-                print("[readout]   Pass --bundle-path at the bundle this run was "
+                    _cprint(f"[readout]     - {line}", flush=True)
+                _cprint("[readout]   Pass --bundle-path at the bundle this run was "
                       "actually fit against, or re-fit.", flush=True)
                 return 3
             train_scored = model.transform(bundle.train_df).cache()
@@ -945,7 +961,7 @@ def main(argv=None) -> int:
             _pw = bundle_preindex_witness(bundle)
             _elig_col = str(_pw.get("col_name")) if _pw else None
             if _elig_col:
-                print(f"[readout]   incident eligibility column: {_elig_col!r} "
+                _cprint(f"[readout]   incident eligibility column: {_elig_col!r} "
                       f"({_pw.get('version')})", flush=True)
             run_readout(train_scored, test_scored, manifest, recall_targets=rt,
                         fdr_targets=ft, min_count=min_count,
@@ -954,7 +970,7 @@ def main(argv=None) -> int:
                         theta_topm=args.readout_theta_topm,
                         readout_max_iter=args.readout_max_iter,
                         elig_col=_elig_col, eval_path=args.eval_path)
-            print(f"[readout]   arm results written to "
+            _cprint(f"[readout]   arm results written to "
                   f"{run_dir / 'results_readout.json'}", flush=True)
             train_scored.unpersist(); test_scored.unpersist()
 
@@ -965,7 +981,7 @@ def main(argv=None) -> int:
             # is precisely the run this tool exists to rescue — so say what is
             # missing rather than echoing nothing, and never index into it.
             if manifest.get("partial"):
-                print(f"[readout]   manifest marked partial="
+                _cprint(f"[readout]   manifest marked partial="
                       f"{manifest['partial']!r}: the fit landed but its own "
                       "readout did not, so there are no stored arm results to "
                       "echo (the numbers above are this re-readout's).",
@@ -975,7 +991,7 @@ def main(argv=None) -> int:
                     continue
                 rk = res.get("ranking", res)   # tolerate old flat-macro manifests
                 auc = rk.get("auc"); ap = rk.get("ap")
-                print(f"[readout]   (manifest) {name}: AUC="
+                _cprint(f"[readout]   (manifest) {name}: AUC="
                       f"{'n/a' if auc is None else f'{auc:.4f}'} "
                       f"AP={'n/a' if ap is None else f'{ap:.4f}'}", flush=True)
     return 0

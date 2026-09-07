@@ -34,14 +34,45 @@ def _phase(name: str) -> Iterator[None]:
     """Bracket a driver phase with start/end markers, a wall-clock timestamp,
     and elapsed wall time. The HH:MM:SS timestamp makes separate runs
     distinguishable in a captured log (two runs never share it) and shows
-    real-time progress -- so a slow phase is not mistaken for a hang."""
-    print(f"[driver] [{time.strftime('%H:%M:%S')}] >>> {name}", flush=True)
+    real-time progress -- so a slow phase is not mistaken for a hang.
+
+    The whole banner is bold cyan (term_colors; identity when color is off)
+    -- a phase boundary is the first thing to scan for in a long run, so it
+    gets the strongest, least-ambiguous treatment in the palette. The import
+    is LOCAL, not module-level: several drivers that import `_phase` (e.g.
+    `hpoa_stage2_probe.py`) ride Spark's `--py-files` for their own
+    mapPartitions kernels, and term_colors must never become a transitive
+    top-level dependency an executor could be asked to import (see
+    term_colors.py's module docstring)."""
+    import term_colors
+    print(term_colors.bold_cyan(
+        f"[driver] [{time.strftime('%H:%M:%S')}] >>> {name}"), flush=True)
     t0 = time.perf_counter()
     try:
         yield
     finally:
-        print(f"[driver] [{time.strftime('%H:%M:%S')}] <<< {name}: "
-              f"{time.perf_counter() - t0:.1f}s", flush=True)
+        print(term_colors.bold_cyan(
+            f"[driver] [{time.strftime('%H:%M:%S')}] <<< {name}: "
+            f"{time.perf_counter() - t0:.1f}s"), flush=True)
+
+
+class _ColorLogFormatter(logging.Formatter):
+    """Bold the `iter N/M` marker + dim the trailing per-iter timing on
+    spark_vi's progress line, and green-highlight an `η_boost[...]` wiring
+    sentinel wherever it appears (gated_lda's per-iter model summary,
+    `spark_vi.models.topic.gated_lda`) -- WITHOUT editing spark-vi: both
+    rules live in `term_colors` and are applied here, at the print site, to
+    the fully-formatted "[driver]   ..." line. Identity on any other line,
+    and identity (via term_colors.c) when color is disabled.
+
+    `term_colors` is imported LOCALLY inside `format` (see `_phase` above
+    for why) -- this class is only ever instantiated by `configure_logging`,
+    driver-side, but stays importable with zero cost even where it isn't."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        import term_colors
+        msg = super().format(record)
+        return term_colors.colorize_eta_boost(term_colors.colorize_iter_line(msg))
 
 
 def configure_logging(extra_loggers: dict[str, int] | None = None) -> None:
@@ -62,6 +93,11 @@ def configure_logging(extra_loggers: dict[str, int] | None = None) -> None:
         stream=__import__("sys").stdout,
         force=True,
     )
+    # basicConfig(force=True) tears down and rebuilds the root handler with
+    # the format string above; swap in the color-aware Formatter on that same
+    # handler rather than duplicating the "[driver]   " format string here.
+    for handler in logging.getLogger().handlers:
+        handler.setFormatter(_ColorLogFormatter("[driver]   %(message)s"))
     logging.getLogger("spark_vi").setLevel(logging.INFO)
     if extra_loggers:
         for name, level in extra_loggers.items():
@@ -105,6 +141,16 @@ _TEE_DROP_PATTERNS = [
     _re.compile(r"^\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} (INFO|WARN|DEBUG) "),
     _re.compile(r"\[CONTEXT ratelimit_period="),
 ]
+
+# `driver_log.md` is a markdown artifact (AGENTS.md: never colorized), but the
+# live terminal this tee mirrors may legitimately be running in color
+# (term_colors.enabled(), e.g. a real tty or CHARM_COLOR=1 forcing it through
+# scripts/run_experiment.py's relay). Strip ANSI SGR escapes before a line is
+# batched to disk -- ONLY the persisted copy is affected; `self._real.write`
+# below stays a raw, uncolored-or-colored-as-is passthrough to whoever is
+# actually watching (a terminal, or run_experiment.py's own relay, which
+# strips again before its OWN summary.md).
+_ANSI_RE = _re.compile(r"\x1b\[[0-9;]*m")
 
 
 class _StdoutTee:
@@ -155,9 +201,10 @@ class _StdoutTee:
         n = self._real.write(s)
         self._buf += s
         *done, self._buf = self._buf.split("\n")
-        self._pending.extend(
-            ln for ln in done
-            if not any(p.search(ln) for p in _TEE_DROP_PATTERNS))
+        for ln in done:
+            plain = _ANSI_RE.sub("", ln)
+            if not any(p.search(plain) for p in _TEE_DROP_PATTERNS):
+                self._pending.append(plain)
         if (time.monotonic() - self._last_flush) >= self._flush_every_s:
             self._flush_pending()
         return n

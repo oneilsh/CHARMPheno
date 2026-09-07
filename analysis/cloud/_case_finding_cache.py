@@ -427,6 +427,12 @@ def load_or_build_case_finding_bundle(spark, *, cache_uri=None, _assemble_fn=Non
     WHICH corpus this is without being something the assembler is called with.
     """
     from charmpheno.omop.case_finding_assembly import assemble_case_finding_corpus
+    # LOCAL import (matches every other import in this module, and every other
+    # importer of this module — see the grep in the term-colors report):
+    # `_case_finding_cache` is never imported at module top level anywhere, so
+    # this never becomes something an executor needs to resolve. Identity when
+    # color is off or the line doesn't match ERROR/WARN/HIT/MISS/rebuild.
+    from term_colors import highlight_line
     assemble = _assemble_fn or assemble_case_finding_corpus
 
     key = None
@@ -437,9 +443,10 @@ def load_or_build_case_finding_bundle(spark, *, cache_uri=None, _assemble_fn=Non
         key = compute_bundle_cache_key(**key_params)
         cached = try_load(spark, cache_uri, key)
         if cached is not None:
-            print("[driver]   case-finding-cache HIT", flush=True)
+            print(highlight_line("[driver]   case-finding-cache HIT"), flush=True)
             return cached
-        print("[driver]   case-finding-cache MISS, building...", flush=True)
+        print(highlight_line("[driver]   case-finding-cache MISS, building..."),
+              flush=True)
 
     bundle = assemble(spark, **assembly_params)
     if cache_uri:
@@ -453,7 +460,8 @@ def load_or_build_case_finding_bundle(spark, *, cache_uri=None, _assemble_fn=Non
         try:
             save(spark, bundle, cache_uri, key)
         except Exception as exc:                                # noqa: BLE001
-            print(f"[driver]   WARNING: case-finding-cache write to {cache_uri} "
-                  f"failed ({type(exc).__name__}: {exc}); proceeding with the "
-                  f"in-memory bundle (no cache reuse next run).", flush=True)
+            print(highlight_line(
+                f"[driver]   WARNING: case-finding-cache write to {cache_uri} "
+                f"failed ({type(exc).__name__}: {exc}); proceeding with the "
+                f"in-memory bundle (no cache reuse next run)."), flush=True)
     return bundle

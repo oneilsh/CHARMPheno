@@ -186,6 +186,16 @@ NOISE_PATTERNS: list[re.Pattern] = [
 # (readability) is documentary.
 DROP_PATTERNS: list[re.Pattern] = PATIENT_PATTERNS + NOISE_PATTERNS
 
+# gated_pc_cloud's driver may run with CHARM_COLOR=1 forced (see the fit
+# dispatch below), so a relayed line can carry ANSI SGR escapes. Strip them
+# before `parse_iter_marker` (its regex is anchored on a literal "[driver]"
+# prefix and would silently stop matching with an escape spliced in) and
+# before `sanitize_line`/summary.md — that file is a markdown artifact and,
+# per AGENTS.md, is never colorized. The live terminal echo happens on the
+# UNSTRIPPED line, before this substitution, so a human watching still sees
+# color; only the parsed/committed copy is plain.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
 
 def sanitize_line(line: str, patterns: list[re.Pattern]) -> str | None:
     """Return the line if safe to commit, or None to drop.
@@ -1460,16 +1470,18 @@ def run_subprocess_tee_sanitize(
 
     try:
         for line in proc.stdout:
-            # Live debugging: always print to terminal
+            # Live debugging: always print to terminal (colors, if the child
+            # emitted any, survive to here — see _ANSI_RE above).
             sys.stdout.write(line)
             sys.stdout.flush()
+            plain = _ANSI_RE.sub("", line)
             # Track iter for the killed-marker, even on lines we don't
             # commit (so we know which iter was in flight when the signal
             # arrived).
-            m = parse_iter_marker(line)
+            m = parse_iter_marker(plain)
             if m is not None:
                 last_iter = m
-            clean = sanitize_line(line, patterns)
+            clean = sanitize_line(plain, patterns)
             if clean is not None:
                 pending.append(clean)
             if (time.monotonic() - last_flush) >= 20.0:
@@ -1766,6 +1778,16 @@ def main(argv: list[str] | None = None) -> int:
                 **os.environ,
                 "PYTHONPATH": f"{REPO_ROOT}:{os.environ.get('PYTHONPATH', '')}",
             }
+        if model_class == "gated_pc" and sys.stdout.isatty():
+            # gated_pc_cloud.py's term_colors decides color by `isatty()` on
+            # ITS OWN stdout, which is always a pipe here (run_subprocess_
+            # tee_sanitize streams it) -- so color would auto-disable even
+            # when a human is watching THIS process's terminal live. Force it
+            # on exactly then, via CHARM_COLOR, so it survives the relay.
+            # run_subprocess_tee_sanitize strips the escapes again before the
+            # iter-marker parse and before anything reaches summary.md -- only
+            # the live echo above stays colored.
+            fit_env = {**(fit_env or os.environ), "CHARM_COLOR": "1"}
         # Display-only join; cmd is passed as list to Popen/run, not via shell.
         print(f"[run-exp] spark-submit: {' '.join(fit_cmd)}", flush=True)
         fit_rc = run_subprocess_tee_sanitize(
