@@ -2714,6 +2714,8 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
         headTrustMove=float(getattr(args, "head_trust_move", 0.0)),
         weightYWarmupIters=args.weight_y_warmup_iters,
         headOptimizer=args.head_optimizer, headLr=args.head_lr,
+        headInnerIters=int(getattr(args, "head_inner_iters", 3)),
+        headHistoryReset=bool(getattr(args, "head_history_reset", True)),
         headNewtonRidge=args.head_newton_ridge, headL2=args.head_l2,
         headIntercept=bool(getattr(args, "head_intercept", False)),
         headStandardize=bool(getattr(args, "head_standardize", False)),
@@ -3867,9 +3869,21 @@ def parse_args(argv=None):
     p.add_argument("--weight-y", type=float, default=50.0,
                    help="PC prediction weight (>0). Hughes ~ tokens/doc; tune on "
                         "validation. The unsup_gated arm always refits at 0.")
-    p.add_argument("--head-optimizer", choices=["sgd", "newton"], default="newton",
+    p.add_argument("--head-optimizer", choices=["sgd", "newton", "lbfgs"],
+                   default="newton",
                    help="head optimizer; 'newton' is the settled convergent head "
-                        "(ADR 0039) — the default here.")
+                        "(ADR 0039) — the default here. 'lbfgs' is the matrix-free "
+                        "batched-L-BFGS co-fit head (O(C*K) shuffle, no newton "
+                        "O(C*K^2) collect — the whole-Mondo strong head); it needs "
+                        "the distributed re-scoring provider, injected here.")
+    p.add_argument("--head-inner-iters", type=int, default=3,
+                   help="head_optimizer=lbfgs: batched-L-BFGS solver passes per outer "
+                        "SVI iter (amortized against a moving theta). Inert otherwise.")
+    p.add_argument("--head-history-reset", type=lambda s: s.lower() != "false",
+                   default=True,
+                   help="head_optimizer=lbfgs: reset the L-BFGS (s,y) curvature "
+                        "history each outer iter (default true; 'false' carries it). "
+                        "Inert otherwise.")
     p.add_argument("--head-lr", type=float, default=0.5)
     p.add_argument("--head-newton-ridge", type=float, default=0.01)
     p.add_argument("--head-l2", type=float, default=1e-3,
@@ -4389,6 +4403,8 @@ def main() -> int:
             "weight_y_warmup_iters": args.weight_y_warmup_iters,
             "grad_cavi_iters": args.grad_cavi_iters, "topic_trust": args.topic_trust,
             "head_trust_move": float(getattr(args, "head_trust_move", 0.0)),
+            "head_inner_iters": int(getattr(args, "head_inner_iters", 3)),
+            "head_history_reset": bool(getattr(args, "head_history_reset", True)),
             "subsampling_rate": args.subsampling_rate, "tau0": args.tau0,
             "kappa": args.kappa, "max_iter": args.max_iter,
             "min_label_count": args.min_label_count,
@@ -4481,7 +4497,40 @@ def main() -> int:
             pc_est = _build_pc_estimator(args, weight_y=args.weight_y, gated=True)
             if args.eval_every > 0:
                 pc_est.setOnIteration(_make_eval_logger(bundle, C, args))
-            pc_model = pc_est.fit(bundle.train_df)
+            # lbfgs co-fit head: the engine's M-step re-scores the CURRENT θ each
+            # outer iter through a DISTRIBUTED provider (the same treeAggregate seam
+            # the frozen-θ readout uses, re-derived per iter because θ moves). We
+            # build it driver-side and inject via the estimator's factory hook; the
+            # engine (spark-vi) never sees Spark. The holder lets us close() the last
+            # outer iter's persisted scored df after the fit. Inert for sgd/newton.
+            _cofit_provider = {}
+            if args.head_optimizer == "lbfgs":
+                from spark_vi.models.topic.batched_lr import (
+                    fold_standardization, standardized_grad_from_raw)
+
+                def _cofit_factory(ctx, _hold=_cofit_provider):
+                    engine = ctx["engine"]
+                    prov = _dr.make_cofit_head_stats_provider(
+                        ctx["dataset"], ctx["C"], engine.K,
+                        grad_cavi_iters=engine.grad_cavi_iters,
+                        head_standardize=engine.head_standardize,
+                        head_std_floor=engine.head_std_floor,
+                        expElogbeta_fn=engine._expElogbeta_from_lambda,
+                        fold_standardization=fold_standardization,
+                        standardized_grad_from_raw=standardized_grad_from_raw,
+                        features_col=ctx["features_col"],
+                        features_cols=ctx["features_cols"],
+                        domain_sizes=ctx["domain_sizes"],
+                        label_col=ctx["label_col"], mask_col=ctx["label_mask_col"])
+                    _hold["provider"] = prov
+                    return prov
+
+                pc_est.setHeadStatsProviderFactory(_cofit_factory)
+            try:
+                pc_model = pc_est.fit(bundle.train_df)
+            finally:
+                if _cofit_provider.get("provider") is not None:
+                    _cofit_provider["provider"].close()
             # EARLY SAVE, before any readout work touches the cluster: the fit is
             # the hours-long unrepeatable half and the readout is where runs die,
             # so the model reaches durable storage the moment it exists. The final

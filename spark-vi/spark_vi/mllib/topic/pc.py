@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import operator
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 from pyspark import StorageLevel, keyword_only
@@ -303,11 +303,28 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
     headOptimizer = Param(
         Params._dummy(), "headOptimizer",
         "head optimizer: 'sgd' (default; the RM-damped step rho*headLrScale*weightY*g, "
-        "one first-order step per SVI iteration) or 'newton' (a per-iteration ridge-Newton "
+        "one first-order step per SVI iteration), 'newton' (a per-iteration ridge-Newton "
         "/ IRLS step that CONVERGES the logistic head on the current theta — the settled "
-        "head fix; ADR 0039). sgd does not converge the coupled head against a moving theta "
-        "(insight 0065); newton is scale-invariant and aggregatable",
+        "head fix; ADR 0039), or 'lbfgs' (a matrix-free amortized batched-L-BFGS co-fit "
+        "head that converges like newton at O(C*K) shuffle without newton's O(C*K^2) driver "
+        "collect — the whole-Mondo-scale strong head; needs the distributed re-scoring "
+        "provider injected on the driver via setHeadStatsProviderFactory). sgd does not "
+        "converge the coupled head against a moving theta (insight 0065); newton/lbfgs are "
+        "scale-invariant and aggregatable",
         typeConverter=TypeConverters.toString,
+    )
+    headInnerIters = Param(
+        Params._dummy(), "headInnerIters",
+        "headOptimizer='lbfgs': number of batched-L-BFGS solver passes per OUTER SVI "
+        "iteration (amortized against a moving theta). Default 3. Inert for sgd/newton.",
+        typeConverter=TypeConverters.toInt,
+    )
+    headHistoryReset = Param(
+        Params._dummy(), "headHistoryReset",
+        "headOptimizer='lbfgs': DISCARD the L-BFGS (s,y) curvature history each outer "
+        "iteration (True, default — fresh curvature, no stale-curvature risk when theta "
+        "moves) vs carry it across iters (False). Inert for sgd/newton.",
+        typeConverter=TypeConverters.toBoolean,
     )
     headLr = Param(
         Params._dummy(), "headLr",
@@ -740,6 +757,8 @@ def _build_model_and_config(
         topic_trust=float(estimator.getOrDefault("topicTrust")),
         weight_y_warmup_iters=int(estimator.getOrDefault("weightYWarmupIters")),
         head_optimizer=str(estimator.getOrDefault("headOptimizer")),
+        head_inner_iters=int(estimator.getOrDefault("headInnerIters")),
+        head_history_reset=bool(estimator.getOrDefault("headHistoryReset")),
         head_lr=float(estimator.getOrDefault("headLr")),
         head_newton_ridge=float(estimator.getOrDefault("headNewtonRidge")),
         head_l2=float(estimator.getOrDefault("headL2")),
@@ -778,7 +797,8 @@ _ONLINE_PCLDA_DEFAULTS = dict(
     numLabels=1, weightY=0.0, probabilityCol="probability",
     lambdaW=0.001, gradCaviIters=20, headLrScale=1.0, headTrustMove=0.0,
     topicTrust=0.1,
-    weightYWarmupIters=0, headOptimizer="sgd", headLr=0.05, headNewtonRidge=0.01,
+    weightYWarmupIters=0, headOptimizer="sgd", headInnerIters=3,
+    headHistoryReset=True, headLr=0.05, headNewtonRidge=0.01,
     headL2=1e-3, headIntercept=False, headStandardize=False,
     closureParents="", warmStartFrom="",
     gateParent="", etaBoost="", gateNBg=2, gateTpn=1, localizeHead=False,
@@ -832,6 +852,8 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         topicTrust: float = 0.1,
         weightYWarmupIters: int = 0,
         headOptimizer: str = "sgd",
+        headInnerIters: int = 3,
+        headHistoryReset: bool = True,
         headLr: float = 0.05,
         headNewtonRidge: float = 0.01,
         headL2: float = 1e-3,
@@ -875,6 +897,12 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         # Stored as an instance attribute — callables aren't MLlib-serializable
         # and persistence is deferred (ADR 0009).
         self._on_iteration = None
+        # Driver-side factory that builds the lbfgs co-fit head's distributed
+        # re-scoring provider (headOptimizer='lbfgs' only). An instance attribute,
+        # not a Param: it closes over the driver's SparkSession/DataFrame and the
+        # analysis-layer Spark seam, neither of which spark-vi may import — so the
+        # driver supplies it and _fit only INVOKES it (spark-vi stays Spark-free).
+        self._head_stats_provider_factory = None
         # featuresCols/domainBounds carry no positive default (featuresCols defaults
         # to [] via _setDefault; domainBounds uses isSet). Drop an explicit None so
         # kwarg-style construction that leaves them unset does not clobber the
@@ -896,6 +924,28 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         the fit hot path. Must not mutate global_params. Not persisted.
         """
         self._on_iteration = fn
+        return self
+
+    def setHeadStatsProviderFactory(
+        self, factory: Callable[[dict], Any] | None,
+    ) -> "OnlinePCLDAEstimator":
+        """Register the lbfgs co-fit head's distributed re-scoring provider factory.
+
+        The engine's ``head_optimizer='lbfgs'`` M-step re-scores the CURRENT θ each
+        outer iter through an injected provider (``OnlinePCLDA.set_head_stats_
+        provider``); with no provider it degrades to a one-step sgd move. That
+        provider must live driver-side (it captures the SparkSession + train
+        DataFrame and the analysis-layer ``treeAggregate`` seam), which spark-vi
+        cannot build, so the DRIVER supplies this factory and ``_fit`` invokes it
+        after the engine exists.
+
+        ``factory(ctx) -> provider`` (or ``None`` to opt out), where ``ctx`` carries
+        ``dataset`` (the train frame), ``engine`` (the built ``OnlinePCLDA``, the
+        authority on ``grad_cavi_iters``/``C``/``K``/``head_standardize``), the
+        feature/label/mask column names, ``domain_sizes`` and ``C``. Called only when
+        ``headOptimizer='lbfgs'``; a no-op (and unused) for sgd/newton. Not
+        MLlib-serialized (a callable, like ``setOnIteration``)."""
+        self._head_stats_provider_factory = factory
         return self
 
     def _fit(self, dataset) -> "OnlinePCLDAModel":
@@ -1096,6 +1146,26 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
                     "anchor_scope": self.getOrDefault("anchorScope"),
                     "topo_order": self.getOrDefault("spectralTopoOrder"),
                 }
+
+        # lbfgs co-fit head: inject the driver-supplied distributed re-scoring
+        # provider onto the engine before the fit. Without it the engine degrades
+        # to the one-step sgd move (announced once); the factory captures the
+        # SparkSession + train frame + the analysis Spark seam (spark-vi cannot
+        # build it, so _fit only invokes it). Inert unless headOptimizer='lbfgs'.
+        factory = getattr(self, "_head_stats_provider_factory", None)
+        if factory is not None and str(self.getOrDefault("headOptimizer")) == "lbfgs":
+            provider = factory({
+                "dataset": dataset,
+                "engine": model_obj,
+                "features_col": features_col,
+                "features_cols": (fcols or None),
+                "domain_sizes": domain_sizes,
+                "label_col": label_col,
+                "label_mask_col": label_mask_col,
+                "C": C,
+            })
+            if provider is not None:
+                model_obj.set_head_stats_provider(provider)
 
         try:
             result = VIRunner(model_obj, config=config).fit(

@@ -825,6 +825,12 @@ def build_gated_pc_args(
         "--grad-cavi-iters", str(effective.get("grad_cavi_iters", 20)),
         "--topic-trust", str(effective.get("topic_trust", 0.1)),
         "--head-trust-move", str(effective.get("head_trust_move", 0.0)),
+        # lbfgs co-fit head knobs (inert unless head_optimizer=lbfgs). Emitted
+        # unconditionally at their inert defaults, mirroring --head-trust-move: the
+        # driver defaults match, so a non-lbfgs run's behavior is unchanged.
+        "--head-inner-iters", str(effective.get("head_inner_iters", 3)),
+        "--head-history-reset",
+        str(effective.get("head_history_reset", True)).lower(),
         "--weight-y-warmup-iters", str(effective.get("weight_y_warmup_iters", 10)),
         "--max-iter", str(effective["max_iter"]),
         "--subsampling-rate", str(effective.get("subsampling_rate", 0.05)),

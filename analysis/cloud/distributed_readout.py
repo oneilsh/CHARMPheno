@@ -1878,6 +1878,237 @@ def make_spark_stats_fn(scored_df, C, K, mu, sd, *, fold_standardization,
         depth=depth, storage_level=storage_level, topm=topm)
 
 
+# --------------------------------------------------------------------------- #
+# The CO-FIT head re-scoring seam (plan 2026-09-07 WP3a).                      #
+# --------------------------------------------------------------------------- #
+# The FROZEN-θ readout above scores a model's θ once and fits the head on it.
+# The lbfgs CO-FIT head runs the SAME batched-L-BFGS solver, but against a θ that
+# MOVES every outer SVI iter, so this seam re-derives θ under the CURRENT global
+# params ONCE per outer iter and hands the engine the identical
+# `(stats_fn, mu, sd, n_obs, n_pos)` tuple its in-memory twin
+# (`OnlinePCLDA.make_head_stats_provider_inmemory`) returns — only distributed.
+#
+# THE θ THAT IS SCORED. The co-fit head trains and predicts through the engine's
+# label-free `_plain_cavi_theta`: a FIXED, short unroll (`grad_cavi_iters`) of the
+# mean-field CAVI fixed point from the deterministic init `gamma = alpha`. That is
+# NOT the readout transform's θ (random gamma init + convergence tol), so this
+# seam reproduces `_plain_cavi_theta` EXACTLY (`_cofit_theta_kernel`), not
+# `_cavi_doc_inference`; the correctness gate is that the distributed
+# `(loss, gW, gb)` match the in-memory provider's on the same data to roundoff.
+
+
+def _cofit_theta_kernel(indices, counts, expElogbeta, alpha_vec, n_iters):
+    """The head's label-free θ under one doc — twin of `OnlinePCLDA._plain_cavi_theta`.
+
+    A FIXED `n_iters`-step unroll of the mean-field CAVI recurrence from the
+    deterministic init `gamma = alpha` (the co-fit head's differentiated θ, byte-
+    for-byte the numpy recurrence in `_plain_cavi_theta`), returning the normalized
+    topic mixture the head reads. `eb_d = expElogbeta[:, indices]` is gathered once
+    (θ moves, the doc's words do not), so this is O(n_iters · K · nnz) per doc. Kept
+    a module-level leaf so it ships by reference on `--py-files` (the UDF below
+    serializes it into the executors' mapPartitions closure)."""
+    from scipy.special import digamma
+
+    idx = np.asarray(indices, dtype=np.intp)
+    cnt = np.asarray(counts, dtype=np.float64)
+    alpha_vec = np.asarray(alpha_vec, dtype=np.float64)
+    eb_d = np.asarray(expElogbeta, dtype=np.float64)[:, idx]      # (K, nnz)
+    gamma = alpha_vec.copy()
+    for _ in range(int(n_iters)):
+        expElogthetad = np.exp(digamma(gamma) - digamma(gamma.sum()))
+        phi_norm = eb_d.T @ expElogthetad + 1e-100
+        gamma = alpha_vec + expElogthetad * (eb_d @ (cnt / phi_norm))
+    return gamma / gamma.sum()
+
+
+def score_cofit_theta_df(base_df, expElogbeta, alpha_vec, grad_cavi_iters, *,
+                         features_col=None, features_cols=None, domain_sizes=None,
+                         topic_col="topicDistribution"):
+    """Append the co-fit head's label-free θ column under the CURRENT global params.
+
+    Mirrors `OnlinePCLDAModel._transform`'s feature-extraction (single fused
+    `features_col`, or per-domain `features_cols` concatenated into the engine's
+    id space exactly as the fit does) but swaps its CAVI for `_cofit_theta_kernel`
+    so the θ is the head's own `_plain_cavi_theta`. `expElogbeta`/`alpha_vec` are
+    computed ON THE DRIVER (from the outer iter's λ/α via the engine's own
+    `_expElogbeta_from_lambda`, so the multi-domain per-domain normalization is the
+    fit's) and broadcast; the executor never sees λ. The broadcast lives as long
+    as the returned DataFrame's UDF closure (ContextCleaner reclaims it on GC — the
+    same lifetime rule `_transform` documents), so do NOT eagerly destroy it."""
+    from pyspark.ml.linalg import DenseVector, VectorUDT
+    from pyspark.sql import functions as F
+
+    sc = base_df.sparkSession.sparkContext
+    bcast = sc.broadcast({
+        "expElogbeta": np.ascontiguousarray(expElogbeta, dtype=np.float64),
+        "alpha": np.ascontiguousarray(alpha_vec, dtype=np.float64),
+        "n_iters": int(grad_cavi_iters),
+        "domain_sizes": (list(domain_sizes) if domain_sizes else None),
+    })
+
+    def _infer(*features):
+        p = bcast.value
+        if p["domain_sizes"] is not None:
+            from spark_vi.mllib.topic.gated_lda import _concat_domain_features
+            indices, counts = _concat_domain_features(features, p["domain_sizes"])
+        else:
+            from spark_vi.mllib.topic._common import _vector_to_bow_document
+            doc = _vector_to_bow_document(features[0])
+            indices, counts = doc.indices, doc.counts
+        theta = _cofit_theta_kernel(
+            indices, counts, p["expElogbeta"], p["alpha"], p["n_iters"])
+        return DenseVector(theta)
+
+    infer_udf = F.udf(_infer, returnType=VectorUDT())
+    fcols = list(features_cols or [])
+    feat_args = ([F.col(c) for c in fcols] if fcols
+                 else [F.col(features_col)])
+    return base_df.withColumn(topic_col, infer_udf(*feat_args))
+
+
+class CofitHeadStatsProvider:
+    """Driver-side re-scoring seam injected into the engine's lbfgs co-fit head.
+
+    Callable as `provider(global_params) -> (stats_fn, mu, sd, n_obs, n_pos)` — the
+    EXACT contract of `OnlinePCLDA.make_head_stats_provider_inmemory`, only the doc
+    loop is a distributed θ score + `treeAggregate`. On each outer SVI iter the
+    engine calls this once (θ is fixed within the iter); the returned `stats_fn`
+    (`make_spark_stats_fn`) is then called cheaply per inner L-BFGS pass against the
+    SAME persisted scored-df, varying only `(W, b)`.
+
+    Cost, per outer iter: ONE θ-scoring pass (materialize the scored df), ONE
+    moments pass, one projection-build, then `head_inner_iters` × (a few line-search
+    trials) stats passes — all `treeAggregate`s over the train split. The scored df
+    is persisted so the moments pass and every inner pass reuse it (θ is scored
+    once, not once per pass).
+
+    Lifecycle: each call unpersists the PREVIOUS outer iter's scored df and closes
+    its `SparkStatsFn` projection before building this iter's (θ has moved; the old
+    cache is dead). One set therefore lingers between calls, and the last set is
+    released by the driver's `close()` after the fit — call it (a `with` or a
+    `finally`), or it leaks executor storage for the life of the SparkContext."""
+
+    def __init__(self, base_df, C, K, *, grad_cavi_iters, head_standardize,
+                 head_std_floor, expElogbeta_fn, fold_standardization,
+                 standardized_grad_from_raw, features_col=None, features_cols=None,
+                 domain_sizes=None, label_col="label", mask_col="labelMask",
+                 topic_col="topicDistribution", depth=2, storage_level=None):
+        self._C, self._K = int(C), int(K)
+        self._grad_cavi_iters = int(grad_cavi_iters)
+        self._head_standardize = bool(head_standardize)
+        self._head_std_floor = float(head_std_floor)
+        self._expElogbeta_fn = expElogbeta_fn
+        self._fold = fold_standardization
+        self._fold_grad = standardized_grad_from_raw
+        self._features_col = features_col
+        self._features_cols = list(features_cols) if features_cols else None
+        self._domain_sizes = list(domain_sizes) if domain_sizes else None
+        self._label_col = label_col
+        self._mask_col = mask_col
+        self._topic_col = topic_col
+        self._depth = int(depth)
+        self._storage_level = storage_level
+        # Project to only the columns the score + aggregates need, so the persisted
+        # scored df carries no stray fit columns (frontier, ids) per outer iter.
+        keep = list(self._features_cols or [self._features_col]) + [label_col, mask_col]
+        self._base = base_df.select(*keep)
+        self._prev_df = None
+        self._prev_stats = None
+        self.n_calls = 0
+
+    def __call__(self, global_params):
+        from pyspark import StorageLevel
+
+        self._release_prev()
+        expElogbeta = np.asarray(
+            self._expElogbeta_fn(global_params["lambda"]), dtype=np.float64)
+        alpha_vec = np.asarray(global_params["alpha"], dtype=np.float64)
+        scored = score_cofit_theta_df(
+            self._base, expElogbeta, alpha_vec, self._grad_cavi_iters,
+            features_col=self._features_col, features_cols=self._features_cols,
+            domain_sizes=self._domain_sizes, topic_col=self._topic_col)
+        sl = (StorageLevel.MEMORY_AND_DISK if self._storage_level is None
+              else self._storage_level)
+        scored = scored.persist(sl)
+        scored.count()                          # score θ ONCE for this outer iter
+
+        mu_raw, sd_raw, n_obs, n_pos = masked_moments(
+            scored, self._C, self._K, topic_col=self._topic_col,
+            label_col=self._label_col, mask_col=self._mask_col, depth=self._depth)
+        # Standardization matches the in-memory provider exactly: real per-node
+        # moments when head_standardize is on (floored if head_std_floor > 0),
+        # identity otherwise — n_obs/n_pos come free from the same pass either way.
+        if self._head_standardize:
+            mu, sd = mu_raw, sd_raw
+            if self._head_std_floor > 0.0:
+                sd = np.maximum(sd, self._head_std_floor)
+        else:
+            mu = np.zeros((self._C, self._K), dtype=np.float64)
+            sd = np.ones((self._C, self._K), dtype=np.float64)
+
+        stats_fn = make_spark_stats_fn(
+            scored, self._C, self._K, mu, sd,
+            fold_standardization=self._fold,
+            standardized_grad_from_raw=self._fold_grad,
+            topic_col=self._topic_col, label_col=self._label_col,
+            mask_col=self._mask_col, depth=self._depth)
+        self._prev_df = scored
+        self._prev_stats = stats_fn
+        self.n_calls += 1
+        return stats_fn, mu, sd, n_obs, n_pos
+
+    def _release_prev(self):
+        if self._prev_stats is not None:
+            try:
+                self._prev_stats.close()
+            except Exception as exc:            # dead context / already gone
+                print(f"[driver]   co-fit stats close skipped ({_error_first_line(exc)})",
+                      flush=True)
+            self._prev_stats = None
+        if self._prev_df is not None:
+            try:
+                self._prev_df.unpersist()
+            except Exception:
+                pass
+            self._prev_df = None
+
+    def close(self):
+        """Release the final outer iter's scored df + projection. Idempotent."""
+        self._release_prev()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
+def make_cofit_head_stats_provider(base_df, C, K, *, grad_cavi_iters,
+                                   head_standardize, head_std_floor, expElogbeta_fn,
+                                   fold_standardization, standardized_grad_from_raw,
+                                   features_col=None, features_cols=None,
+                                   domain_sizes=None, label_col="label",
+                                   mask_col="labelMask", topic_col="topicDistribution",
+                                   depth=2, storage_level=None):
+    """Build the distributed lbfgs co-fit re-scoring provider. See `CofitHeadStatsProvider`.
+
+    The returned object is `provider(global_params) -> (stats_fn, mu, sd, n_obs,
+    n_pos)` and MUST be `close()`d (or used as a context manager) after the fit to
+    release the last outer iter's persisted scored df. `fold_standardization` /
+    `standardized_grad_from_raw` are injected from `spark_vi.models.topic.batched_lr`
+    (the same fold the readout uses); `expElogbeta_fn` is the engine's own
+    `_expElogbeta_from_lambda` so the θ the head reads is byte-identical."""
+    return CofitHeadStatsProvider(
+        base_df, C, K, grad_cavi_iters=grad_cavi_iters,
+        head_standardize=head_standardize, head_std_floor=head_std_floor,
+        expElogbeta_fn=expElogbeta_fn, fold_standardization=fold_standardization,
+        standardized_grad_from_raw=standardized_grad_from_raw,
+        features_col=features_col, features_cols=features_cols,
+        domain_sizes=domain_sizes, label_col=label_col, mask_col=mask_col,
+        topic_col=topic_col, depth=depth, storage_level=storage_level)
+
+
 def score_cells_df(scored_df, V, b_raw, C, *, topic_col="topicDistribution",
                    label_col="label", mask_col="labelMask", topm=0, id_col=None):
     """Explode the fitted model's OBSERVED test cells to `[node, y, p]`.
