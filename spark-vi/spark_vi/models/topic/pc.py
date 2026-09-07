@@ -1481,9 +1481,27 @@ class OnlinePCLDA(VIModel):
         :func:`spark_vi.models.topic.batched_lr.solve_batched_lr` consumes for the
         FROZEN-θ readout — here evaluated against the θ implied by ``global_params``.
         Injected on the DRIVER only (never pickled into a Spark task — the head object
-        stays off the closure per ADR 0047). ``None`` clears it. Without a provider the
-        lbfgs branch degrades to the one-step sgd move, announced once."""
+        stays off the closure per ADR 0047; see ``__getstate__``). ``None`` clears it.
+        Without a provider the lbfgs branch degrades to the one-step sgd move, announced
+        once."""
         self._head_stats_provider = provider
+
+    def __getstate__(self):
+        """Pickle WITHOUT the driver-only head-stats provider (ADR 0047 closure clause).
+
+        VIRunner ships the MODEL into every E-step task closure (``_model=model``
+        default-arg capture); the distributed lbfgs provider is a driver-side closure
+        that captures the SparkSession / SparkContext, so pickling the model with it
+        attached raises SPARK-5063 (``CONTEXT_ONLY_VALID_ON_DRIVER``) — the fit dies
+        before iter 1. The provider is consumed ONLY by ``update_global`` /
+        ``_lbfgs_head_step``, which run on the DRIVER's own instance (never a pickled
+        copy), so every pickled-for-executor copy carries ``_head_stats_provider=None``
+        while the driver instance keeps it. Byte-identical for sgd/newton (provider
+        already None). Mirrors ``GatedOnlineLDA.__getstate__``'s eta-boost exclusion.
+        """
+        state = dict(self.__dict__)
+        state["_head_stats_provider"] = None
+        return state
 
     def _plain_cavi_theta(self, eb_d, counts, alpha_vec, n_iters) -> np.ndarray:
         """Plain-numpy twin of :func:`_cavi_theta_anp` — the head's label-free θ.
