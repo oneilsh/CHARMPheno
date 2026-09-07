@@ -3,7 +3,10 @@
 Overrides local_update, initialize_global, and update_global (the gated per-node α step);
 compute_elbo and infer_local are ALSO overridden, but only branch away from the inherited
 OnlineLDA behavior in multi-domain mode (see below) — with domains=None they delegate to
-super() and are byte-identical to the base class.
+super() and are byte-identical to the base class. An OPTIONAL sparse per-topic eta boost
+(`eta_boost`, the profile-eta word-side prior) tilts chosen topics' Dirichlet prior on
+condition-domain tokens; when unset (the default) every path stays byte-identical — see
+the micro-design comment above `_resolve_eta_boost`.
   * local_update — restrict each training doc's CAVI to DagLayout.allowed_set(frontier)
     (the exact variational analogue of the Gibbs gate in dag_placement.fit_gated); sstats
     for disallowed topics stay zero, welding each node's topic to its subtree's documents.
@@ -55,6 +58,7 @@ oracle; the placement design docs/superpowers/specs/2026-07-15-gated-svi-placeme
 from __future__ import annotations
 
 import hashlib
+import operator
 from typing import Any, Iterable
 
 import numpy as np
@@ -75,12 +79,163 @@ def node_affinity(theta: np.ndarray, lay: DagLayout) -> dict[int, float]:
     return {u: float(theta[lay.block[u]].sum()) for u in lay.nodes}
 
 
+# ---------------------------------------------------------------------------
+# Sparse per-topic eta boost (the profile-eta word-side prior; WP-1 of the
+# 2026-09-06 profile-eta-prior plan).
+#
+# MICRO-DESIGN — the exhaustive inventory of every site where the scalar
+# Dirichlet prior eta enters the (Gated)OnlineLDA fit, and where the boost
+# therefore does and does not act. Verified by tracing every `eta` use in
+# spark_vi (lda.py, gated_lda.py, pc.py, core/runner.py, the mllib shims):
+#
+#   DRIVER-SIDE eta sites (all of them — eta never runs executor-side):
+#     1. OnlineLDA.__init__ / GatedOnlineLDA.__init__ — validation and storage
+#        (self.eta scalar; self._eta_domains per-domain). The boost is resolved
+#        and stored here too (`_resolve_eta_boost` -> self._eta_boost).
+#     2. initialize_global — global_params["eta"] = np.array(self.eta) (a 0-d
+#        display/KL scalar). The LAMBDA INIT ITSELF HAS NO ETA SITE: lambda is
+#        drawn Gamma(gamma_shape, 1/gamma_shape) (Hoffman 2010's convention),
+#        and the spectral strategies build lambda from anchors — eta enters
+#        neither, so the boost does NOT touch initialization. The tilted floor
+#        emerges through the updates (site 3), which is the intended mechanism:
+#        lambda_target = eta_vec + counts EVERY update, so a zero-count topic
+#        rho-blends toward eta_vec and keeps a tilted E[log beta] forever,
+#        while any real counts dominate it.
+#     3. update_global — the natural-gradient target's prior intercept:
+#        domains=None: target = eta + expElogbeta * lambda_stats (scalar eta
+#        from global_params); multi-domain: target = _eta_vocab_vector() + ...
+#        (per-domain eta_m broadcast per block). THE BOOST ENTERS HERE as a
+#        sparse in-place add on the boosted topics' target rows
+#        (`_apply_eta_boost`), before the (1-rho)/rho blend — identical
+#        arithmetic to a dense per-topic eta matrix, at O(nnz) cost.
+#        (OnlineLDA's optimize_eta Newton branch is a fourth driver-side site,
+#        but GatedOnlineLDA.__init__ rejects optimize_eta unconditionally, so
+#        it is unreachable here.)
+#     4. compute_elbo — the global KL sum_k KL(Dir(lambda_k) || Dir(prior_k)).
+#        domains=None: prior = eta * 1_V (OnlineLDA.compute_elbo); multi-domain:
+#        per-(topic, domain) blocks against eta_m * 1_{V_m}. THE BOOST ENTERS
+#        HERE: a boosted topic k is scored against prior_k = eta_vec + boost_k
+#        (`_boosted_prior_row` — one O(V_0) temporary per BOOSTED topic; the
+#        K x V dense eta matrix is never materialized, and non-boosted topics
+#        take the byte-identical original path).
+#     5. Display/provenance only: iteration_summary, iteration_diagnostics,
+#        get_metadata (eta_m). The boost adds a compact summary suffix and
+#        compact metadata keys; when absent, output is byte-identical.
+#
+#   EXECUTOR-SIDE eta sites: NONE. local_update (OnlineLDA, GatedOnlineLDA,
+#   OnlinePCLDA), _cavi_doc_inference, infer_local and combine_stats read only
+#   lambda / alpha / w_CK — never eta — and the mllib _transform UDFs broadcast
+#   {expElogbeta, alpha, gamma_shape, ...} without eta. The boost therefore
+#   never needs to reach executors AT ALL. But the MODEL OBJECT rides every
+#   task closure (VIRunner's `_model=model` default-arg capture), and ADR 0047's
+#   closure clause forbids array-shaped payloads in task closures (a large
+#   closure is silently auto-broadcast per job and its driver-side pickle leaks
+#   until context shutdown). So GatedOnlineLDA.__getstate__ EXCLUDES the boost
+#   from the pickled state: the driver's own instance (the only place
+#   update_global / compute_elbo run) keeps it; every pickled copy — which in
+#   this codebase means an executor-bound copy — carries _eta_boost=None.
+#   Should an executor-side eta consumer ever appear, ship the boost through
+#   global_params (the runner's explicit per-iteration sc.broadcast, destroyed
+#   per ADR 0047), not through the closure.
+#
+#   OnlinePCLDA composition: every eta touch delegates to the injected engine
+#   (its update_global calls self._lda.update_global first, so the boosted
+#   unsupervised target is formed by this class; the supervised EG correction
+#   is mass-preserving on top of lam_unsup and touches no eta), and
+#   compute_elbo / get_metadata delegate — so Gated-PC inherits the boost with
+#   zero changes to pc.py.
+# ---------------------------------------------------------------------------
+
+def _resolve_eta_boost(eta_boost, K: int, boost_v: int):
+    """Validate a sparse per-topic eta boost into {topic: (idx int64, w float64)}.
+
+    ``eta_boost`` maps a topic index k to a pair (vocab_idx_array, weight_array)
+    of equal length: the effective Dirichlet prior for topic k becomes
+    eta_vec_k = (scalar/per-domain) eta + boost, i.e. the weights are ADDED
+    pseudo-mass on top of the flat eta — never a replacement — so the resolved
+    prior stays strictly positive by construction (eta > 0 is already enforced)
+    and the D3 scale normalization is the CALLER's job (the weights arrive
+    final). CONDITION DOMAIN (domain 0) ONLY: indices are domain-0-local ids,
+    which equal concatenated global ids because domain 0 opens the
+    concatenation; ``boost_v`` is that domain's width (V_0, or V when
+    domains=None and the whole vocabulary is one domain).
+
+    None or {} resolve to None — the byte-identical no-boost path.
+
+    Rejections are deliberate fail-fast guards, each against a silent-wrong-
+    number failure mode:
+      * non-integer topic keys / float index arrays — a truncating cast would
+        silently boost the wrong topic/token;
+      * indices outside [0, boost_v) — a boost leaking past the condition
+        domain is exactly the "uncredited nodes moved" wiring bug the plan's
+        failure-reads name;
+      * DUPLICATE indices within one topic — the sparse apply uses fancy-index
+        ``+=``, whose buffering semantics drop duplicate contributions rather
+        than accumulating them (np.add.at semantics would differ), so a
+        duplicate would silently lose mass; the WP-2 emitter takes
+        max-over-terms per concept and never emits duplicates, so one here is
+        always a caller bug;
+      * nonpositive / nonfinite weights — a zero adds nothing and a negative
+        could drive the effective prior toward/below 0 (improper Dirichlet).
+    """
+    if eta_boost is None or len(eta_boost) == 0:
+        return None
+    if not isinstance(eta_boost, dict):
+        raise ValueError(
+            f"eta_boost must be a dict {{topic_index: (vocab_idx_array, "
+            f"weight_array)}}, got {type(eta_boost).__name__}")
+    out: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    for key, pair in eta_boost.items():
+        try:
+            k = operator.index(key)
+        except TypeError as exc:
+            raise ValueError(
+                f"eta_boost topic keys must be integers, got {key!r}") from exc
+        if not 0 <= k < K:
+            raise ValueError(
+                f"eta_boost topic index {k} is outside [0, K={K})")
+        try:
+            idx_raw, w_raw = pair
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"eta_boost[{k}] must be a (vocab_idx_array, weight_array) "
+                f"pair, got {pair!r}") from exc
+        idx = np.asarray(idx_raw)
+        if idx.ndim != 1 or idx.size == 0 or idx.dtype.kind not in "iu":
+            raise ValueError(
+                f"eta_boost[{k}] indices must be a non-empty 1-D integer "
+                f"array, got dtype={idx.dtype} shape={idx.shape}")
+        idx = idx.astype(np.int64, copy=True)
+        if int(idx.min()) < 0 or int(idx.max()) >= boost_v:
+            raise ValueError(
+                f"eta_boost[{k}] indices must lie in [0, {boost_v}) — the "
+                f"condition (first) domain's vocabulary; got range "
+                f"[{int(idx.min())}, {int(idx.max())}]")
+        if np.unique(idx).size != idx.size:
+            raise ValueError(
+                f"eta_boost[{k}] has duplicate vocabulary indices; each "
+                f"boosted token appears once (take the max over sources "
+                f"upstream)")
+        w = np.array(w_raw, dtype=np.float64, copy=True)
+        if w.shape != idx.shape:
+            raise ValueError(
+                f"eta_boost[{k}] weights shape {w.shape} != indices shape "
+                f"{idx.shape}")
+        if not np.all(np.isfinite(w)) or np.any(w <= 0.0):
+            raise ValueError(
+                f"eta_boost[{k}] weights must be finite and > 0 (they are "
+                f"added Dirichlet pseudo-mass)")
+        out[k] = (idx, w)
+    return out
+
+
 class GatedOnlineLDA(OnlineLDA):
     def __init__(self, lay: DagLayout, vocab_size: int, *, init: str = "random",
                  optimize_alpha: bool = False,
                  frontier_histogram: dict | None = None,
                  domains: list[int] | None = None,
                  eta: float | Iterable[float] | None = None,
+                 eta_boost: dict | None = None,
                  omega: float | Iterable[float] | None = None, **kw) -> None:
         # optimize_alpha is handled by the gated per-node Newton step (this class),
         # NOT OnlineLDA's full-K alpha_newton_step; pass it to the parent as False
@@ -150,6 +305,20 @@ class GatedOnlineLDA(OnlineLDA):
             self.domains = None
             self._domain_bounds = None
             self._eta_domains = None
+        # Sparse per-topic eta boost (profile-eta word-side prior; see the
+        # micro-design comment above `_resolve_eta_boost`). Condition (first)
+        # domain only: indices are validated against V_0 (= V when
+        # domains=None). None (the default) keeps every code path in this
+        # class byte-identical to the un-boosted model. WHY a prior and not an
+        # init: the boost re-enters the natural-gradient target
+        # (lambda_target = eta_vec + counts) on EVERY update, so a zero-count
+        # topic still rho-blends toward a tilted eta_vec and keeps a sharp
+        # E[log beta] on its profile tokens — persistent anti-starvation AND
+        # alignment — while real counts trivially dominate it; an init would
+        # wash out or lock a wrong basin. Fixed for the life of the fit, like
+        # _eta_domains (optimize_eta is rejected below).
+        boost_v = self.domains[0] if self.domains is not None else self.V
+        self._eta_boost = _resolve_eta_boost(eta_boost, self.K, boost_v)
         # Per-domain modality weight omega (see _resolve_omega). None (the default)
         # = the unweighted MixEHR-faithful path, byte-identical to pre-omega code.
         self.omega = self._resolve_omega(omega)
@@ -329,6 +498,65 @@ class GatedOnlineLDA(OnlineLDA):
         for m in range(len(self.domains)):
             out[bounds[m]:bounds[m + 1]] = self._eta_domains[m]
         return out
+
+    def _apply_eta_boost(self, target: np.ndarray) -> None:
+        """Add the sparse per-topic boost to the natural-gradient target, in place.
+
+        ``target`` is the CONCATENATED (K, V) target ``eta_vec + expElogbeta *
+        lambda_stats`` from update_global (domain 0 opens the concatenation, so
+        the boost's domain-0-local indices are usable directly in both modes).
+        This is arithmetically identical to using a dense per-topic eta matrix
+        eta_vec + boost as the prior intercept, at O(nnz) instead of O(K*V):
+        addition is elementwise, so scattering the boost after the dense
+        intercept equals building the boosted intercept first. Fancy-index
+        ``+=`` is safe because `_resolve_eta_boost` rejected duplicate indices.
+
+        WHY this is the load-bearing site: lambda_target = eta_vec + counts on
+        EVERY update, so a topic whose gate never admits a document (zero
+        counts, the starved floor) rho-blends toward eta_vec + boost and holds
+        a tilted E[log beta] on its profile tokens indefinitely, while a topic
+        with real evidence barely feels the added pseudo-mass."""
+        for k, (idx, w) in self._eta_boost.items():
+            target[k, idx] += w
+
+    def _boosted_prior_row(self, k: int, base: np.ndarray) -> np.ndarray:
+        """Topic k's effective Dirichlet prior over ``base``'s vocabulary slice.
+
+        ``base`` is the FLAT prior for the slice the caller is scoring —
+        the full length-V eta_vec (domains=None) or domain 0's length-V_0
+        block (multi-domain; only domain 0 can carry boost, and its local
+        indices equal global ones). Returns ``base`` itself (no copy) for a
+        non-boosted topic — the byte-identical original path — and a boosted
+        COPY otherwise, so compute_elbo's KL is exact under the per-topic
+        prior without ever materializing a dense (K, V) eta matrix: one O(V_0)
+        temporary per boosted topic, only while its KL is computed."""
+        boosted = self._eta_boost.get(k)
+        if boosted is None:
+            return base
+        idx, w = boosted
+        row = base.copy()
+        row[idx] += w
+        return row
+
+    def __getstate__(self):
+        """Pickle WITHOUT the eta boost (ADR 0047's closure clause).
+
+        No executor-side code reads eta (see the micro-design above
+        `_resolve_eta_boost`): update_global and compute_elbo — the only boost
+        consumers — run on the driver's own instance, never on a pickled copy.
+        But the model object rides every task closure (VIRunner's
+        ``_model=model`` default-arg capture), and ADR 0047 forbids
+        array-shaped payloads in task closures: at record scale the boost is
+        hundreds of KB, enough to push the pickled closure over pyspark's
+        silent auto-broadcast threshold, whose driver-side pickle file leaks
+        per job until context shutdown. So every pickled copy of this model —
+        which in this codebase means an executor-bound copy — carries
+        ``_eta_boost=None``. Consequence to respect: a pickle/deepcopy
+        round-trip is NOT boost-preserving by design; the boost lives only on
+        the constructing (driver) instance."""
+        state = dict(self.__dict__)
+        state["_eta_boost"] = None
+        return state
 
     def _resolve_omega(self, omega) -> np.ndarray | None:
         """Validate the per-domain modality weight into a length-n_domains float
@@ -641,11 +869,21 @@ class GatedOnlineLDA(OnlineLDA):
         if self.domains is None:
             expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
             target_lam = eta + expElogbeta * target_stats["lambda_stats"]
+            if self._eta_boost is not None:
+                # Sparse per-topic prior boost on the target's eta intercept
+                # (profile-eta; see _apply_eta_boost for why this is THE
+                # persistent-prior site). None = byte-identical original path.
+                self._apply_eta_boost(target_lam)
             new_lam = (1.0 - learning_rate) * lam + learning_rate * target_lam
         else:
             expElogbeta = self._assemble_expElogbeta(lam)
             eta_vec = self._eta_vocab_vector()          # per-domain eta_m, broadcast per block
             target = eta_vec + expElogbeta * target_stats["lambda_stats"]
+            if self._eta_boost is not None:
+                # Boost applies to the CONCATENATED target before the per-domain
+                # split; indices are condition-domain (domain 0) local, which
+                # equal global ids because domain 0 opens the concatenation.
+                self._apply_eta_boost(target)
             target_dict = self._split_to_domains(target)
             new_lam = {
                 m: (1.0 - learning_rate) * lam[m] + learning_rate * target_dict[m]
@@ -690,7 +928,10 @@ class GatedOnlineLDA(OnlineLDA):
     def compute_elbo(self, global_params, aggregated_stats):
         """ELBO = doc-data-likelihood − doc-level KL − global KL (same accounting
         as OnlineLDA.compute_elbo; see its docstring for the sign convention).
-        domains=None delegates to the inherited single-array global KL, unchanged.
+        domains=None delegates to the inherited single-array global KL, unchanged
+        — unless a sparse per-topic eta boost is set, in which case each boosted
+        topic's KL is scored against its own effective prior eta + boost_k (the
+        prior update_global actually applies), computed inline below.
 
         Multi-domain (MixEHR-style; Li, Nair, Lu et al. 2020, Nat. Commun.): each
         topic's global KL decomposes into a SUM over domains of independent
@@ -720,7 +961,26 @@ class GatedOnlineLDA(OnlineLDA):
         objective.
         """
         if self.domains is None:
-            return super().compute_elbo(global_params, aggregated_stats)
+            if self._eta_boost is None:
+                return super().compute_elbo(global_params, aggregated_stats)
+            # Boosted single-domain global KL: same accounting as
+            # OnlineLDA.compute_elbo, but each BOOSTED topic k is scored
+            # against its own effective prior eta_vec + boost_k (the exact
+            # prior update_global uses, so the bound matches the model being
+            # fit). `_boosted_prior_row` hands non-boosted topics the shared
+            # flat eta_vec unchanged — no dense (K, V) eta is materialized.
+            lam = global_params["lambda"]
+            eta_flat = np.full(self.V, float(global_params["eta"]),
+                               dtype=np.float64)
+            global_kl = 0.0
+            for k in range(self.K):
+                global_kl += _dirichlet_kl(
+                    lam[k], self._boosted_prior_row(k, eta_flat))
+            return float(
+                float(aggregated_stats["doc_loglik_sum"])
+                - float(aggregated_stats["doc_theta_kl_sum"])
+                - global_kl
+            )
         lam = global_params["lambda"]
         eta_vec = self._eta_vocab_vector()
         bounds = self._domain_bounds
@@ -728,8 +988,14 @@ class GatedOnlineLDA(OnlineLDA):
         for m in range(len(self.domains)):
             eta_vec_m = eta_vec[bounds[m]:bounds[m + 1]]
             lam_m = lam[m]
+            # Only domain 0 (the condition domain) can carry a boost; its
+            # local indices equal global ids (the domain opens the
+            # concatenation), so _boosted_prior_row indexes eta_vec_m directly.
+            boosted_domain = m == 0 and self._eta_boost is not None
             for k in range(self.K):
-                global_kl += _dirichlet_kl(lam_m[k], eta_vec_m)
+                prior_k = (self._boosted_prior_row(k, eta_vec_m)
+                           if boosted_domain else eta_vec_m)
+                global_kl += _dirichlet_kl(lam_m[k], prior_k)
         return float(
             float(aggregated_stats["doc_loglik_sum"])
             - float(aggregated_stats["doc_theta_kl_sum"])
@@ -796,7 +1062,7 @@ class GatedOnlineLDA(OnlineLDA):
             aggregated yet.
         """
         if self.domains is None:
-            return super().iteration_summary(global_params)
+            return super().iteration_summary(global_params) + self._eta_boost_summary()
         alpha = np.asarray(global_params["alpha"])
         lam = global_params["lambda"]
         eta_str = ", ".join(f"{e:.4g}" for e in self._eta_domains)
@@ -817,7 +1083,19 @@ class GatedOnlineLDA(OnlineLDA):
                 f", θ_contrib_m=[{', '.join(f'{c:.4g}' for c in contrib)}]"
                 f" frac=[{', '.join(f'{f:.3g}' for f in frac)}]"
             )
-        return out
+        return out + self._eta_boost_summary()
+
+    def _eta_boost_summary(self) -> str:
+        """Compact per-iter trace that the eta boost is DEPLOYED — the cheapest
+        run-log guard against the plan's "wiring bug" failure read (a boost that
+        silently never reached the fit). "" when no boost is set, so un-boosted
+        summaries stay byte-identical to the pre-boost output."""
+        if self._eta_boost is None:
+            return ""
+        nnz = sum(int(v[0].size) for v in self._eta_boost.values())
+        mass = sum(float(v[1].sum()) for v in self._eta_boost.values())
+        return (f", η_boost[topics={len(self._eta_boost)} nnz={nnz} "
+                f"mass={mass:.4g}]")
 
     def get_metadata(self) -> dict[str, Any]:
         """Shape constants plus, in multi-domain mode, the constants needed to
@@ -852,4 +1130,17 @@ class GatedOnlineLDA(OnlineLDA):
             md["eta_m"] = [float(x) for x in self._eta_domains]
             omega = self.omega if self.omega is not None else np.ones(len(self.domains))
             md["omega"] = [float(x) for x in omega]
+        if self._eta_boost is not None:
+            # COMPACT boost provenance (metadata is written verbatim into
+            # manifest.json, so the full index/weight arrays stay out): which
+            # topics were boosted, total nnz, total added pseudo-mass. This is
+            # a run-manifest fingerprint, NOT enough to reconstruct the boost —
+            # deliberate: serving (infer_local) never reads eta, and a
+            # boosted fit is resume/warm-start-incompatible by design (D5), so
+            # nothing downstream legitimately needs the arrays back.
+            md["eta_boost_topics"] = sorted(int(k) for k in self._eta_boost)
+            md["eta_boost_nnz"] = int(
+                sum(v[0].size for v in self._eta_boost.values()))
+            md["eta_boost_mass"] = float(
+                sum(float(v[1].sum()) for v in self._eta_boost.values()))
         return md

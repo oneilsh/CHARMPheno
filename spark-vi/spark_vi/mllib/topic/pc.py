@@ -20,6 +20,7 @@ head trains on it — and ``_transform`` additionally appends a head-derived
 from __future__ import annotations
 
 import json
+import operator
 from pathlib import Path
 from typing import Callable
 
@@ -340,6 +341,19 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         "(topic-side gate vs label-side head — they may use the same or different DAGs).",
         typeConverter=TypeConverters.toString,
     )
+    etaBoost = Param(
+        Params._dummy(), "etaBoost",
+        "JSON-encoded sparse per-topic eta boost {topic_index: [[vocab_idx, ...], "
+        "[weight, ...]]} — the profile-eta word-side prior (requires gateParent): "
+        "each listed topic's Dirichlet prior on beta becomes eta + boost on the "
+        "listed CONDITION-DOMAIN (domain 0) vocab indices, re-entering every "
+        "lambda update (lambda_target = eta_vec + counts), so a zero-count topic "
+        "keeps a tilted E[log beta] on its profile tokens while real counts "
+        "dominate it. Weights are final added pseudo-mass (scale/IDF folded "
+        "upstream). Empty (default) = flat eta, byte-identical to the un-boosted "
+        "fit.",
+        typeConverter=TypeConverters.toString,
+    )
     gateNBg = Param(
         Params._dummy(), "gateNBg",
         "number of shared background topics for the topic-side gate (gateParent); "
@@ -493,6 +507,23 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
     def getClosureParents(self) -> str:
         return str(self.getOrDefault(self.closureParents))
 
+    def setEtaBoost(self, boost) -> "OnlinePCLDAEstimator":
+        """Set the sparse per-topic eta boost from {topic_index: (vocab_idx_seq,
+        weight_seq)} (JSON-encoded into the string Param), or a pre-encoded JSON
+        string. Empty/None restores the flat (un-boosted) eta."""
+        if boost is None or boost == "" or boost == {}:
+            return self._set(etaBoost="")
+        # operator.index (not int()) on the vocab indices: a float index would
+        # otherwise TRUNCATE silently and boost the wrong token.
+        encoded = boost if isinstance(boost, str) else json.dumps(
+            {operator.index(k): [[operator.index(i) for i in pair[0]],
+                                 [float(w) for w in pair[1]]]
+             for k, pair in boost.items()})
+        return self._set(etaBoost=encoded)
+
+    def getEtaBoost(self) -> str:
+        return str(self.getOrDefault(self.etaBoost))
+
     def setGateParent(self, parent) -> "OnlinePCLDAEstimator":
         """Select the GATED topic engine from a DAG parent map {child: parent |
         [parents]} (JSON-encoded into the string Param). Empty/None = ungated."""
@@ -568,6 +599,31 @@ def _build_model_and_config(
     topic_engine = None
     topic_support = None
     gate_raw = str(estimator.getOrDefault("gateParent"))
+    # Sparse per-topic eta boost (profile-eta word-side prior). Decoded here to
+    # plain (indices, weights) pairs; deep validation (ranges, duplicates,
+    # positivity, integer dtype) is GatedOnlineLDA's `_resolve_eta_boost`, so
+    # the estimator and the direct-model path enforce identical contracts.
+    boost_raw = str(estimator.getOrDefault("etaBoost"))
+    eta_boost = None
+    if boost_raw:
+        if not gate_raw:
+            raise ValueError(
+                "etaBoost requires gateParent to be set: the boost is a "
+                "per-NODE-TOPIC prior over the gated layout's blocks; an "
+                "ungated OnlineLDA has no node topics to boost.")
+        try:
+            decoded = json.loads(boost_raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"etaBoost is not valid JSON: {exc}") from exc
+        if not isinstance(decoded, dict):
+            raise ValueError(
+                f"etaBoost must decode to an object {{topic_index: [[idx, ...], "
+                f"[weight, ...]]}}, got {type(decoded).__name__}")
+        try:
+            eta_boost = {int(k): v for k, v in decoded.items()}
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"etaBoost topic keys must be integers: {exc}") from exc
     if gate_raw:
         from spark_vi.models.topic.dag_placement import DagLayout
         from spark_vi.models.topic.gated_lda import GatedOnlineLDA
@@ -599,6 +655,7 @@ def _build_model_and_config(
         topic_engine = GatedOnlineLDA(
             lay, vocab_size, init=str(estimator.getOrDefault("init")),
             alpha=alpha, eta=1.0 / lay.K,
+            eta_boost=eta_boost,                     # None = flat eta, unchanged
             domains=domains,                         # None = single fused vocab
             gamma_shape=estimator.getOrDefault("gammaShape"),
             cavi_max_iter=estimator.getOrDefault("caviMaxIter"),
@@ -674,7 +731,8 @@ _ONLINE_PCLDA_DEFAULTS = dict(
     weightYWarmupIters=0, headOptimizer="sgd", headLr=0.05, headNewtonRidge=0.01,
     headL2=1e-3, headIntercept=False, headStandardize=False,
     closureParents="", warmStartFrom="",
-    gateParent="", gateNBg=2, gateTpn=1, localizeHead=False, headSupport="siblings",
+    gateParent="", etaBoost="", gateNBg=2, gateTpn=1, localizeHead=False,
+    headSupport="siblings",
     frontierCol="frontier",
     init="random", spectralMaxVocab=8000, spectralMethod="auto", spectralD=0,
     spectralMinDocFreq=5, anchorScope="closure", spectralTopoOrder="forward",
@@ -728,6 +786,7 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         headStandardize: bool = False,
         closureParents: str = "",
         gateParent: str = "",
+        etaBoost: str = "",
         gateNBg: int = 2,
         gateTpn: int = 1,
         localizeHead: bool = False,
