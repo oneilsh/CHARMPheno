@@ -139,6 +139,46 @@ def test_lbfgs_without_provider_falls_back_to_sgd_move():
     np.testing.assert_allclose(o_l["w_CK"], o_s["w_CK"])
 
 
+def test_pickle_excludes_head_stats_provider():
+    """ADR 0047 / SPARK-5063: the model rides every E-step task closure (VIRunner's
+    ``_model=model`` capture), so the pickled state must NOT carry the driver-only
+    provider — a real distributed provider closes over the SparkContext and pickling
+    it raises CONTEXT_ONLY_VALID_ON_DRIVER (exp 0120's first crash, ~22s in, before
+    iter 1). The DRIVER instance keeps the provider (update_global consumes it there);
+    every pickled copy drops it. Checked on ``__getstate__`` directly — VIRunner ships
+    via cloudpickle, and the model carries autograd closures stdlib pickle can't touch,
+    so the exclusion (not a full pickle round-trip) is the invariant under test."""
+    docs, V, K, C = _small()
+    m = OnlinePCLDA(K=K, vocab_size=V, C=C, weight_y=5.0, grad_cavi_iters=6,
+                    head_optimizer="lbfgs", random_seed=0)
+    m.set_head_stats_provider(lambda gp: (_ for _ in ()).throw(
+        AssertionError("provider must never be called on an executor")))
+
+    assert m._head_stats_provider is not None          # driver instance keeps it
+    state = m.__getstate__()
+    assert state["_head_stats_provider"] is None        # pickled-for-executor copy drops it
+    assert m._head_stats_provider is not None           # __getstate__ did not mutate self
+
+    # A copy rebuilt from that state (an executor-bound model) has no provider, and its
+    # E-step never touches one — local_update reads only lambda/alpha, never eta/head.
+    clone = OnlinePCLDA.__new__(OnlinePCLDA)
+    clone.__dict__.update(state)
+    assert clone._head_stats_provider is None
+    clone.local_update(docs, clone.initialize_global(None))   # must not raise
+    # sgd/newton never set a provider, so their state is byte-identical either way.
+    m_s = OnlinePCLDA(K=K, vocab_size=V, C=C, weight_y=5.0, head_optimizer="sgd")
+    assert m_s.__getstate__()["_head_stats_provider"] is None
+
+    # End-to-end via the PRODUCTION serializer: cloudpickle (what VIRunner ships the
+    # model with) must round-trip the provider-bearing model — the exact mechanism
+    # that crashed exp 0120 (a stdlib-unpicklable provider closure would still fail
+    # here without __getstate__; the SparkContext capture is what did on-cluster).
+    cloudpickle = pytest.importorskip("pyspark.cloudpickle")
+    cp_clone = cloudpickle.loads(cloudpickle.dumps(m))
+    assert cp_clone._head_stats_provider is None
+    assert m._head_stats_provider is not None           # driver instance untouched
+
+
 # --------------------------------------------------------------------------- #
 # 5. solve_batched_lr `state` carry: byte-identical unused, carries when used   #
 # --------------------------------------------------------------------------- #

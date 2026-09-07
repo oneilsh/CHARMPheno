@@ -181,7 +181,21 @@ make -C analysis/cloud inspect-topics ID=120 CREDITED=1 RESOLVE_NAMES=1 INSPECT_
 
 ## Run log
 
-(pending)
+**2026-09-07 — first attempt CRASHED at ~22s (ADR-0047 closure violation), fixed.**
+The fit died before iter 1 with `[CONTEXT_ONLY_VALID_ON_DRIVER]` (SPARK-5063):
+VIRunner ships the model into every E-step task closure (`_model=model`), and the
+injected distributed lbfgs provider closes over the SparkContext, so cloudpickling
+the model with it attached raised. `OnlinePCLDA.set_head_stats_provider`'s docstring
+already CLAIMED the provider "stays off the closure per ADR 0047" — but the
+`__getstate__` that enforces it was never added (the invariant was documented, not
+implemented). Fixed by adding `OnlinePCLDA.__getstate__` stripping
+`_head_stats_provider` from pickled copies (mirrors `GatedOnlineLDA.__getstate__`'s
+eta-boost exclusion): the driver instance keeps the provider — update_global consumes
+it there — every executor-bound copy carries None. The local coupling test used the
+IN-MEMORY provider (captures a picklable `rows` list, not a SparkContext), so nothing
+had pickled the model with a Spark-capturing provider — the gap. Added a regression
+test that cloudpickle (the production serializer) round-trips the provider-bearing
+model dropping the provider. Re-run below.
 
 ## Results
 
