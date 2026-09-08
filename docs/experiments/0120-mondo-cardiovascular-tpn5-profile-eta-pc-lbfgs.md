@@ -104,6 +104,10 @@ baseline_max_iter: 100
 min_label_count: 20
 eval_every: 0
 num_partitions: 96
+fit_save_interval: 5         # crash insurance (2026-09-08): dump fit-only lambda
+                             # every 5 iters, atomic, re-scoreable with
+                             # gated-pc-readout. profile-eta can't resume (D5), so a
+                             # death mid-run is salvaged by reading the last dump.
 seed: 42
 cache_uri: hdfs:///user/dataproc/charm/case_finding_cache
 # The 0085 operating point (strength 1.0), unchanged from 0116/0118 — the aligned
@@ -235,7 +239,12 @@ Not a code leak in the head — the scored-df persist/unpersist lifecycle is bou
 `head_inner_iters 3→1` (0086: non-discriminative under the cap; ~3x fewer stages),
 `spark.ui.enabled=false` (drops the largest driver-heap sink; diagnostics live in
 driver_log), `CHARM_DRIVER_MEMORY=16g`, `memoryOverhead 3g→4g` (the executor-side
-Python-UDF pressure behind the first 143s). Re-run per the command above.
+Python-UDF pressure behind the first 143s). Also added `fit_save_interval: 5` —
+the fit now atomically dumps the fit-only λ every 5 iters (new `--fit-save-interval`
+on the `on_iteration` seam), so any future death mid-run leaves a readout-able
+checkpoint (`gated-pc-readout ID=120` scores the last dump). profile-eta fits
+can't resume (D5), so a periodic dump is the right insurance, not a resume.
+Re-run per the command above.
 
 ## Results
 

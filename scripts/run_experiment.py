@@ -842,6 +842,7 @@ def build_gated_pc_args(
         "--min-label-count", str(effective.get("min_label_count", 20)),
         "--num-partitions", str(effective.get("num_partitions", 0)),
         "--eval-every", str(effective.get("eval_every", 0)),
+        "--fit-save-interval", str(effective.get("fit_save_interval", 0)),
         "--out-dir", str(out_dir),
     ]
     if effective.get("seed") is not None:
