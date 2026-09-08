@@ -2030,3 +2030,45 @@ class TestPrintSparkConfMode:
         rc = rx.main(["--print-spark-conf", "--experiments-dir", str(tmp_path)])
         assert rc == 2
         assert capsys.readouterr().out == ""
+
+
+class TestMaxIterOverride:
+    """`--max-iter N` forces max_iter to N and touches nothing else — the bootstrap
+    escape hatch (warm a cache-HIT bundle + manifest for the --emit-eta probe
+    without a full fit). Distinct from CHARM_DEV, which shrinks a whole bundle of
+    knobs to a ranking loop."""
+
+    def test_none_passes_through_unchanged(self):
+        eff = {"max_iter": 50, "weight_y_warmup_iters": 10, "seed": 42}
+        out = rx._apply_max_iter_override(eff, None)
+        assert out == eff
+
+    def test_sets_max_iter_exactly(self):
+        out = rx._apply_max_iter_override(
+            {"max_iter": 50, "weight_y_warmup_iters": 10}, 2)
+        assert out["max_iter"] == 2
+
+    def test_clamps_warmup_that_would_outlast_the_fit(self):
+        out = rx._apply_max_iter_override(
+            {"max_iter": 50, "weight_y_warmup_iters": 10}, 2)
+        assert out["weight_y_warmup_iters"] == 2
+
+    def test_leaves_warmup_below_n_untouched(self):
+        out = rx._apply_max_iter_override(
+            {"max_iter": 50, "weight_y_warmup_iters": 1}, 5)
+        assert out["weight_y_warmup_iters"] == 1
+
+    def test_touches_nothing_but_iter_knobs(self):
+        eff = {"max_iter": 50, "weight_y_warmup_iters": 1, "seed": 42,
+               "vocab_size": 5000, "cache_uri": "hdfs:///x"}
+        out = rx._apply_max_iter_override(eff, 3)
+        assert out["max_iter"] == 3
+        for k in ("seed", "vocab_size", "cache_uri", "weight_y_warmup_iters"):
+            assert out[k] == eff[k]
+        # original dict not mutated
+        assert eff["max_iter"] == 50
+
+    def test_non_positive_is_rejected(self):
+        for bad in (0, -1):
+            with pytest.raises(SystemExit):
+                rx._apply_max_iter_override({"max_iter": 50}, bad)
