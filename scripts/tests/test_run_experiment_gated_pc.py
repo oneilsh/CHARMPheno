@@ -48,6 +48,18 @@ def test_build_gated_pc_args_shape(monkeypatch):
     assert "--resume-from" not in args             # resume unsupported
 
 
+def test_build_gated_pc_args_fit_save_interval_default_off(monkeypatch):
+    mod = _run_exp(monkeypatch)
+    args = mod.build_gated_pc_args(_base_eff(), "/out")
+    assert args[args.index("--fit-save-interval") + 1] == "0"
+
+
+def test_build_gated_pc_args_fit_save_interval_from_config(monkeypatch):
+    mod = _run_exp(monkeypatch)
+    args = mod.build_gated_pc_args({**_base_eff(), "fit_save_interval": 5}, "/out")
+    assert args[args.index("--fit-save-interval") + 1] == "5"
+
+
 def test_build_fit_args_routes_gated_pc(monkeypatch):
     mod = _run_exp(monkeypatch)
     args = mod.build_fit_args(_base_eff(), "/out")

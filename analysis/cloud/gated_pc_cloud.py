@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import time
 from pathlib import Path
 
@@ -1167,15 +1168,27 @@ def _save_fit(out, gp, C, manifest_fields, *, results=None, domain_mass=None,
         lam_arrays = {f"lambda_{m}": lam[m] for m in sorted(lam)}
     else:
         lam_arrays = {"lambda": lam}
-    np.savez(out / "gated_pc_result.npz",
-             **lam_arrays, alpha=gp["alpha"], w_CK=gp["w_CK"],
-             b_CK=np.asarray(gp.get("b_CK", np.zeros(C)), dtype=np.float64))
+    # Atomic writes (tmp + os.replace). _save_fit is called mid-fit as a periodic
+    # checkpoint (--fit-save-interval) with the fit still running, so a crash DURING
+    # a write must not tear the npz/manifest that is the crash insurance itself —
+    # the same rule the readout checkpoint (_write_readout_checkpoint) follows.
+    # os.replace is atomic within a filesystem; the run dir is the driver's local
+    # workspace mount. np.savez gets a FILE OBJECT so it does not append '.npz' to
+    # the tmp name (the same gotcha noted at the readout-checkpoint site).
+    npz_path = out / "gated_pc_result.npz"
+    npz_tmp = out / "gated_pc_result.npz.tmp"
+    with open(npz_tmp, "wb") as _f:
+        np.savez(_f, **lam_arrays, alpha=gp["alpha"], w_CK=gp["w_CK"],
+                 b_CK=np.asarray(gp.get("b_CK", np.zeros(C)), dtype=np.float64))
+    os.replace(npz_tmp, npz_path)
     manifest = dict(manifest_fields)
     manifest["per_node_domain_mass"] = (
         {str(k): v for k, v in domain_mass.items()} if domain_mass else None)
     manifest["results"] = results
     manifest["partial"] = partial
-    (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    man_tmp = out / "manifest.json.tmp"
+    man_tmp.write_text(json.dumps(manifest, indent=2))
+    os.replace(man_tmp, out / "manifest.json")
     return manifest
 
 
@@ -4002,6 +4015,15 @@ def parse_args(argv=None):
                         "gated_pc fit (0 = off, only the final eval). Each eval is 2 "
                         "full CAVI transforms + an LR fit on the driver, so keep it "
                         "modest (e.g. 20–25). Lets you watch the shaping converge.")
+    p.add_argument("--fit-save-interval", type=int, default=0,
+                   help="checkpoint the fit-only result (gated_pc_result.npz + "
+                        "manifest.json, partial='fit-only') every N SVI iters (0 = "
+                        "off, only the end-of-fit save). Crash insurance for long "
+                        "co-fit runs: a death at iter M leaves iter-M lambda on disk, "
+                        "re-scoreable with gated_pc_readout — no resume needed (and "
+                        "profile-eta fits cannot resume anyway, D5). Writes are "
+                        "atomic; the cost is one npz+manifest dump per interval, so "
+                        "keep it modest (e.g. 5).")
     p.add_argument("--recall-targets", default="0.5,0.8,0.9",
                    help="comma-separated recall levels for precision@recall "
                         "(the case-finding operating points).")
@@ -4495,8 +4517,28 @@ def main() -> int:
 
         with _phase(f"gated_pc fit (weightY={args.weight_y}, K={lay.K})"):
             pc_est = _build_pc_estimator(args, weight_y=args.weight_y, gated=True)
+            # Per-iteration hooks, composed: the optional eval logger (eval_every)
+            # and the optional fit checkpoint (fit_save_interval). Both share the
+            # estimator's single on_iteration seam, so build a list and fan out.
+            _on_iters = []
             if args.eval_every > 0:
-                pc_est.setOnIteration(_make_eval_logger(bundle, C, args))
+                _on_iters.append(_make_eval_logger(bundle, C, args))
+            if args.fit_save_interval > 0 and out is not None:
+                def _fit_ckpt(it, gp, _elbo, _out=out, _C=C, _mf=manifest_fields,
+                              _every=int(args.fit_save_interval)):
+                    # VIRunner calls this after each iter with that iter's params;
+                    # dump the fit-only result every _every iters so a crash leaves
+                    # a readout-able lambda. Atomic (see _save_fit). Never mutates gp.
+                    if it % _every == 0:
+                        _save_fit(_out, gp, _C, _mf, partial="fit-only")
+                        _cprint(f"[driver]   fit checkpoint @ iter {it} "
+                              "(re-scoreable with gated_pc_readout)", flush=True)
+                _on_iters.append(_fit_ckpt)
+            if _on_iters:
+                def _on_iter_fanout(it, gp, elbo, _cbs=tuple(_on_iters)):
+                    for _cb in _cbs:
+                        _cb(it, gp, elbo)
+                pc_est.setOnIteration(_on_iter_fanout)
             # lbfgs co-fit head: the engine's M-step re-scores the CURRENT θ each
             # outer iter through a DISTRIBUTED provider (the same treeAggregate seam
             # the frozen-θ readout uses, re-derived per iter because θ moves). We
