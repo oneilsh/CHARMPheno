@@ -373,11 +373,15 @@ next-exp: zip cluster-overlay $(WORKSPACE_ENV)
 	. ./$(WORKSPACE_ENV) && \
 	python $(REPO_ROOT)/scripts/run_experiment.py --next --runs-dir $(RUNS_DIR) $(if $(NO_EVAL),--no-eval)
 
-# Same pipeline pinned to specific id (auto-resumes if RUN_ID dir exists)
+# Same pipeline pinned to specific id (auto-resumes if RUN_ID dir exists).
+# MAX_ITER=N overrides the doc's max_iter (only max_iter — see run_experiment.py's
+# --max-iter): for a run whose NUMBERS DON'T MATTER and you just need it to COMPLETE,
+# e.g. bootstrapping a cache-HIT bundle + manifest.json for the --emit-eta probe on a
+# fresh cluster without paying a full fit. NEVER for a run of record.
 exp: zip cluster-overlay $(WORKSPACE_ENV)
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	. ./$(WORKSPACE_ENV) && \
-	python $(REPO_ROOT)/scripts/run_experiment.py --id $(ID) --runs-dir $(RUNS_DIR) $(if $(NO_EVAL),--no-eval)
+	python $(REPO_ROOT)/scripts/run_experiment.py --id $(ID) --runs-dir $(RUNS_DIR) $(if $(NO_EVAL),--no-eval) $(if $(MAX_ITER),--max-iter $(MAX_ITER))
 
 # Post-hoc likelihood-ratio readout on an EXISTING run (no re-fit). Reads the
 # run's saved lambda + cached bundle; prints LR-AUC(alpha) vs theta-mass AUC.

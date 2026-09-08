@@ -1216,6 +1216,37 @@ def _apply_dev_profile(effective: dict) -> dict:
     return dev
 
 
+def _apply_max_iter_override(effective: dict, max_iter: int | None) -> dict:
+    """`--max-iter N`: force max_iter to N (a positive int), else pass through.
+
+    Surgical counterpart to ``_apply_dev_profile``: that one shrinks a whole bundle
+    of iteration knobs to a fast *ranking* loop and only ever SHRINKS them (min());
+    this one sets max_iter to EXACTLY N and touches nothing else — the case where a
+    run's numbers are irrelevant and all that is wanted is for it to COMPLETE and
+    write ``manifest.json`` (e.g. warming a cache-HIT bundle + manifest so the
+    ``--emit-eta`` probe has a key to recompute, without paying a full fit). Applied
+    AFTER the dev profile so an explicit N wins over it. weight_y_warmup_iters is
+    clamped to N so the supervision warmup never outlasts the (now shorter) fit;
+    everything else — data, DAG, vocab, spark_conf — is untouched, so the bundle
+    cache key is byte-identical (max_iter is not a bundle-key input). NEVER for a
+    run of record.
+    """
+    if max_iter is None:
+        return effective
+    if max_iter <= 0:
+        raise SystemExit(f"[run-exp] ERROR: --max-iter must be a positive int, "
+                         f"got {max_iter}")
+    out = dict(effective)
+    out["max_iter"] = int(max_iter)
+    warm = int(effective.get("weight_y_warmup_iters", 0) or 0)
+    if warm > max_iter:
+        out["weight_y_warmup_iters"] = int(max_iter)
+    print(f"[run-exp] --max-iter override: max_iter={out['max_iter']} "
+          f"(warmup clamped to {out.get('weight_y_warmup_iters', warm)}); "
+          f"NOT a run of record", flush=True)
+    return out
+
+
 def _driver_memory_for(model_class: str) -> str:
     """Driver memory for the fit spark-submit, overridable via CHARM_DRIVER_MEMORY.
 
@@ -1593,6 +1624,17 @@ def main(argv: list[str] | None = None) -> int:
                              "nothing: it exists so other launchers (the Makefile's "
                              "gated-pc-readout target) can reuse the doc's recorded "
                              "Spark tuning instead of duplicating it.")
+    parser.add_argument("--max-iter", type=int, default=None, metavar="N",
+                        help="Override the doc's max_iter with N (a positive int). "
+                             "Unlike CHARM_DEV (which shrinks a whole bundle of "
+                             "iteration knobs to a ~3-4x dev ranking loop), this "
+                             "changes ONLY max_iter — for the case where a run's "
+                             "final numbers do not matter and you just need it to "
+                             "COMPLETE: e.g. bootstrapping a cache-HIT bundle + "
+                             "manifest.json for the --emit-eta probe without paying "
+                             "a full 50-iter fit. weight_y_warmup_iters is clamped "
+                             "to N so warmup never outlasts the fit. NEVER use for a "
+                             "run of record.")
     parser.add_argument("--runs-dir", default=DEFAULT_RUNS_DIR,
                         help="Base directory for run output. Default: %(default)s")
     parser.add_argument("--experiments-dir", type=Path, default=EXPERIMENTS_DIR,
@@ -1712,6 +1754,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     effective = merge_config(defaults, fm)
     effective = _apply_dev_profile(effective)
+    effective = _apply_max_iter_override(effective, args.max_iter)
 
     # 2b. --build-covariates-only: dispatch to standalone script and return.
     if args.build_covariates_only:
