@@ -115,7 +115,7 @@ def compare_per_node(driver_pn, dist_pn):
     """Max |ΔAUC|, |ΔAP| and any skipped/count disagreement between two per_node
     (``_bundle_masked['per_label']``-shaped) tables — reusable by the orchestrator
     on two real `results_readout.json` per_node dicts (driver vs distributed)."""
-    dauc = dap = 0.0
+    dauc = dap = dlift = 0.0
     mism = []
     for c in set(driver_pn) | set(dist_pn):
         a, b = driver_pn.get(c, {}), dist_pn.get(c, {})
@@ -130,7 +130,11 @@ def compare_per_node(driver_pn, dist_pn):
             dauc = max(dauc, abs(a["auc"] - b["auc"]))
         if a.get("ap") is not None and b.get("ap") is not None:
             dap = max(dap, abs(a["ap"] - b["ap"]))
-    return {"max_dauc": dauc, "max_dap": dap, "mismatches": mism}
+        # top-k screening metrics: same scorer both sides, so they must match too.
+        if a.get("lift_at_k") is not None and b.get("lift_at_k") is not None:
+            dlift = max(dlift, abs(a["lift_at_k"] - b["lift_at_k"]))
+    return {"max_dauc": dauc, "max_dap": dap, "max_dlift": dlift,
+            "mismatches": mism}
 
 
 # --------------------------------------------------------------------------- #

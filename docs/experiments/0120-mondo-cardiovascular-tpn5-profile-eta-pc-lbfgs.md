@@ -246,6 +246,32 @@ checkpoint (`gated-pc-readout ID=120` scores the last dump). profile-eta fits
 can't resume (D5), so a periodic dump is the right insurance, not a resume.
 Re-run per the command above.
 
+**2026-09-09 — fit is DONE (50/50, saved); readout INTERRUPTED, must re-run.**
+The fit completed and saved (per-iter ~135s after the `head_inner_iters:1`
+hardening; head trained: 259/299 nodes, median |w_c| 560). Interpretability is a
+clear pass — `profile_align.md`: credited top-15 overlap median 1.00 for both
+starved (mass 0.128) and fed (mass 0.855), i.e. data drives the fed nodes and the
+prior only fills the starved tail (insight-worthy: the co-fit head *reinforced*
+alignment vs profile-eta-alone). BUT the digest's per-node decoder shows `self-w
+≈ 0` with the discriminative weight on ancestor/shared topics — legibility and
+decode-discriminability are decoupled (the mechanical form of 0084/0085).
+
+The `gated-pc-readout` did NOT finish: `results_readout.json` is empty
+(`gated_pc: {}`, `partial: fit-only`, `results: None`) — the idle-kill hit during
+the 200-iter batched-L-BFGS solve (`readout_ckpt_gated_pc.npz` at iter ~70–90).
+So there are **no AUCs yet**; re-run resumes the solve from the checkpoint (needs
+a bundle rebuild on a fresh cluster, accepted as a daily cost).
+
+Added a **top-1% screening metric** to the readout before the re-run (one
+expensive pass yields both): `evaluate._score_label`/`_macro` now emit
+`prec_at_k` / `recall_at_k` / `lift_at_k` at `topk_frac=0.01` (lift = precision in
+the top 1% by score ÷ prevalence = "× better than predicting the majority"), per
+node and macro, on both the driver (`readout_from_proba`) and distributed
+(`per_node_metric_rows`) paths. This is the rare-disease-honest complement to the
+macro AUC and the VOI-relevant operating point — AUC can look fine while top-1%
+lift sits near 1.
+
 ## Results
 
-(pending)
+(pending readout re-run — will carry macro AUC + credited dAUC vs 0113/0116 AND
+top-1% lift)

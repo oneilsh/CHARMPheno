@@ -271,7 +271,13 @@ def readout_from_proba(proba, y_te, m_te, C, *, recall_targets, fdr_targets,
         if rl.get("skipped") is None and rl.get("auc") is not None:
             per_node[c] = {"auc": float(rl["auc"]),
                            "ap": (None if rl.get("ap") is None else float(rl["ap"])),
-                           "n_pos": int(pr["per_node"].get(c, {}).get("n_pos", 0))}
+                           "n_pos": int(pr["per_node"].get(c, {}).get("n_pos", 0)),
+                           # top-fraction screening metrics (evaluate._score_label),
+                           # so the headline can rank nodes by lift, not just AUC.
+                           "prec_at_k": rl.get("prec_at_k"),
+                           "recall_at_k": rl.get("recall_at_k"),
+                           "lift_at_k": rl.get("lift_at_k"),
+                           "topk_frac": rl.get("topk_frac")}
     return {"ranking": ranking["macro"], "pr": pr["macro"], "detection": det,
             "per_node": per_node}
 
@@ -2251,7 +2257,13 @@ def _readout_from_per_node(per_node_metrics, C, *, recall_targets, fdr_targets):
             per_node[c] = {"auc": float(rl["auc"]),
                            "ap": (None if rl.get("ap") is None
                                   else float(rl["ap"])),
-                           "n_pos": int(rl.get("n_pos", 0))}
+                           "n_pos": int(rl.get("n_pos", 0)),
+                           # top-fraction screening metrics (evaluate._score_label);
+                           # carried per-node so a consumer can rank nodes by lift.
+                           "prec_at_k": rl.get("prec_at_k"),
+                           "recall_at_k": rl.get("recall_at_k"),
+                           "lift_at_k": rl.get("lift_at_k"),
+                           "topk_frac": rl.get("topk_frac")}
     return {"ranking": ranking_macro, "pr": dict(_EVAL_DIST_PR_SKIP),
             "detection": dict(_EVAL_DIST_DET_SKIP), "per_node": per_node}
 
@@ -2259,7 +2271,8 @@ def _readout_from_per_node(per_node_metrics, C, *, recall_targets, fdr_targets):
 def distributed_ranking_readout(test_scored, C, V, b_raw, *, recall_targets,
                                 fdr_targets, min_count=0, id_col="person_id",
                                 elig_col=None, theta_topm=0,
-                                arm_label="gated_pc (pc_topics_lr)"):
+                                arm_label="gated_pc (pc_topics_lr)",
+                                topk_frac=0.01):
     """Collect-free PREVALENT (+ INCIDENT) ranking readout — eval_path=distributed (WP-B).
 
     The eval_path=distributed replacement for `_collect_lean_proba` +
@@ -2296,7 +2309,8 @@ def distributed_ranking_readout(test_scored, C, V, b_raw, *, recall_targets,
         prev_pn, inc_pn = _dr.per_node_metric_arms_rows(cells, C, min_count=min_count)
     else:
         cells = _dr.score_cells_df(scored, V, b_raw, C)
-        prev_pn = _dr.per_node_metric_rows(cells, C, min_count=min_count)
+        prev_pn = _dr.per_node_metric_rows(cells, C, min_count=min_count,
+                                           topk_frac=topk_frac)
         inc_pn = None
     prevalent = _readout_from_per_node(prev_pn, C, recall_targets=recall_targets,
                                        fdr_targets=fdr_targets)
