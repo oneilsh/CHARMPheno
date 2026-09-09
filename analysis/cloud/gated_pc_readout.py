@@ -697,12 +697,12 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
                   "collect); conditional/detection/PR axes need the collect and are "
                   "skipped — run --eval-path driver for them.", flush=True)
             _ck = Path(out_dir) / "readout_ckpt_gated_pc.npz" if out_dir else None
-            _V, _b, _const, _deg, _ = _fit_readout_heads(
+            _V, _b, _const, _deg, _info = _fit_readout_heads(
                 train_scored, C, K, label="gated_pc", max_iter=readout_max_iter,
                 theta_topm=theta_topm, checkpoint_path=_ck, checkpoint_every=10)
             if out_dir:
                 _write_readout_heads(out_dir, "gated_pc", _V, _b, _const, _deg,
-                                     C, K, theta_topm)
+                                     C, K, theta_topm, W_std=_info.get("W_std"))
             results["gated_pc"], _inc_block = distributed_ranking_readout(
                 test_scored, C, _V, _b,
                 recall_targets=recall_targets, fdr_targets=fdr_targets,

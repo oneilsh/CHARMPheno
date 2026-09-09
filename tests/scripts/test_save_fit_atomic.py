@@ -70,3 +70,23 @@ def test_save_fit_overwrites_in_place_atomically(tmp_path):
     assert not any(n.endswith(".tmp") for n in names), names
     import json
     assert json.loads((tmp_path / "manifest.json").read_text())["partial"] is None
+
+
+def test_readout_heads_sidecar_carries_w_std_when_given(tmp_path):
+    """The heads sidecar stores the solve's STANDARDIZED weights beside V when
+    the caller passes them (inspect_topics reads them as the honest loadings
+    scale once the solver checkpoint is gone), and stays readable without."""
+    C, K = 3, 5
+    V = np.arange(C * K, dtype=float).reshape(C, K)
+    W = V / 7.0
+    ok = gpc._write_readout_heads(tmp_path, "gated_pc", V, np.zeros(C),
+                                  np.zeros((C, K), dtype=bool),
+                                  np.zeros(C, dtype=bool), C, K, 0, W_std=W)
+    assert ok
+    z = np.load(tmp_path / "readout_heads_gated_pc.npz")
+    assert "W_std" in z.files and np.array_equal(z["W_std"], W)
+    assert np.array_equal(z["V"], V)
+    ok = gpc._write_readout_heads(tmp_path, "other", V, np.zeros(C),
+                                  np.zeros((C, K), dtype=bool),
+                                  np.zeros(C, dtype=bool), C, K, 0)
+    assert ok and "W_std" not in np.load(tmp_path / "readout_heads_other.npz").files
