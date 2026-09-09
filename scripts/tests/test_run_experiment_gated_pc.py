@@ -462,3 +462,11 @@ def test_the_0110_front_matter_asks_for_the_preindex_column():
            / "0110-native-mondo-label-space.md").read_text()
     front = doc.split("---")[1]
     assert re.search(r"^preindex_closure:\s*true\s*$", front, re.M)
+
+
+def test_build_gated_pc_args_readout_l2_forwarded_only_when_set(monkeypatch):
+    mod = _run_exp(monkeypatch)
+    args = mod.build_gated_pc_args(_base_eff(), "/out")
+    assert "--readout-l2" not in args
+    args = mod.build_gated_pc_args({**_base_eff(), "readout_l2": 100}, "/out")
+    assert args[args.index("--readout-l2") + 1] == "100"

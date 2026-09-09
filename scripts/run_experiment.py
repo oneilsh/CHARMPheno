@@ -954,6 +954,8 @@ def build_gated_pc_args(
         args.extend(["--readout-max-iter", str(effective["readout_max_iter"])])
     if effective.get("readout_theta_topm") is not None:
         args.extend(["--readout-theta-topm", str(effective["readout_theta_topm"])])
+    if effective.get("readout_l2") is not None:
+        args.extend(["--readout-l2", str(effective["readout_l2"])])
     if effective.get("readout_calibration"):
         args.extend(["--readout-calibration", str(effective["readout_calibration"])])
     if effective.get("head_converge_iters") is not None:

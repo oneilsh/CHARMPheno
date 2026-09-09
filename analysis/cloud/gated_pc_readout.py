@@ -116,6 +116,18 @@ def resolve_readout_max_iter(cli_value, manifest):
     return _LEGACY_READOUT_MAX_ITER, "legacy default"
 
 
+def resolve_readout_l2(cli_value, manifest):
+    """Ridge strength for a re-readout: explicit CLI > the fit's recorded
+    ``readout_l2`` > the legacy 1.0. Same reproduce-the-run doctrine as
+    `resolve_readout_max_iter`. Returns ``(l2, source)``."""
+    if cli_value is not None:
+        return float(cli_value), "CLI"
+    recorded = manifest.get("readout_l2")
+    if recorded is not None:
+        return float(recorded), "manifest"
+    return 1.0, "legacy default"
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Post-hoc case-finding readout on a finished gated_pc run "
@@ -235,16 +247,14 @@ def build_parser() -> argparse.ArgumentParser:
                         f"field fall back to {_LEGACY_READOUT_MAX_ITER} (the "
                         "record-run budget); recovering a DEV smoke from one of "
                         "those still needs an explicit 60.")
-    p.add_argument("--readout-l2", type=float, default=1.0,
-                   help="Ridge strength of the per-node readout heads, on the "
-                        "SUMMED log-loss (sklearn's C=1.0 <=> 1.0, the record "
-                        "default). At hundreds of thousands of training cells "
-                        "1.0 is near-unregularized over K standardized features; "
-                        "raise it (1e2, 1e4) to test whether the diffuse heads "
-                        "(inspect_topics --collinearity: |w| smeared over ~K "
-                        "topics) are an overfit the test AUC pays for. The "
-                        "record number is the default; a sweep is a named "
-                        "re-readout, not the record.")
+    p.add_argument("--readout-l2", type=float, default=None,
+                   help="OVERRIDE the ridge strength of the per-node readout "
+                        "heads (SUMMED log-loss; 1.0 == sklearn C=1.0). Default: "
+                        "the manifest's recorded readout_l2, else 1.0 — so a "
+                        "recovery reproduces the fit's own readout. At record "
+                        "cell counts 1.0 is near-unregularized over K "
+                        "standardized features: 0120 went 0.7555 -> 0.7927 at "
+                        "100 (insight 0089). A sweep is a named re-readout.")
     return p
 
 
@@ -595,7 +605,7 @@ def reconstruct_model(run_dir: Path, manifest: dict):
 def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targets,
                 min_count, readout_mode="auto", ab_check=False, out_dir=None,
                 theta_topm=None, readout_max_iter=None, elig_col=None,
-                eval_path="driver", readout_l2=1.0):
+                eval_path="driver", readout_l2=None):
     """Score both gated_pc arms off two already-TRANSFORMED splits. No argparse.
 
     The whole body of this tool that is worth testing: given the frames a finished
@@ -690,6 +700,8 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
         # the resolution matters — and the log line lands right where the number is
         # about to be spent, next to top-m's.
         readout_max_iter, _mi_src = resolve_readout_max_iter(readout_max_iter, manifest)
+        readout_l2, _l2_src = resolve_readout_l2(readout_l2, manifest)
+        _cprint(f"[readout]   readout l2={readout_l2:g} (from {_l2_src})", flush=True)
         _cprint(f"[readout]   readout max_iter={readout_max_iter} (from {_mi_src})",
               flush=True)
         _epath = resolve_eval_path(eval_path, mode)

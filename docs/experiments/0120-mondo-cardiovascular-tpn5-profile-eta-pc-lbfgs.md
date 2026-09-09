@@ -1,7 +1,7 @@
 ---
 id: 120
 slug: mondo-cardiovascular-tpn5-profile-eta-pc-lbfgs
-status: done
+status: done  # readout verdict withdrawn 2026-09-09, see 'Readout re-analysis'
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -333,3 +333,25 @@ could have converted alignment into discriminability — does not. The frontier
 moves off word-side priors and static-θ shaping to representation: the
 episode/temporal index (spec `2026-09-01-incident-episode-eval-program.md`).
 Closing insight: [0087](../insights/0087-the-scalable-cofit-head-shapes-topics-but-does-not-discriminate-profile-eta-closes-on-case-finding.md).
+
+## Readout re-analysis (2026-09-09, off the saved fit; insights 0088 / 0089)
+
+Three findings that change how the Results above read, none of which touch the fit:
+
+1. **The leakage strip was a no-op** (`--strip-audit`: 0/5000, 0/5000, 0/1601 dims; node ids
+   are Mondo numerics, vocab keys are OMOP ids — insight 0088). The macros above are
+   prevalent numbers with own pre-index codes in the features; the incident arm was off.
+2. **The readout ridge is worth more than the verdict.** Same θ, `--readout-l2` 1 → 100 →
+   1e4: macro AUC **0.7555 → 0.7927 → 0.7909** (AP 0.4919 / 0.5242 / 0.5044); at l2=1 only
+   68/259 heads converged. The pre-registered "readout down vs 0116" comparison is therefore
+   not established — 0116 has not been re-read at a converged head (insight 0089).
+3. **Own topics are not what the heads read.** Standardized W_std: own-block share 0.00–0.01
+   for credited, fed and starved alike (also among fed topics only), 95% on unrelated nodes'
+   blocks. Credited boosted topics are distinct (cos 0.09) but prior-shaped: λ mass 65 vs
+   floor 61 vs fed 1319 (0087 refinement).
+
+Verdict status: **"PC closes on the merits" is withdrawn as unproven.** What stands is
+engineering (the head scales) and the mechanism (profile-eta builds data-empty topics).
+The discriminability question is re-opened on two corrected axes — a regularized head and
+the incident cohort — plus the own-block ablation.
+
