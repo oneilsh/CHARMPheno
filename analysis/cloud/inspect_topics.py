@@ -1501,6 +1501,23 @@ def _ancestors(parent_int, e):
     return out
 
 
+def _descendants(parent_int, e):
+    """All proper descendants of engine node `e` under the meta's
+    `{child: [parents]}` map. Empty when the map is absent."""
+    children = {}
+    for c, ps in (parent_int or {}).items():
+        for p in ps:
+            children.setdefault(int(p), []).append(int(c))
+    out, stack = set(), [e]
+    while stack:
+        c = stack.pop()
+        for k in children.get(int(c), []):
+            if k not in out:
+                out.add(k)
+                stack.append(k)
+    return out
+
+
 def _uniform_unit_vec(lams):
     """The `_topic_unit_vec` of a perfectly FLAT topic: each domain's row is
     uniform (1/V_m), concatenated and L2-normalized. Cosine against it is the
@@ -1598,7 +1615,9 @@ def build_collinearity(run_dir, profile_file, *, bundle_meta_path,
     def group_stats(members):
         peers_pool = list(members)
         s = {"cos_peer": [], "cos_bg": [], "cos_anc": [], "cos_flat": [],
-             "own": [], "bg": [], "anc": [], "ev": [], "n_anc": 0, "n_dec": 0}
+             "own": [], "bg": [], "anc": [], "desc": [], "other": [], "top10": [],
+             "top5_rel": {"own": 0, "anc": 0, "desc": 0, "bg": 0, "other": 0},
+             "ev": [], "n_anc": 0, "n_dec": 0}
         for e in members:
             t = block[e][0]
             v = vec(t)
@@ -1623,10 +1642,28 @@ def build_collinearity(run_dir, profile_file, *, bundle_meta_path,
                 tot = float(row.sum())
                 if tot > 0:
                     s["n_dec"] += 1
-                    s["own"].append(float(row[block[e]].sum()) / tot)
-                    s["bg"].append(float(row[:n_bg].sum()) / tot)
-                    s["anc"].append(float(row[anc_topics].sum()) / tot
-                                    if anc_topics else 0.0)
+                    desc = _descendants(parent_int, e) if parent_int else set()
+                    desc_topics = [tt for d in desc for tt in block.get(d, [])]
+                    own_s = float(row[block[e]].sum()) / tot
+                    bg_s = float(row[:n_bg].sum()) / tot
+                    anc_s = float(row[anc_topics].sum()) / tot if anc_topics else 0.0
+                    desc_s = (float(row[desc_topics].sum()) / tot
+                              if desc_topics else 0.0)
+                    s["own"].append(own_s)
+                    s["bg"].append(bg_s)
+                    s["anc"].append(anc_s)
+                    s["desc"].append(desc_s)
+                    s["other"].append(max(0.0, 1.0 - own_s - bg_s - anc_s - desc_s))
+                    order = np.argsort(-row)
+                    s["top10"].append(float(row[order[:10]].sum()) / tot)
+                    own_set, anc_set = set(block[e]), set(anc_topics)
+                    desc_set = set(desc_topics)
+                    for tt in order[:5]:
+                        tt = int(tt)
+                        rel = ("bg" if tt < n_bg else "own" if tt in own_set
+                               else "anc" if tt in anc_set
+                               else "desc" if tt in desc_set else "other")
+                        s["top5_rel"][rel] += 1
         return s
 
     L = [f"# collinearity — {run_dir.name} · credited={len(cred)} "
@@ -1668,9 +1705,12 @@ def build_collinearity(run_dir, profile_file, *, bundle_meta_path,
                  f"bg={_med(s['cos_bg']):.2f} anc={_med(s['cos_anc']):.2f} "
                  f"(n_anc={s['n_anc']}) flat={_med(s['cos_flat']):.2f}")
     if W is not None:
-        L.append(f"decoder ({heads['src'].split(';')[0]}): median share of |w| "
-                 "on [own block | background | ancestors' blocks]; own<0.05 = "
-                 "head ignores its own topic")
+        scale = ("standardized W_std" if heads.get("standardized")
+                 else "raw-θ V (INFLATED)")
+        L.append(f"decoder ({scale}): median share of |w| on [own block | "
+                 "background | ancestors' | descendants' | other nodes' blocks], "
+                 "top10 = share held by the 10 largest |w|; own<0.05 = head "
+                 "ignores its own topic")
         if not heads.get("standardized"):
             L.append("  INCONCLUSIVE: only the raw-θ decoder V is on disk, and "
                      "V = W_std/sd explodes on low-variance (starved) topics, so "
@@ -1685,8 +1725,13 @@ def build_collinearity(run_dir, profile_file, *, bundle_meta_path,
                 continue
             low = sum(1 for o in s["own"] if o < 0.05)
             L.append(f"  {name}: n={s['n_dec']} own={_med(s['own']):.2f} "
-                     f"bg={_med(s['bg']):.2f} anc={_med(s['anc']):.2f} · "
-                     f"own<0.05: {low}/{s['n_dec']}")
+                     f"bg={_med(s['bg']):.2f} anc={_med(s['anc']):.2f} "
+                     f"desc={_med(s['desc']):.2f} other={_med(s['other']):.2f} "
+                     f"top10={_med(s['top10']):.2f} · own<0.05: {low}/{s['n_dec']}")
+            rel = s["top5_rel"]
+            tot5 = max(1, sum(rel.values()))
+            L.append("    top-5 loaded topics by relation: " + " ".join(
+                f"{k}={100 * v / tot5:.0f}%" for k, v in rel.items()))
     else:
         L.append("decoder: no readout heads/checkpoint on disk (run "
                  "gated-pc-readout first)")

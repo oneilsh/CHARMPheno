@@ -671,9 +671,16 @@ def test_collinearity_credited_pair_is_collinear_and_decoded_elsewhere(tmp_path)
     cred_dec = [l for l in dec if l.startswith("  credited: n=2 own=")][0]
     # |w| = 3+3 on parentC's block + 1 on BG0: anc 6/7, bg 1/7, own 0
     assert "own=0.00" in cred_dec and "anc=0.86" in cred_dec and "bg=0.14" in cred_dec
+    assert "desc=0.00" in cred_dec and "other=0.00" in cred_dec
     assert "own<0.05: 2/2" in cred_dec
     fed_dec = [l for l in dec if l.startswith("  uncredited fed: n=2 own=")][0]
     assert "own=1.00" in fed_dec
+    # top-5 relation census: the credited pair's 5 largest |w| are the 2
+    # ancestor topics, BG0, then zeros (classed by position: own block first)
+    rel = [l for l in rep.splitlines() if "top-5 loaded topics by relation" in l]
+    assert len(rel) == 2 and "anc=40%" in rel[0] and "bg=20%" in rel[0]
+    # raw V on disk here -> the header names the inflated scale
+    assert "decoder (raw-θ V (INFLATED))" in rep
     # evidence: both credited boosted topics are at the prior floor
     ev = [l for l in rep.splitlines() if "at floor" in l]
     assert any(l.startswith("  credited:") and "2/2" in l for l in ev)
@@ -712,3 +719,4 @@ def test_collinearity_flags_raw_v_decoder_as_inconclusive(tmp_path):
     rep = it.build_collinearity(run, str(_align_tsv(tmp_path)),
                                 bundle_meta_path=str(meta))
     assert "INCONCLUSIVE" not in rep
+    assert "decoder (standardized W_std)" in rep
