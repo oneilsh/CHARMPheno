@@ -1,7 +1,7 @@
 ---
 id: 120
 slug: mondo-cardiovascular-tpn5-profile-eta-pc-lbfgs
-status: planned
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -273,5 +273,63 @@ lift sits near 1.
 
 ## Results
 
-(pending readout re-run — will carry macro AUC + credited dAUC vs 0113/0116 AND
-top-1% lift)
+**Status: DONE — the fair PC test is NEGATIVE. PC/profile-eta closes on
+case-finding (pre-registered "corr healthy + readout DOWN → closes on the
+merits"). Engineering: the L-BFGS co-fit head SCALES (the arc's build goal).
+Science: controlled, right-sized, aligned-target shaping does NOT improve
+case-finding — it mildly hurts, and hurts most on the nodes it targets.**
+
+Fit (50/50, hardened re-run): head trained — 259/299 nodes, median |w_c| 560,
+`corr_relΔλ` pegged 0.03 throughout, ELBO −125.7M→−84M. The coupling and scaling
+the whole arc was built to prove: confirmed (412 batched-L-BFGS data passes, 0
+line-search failures at C=299/K=1498).
+
+**Ranking (readout re-run, this session's top-1% metric):**
+
+| arm | macro AUC | AP | detection AUC | top-1% lift | prec@1% |
+|---|--:|--:|--:|--:|--:|
+| pc_topics_lr (LR on shaped θ) | **0.7555** | 0.492 | 0.511 | **7.57** | 0.605 |
+| co-fit head (sigmoid w·θ) | 0.6397 | 0.378 | 0.500 | — | — |
+
+- **AUC is DOWN, not flat.** 0.7555 < the pre-registered `0.7813 − noise` bar,
+  < the 0.758 revival line, and ~0.025 below 0116's ~0.7804 (profile-eta S=1,
+  no shaping) and 0113's ~0.78. The co-fit shaping mildly *lowered* linear
+  decodability of θ. (Comparison is to the recorded 0113/0116 macros — a fresh
+  paired `readout-ab` was not runnable: those runs are not scored on this
+  cluster.)
+- **The co-fit head's own decoder is weak (0.64 ≪ 0.7555).** A fresh LR reads the
+  shaped θ far better than the head that shaped it — the `self-w ≈ 0` decoupling
+  (topics_digest decoder view) quantified: decode weight routes through
+  ancestor/shared topics, not the profile-aligned own-topics.
+
+**Credited split (14 credited / 179 uncredited scored):** credited median AUC
+**0.734** (p25 0.675 / p75 0.802) < uncredited **0.767** (0.695 / 0.823). **The
+shaping did worst exactly where it was aimed** — the 36 profiled rare nodes are
+below the un-profiled majority. AUC also falls with depth (d2 0.816 → d7 0.729):
+the rare deep tail scores worst.
+
+**Top-1% is the one positive, and it is honest about its limits.** Macro lift
+7.57 / precision 0.605 — the top 1% by score is 60% true cases, 7.6× the
+majority/random baseline: the representation is NOT useless for screening. But
+the high-lift nodes (253: lift 51, n_pos 211; 15: 44, n_pos 282; 4: 30, n_pos
+590) all carry hundreds of positives — **the enrichment is concentrated in
+data-rich nodes**, absent from the rare credited tail. Top-1% reveals real signal
+AUC's macro hides, and localizes it to where data already is — sharpening, not
+softening, the VOI concern (feature-VOI would work where data is, not in the rare
+tail the prior was meant to rescue).
+
+**Interpretability (unchanged, complete): a clean pass, and now clearly
+decoupled from prediction.** `--profile-align`: credited top-15 overlap median
+1.00 (starved mass 0.128 / fed 0.855 — data drives fed, prior fills starved). The
+stage-2 probe confirms the prior realizes in-vocab (median 45 tokens/node, 47% of
+positive cells carry ≥1 profile token; varicose's 0.09 coverage explains its 0.00
+alignment — a data-coverage miss, not a modeling one). So profile-eta delivers
+legibility (insight 0085) — but insight 0087 records that this legibility sits on
+topics the decoder does not use.
+
+**Verdict → the arc closes.** profile-eta is an interpretability lever, not an
+AUC lever (0084/0085), and the scalable strong co-fit head — the last thing that
+could have converted alignment into discriminability — does not. The frontier
+moves off word-side priors and static-θ shaping to representation: the
+episode/temporal index (spec `2026-09-01-incident-episode-eval-program.md`).
+Closing insight: [0087](../insights/0087-the-scalable-cofit-head-shapes-topics-but-does-not-discriminate-profile-eta-closes-on-case-finding.md).
