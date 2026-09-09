@@ -2175,7 +2175,7 @@ def score_cells_df(scored_df, V, b_raw, C, *, topic_col="topicDistribution",
     return scored_df.sparkSession.createDataFrame(cells, schema)
 
 
-def _score_group(node, y, p, min_count):
+def _score_group(node, y, p, min_count, topk_frac=0.01):
     """One node's metric record, delegating verbatim to the driver readout's scorer.
 
     Shipped to the executors by BOTH grouping engines below. The scorer is
@@ -2183,18 +2183,26 @@ def _score_group(node, y, p, min_count):
     plan's "What must NOT change" clause makes metric equality with the driver
     readout the correctness gate; a second copy of the degenerate/`min_count` skip
     rules is exactly how that gate would rot. It is a pure function of
-    `(y_true, proba, min_count)`, so it is safe to ship.
+    `(y_true, proba, min_count, topk_frac)`, so it is safe to ship.
+
+    The trailing three fields are the top-`topk_frac` screening metrics
+    (`prec_at_k`/`recall_at_k`/`lift_at_k`, evaluate._topk_screening_metrics); a
+    skipped column carries them as None, so the tuple width is fixed.
     """
     from analysis.pc.evaluate import _score_label
 
-    rec = _score_label(y, p, min_count=int(min_count))
-    return (int(node),
-            None if rec["auc"] is None else float(rec["auc"]),
-            None if rec["ap"] is None else float(rec["ap"]),
-            int(rec["n_pos"]), int(rec["n_neg"]), rec["skipped"])
+    rec = _score_label(y, p, min_count=int(min_count), topk_frac=float(topk_frac))
+
+    def _f(key):
+        v = rec.get(key)
+        return None if v is None else float(v)
+
+    return (int(node), _f("auc"), _f("ap"),
+            int(rec["n_pos"]), int(rec["n_neg"]), rec["skipped"],
+            _f("prec_at_k"), _f("recall_at_k"), _f("lift_at_k"))
 
 
-def per_node_metric_rows(cells_df, C, *, min_count=0, engine="rdd"):
+def per_node_metric_rows(cells_df, C, *, min_count=0, engine="rdd", topk_frac=0.01):
     """Per-node AUC/AP over the exploded cells — `_bundle_masked` semantics, distributed.
 
     Plan §3 ("Eval — exact, distributed, no subsampling"): group the cells by node
@@ -2234,14 +2242,17 @@ def per_node_metric_rows(cells_df, C, *, min_count=0, engine="rdd"):
     """
     C = int(C)
     min_count = int(min_count)
+    topk_frac = float(topk_frac)
+    _COLS = ("node", "auc", "ap", "n_pos", "n_neg", "skipped",
+             "prec_at_k", "recall_at_k", "lift_at_k")
     if engine == "rdd":
         def _pairs(row):
             return int(row["node"]), (float(row["y"]), float(row["p"]))
 
-        def _score(kv, _mc=min_count):
+        def _score(kv, _mc=min_count, _tf=topk_frac):
             node, pairs = kv
             arr = np.asarray(list(pairs), dtype=np.float64).reshape(-1, 2)
-            return _score_group(node, arr[:, 0], arr[:, 1], _mc)
+            return _score_group(node, arr[:, 0], arr[:, 1], _mc, _tf)
 
         rows = cells_df.rdd.map(_pairs).groupByKey().map(_score).collect()
     elif engine == "pandas":
@@ -2252,14 +2263,19 @@ def per_node_metric_rows(cells_df, C, *, min_count=0, engine="rdd"):
                              StructField("ap", DoubleType(), True),
                              StructField("n_pos", LongType(), False),
                              StructField("n_neg", LongType(), False),
-                             StructField("skipped", StringType(), True)])
+                             StructField("skipped", StringType(), True),
+                             StructField("prec_at_k", DoubleType(), True),
+                             StructField("recall_at_k", DoubleType(), True),
+                             StructField("lift_at_k", DoubleType(), True)])
 
-        def _metrics(pdf, _mc=min_count):
+        # applyInPandas requires a 1- or 2-arg function, so capture min_count /
+        # topk_frac by closure (both are fixed scalars here) rather than as extra
+        # default args — a third parameter trips INVALID_PANDAS_UDF.
+        def _metrics(pdf):
             import pandas as pd
             rec = _score_group(pdf["node"].iloc[0], pdf["y"].to_numpy(),
-                               pdf["p"].to_numpy(), _mc)
-            return pd.DataFrame([dict(zip(
-                ("node", "auc", "ap", "n_pos", "n_neg", "skipped"), rec))])
+                               pdf["p"].to_numpy(), min_count, topk_frac)
+            return pd.DataFrame([dict(zip(_COLS, rec))])
 
         rows = [tuple(r) for r in
                 cells_df.groupBy("node").applyInPandas(_metrics, schema).collect()]
@@ -2269,11 +2285,17 @@ def per_node_metric_rows(cells_df, C, *, min_count=0, engine="rdd"):
     from analysis.pc.evaluate import _score_label
 
     empty = np.zeros(0, dtype=np.float64)
-    per_node = {c: _score_label(empty, empty, min_count=min_count)
-                for c in range(C)}
-    for node, auc, ap, n_pos, n_neg, skipped in rows:
-        per_node[int(node)] = {"auc": auc, "ap": ap, "n_pos": int(n_pos),
-                               "n_neg": int(n_neg), "skipped": skipped}
+    _empty_rec = dict(_score_label(empty, empty, min_count=min_count,
+                                   topk_frac=topk_frac))
+    for _k in ("prec_at_k", "recall_at_k", "lift_at_k"):
+        _empty_rec.setdefault(_k, None)
+    _empty_rec.setdefault("topk_frac", topk_frac)
+    per_node = {c: dict(_empty_rec) for c in range(C)}
+    for node, auc, ap, n_pos, n_neg, skipped, prec_k, rec_k, lift_k in rows:
+        per_node[int(node)] = {
+            "auc": auc, "ap": ap, "n_pos": int(n_pos), "n_neg": int(n_neg),
+            "skipped": skipped, "prec_at_k": prec_k, "recall_at_k": rec_k,
+            "lift_at_k": lift_k, "topk_frac": topk_frac}
     return per_node
 
 
