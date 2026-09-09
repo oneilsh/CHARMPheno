@@ -677,6 +677,11 @@ def test_collinearity_credited_pair_is_collinear_and_decoded_elsewhere(tmp_path)
     assert "own=1.00" in fed_dec
     # top-5 relation census: the credited pair's 5 largest |w| are the 2
     # ancestor topics, BG0, then zeros (classed by position: own block first)
+    # fed-only view: fixture fed topics = BG0 + t5 (parentC) + t7 (D); the
+    # credited pair's |w| among those is all on parentC's t5 and BG0 -> own 0
+    fedl = [l for l in rep.splitlines() if "among FED topics only" in l]
+    assert len(fedl) == 2 and "(3 of 9)" in fedl[0] and "own=0.00" in fedl[0]
+    assert "own=1.00" in fedl[1]
     rel = [l for l in rep.splitlines() if "top-5 loaded topics by relation" in l]
     assert len(rel) == 2 and "anc=40%" in rel[0] and "bg=20%" in rel[0]
     # raw V on disk here -> the header names the inflated scale

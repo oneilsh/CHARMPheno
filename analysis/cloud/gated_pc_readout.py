@@ -235,6 +235,16 @@ def build_parser() -> argparse.ArgumentParser:
                         f"field fall back to {_LEGACY_READOUT_MAX_ITER} (the "
                         "record-run budget); recovering a DEV smoke from one of "
                         "those still needs an explicit 60.")
+    p.add_argument("--readout-l2", type=float, default=1.0,
+                   help="Ridge strength of the per-node readout heads, on the "
+                        "SUMMED log-loss (sklearn's C=1.0 <=> 1.0, the record "
+                        "default). At hundreds of thousands of training cells "
+                        "1.0 is near-unregularized over K standardized features; "
+                        "raise it (1e2, 1e4) to test whether the diffuse heads "
+                        "(inspect_topics --collinearity: |w| smeared over ~K "
+                        "topics) are an overfit the test AUC pays for. The "
+                        "record number is the default; a sweep is a named "
+                        "re-readout, not the record.")
     return p
 
 
@@ -585,7 +595,7 @@ def reconstruct_model(run_dir: Path, manifest: dict):
 def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targets,
                 min_count, readout_mode="auto", ab_check=False, out_dir=None,
                 theta_topm=None, readout_max_iter=None, elig_col=None,
-                eval_path="driver"):
+                eval_path="driver", readout_l2=1.0):
     """Score both gated_pc arms off two already-TRANSFORMED splits. No argparse.
 
     The whole body of this tool that is worth testing: given the frames a finished
@@ -699,7 +709,8 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
             _ck = Path(out_dir) / "readout_ckpt_gated_pc.npz" if out_dir else None
             _V, _b, _const, _deg, _info = _fit_readout_heads(
                 train_scored, C, K, label="gated_pc", max_iter=readout_max_iter,
-                theta_topm=theta_topm, checkpoint_path=_ck, checkpoint_every=10)
+                l2=readout_l2, theta_topm=theta_topm, checkpoint_path=_ck,
+                checkpoint_every=10)
             if out_dir:
                 _write_readout_heads(out_dir, "gated_pc", _V, _b, _const, _deg,
                                      C, K, theta_topm, W_std=_info.get("W_std"))
@@ -713,7 +724,7 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
             dist = distributed_score_arm(
                 train_scored, test_scored, C, K, recall_targets=recall_targets,
                 fdr_targets=fdr_targets, min_count=min_count, label="gated_pc",
-                theta_topm=theta_topm, max_iter=readout_max_iter,
+                theta_topm=theta_topm, max_iter=readout_max_iter, l2=readout_l2,
                 # Same dir as `results_readout.json`, and for the same reason one
                 # step earlier in the pipeline: this tool IS the recovery path, and
                 # its solve is the multi-hour part. A death mid-solve (the 08-28
@@ -969,7 +980,8 @@ def main(argv=None) -> int:
                         ab_check=args.readout_ab_check, out_dir=run_dir,
                         theta_topm=args.readout_theta_topm,
                         readout_max_iter=args.readout_max_iter,
-                        elig_col=_elig_col, eval_path=args.eval_path)
+                        elig_col=_elig_col, eval_path=args.eval_path,
+                        readout_l2=args.readout_l2)
             _cprint(f"[readout]   arm results written to "
                   f"{run_dir / 'results_readout.json'}", flush=True)
             train_scored.unpersist(); test_scored.unpersist()
