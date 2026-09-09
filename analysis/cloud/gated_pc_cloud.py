@@ -3988,6 +3988,13 @@ def parse_args(argv=None):
                         "is the readout's wall-clock knob. Lower it for the dev "
                         "RANKING loop (CHARM_DEV caps it at 60), never for a run of "
                         "record: the capped point is whatever the budget bought.")
+    p.add_argument("--readout-l2", type=float, default=1.0,
+                   help="ridge strength of EVERY per-node readout head solve, on the "
+                        "SUMMED log-loss (1.0 == sklearn C=1.0, the historical "
+                        "default). At record cell counts 1.0 is near-unregularized "
+                        "over K standardized features: exp 0120's re-readout went "
+                        "0.7555 -> 0.7927 macro AUC at 100 (insight 0089). Recorded "
+                        "in the manifest so a re-readout reproduces the fit's own.")
     p.add_argument("--readout-theta-topm", type=int, default=0,
                    help="fit and score the distributed readout on each doc's top-M "
                         "theta entries (truncated, NOT renormalized), 0 (default) = "
@@ -4472,6 +4479,7 @@ def main() -> int:
             # readout was a 60-iter dev smoke or a 200-iter record run; it defaulted
             # to 200 and the operator had to remember to pass --readout-max-iter 60.
             "readout_max_iter": int(args.readout_max_iter),
+            "readout_l2": float(args.readout_l2),
             "recall_targets": args._recall_targets,
             "fdr_targets": args._fdr_targets,
             "with_dag_head": args.with_dag_head,
@@ -4633,7 +4641,8 @@ def main() -> int:
                 _ck = Path(out) / "readout_ckpt_gated_pc.npz" if out else None
                 _V_gp, _b_gp, _const_gp, _deg_gp, _info_gp = _fit_readout_heads(
                     train_scored, C, lay.K, label="gated_pc",
-                    max_iter=args.readout_max_iter, theta_topm=theta_topm,
+                    max_iter=args.readout_max_iter, l2=args.readout_l2,
+                    theta_topm=theta_topm,
                     checkpoint_path=_ck, checkpoint_every=10)
                 if out:
                     _write_readout_heads(out, "gated_pc", _V_gp, _b_gp, _const_gp,
@@ -4655,8 +4664,8 @@ def main() -> int:
                 _dist_gp = distributed_score_arm(
                     train_scored, test_scored, C, lay.K, recall_targets=rt,
                     fdr_targets=ft, min_count=args.min_label_count, label="gated_pc",
-                    max_iter=args.readout_max_iter, theta_topm=theta_topm,
-                    checkpoint_dir=out, elig_col=elig_col)
+                    max_iter=args.readout_max_iter, l2=args.readout_l2,
+                    theta_topm=theta_topm, checkpoint_dir=out, elig_col=elig_col)
                 results["gated_pc"], proba_gp, y_te, m_te, ids_gp = _dist_gp[:5]
                 _gp_fit = _dist_gp[5]         # raw-θ params: the calibration warm start
                 elig_te = _dist_gp[6]         # E1's (D,C) eligibility, or None
@@ -4782,8 +4791,8 @@ def main() -> int:
                 _fit_df = train_scored.filter(_h != 0)
                 _Vc, _bc, _constc, _degc, _ = _fit_readout_heads(
                     _fit_df, C, lay.K, label="gated_pc calibration-fit",
-                    max_iter=args.readout_max_iter, warm_start=_gp_fit,
-                    theta_topm=theta_topm)
+                    max_iter=args.readout_max_iter, l2=args.readout_l2,
+                    warm_start=_gp_fit, theta_topm=theta_topm)
                 _cal_scored = _cal_df.withColumn(
                     "doc_key", _doc_key_column(_cal_df))
                 _cal_cells = _dr.score_cells_df(_cal_scored, _Vc, _bc, C)
@@ -4835,8 +4844,8 @@ def main() -> int:
                     # curve describes a model nobody scored with.
                     _Vc, _bc, _constc, _degc, _ = _fit_readout_heads(
                         _fit_df, C, lay.K, label="gated_pc calibration-fit",
-                        max_iter=args.readout_max_iter, warm_start=_gp_fit,
-                        theta_topm=theta_topm)
+                        max_iter=args.readout_max_iter, l2=args.readout_l2,
+                        warm_start=_gp_fit, theta_topm=theta_topm)
                     proba_cal, y_cal, m_cal, _, _ = _collect_lean_proba(
                         _cal_df, C, _Vc, _bc, degenerate=_degc, const=_constc,
                         theta_topm=theta_topm)
@@ -5006,7 +5015,8 @@ def main() -> int:
                         us_train_scored, us_test_scored, C, lay.K, recall_targets=rt,
                         fdr_targets=ft, min_count=args.min_label_count,
                         label="unsup_gated", max_iter=args.readout_max_iter,
-                        theta_topm=theta_topm, checkpoint_dir=out)
+                        l2=args.readout_l2, theta_topm=theta_topm,
+                        checkpoint_dir=out)
                     results["unsup_gated"], proba_us, y_te, m_te, _ = _dist_us[:5]
                 else:
                     Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(
@@ -5062,7 +5072,8 @@ def main() -> int:
                         dh_train, dh_test, C, int(args.k), recall_targets=rt,
                         fdr_targets=ft, min_count=args.min_label_count,
                         label="dag_head", max_iter=args.readout_max_iter,
-                        theta_topm=theta_topm, checkpoint_dir=out)[0]
+                        l2=args.readout_l2, theta_topm=theta_topm,
+                        checkpoint_dir=out)[0]
                     dh_train.unpersist(); dh_test.unpersist()
                 else:
                     Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(

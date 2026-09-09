@@ -942,15 +942,24 @@ def test_stdout_tee_batches_between_flush_intervals(tmp_path):
     assert log.read_text().endswith("[driver] three\n")
 
 
-def test_parse_args_readout_l2_default_is_the_record_and_is_forwarded(monkeypatch):
-    """`--readout-l2` defaults to the record's 1.0 (sklearn C=1.0 on the summed
-    loss) and reaches both head solves of `run_readout` as `l2=`."""
+def test_parse_args_readout_l2_resolves_cli_then_manifest_then_legacy(monkeypatch):
+    """`--readout-l2` is None-means-ask-the-manifest (reproduce the fit's own
+    readout), the fit driver records `readout_l2`, and both head solves of
+    `run_readout` receive it as `l2=`."""
     a = gpr.build_parser().parse_args(["--run-dir", "/tmp/r"])
-    assert a.readout_l2 == 1.0
+    assert a.readout_l2 is None
     b = gpr.build_parser().parse_args(["--run-dir", "/tmp/r", "--readout-l2", "1e4"])
     assert b.readout_l2 == 1e4
+    assert gpr.resolve_readout_l2(None, {}) == (1.0, "legacy default")
+    assert gpr.resolve_readout_l2(None, {"readout_l2": 100}) == (100.0, "manifest")
+    assert gpr.resolve_readout_l2(7, {"readout_l2": 100}) == (7.0, "CLI")
+    fit = gpc.parse_args(["--cdr", "x", "--billing", "y", "--out-dir", "/tmp/o"])
+    assert fit.readout_l2 == 1.0
+    fit = gpc.parse_args(["--cdr", "x", "--billing", "y", "--out-dir", "/tmp/o",
+                          "--readout-l2", "100"])
+    assert fit.readout_l2 == 100.0
     import inspect
     sig = inspect.signature(gpr.run_readout)
-    assert sig.parameters["readout_l2"].default == 1.0
+    assert sig.parameters["readout_l2"].default is None
     src = inspect.getsource(gpr.run_readout)
     assert src.count("l2=readout_l2") == 2        # distributed-eval solve + driver-eval arm
