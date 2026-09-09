@@ -113,6 +113,13 @@ signal the macro AUC hides, and localizes it to where data already is.
   uncredited gap (0.734 < 0.767) and the depth slide are therefore a TRACKING
   gradient as much as a discriminability one. The honest verdict on PC needs the
   incident cohort, which this arc never ran.
+- **Paired re-read at ridge 100 (insight 0089): the verdict stands, the mechanism story
+  does not.** 0120 − 0116 on 193 shared nodes: median dAUC **−0.015**, 144/193 down, every
+  depth negative, credited (−0.014) and uncredited (−0.015) alike; macro 0.7927 vs 0.8098.
+  The head's cost is real and UNIFORM — not "most where aimed" (point 2 is retracted: at a
+  converged head credited nodes decode at 0.799–0.847, at or above uncredited), and not
+  own-topic decoupling (point 3: `self-w ≈ 0` holds for every node on every run). The
+  label term perturbs the shared representation the decoder reads.
 
 ## Reproduce
 
