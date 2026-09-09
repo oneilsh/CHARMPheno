@@ -1903,13 +1903,47 @@ def _read_readout_heads(run_dir, label, *, C=None, K=None, theta_topm=None):
     return V, b_raw, const, degenerate, gC, gK, gm
 
 
+def _apply_feature_mask(stats_fn, feature_mask):
+    """Wrap a batched-LR `stats_fn` so the DATA gradient is zero outside a (C,K)
+    boolean `feature_mask` — the driver-side seam for a per-node FEATURE ABLATION
+    (own block only / drop own block / background only ...).
+
+    Why zeroing the gradient is a correct projected solve, not a hack: the
+    solver minimizes F_c = loss_c(w) + 0.5·l2·‖w‖² per node by L-BFGS from
+    w = 0. On a coordinate whose data gradient is always 0, the ridge gradient
+    l2·w is also 0 while w stays 0, so the full gradient is 0 there; the two-loop
+    direction is a linear combination of gradients and of past steps, both of
+    which are 0 on that coordinate, so the step is 0 there, so w stays exactly
+    0 — by induction, for every iteration and every trial point of the line
+    search. The unmasked coordinates therefore solve exactly the reduced problem
+    over the kept features (same objective, restricted to the subspace), which is
+    what an ablation means. No closure payload: the mask lives on the driver and
+    is applied to the returned (C,K) gradient; `node_mask` passes straight
+    through as in `_fittable_stats`."""
+    fm = np.ascontiguousarray(np.asarray(feature_mask, dtype=bool))
+
+    def _masked(W_std, b_std, node_mask=None, _f=stats_fn, _fm=fm):
+        loss, gW, gb = _f(W_std, b_std, node_mask=node_mask)
+        return loss, np.where(_fm, gW, 0.0), gb
+    return _masked
+
+
 def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
                        max_iter=_READOUT_MAX_ITER, history=6, label="", depth=None,
                        warm_start=None, theta_topm=0, checkpoint_path=None,
                        checkpoint_every=10,
                        topic_col="topicDistribution",
-                       label_col="label", mask_col="labelMask"):
+                       label_col="label", mask_col="labelMask",
+                       feature_mask=None):
     """Fit all C per-node readout heads with ONE batched distributed L-BFGS.
+
+    `feature_mask` (optional, (C,K) bool): per-node FEATURE ABLATION — the head
+    of node c may load only on the topics where `feature_mask[c]` is True (see
+    `_apply_feature_mask` for why gradient masking is an exact reduced solve).
+    Folded into the checkpoint fingerprint, so an ablation solve never resumes a
+    full-feature checkpoint of the same problem, and applied to any warm start /
+    resumed point. The standardization moments are unaffected (a masked feature
+    simply carries w = 0, which folds to V = 0).
 
     Returns `(V (C,K), b_raw (C,), const (C,), degenerate (C,) bool, info)` — the
     raw-θ scoring parameters, so nothing but `(V, b_raw)` has to travel to score a
@@ -2016,10 +2050,22 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
     degenerate = (n_obs <= 0) | (n_pos <= 0) | (n_pos >= n_obs)
     const = np.where((n_obs > 0) & (n_pos >= n_obs), 1.0, 0.0)
     keep = ~degenerate
+    fmask = None
+    if feature_mask is not None:
+        fmask = np.ascontiguousarray(np.asarray(feature_mask, dtype=bool))
+        if fmask.shape != (C, K):
+            raise ValueError(f"feature_mask shape {fmask.shape} != ({C}, {K})")
+        _cprint(f"[driver]   {tag}FEATURE ABLATION: heads restricted to a per-node "
+              f"topic mask (mean {fmask.mean() * K:.1f} of {K} topics per node)",
+              flush=True)
+
+    def _proj(W):
+        # Pin masked coordinates at exactly 0 on any externally supplied point.
+        return W if fmask is None else np.where(fmask, W, 0.0)
     x0 = None
     if warm_start is not None:
         W0, b0 = unfold_standardization(warm_start[0], warm_start[1], mu, sd)
-        x0 = (np.where(keep[:, None], W0, 0.0), np.where(keep, b0, 0.0))
+        x0 = (_proj(np.where(keep[:, None], W0, 0.0)), np.where(keep, b0, 0.0))
     ckpt_path = Path(checkpoint_path) if checkpoint_path is not None else None
     fingerprint = None
     if ckpt_path is not None:
@@ -2027,6 +2073,12 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
         # exact-integer sums, the reproducible identity of this arm's problem
         # (see _readout_ckpt_fingerprint for why mu/sd bytes are NOT hashed).
         fingerprint = _readout_ckpt_fingerprint(C, K, n_obs, n_pos, theta_topm)
+        if fmask is not None:
+            # An ablation is a different problem on the same rows: fold the mask
+            # so a masked solve never resumes (or is resumed by) the full one.
+            _h = hashlib.sha256((fingerprint + "|feature_mask|").encode())
+            _h.update(fmask.tobytes())
+            fingerprint = _h.hexdigest()
         resumed = _read_readout_ckpt(ckpt_path, fingerprint)
         if resumed is not None:
             W_ck, b_ck, ck_iter = resumed
@@ -2036,7 +2088,8 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
             # distributed passes. (A checkpoint written by THIS problem already has
             # them at zero — the fingerprint pins the degenerate mask — so this is
             # a belt-and-braces restatement of the contract, not a fixup.)
-            x0 = (np.where(keep[:, None], W_ck, 0.0), np.where(keep, b_ck, 0.0))
+            x0 = (_proj(np.where(keep[:, None], W_ck, 0.0)),
+                  np.where(keep, b_ck, 0.0))
             _cprint(f"[driver]   {tag}resuming batched solve from checkpoint "
                   f"(iter {ck_iter} recorded); curvature history is not carried, "
                   "early iterations re-learn it", flush=True)
@@ -2051,7 +2104,9 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
             fold_standardization=fold_standardization,
             standardized_grad_from_raw=standardized_grad_from_raw,
             topic_col=topic_col, label_col=label_col, mask_col=mask_col,
-            depth=depth, topm=theta_topm) as stats_fn:
+            depth=depth, topm=theta_topm) as _raw_stats_fn:
+        stats_fn = (_apply_feature_mask(_raw_stats_fn, fmask)
+                    if fmask is not None else _raw_stats_fn)
 
         def _fittable_stats(W_std, b_std, node_mask=None, _f=stats_fn, _keep=keep):
             # `node_mask` passes STRAIGHT THROUGH to the pass (the solver uses it
@@ -2159,7 +2214,7 @@ def distributed_score_arm(train_scored, test_scored, C, K, *, recall_targets,
                           checkpoint_dir=None, checkpoint_every=10,
                           topic_col="topicDistribution", label_col="label",
                           mask_col="labelMask", id_col="person_id",
-                          elig_col=None):
+                          elig_col=None, feature_mask=None):
     """`score_arm` without the driver-side θ collect — the distributed twin.
 
     Returns `(readout, proba_te (D_te,C) f32, y_te u8, m_te u8, doc_key_order,
@@ -2209,7 +2264,8 @@ def distributed_score_arm(train_scored, test_scored, C, K, *, recall_targets,
         train_scored, C, K, l2=l2, gtol=gtol, max_iter=max_iter, history=history,
         depth=depth, label=label, warm_start=warm_start, theta_topm=theta_topm,
         checkpoint_path=ckpt_path, checkpoint_every=checkpoint_every,
-        topic_col=topic_col, label_col=label_col, mask_col=mask_col)
+        topic_col=topic_col, label_col=label_col, mask_col=mask_col,
+        feature_mask=feature_mask)
     if checkpoint_dir is not None:
         # PART 1 keystone: the COMPLETED fit's raw-θ scoring params are the record
         # that conversion_analysis --deciles on scores from (one mapPartitions),
