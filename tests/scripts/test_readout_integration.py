@@ -963,3 +963,42 @@ def test_parse_args_readout_l2_resolves_cli_then_manifest_then_legacy(monkeypatc
     assert sig.parameters["readout_l2"].default is None
     src = inspect.getsource(gpr.run_readout)
     assert src.count("l2=readout_l2") == 2        # distributed-eval solve + driver-eval arm
+
+
+def test_build_readout_feature_mask_modes_on_a_small_dag():
+    """Engine ids 0 (root) .. 4; n_bg=2, tpn=2 -> K=10. parent_int: 1<-0, 2<-1,
+    3<-1, 4<-0. Blocks: node1 [2,3], node2 [4,5], node3 [6,7], node4 [8,9]."""
+    C, K, n_bg, tpn = 5, 10, 2, 2
+    pi = {1: [0], 2: [1], 3: [1], 4: [0]}
+    assert gpr.build_readout_feature_mask("all", C, K, n_bg, tpn, pi) is None
+    own = gpr.build_readout_feature_mask("own", C, K, n_bg, tpn)
+    assert own.shape == (C, K) and own[2].tolist() == [False] * 4 + [True, True] + [False] * 4
+    assert not own[0].any()                               # root owns no block
+    ownbg = gpr.build_readout_feature_mask("own-bg", C, K, n_bg, tpn)
+    assert ownbg[2, :2].all() and ownbg[2, 4:6].all() and ownbg[2].sum() == 4
+    bg = gpr.build_readout_feature_mask("bg", C, K, n_bg, tpn)
+    assert bg[:, :2].all() and bg[:, 2:].sum() == 0
+    clo = gpr.build_readout_feature_mask("closure", C, K, n_bg, tpn, pi)
+    # node 2's closure: bg + own [4,5] + parent node1's [2,3]; NOT sibling 3 or node 4
+    assert clo[2].tolist() == [True, True, True, True, True, True, False, False, False, False]
+    assert clo[4].tolist() == [True, True, False, False, False, False, False, False, True, True]
+    do = gpr.build_readout_feature_mask("drop-own", C, K, n_bg, tpn)
+    assert (~do[2]).tolist() == [False] * 4 + [True, True] + [False] * 4
+    dc = gpr.build_readout_feature_mask("drop-closure", C, K, n_bg, tpn, pi)
+    assert dc[2].tolist() == [True, True, False, False, False, False, True, True, True, True]
+    with pytest.raises(ValueError):
+        gpr.build_readout_feature_mask("closure", C, K, n_bg, tpn)      # needs parent_int
+    with pytest.raises(ValueError):
+        gpr.build_readout_feature_mask("nope", C, K, n_bg, tpn)
+
+
+def test_parse_args_readout_feature_mask_default_all():
+    a = gpr.build_parser().parse_args(["--run-dir", "/tmp/r"])
+    assert a.readout_feature_mask == "all"
+    b = gpr.build_parser().parse_args(["--run-dir", "/tmp/r",
+                                       "--readout-feature-mask", "drop-own"])
+    assert b.readout_feature_mask == "drop-own"
+    import inspect
+    sig = inspect.signature(gpr.run_readout)
+    assert sig.parameters["feature_mask"].default is None
+    assert sig.parameters["mask_tag"].default is None

@@ -116,6 +116,69 @@ def resolve_readout_max_iter(cli_value, manifest):
     return _LEGACY_READOUT_MAX_ITER, "legacy default"
 
 
+_FEATURE_MASK_MODES = ("all", "own", "own-bg", "bg", "closure", "drop-own",
+                       "drop-closure")
+
+
+def build_readout_feature_mask(mode, C, K, n_bg, tpn, parent_int=None):
+    """The (C,K) per-node topic mask for a readout FEATURE ABLATION, or None
+    for `all`. Rows are engine node ids 0..C-1 (root 0 owns no block; its row
+    keeps only the background under the bg-including modes and is degenerate
+    anyway); columns follow `DagLayout`: `[0, n_bg)` background, then one
+    `tpn`-wide block per non-root node in sorted engine-id order.
+
+      own          the node's own block only
+      own-bg       own block + background
+      bg           background only (0081's "the signal is shared" test)
+      closure      own + every ancestor's block + background — exactly the
+                   gate's allowed set for a document attested at this node
+      drop-own     everything EXCEPT the own block
+      drop-closure everything except own + ancestors' blocks (background kept)
+
+    `parent_int` (`{child: [parents]}` in engine ids) is needed by the closure
+    modes only. Pure numpy; unit-tested off-cluster."""
+    if mode not in _FEATURE_MASK_MODES:
+        raise ValueError(f"unknown feature mask mode {mode!r}; "
+                         f"choose from {_FEATURE_MASK_MODES}")
+    if mode == "all":
+        return None
+    C, K, n_bg, tpn = int(C), int(K), int(n_bg), int(tpn)
+    nodes = sorted(e for e in range(1, C))
+    block = {e: list(range(n_bg + i * tpn, n_bg + (i + 1) * tpn))
+             for i, e in enumerate(nodes)}
+    parents = {int(c): [int(p) for p in ps]
+               for c, ps in (parent_int or {}).items()}
+    if mode in ("closure", "drop-closure") and not parents:
+        raise ValueError(f"feature mask mode {mode!r} needs parent_int")
+
+    def ancestors(e):
+        out, stack = set(), [e]
+        while stack:
+            for q in parents.get(stack.pop(), []):
+                if q != 0 and q not in out:
+                    out.add(q); stack.append(q)
+        return out
+
+    m = np.zeros((C, K), dtype=bool)
+    for e in range(C):
+        own = block.get(e, [])
+        anc = ([t for a in ancestors(e) for t in block.get(a, [])]
+               if mode in ("closure", "drop-closure") else [])
+        if mode == "own":
+            m[e, own] = True
+        elif mode == "own-bg":
+            m[e, own] = True; m[e, :n_bg] = True
+        elif mode == "bg":
+            m[e, :n_bg] = True
+        elif mode == "closure":
+            m[e, own] = True; m[e, anc] = True; m[e, :n_bg] = True
+        elif mode == "drop-own":
+            m[e, :] = True; m[e, own] = False
+        elif mode == "drop-closure":
+            m[e, :] = True; m[e, own] = False; m[e, anc] = False
+    return m
+
+
 def resolve_readout_l2(cli_value, manifest):
     """Ridge strength for a re-readout: explicit CLI > the fit's recorded
     ``readout_l2`` > the legacy 1.0. Same reproduce-the-run doctrine as
@@ -255,6 +318,18 @@ def build_parser() -> argparse.ArgumentParser:
                         "cell counts 1.0 is near-unregularized over K "
                         "standardized features: 0120 went 0.7555 -> 0.7927 at "
                         "100 (insight 0089). A sweep is a named re-readout.")
+    p.add_argument("--readout-feature-mask", choices=_FEATURE_MASK_MODES,
+                   default="all",
+                   help="FEATURE ABLATION of the per-node readout heads: restrict "
+                        "each node's head to its own topic block (own), own+background "
+                        "(own-bg), background only (bg), the gate's closure (closure), "
+                        "or everything but its own block / closure (drop-own, "
+                        "drop-closure). Answers whether the gated per-node block "
+                        "carries the node's case-finding signal at all (insight "
+                        "0089: full heads put ~0 weight on it). Distributed mode "
+                        "only. Writes results_readout_<mode>.json and "
+                        "readout_heads_gated_pc_<mode>.npz — the record files are "
+                        "never touched.")
     return p
 
 
@@ -605,7 +680,8 @@ def reconstruct_model(run_dir: Path, manifest: dict):
 def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targets,
                 min_count, readout_mode="auto", ab_check=False, out_dir=None,
                 theta_topm=None, readout_max_iter=None, elig_col=None,
-                eval_path="driver", readout_l2=None):
+                eval_path="driver", readout_l2=None, feature_mask=None,
+                mask_tag=None):
     """Score both gated_pc arms off two already-TRANSFORMED splits. No argparse.
 
     The whole body of this tool that is worth testing: given the frames a finished
@@ -658,10 +734,16 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
               "cardiovascular scale (C=444)", flush=True)
         ab = False
 
+    arm = "gated_pc" if not mask_tag else f"gated_pc_{mask_tag}"
+    results_name = ("results_readout.json" if not mask_tag
+                    else f"results_readout_{mask_tag}.json")
+    if feature_mask is not None and mode != "distributed":
+        raise SystemExit("[readout] --readout-feature-mask needs the distributed "
+                         "readout (the driver-collect sklearn path has no mask)")
+
     def _dump(results):
         if out_dir is not None:
-            _dump_partial_results(Path(out_dir), results,
-                                  name="results_readout.json")
+            _dump_partial_results(Path(out_dir), results, name=results_name)
 
     results = {}
     dist = None
@@ -718,24 +800,25 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
                   "score_cells_arms_df/per_node_metric_arms_rows (no driver "
                   "collect); conditional/detection/PR axes need the collect and are "
                   "skipped — run --eval-path driver for them.", flush=True)
-            _ck = Path(out_dir) / "readout_ckpt_gated_pc.npz" if out_dir else None
+            _ck = Path(out_dir) / f"readout_ckpt_{arm}.npz" if out_dir else None
             _V, _b, _const, _deg, _info = _fit_readout_heads(
-                train_scored, C, K, label="gated_pc", max_iter=readout_max_iter,
+                train_scored, C, K, label=arm, max_iter=readout_max_iter,
                 l2=readout_l2, theta_topm=theta_topm, checkpoint_path=_ck,
-                checkpoint_every=10)
+                checkpoint_every=10, feature_mask=feature_mask)
             if out_dir:
-                _write_readout_heads(out_dir, "gated_pc", _V, _b, _const, _deg,
+                _write_readout_heads(out_dir, arm, _V, _b, _const, _deg,
                                      C, K, theta_topm, W_std=_info.get("W_std"))
             results["gated_pc"], _inc_block = distributed_ranking_readout(
                 test_scored, C, _V, _b,
                 recall_targets=recall_targets, fdr_targets=fdr_targets,
                 min_count=min_count, elig_col=elig_col,
-                arm_label="gated_pc (pc_topics_lr)")
+                arm_label=f"{arm} (pc_topics_lr)")
             dist = None
         else:
             dist = distributed_score_arm(
                 train_scored, test_scored, C, K, recall_targets=recall_targets,
-                fdr_targets=fdr_targets, min_count=min_count, label="gated_pc",
+                fdr_targets=fdr_targets, min_count=min_count, label=arm,
+                feature_mask=feature_mask,
                 theta_topm=theta_topm, max_iter=readout_max_iter, l2=readout_l2,
                 # Same dir as `results_readout.json`, and for the same reason one
                 # step earlier in the pipeline: this tool IS the recovery path, and
@@ -755,7 +838,7 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
             Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, C, recall_targets=recall_targets,
             fdr_targets=fdr_targets, min_count=min_count)
     _dump(results)
-    print(format_arm_readout("gated_pc (pc_topics_lr)", results["gated_pc"]),
+    print(format_arm_readout(f"{arm} (pc_topics_lr)", results["gated_pc"]),
           flush=True)
     # E2/WP4 incident block. Two sources, one shape: the collect path scores the
     # incident-masked (D,C) proba here; the eval_path=distributed path already built
@@ -986,6 +1069,19 @@ def main(argv=None) -> int:
             if _elig_col:
                 _cprint(f"[readout]   incident eligibility column: {_elig_col!r} "
                       f"({_pw.get('version')})", flush=True)
+            _fmask, _mtag = None, None
+            if args.readout_feature_mask != "all":
+                _fmask = build_readout_feature_mask(
+                    args.readout_feature_mask, C, int(manifest["K"]),
+                    int(manifest["n_bg"]), int(manifest["tpn"]),
+                    parent_int=getattr(bundle, "parent_int", None))
+                _mtag = args.readout_feature_mask.replace("-", "_")
+                _cprint(f"[readout]   FEATURE ABLATION mode={args.readout_feature_mask}: "
+                      f"results -> results_readout_{_mtag}.json, heads -> "
+                      f"readout_heads_gated_pc_{_mtag}.npz (record untouched)",
+                      flush=True)
+            _rname = ("results_readout.json" if not _mtag
+                      else f"results_readout_{_mtag}.json")
             run_readout(train_scored, test_scored, manifest, recall_targets=rt,
                         fdr_targets=ft, min_count=min_count,
                         readout_mode=args.readout_mode,
@@ -993,9 +1089,10 @@ def main(argv=None) -> int:
                         theta_topm=args.readout_theta_topm,
                         readout_max_iter=args.readout_max_iter,
                         elig_col=_elig_col, eval_path=args.eval_path,
-                        readout_l2=args.readout_l2)
-            _cprint(f"[readout]   arm results written to "
-                  f"{run_dir / 'results_readout.json'}", flush=True)
+                        readout_l2=args.readout_l2, feature_mask=_fmask,
+                        mask_tag=_mtag)
+            _cprint(f"[readout]   arm results written to {run_dir / _rname}",
+                  flush=True)
             train_scored.unpersist(); test_scored.unpersist()
 
             # Echo the other arms' stored summary (only gated_pc can be re-scored).

@@ -1484,6 +1484,133 @@ def build_strip_audit(run_dir, *, bundle_meta_path, profile_file=None):
     return "\n".join(L) + "\n"
 
 
+
+# --------------------------------------------------------------------------- #
+# --profile-support: does the DATA build what the HPO profile says?            #
+# --------------------------------------------------------------------------- #
+def build_profile_support(run_dir, profile_file, *, bundle_meta_path,
+                          names_path=None, top_m=15, starved_frac=0.5,
+                          exemplars=8, t_words=6):
+    """For each credited node, compare the PRIOR-shaped topic with the
+    DATA-shaped ones of the same block.
+
+    Under `profile_eta_topics: 1` only the FIRST topic of a credited node's
+    block carries the HPO word prior; the other tpn-1 topics of that block are
+    trained on exactly the same documents (the gate welds the block to the
+    node's subtree) with no prior. They are therefore what the corpus says
+    about the node once ancestors and background have taken their share —
+    the direct measurement of "does the data support the profile, or is some
+    other signal there":
+
+      * per credited node: is any un-priored sibling topic FED (support_frac
+        <= starved_frac)? how much data evidence did it absorb vs the boosted
+        topic? and what fraction of its top-`top_m` condition tokens are
+        profile tokens (E[beta] mass on the profile too)?
+      * pooled medians, plus exemplars: node name, boosted topic's words
+        (`*` = profile token), and the best-fed sibling's words the same way,
+        so the "other signal" is readable, not just counted.
+
+    A high sibling overlap says the data independently lands on the profile
+    vocabulary (the prior was redundant but right); a fed sibling with near-zero
+    overlap says the data has a node-specific signature the profile does not
+    describe (the prior was pointing past the data); no fed sibling at all says
+    the node's documents were fully explained by ancestors/background (there is
+    no node-specific residual for ANY word prior to attach to). Model params,
+    counts of nodes and concept names only (egress-safe)."""
+    run_dir = Path(run_dir)
+    npz, manifest = load_run(run_dir)
+    meta = load_bundle_meta(bundle_meta_path) if bundle_meta_path else None
+    if not meta or "vocab_maps" not in meta:
+        raise SystemExit("[inspect_topics] --profile-support needs the bundle "
+                         "meta (INSPECT_KEY auto-discovery or --bundle-meta)")
+    vm0 = {str(k): int(v) for k, v in meta["vocab_maps"][0].items()}
+    prof = _profile_vocab_sets(profile_file, manifest, vm0)
+    if not prof:
+        raise SystemExit("[inspect_topics] no profiled node maps into this "
+                         "run's DAG/vocab — wrong TSV or wrong bundle?")
+    lams = domain_lambdas(npz)
+    sh = topic_sharpness(lams)
+    nodes, _ = node_order(manifest)
+    n_bg, tpn = int(manifest["n_bg"]), int(manifest["tpn"])
+    block = {e: list(range(n_bg + i * tpn, n_bg + (i + 1) * tpn))
+             for i, e in enumerate(nodes)}
+    dom_names = manifest.get("domain_names") or [f"dom{i}" for i in range(len(lams))]
+    name_by_id = {int(k): v for k, v in
+                  manifest.get("corpus_manifest", {}).get("name_by_id", {}).items()}
+    if "name_by_id" in meta:
+        name_by_id = {int(k): v for k, v in meta["name_by_id"].items()} or name_by_id
+    inv_maps = [{int(idx): int(cid) for cid, idx in vm.items()}
+                for vm in meta["vocab_maps"]]
+    names = load_concept_names(names_path) if names_path else None
+    nnames = node_names(manifest)
+    floor = float(np.min(sh["evidence"]))
+
+    rows = []
+    for e, pidx in sorted(prof.items()):
+        blk = block.get(e)
+        if not blk or tpn < 2:
+            continue
+        t0 = blk[0]
+        m0, ov0 = _align_scores(lams[0], t0, pidx, top_m)
+        sib = []
+        for t in blk[1:]:
+            m, ov = _align_scores(lams[0], t, pidx, top_m)
+            sib.append({"t": t, "ev": float(sh["evidence"][t]),
+                        "fed": bool(sh["support_frac"][t] <= starved_frac),
+                        "mass": m, "overlap": ov})
+        best = max(sib, key=lambda r: r["ev"])
+        rows.append({"eng": e, "t0": t0, "ev0": float(sh["evidence"][t0]),
+                     "ov0": ov0, "mass0": m0, "n_prof": len(pidx),
+                     "n_fed_sib": sum(r["fed"] for r in sib), "best": best,
+                     "pidx": pidx})
+    if not rows:
+        raise SystemExit("[inspect_topics] --profile-support needs tpn >= 2 "
+                         "(a block with un-priored sibling topics)")
+
+    def _med(vs):
+        vs = sorted(v for v in vs if v == v)
+        return vs[len(vs) // 2] if vs else float("nan")
+
+    fed_rows = [r for r in rows if r["n_fed_sib"] > 0]
+    L = [f"# profile support — {run_dir.name} · {len(rows)} credited node(s), "
+         f"tpn={tpn} (topic 1 of each block carries the HPO prior; topics "
+         f"2..{tpn} are data-only) · prior floor λ={floor:.1f} · top-{top_m} "
+         f"overlap = fraction of a topic's top condition tokens that are profile "
+         f"tokens"]
+    L.append(f"boosted (prior) topics: median evidence={_med([r['ev0'] for r in rows]):.1f} "
+             f"overlap={_med([r['ov0'] for r in rows]):.2f} "
+             f"mass={_med([r['mass0'] for r in rows]):.2f}")
+    L.append(f"nodes with >=1 FED data-only sibling: {len(fed_rows)}/{len(rows)}; "
+             f"with none: {len(rows) - len(fed_rows)} (documents fully explained by "
+             f"ancestors/background — no node-specific residual)")
+    if fed_rows:
+        L.append(f"best data-only sibling (fed nodes): median evidence="
+                 f"{_med([r['best']['ev'] for r in fed_rows]):.1f} "
+                 f"(x{_med([r['best']['ev'] / max(r['ev0'], 1e-9) for r in fed_rows]):.1f} "
+                 f"the boosted topic's) · profile overlap@{top_m}="
+                 f"{_med([r['best']['overlap'] for r in fed_rows]):.2f} "
+                 f"mass={_med([r['best']['mass'] for r in fed_rows]):.3f} · "
+                 f"flat-mass baseline≈{_med([r['n_prof'] / len(vm0) for r in fed_rows]):.3f}")
+        hi = sum(1 for r in fed_rows if r["best"]["overlap"] >= 0.2)
+        L.append(f"  fed siblings whose top-{top_m} is >=20% profile tokens: "
+                 f"{hi}/{len(fed_rows)} — the data lands on the profile vocabulary; "
+                 f"the rest carry a signature the profile does not describe")
+    L.append(f"exemplars (`*` = profile token; boosted topic, then best data-only "
+             f"sibling with its evidence):")
+    show = sorted(fed_rows, key=lambda r: -r["best"]["ev"])[:exemplars]
+    show += [r for r in rows if r["n_fed_sib"] == 0][:max(0, exemplars - len(show))]
+    for r in show:
+        nm = _trunc(str(nnames.get(r["eng"], r["eng"])), 38)
+        w0 = _digest_words(r["t0"], lams, sh, inv_maps, names, name_by_id,
+                           dom_names, k=t_words, profile_idx=r["pidx"])
+        b = r["best"]
+        wb = _digest_words(b["t"], lams, sh, inv_maps, names, name_by_id,
+                           dom_names, k=t_words, profile_idx=r["pidx"])
+        L.append(f"- {nm}: prior[ev {r['ev0']:.0f}] {w0}")
+        L.append(f"    data[ev {b['ev']:.0f}, {'fed' if b['fed'] else 'STARVED'}, "
+                 f"ov {b['overlap']:.2f}] {wb}")
+    return "\n".join(L) + "\n"
+
 # --------------------------------------------------------------------------- #
 # --collinearity: are the credited (profile-boosted) topics near-duplicates?   #
 # --------------------------------------------------------------------------- #
@@ -1860,6 +1987,14 @@ def main():
                          "topic evidence vs the prior floor — credited vs "
                          "uncredited fed/starved. Needs --credited-file and "
                          "the bundle meta. Suppresses other reports.")
+    ap.add_argument("--profile-support", action="store_true",
+                    help="Emit the PROFILE-SUPPORT report: per credited node, "
+                         "the prior-shaped boosted topic vs the DATA-only "
+                         "sibling topics of the same block (evidence, top-15 "
+                         "profile overlap, words) — does the corpus build what "
+                         "the HPO profile says, or something else? Needs "
+                         "--credited-file, the bundle meta, tpn>=2. "
+                         "Suppresses other reports.")
     ap.add_argument("--profile-align", action="store_true",
                     help="Emit the ~10-line profile-ALIGNMENT scorecard "
                          "(insight 0084's legibility read, quantified): each "
@@ -1875,6 +2010,14 @@ def main():
         report = build_strip_audit(run_dir, bundle_meta_path=args.bundle_meta,
                                    profile_file=args.credited_file)
         default_out = "strip_audit.md"
+    elif args.profile_support:
+        if not args.credited_file:
+            raise SystemExit("[inspect_topics] --profile-support needs "
+                             "--credited-file (CREDITED=1 via the Makefile)")
+        report = build_profile_support(
+            run_dir, args.credited_file, bundle_meta_path=args.bundle_meta,
+            names_path=args.concept_names, t_words=args.top_words)
+        default_out = "profile_support.md"
     elif args.collinearity:
         if not args.credited_file:
             raise SystemExit("[inspect_topics] --collinearity needs "

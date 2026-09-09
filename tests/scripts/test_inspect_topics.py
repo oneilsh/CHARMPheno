@@ -725,3 +725,23 @@ def test_collinearity_flags_raw_v_decoder_as_inconclusive(tmp_path):
                                 bundle_meta_path=str(meta))
     assert "INCONCLUSIVE" not in rep
     assert "decoder (standardized W_std)" in rep
+
+
+def test_profile_support_reads_data_only_siblings(tmp_path):
+    """Fixture: credited nodeA (eng 1, block t=[1,2]) has a faint prior tilt on
+    its boosted topic t=1 and a STARVED sibling t=2; credited nodeB (eng 2,
+    block [3,4]) has t=3 boosted and a FED sibling t=4 -> make t=4 sharp on
+    idx 2 (a profile token of B) so its overlap is high."""
+    run, meta = _make_collin_run(tmp_path, "ps")
+    z = np.load(run / "gated_pc_result.npz")
+    lam0 = np.array(z["lambda_0"]); lam0[4, 2] += 300.0       # B's data sibling: profile idx 2
+    np.savez(run / "gated_pc_result.npz", lambda_0=lam0, lambda_1=z["lambda_1"],
+             alpha=z["alpha"], w_CK=z["w_CK"], b_CK=z["b_CK"])
+    rep = it.build_profile_support(run, str(_align_tsv(tmp_path)),
+                                   bundle_meta_path=str(meta), top_m=2)
+    assert "2 credited node(s), tpn=2" in rep
+    assert "nodes with >=1 FED data-only sibling: 1/2" in rep
+    # B's fed sibling: top-2 = {idx2, +one flat} -> overlap 0.50 -> counts as >=20%
+    assert "fed siblings whose top-2 is >=20% profile tokens: 1/1" in rep
+    assert "- nodeB:" in rep and "fed, ov 0.50" in rep
+    assert "- nodeA:" in rep and "STARVED" in rep

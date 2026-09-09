@@ -90,3 +90,46 @@ def test_readout_heads_sidecar_carries_w_std_when_given(tmp_path):
                                   np.zeros((C, K), dtype=bool),
                                   np.zeros(C, dtype=bool), C, K, 0)
     assert ok and "W_std" not in np.load(tmp_path / "readout_heads_other.npz").files
+
+
+def test_feature_mask_solve_is_an_exact_reduced_solve():
+    """`_apply_feature_mask` on the batched solver: masked coordinates stay
+    EXACTLY 0 through the whole L-BFGS path, and the kept coordinates land on
+    the optimum of the reduced problem (a solve over the kept features only)."""
+    from analysis.pc.batched_lr import solve_batched_lr
+    rng = np.random.default_rng(3)
+    C, K, n = 2, 5, 400
+    X = rng.normal(size=(n, K))
+    w_true = np.array([[1.5, -1.0, 0.0, 0.8, 0.0], [0.0, 2.0, -1.2, 0.0, 0.5]])
+    Y = np.stack([(rng.uniform(size=n) < 1 / (1 + np.exp(-(X @ w_true[c] + 0.2))))
+                  for c in range(C)], axis=1).astype(float)
+
+    def stats_fn(W, b, node_mask=None):
+        z = X @ W.T + b                                   # (n, C)
+        p = 1 / (1 + np.exp(-z))
+        loss = -(Y * np.log(p + 1e-300) + (1 - Y) * np.log(1 - p + 1e-300)).sum(0)
+        gW = (p - Y).T @ X                                # (C, K)
+        gb = (p - Y).sum(0)
+        return loss, gW, gb
+
+    mask = np.ones((C, K), dtype=bool)
+    mask[0, [1, 4]] = False                               # node 0 loses 2 features
+    mask[1, [0, 2, 3]] = False                            # node 1 keeps 2
+    Wm, bm, im = solve_batched_lr(gpc._apply_feature_mask(stats_fn, mask), C, K,
+                                  l2=1.0, max_iter=300, gtol=1e-8)
+    assert np.all(Wm[~mask] == 0.0)                       # exactly, not approximately
+    # reduced problem per node: solve on the kept columns only, compare
+    for c in range(C):
+        keep = np.flatnonzero(mask[c])
+        Xr = X[:, keep]
+
+        def sf_r(W, b, node_mask=None, _Xr=Xr, _y=Y[:, c]):
+            z = _Xr @ W[0] + b[0]
+            p = 1 / (1 + np.exp(-z))
+            loss = -(_y * np.log(p + 1e-300) + (1 - _y) * np.log(1 - p + 1e-300)).sum()
+            return (np.array([loss]), ((p - _y) @ _Xr)[None, :],
+                    np.array([(p - _y).sum()]))
+        Wr, br, _ = solve_batched_lr(sf_r, 1, len(keep), l2=1.0, max_iter=300,
+                                     gtol=1e-8)
+        assert np.allclose(Wm[c, keep], Wr[0], atol=1e-4), c
+        assert abs(bm[c] - br[0]) < 1e-4
