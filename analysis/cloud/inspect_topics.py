@@ -1351,6 +1351,346 @@ def build_auc_slice(run_dir, *, bundle_meta_path=None, grep_pattern=None,
     return "\n".join(L).rstrip() + "\n"
 
 
+# --------------------------------------------------------------------------- #
+# --strip-audit: what the vocabulary leakage strip COULD have dropped          #
+# --------------------------------------------------------------------------- #
+def _node_cid_set(manifest, meta):
+    """Every node concept id the run knows: the manifest's post-prune int2cid,
+    unioned with the bundle meta's. The PRE-prune `before_dag.nodes()` the
+    assembler actually strips over is not persisted, so this is a LOWER bound
+    on the strip set — enough to decide the id-space question, which is what
+    the audit is for (a Mondo id is a Mondo id before and after pruning)."""
+    _, int2cid = node_order(manifest)
+    cids = {int(c) for e, c in int2cid.items() if e != 0}
+    if meta and "int2cid" in meta:
+        cids |= {int(c) for e, c in meta["int2cid"].items() if int(e) != 0}
+    return cids
+
+
+def _profile_concepts(profile_file):
+    """{mondo numeric id: set of POSITIVE concept ids} from the emit-eta TSV —
+    ALL mapped concepts, in-vocab or not (the TSV is bundle-agnostic)."""
+    header, out = None, {}
+    with open(profile_file) as fh:
+        for line in fh:
+            parts = line.rstrip("\n").split("\t")
+            if header is None:
+                header = parts
+                need = ("mondo_id", "concept_id", "neg")
+                if any(c not in header for c in need):
+                    raise SystemExit(f"[inspect_topics] {profile_file} lacks "
+                                     f"{need} (columns: {header})")
+                mi, ci, ni = (header.index(c) for c in need)
+                continue
+            if str(parts[ni]).strip().lower() in ("1", "true"):
+                continue
+            s = str(parts[mi])
+            if not (s.startswith("MONDO:") and s[len("MONDO:"):].isdigit()):
+                continue
+            if str(parts[ci]).strip().lstrip("-").isdigit():
+                out.setdefault(int(s[len("MONDO:"):]), set()).add(int(parts[ci]))
+    return out
+
+
+def build_strip_audit(run_dir, *, bundle_meta_path, profile_file=None):
+    """Off-YARN audit of the vocabulary LEAKAGE STRIP on this run's bundle.
+
+    The assembler strips `{vm[c] for c in before_dag.nodes() if c in vm}` from
+    every domain's features (`multi_domain.py`, step 6): the label DAG's node
+    ids looked up in each domain's `{concept_id: idx}` vocab map. That is only
+    a strip when the node ids and the vocab keys share an id space. On the
+    anchor Mondo path (`dag_source: mondo`) node ids ARE OMOP concept ids; on
+    the native path (`dag_source: mondo_native`, exp 0110+) node ids are the
+    Mondo curie's numeric part (`MONDO:0004995` -> 4995 — `mondo_native_dag`'s
+    recorded id-space deviation), which an OMOP-keyed vocab map only matches by
+    numeric coincidence. This report counts, per domain, how many vocab dims a
+    node id actually resolves to — i.e. how many dims the strip could have
+    removed — so `strip_mode` in the front matter can be read as what it DID
+    rather than what it says. With the emit-eta TSV it also reports how many
+    of the credited profiles' concepts sit in the node-id set (would-be
+    stripped) vs the condition vocab (live).
+
+    Model/bundle metadata and counts of dims only (egress-safe)."""
+    run_dir = Path(run_dir)
+    _, manifest = load_run(run_dir)
+    meta = load_bundle_meta(bundle_meta_path) if bundle_meta_path else None
+    if not meta or "vocab_maps" not in meta:
+        raise SystemExit("[inspect_topics] --strip-audit needs the bundle meta "
+                         "(INSPECT_KEY auto-discovery or --bundle-meta)")
+    cm = manifest.get("corpus_manifest", {})
+    dag_source = str(cm.get("dag_source") or manifest.get("dag_source") or "?")
+    strip_mode = str(cm.get("strip_mode") or manifest.get("strip_mode") or "?")
+    window_mode = str(cm.get("window_mode") or manifest.get("window_mode") or "?")
+    index_mode = str(cm.get("index_mode") or "?")
+    dom_names = list(manifest.get("domain_names") or
+                     [f"dom{m}" for m in range(len(meta["vocab_maps"]))])
+    cids = _node_cid_set(manifest, meta)
+    native = dag_source == "mondo_native"
+
+    L = [f"# strip audit — {run_dir.name} · dag_source={dag_source} "
+         f"strip_mode={strip_mode} window_mode={window_mode} "
+         f"index_mode={index_mode} · {len(cids)} node ids (post-prune; the "
+         f"assembler strips over the PRE-prune set, so dims below are a lower "
+         f"bound)"]
+    if native:
+        L.append("node ids are Mondo numerics (MONDO:%07d -> int); the strip "
+                 "resolves them against OMOP concept-id vocab maps, so a hit "
+                 "below is a numeric coincidence, not a disease code")
+    else:
+        L.append("node ids are OMOP concept ids; hits below are the DAG-node "
+                 "codes the strip removed from the features")
+    total_hits = 0
+    for m, vm in enumerate(meta["vocab_maps"]):
+        keys = set()
+        for k in vm.keys():
+            ks = str(k).strip()
+            if ks.lstrip("-").isdigit():
+                keys.add(int(ks))
+        hits = sorted(cids & keys)
+        total_hits += len(hits)
+        nm = dom_names[m] if m < len(dom_names) else f"dom{m}"
+        frac = len(hits) / len(vm) if vm else float("nan")
+        L.append(f"domain {m} ({nm}): {len(hits)} of {len(vm)} vocab dims match a "
+                 f"node id ({100 * frac:.3f}%)")
+    if profile_file:
+        prof = _profile_concepts(profile_file)
+        vm0 = set()
+        for k in meta["vocab_maps"][0].keys():
+            if str(k).strip().lstrip("-").isdigit():
+                vm0.add(int(str(k).strip()))
+        allc = set().union(*prof.values()) if prof else set()
+        in_node = allc & cids
+        in_vocab = allc & vm0
+        L.append(f"profile (emit-eta, {len(prof)} nodes, {len(allc)} distinct "
+                 f"positive concepts): {len(in_vocab)} in the condition vocab "
+                 f"(live), {len(in_node)} equal to a node id (would be stripped), "
+                 f"{len(allc - in_vocab - in_node)} in neither")
+    if native and total_hits <= max(3, len(cids) // 100):
+        L.append("VERDICT: the vocabulary strip is effectively a NO-OP on this "
+                 "run — the disease's own condition codes stay in the features "
+                 "wherever the window admits them; the leakage protection "
+                 "actually in force is the pre-index feature window "
+                 f"(window_mode={window_mode}) plus incident eligibility at eval")
+    elif native:
+        L.append(f"VERDICT: {total_hits} coincidental dims stripped — inspect "
+                 "them before trusting anything else in this report")
+    else:
+        L.append(f"VERDICT: {total_hits} DAG-node dims stripped across domains")
+    return "\n".join(L) + "\n"
+
+
+# --------------------------------------------------------------------------- #
+# --collinearity: are the credited (profile-boosted) topics near-duplicates?   #
+# --------------------------------------------------------------------------- #
+def _ancestors(parent_int, e):
+    """All proper ancestors of engine node `e` (root 0 excluded), walking the
+    meta's `{child: [parents]}` map. Empty when the map is absent."""
+    out, stack = set(), [e]
+    while stack:
+        c = stack.pop()
+        for p in (parent_int or {}).get(int(c), []):
+            p = int(p)
+            if p != 0 and p not in out:
+                out.add(p)
+                stack.append(p)
+    return out
+
+
+def _uniform_unit_vec(lams):
+    """The `_topic_unit_vec` of a perfectly FLAT topic: each domain's row is
+    uniform (1/V_m), concatenated and L2-normalized. Cosine against it is the
+    'flatness floor' — two starved topics agree because both are ~this."""
+    parts = [np.full(lam.shape[1], 1.0 / lam.shape[1]) for lam in lams]
+    v = np.concatenate(parts)
+    return v / np.linalg.norm(v)
+
+
+def _jaccard(a, b):
+    u = len(a | b)
+    return len(a & b) / u if u else float("nan")
+
+
+def build_collinearity(run_dir, profile_file, *, bundle_meta_path,
+                       readout_label="gated_pc", starved_frac=0.5,
+                       n_compare=40, seed=0):
+    """Does the profile prior make the credited nodes' boosted topics into
+    near-duplicates of each other and of the shared/ancestor topics — and does
+    the readout decoder then route around them? Insight 0087's `self-w ≈ 0`
+    read, quantified and given a control group.
+
+    Four pooled sections, credited vs uncredited (the latter split fed/starved
+    by the boosted topic's support_frac, the digest's flatness read):
+
+      profiles   pairwise Jaccard of the credited nodes' in-vocab positive
+                 profile token sets (max and median vs the other credited
+                 nodes): near-1 = the prior is pinning many nodes to the SAME
+                 words, so their topics cannot be distinct whatever the fit does.
+      topics     cosine of each node's boosted topic (all-domain E[beta], as in
+                 `sibling_redundancy`) vs: the other group members (max), the
+                 background topics (max), its own ancestors' topics (max), and
+                 the flat topic (the starvation floor — read the others against
+                 it; a starved topic is trivially ~1 to another starved topic).
+      decoder    from the readout heads (standardized W_std when the checkpoint
+                 is on disk, else raw V): the share of |w| a node's head puts on
+                 its OWN block vs the background vs its ancestors' blocks. A
+                 median own-share near 0 with a high ancestor/background share is
+                 the mechanical form of 'legible topic, unused topic'.
+      evidence   the boosted topic's lambda mass vs the prior floor (the
+                 minimum over all topics): a topic at the floor absorbed no
+                 data, so its theta cannot vary between documents and no decoder
+                 could load on it however legible it reads.
+
+    `n_compare` bounds the pairwise work (each node is compared against up to
+    that many sampled peers of its group, same for both groups). Model params
+    and counts of nodes only (egress-safe)."""
+    run_dir = Path(run_dir)
+    npz, manifest = load_run(run_dir)
+    meta = load_bundle_meta(bundle_meta_path) if bundle_meta_path else None
+    if not meta or "vocab_maps" not in meta:
+        raise SystemExit("[inspect_topics] --collinearity needs the bundle meta "
+                         "(INSPECT_KEY auto-discovery or --bundle-meta)")
+    vm0 = {str(k): int(v) for k, v in meta["vocab_maps"][0].items()}
+    prof = _profile_vocab_sets(profile_file, manifest, vm0)
+    credited = _credited_engine_ids(profile_file, manifest)
+    parent_int = ({int(c): [int(p) for p in ps]
+                   for c, ps in meta["parent_int"].items()}
+                  if "parent_int" in meta else None)
+    nodes, _ = node_order(manifest)
+    n_bg, tpn = int(manifest["n_bg"]), int(manifest["tpn"])
+    K = int(manifest["K"])
+    block = {e: list(range(n_bg + i * tpn, n_bg + (i + 1) * tpn))
+             for i, e in enumerate(nodes)}
+    lams = domain_lambdas(npz)
+    sh = topic_sharpness(lams)
+    floor = float(np.min(sh["evidence"])) if K else float("nan")
+    rng = np.random.default_rng(seed)
+
+    cred = sorted(e for e in nodes if e in credited)
+    uncred = [e for e in nodes if e not in credited]
+    fed = [e for e in uncred if sh["support_frac"][block[e][0]] <= starved_frac]
+    starved = [e for e in uncred if sh["support_frac"][block[e][0]] > starved_frac]
+    groups = [("credited", cred), ("uncredited fed", fed),
+              ("uncredited starved", starved)]
+
+    vec_cache = {}
+
+    def vec(t):
+        if t not in vec_cache:
+            vec_cache[t] = _topic_unit_vec(t, lams)
+        return vec_cache[t]
+
+    flat = _uniform_unit_vec(lams)
+    bg_vecs = [vec(t) for t in range(n_bg)]
+
+    def _med(vs):
+        vs = [v for v in vs if v == v]           # drop NaN
+        return float(np.median(vs)) if vs else float("nan")
+
+    heads = load_readout_heads(run_dir, readout_label)
+    W = np.abs(heads["W_load"]) if heads else None
+    degen = heads.get("degenerate") if heads else None
+
+    def group_stats(members):
+        peers_pool = list(members)
+        s = {"cos_peer": [], "cos_bg": [], "cos_anc": [], "cos_flat": [],
+             "own": [], "bg": [], "anc": [], "ev": [], "n_anc": 0, "n_dec": 0}
+        for e in members:
+            t = block[e][0]
+            v = vec(t)
+            others = [o for o in peers_pool if o != e]
+            if len(others) > n_compare:
+                others = list(rng.choice(others, size=n_compare, replace=False))
+            if others:
+                s["cos_peer"].append(max(float(v @ vec(block[o][0]))
+                                         for o in others))
+            if bg_vecs:
+                s["cos_bg"].append(max(float(v @ b) for b in bg_vecs))
+            anc = _ancestors(parent_int, e) if parent_int else set()
+            anc_topics = [tt for a in anc for tt in block.get(a, [])]
+            if anc_topics:
+                s["n_anc"] += 1
+                s["cos_anc"].append(max(float(v @ vec(tt)) for tt in anc_topics))
+            s["cos_flat"].append(float(v @ flat))
+            s["ev"].append(float(sh["evidence"][t]))
+            if W is not None and e < W.shape[0] and not (
+                    degen is not None and bool(degen[e])):
+                row = W[e]
+                tot = float(row.sum())
+                if tot > 0:
+                    s["n_dec"] += 1
+                    s["own"].append(float(row[block[e]].sum()) / tot)
+                    s["bg"].append(float(row[:n_bg].sum()) / tot)
+                    s["anc"].append(float(row[anc_topics].sum()) / tot
+                                    if anc_topics else 0.0)
+        return s
+
+    L = [f"# collinearity — {run_dir.name} · credited={len(cred)} "
+         f"uncredited fed={len(fed)} starved={len(starved)} (boosted topic "
+         f"support_frac > {starved_frac} = starved) · K={K} n_bg={n_bg} tpn={tpn}"]
+
+    # 1. profile overlap among credited nodes
+    pe = [e for e in cred if e in prof]
+    if len(pe) >= 2:
+        mx, md = [], []
+        for e in pe:
+            js = [_jaccard(prof[e], prof[o]) for o in pe if o != e]
+            mx.append(max(js))
+            md.append(float(np.median(js)))
+        counts = {}
+        for e in pe:
+            for idx in prof[e]:
+                counts[idx] = counts.get(idx, 0) + 1
+        shared = sum(1 for c in counts.values() if c >= max(2, len(pe) // 2))
+        L.append(f"profiles: {len(pe)} credited nodes with in-vocab tokens · "
+                 f"pairwise Jaccard vs other credited: median-of-max="
+                 f"{_med(mx):.2f} median-of-median={_med(md):.2f} · "
+                 f"{shared} tokens sit in >= half of the profiles · median "
+                 f"profile size {int(np.median([len(prof[e]) for e in pe]))}")
+    else:
+        L.append("profiles: fewer than 2 credited nodes map into this vocab")
+
+    # 2-4. per group
+    L.append("topics: max cosine of the boosted topic vs [group peers | "
+             "background | own ancestors] and vs the FLAT topic (floor)")
+    stats = {}
+    for name, members in groups:
+        if not members:
+            L.append(f"  {name}: n=0")
+            continue
+        s = group_stats(members)
+        stats[name] = s
+        L.append(f"  {name}: n={len(members)} peer={_med(s['cos_peer']):.2f} "
+                 f"bg={_med(s['cos_bg']):.2f} anc={_med(s['cos_anc']):.2f} "
+                 f"(n_anc={s['n_anc']}) flat={_med(s['cos_flat']):.2f}")
+    if W is not None:
+        L.append(f"decoder ({heads['src'].split(';')[0]}): median share of |w| "
+                 "on [own block | background | ancestors' blocks]; own<0.05 = "
+                 "head ignores its own topic")
+        for name, members in groups:
+            s = stats.get(name)
+            if not s or not s["own"]:
+                L.append(f"  {name}: no fittable heads")
+                continue
+            low = sum(1 for o in s["own"] if o < 0.05)
+            L.append(f"  {name}: n={s['n_dec']} own={_med(s['own']):.2f} "
+                     f"bg={_med(s['bg']):.2f} anc={_med(s['anc']):.2f} · "
+                     f"own<0.05: {low}/{s['n_dec']}")
+    else:
+        L.append("decoder: no readout heads/checkpoint on disk (run "
+                 "gated-pc-readout first)")
+    L.append(f"evidence: boosted-topic lambda mass, median per group vs the "
+             f"prior floor {floor:.1f} (min over all topics)")
+    for name, members in groups:
+        s = stats.get(name)
+        if not s:
+            continue
+        at_floor = sum(1 for v in s["ev"] if v <= 1.05 * floor)
+        L.append(f"  {name}: median={_med(s['ev']):.1f} · at floor (<=1.05x): "
+                 f"{at_floor}/{len(s['ev'])}")
+    return "\n".join(L) + "\n"
+
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1423,6 +1763,22 @@ def main():
                          "deltas on shared scored nodes, split by "
                          "--credited-file when given. (--profile-align) "
                          "baseline run for paired alignment scores.")
+    ap.add_argument("--strip-audit", action="store_true",
+                    help="Emit the LEAKAGE-STRIP audit: per domain, how many "
+                         "vocab dims the label DAG's node ids actually resolve "
+                         "to (what strip_mode could have removed). On the "
+                         "native-Mondo path node ids are Mondo numerics, so "
+                         "the OMOP-keyed strip is expected to hit ~nothing. "
+                         "Needs the bundle meta; --credited-file adds the "
+                         "profile-concept split. Suppresses other reports.")
+    ap.add_argument("--collinearity", action="store_true",
+                    help="Emit the credited-topic COLLINEARITY report: profile "
+                         "Jaccard among credited nodes, boosted-topic cosine vs "
+                         "peers/background/ancestors/flat, readout-decoder "
+                         "weight share on own/background/ancestor blocks, and "
+                         "topic evidence vs the prior floor — credited vs "
+                         "uncredited fed/starved. Needs --credited-file and "
+                         "the bundle meta. Suppresses other reports.")
     ap.add_argument("--profile-align", action="store_true",
                     help="Emit the ~10-line profile-ALIGNMENT scorecard "
                          "(insight 0084's legibility read, quantified): each "
@@ -1434,7 +1790,20 @@ def main():
     args = ap.parse_args()
 
     run_dir = resolve_run_dir(args.run_dir)
-    if args.profile_align:
+    if args.strip_audit:
+        report = build_strip_audit(run_dir, bundle_meta_path=args.bundle_meta,
+                                   profile_file=args.credited_file)
+        default_out = "strip_audit.md"
+    elif args.collinearity:
+        if not args.credited_file:
+            raise SystemExit("[inspect_topics] --collinearity needs "
+                             "--credited-file (the probe's --emit-eta TSV; "
+                             "CREDITED=1 via the Makefile)")
+        report = build_collinearity(
+            run_dir, args.credited_file, bundle_meta_path=args.bundle_meta,
+            readout_label=args.readout_label)
+        default_out = "collinearity.md"
+    elif args.profile_align:
         if not args.credited_file:
             raise SystemExit("[inspect_topics] --profile-align needs "
                              "--credited-file (the probe's --emit-eta TSV; "

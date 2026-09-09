@@ -552,3 +552,137 @@ def test_digest_without_profile_file_is_unchanged(tmp_path):
     rep = it.build_digest(run, bundle_meta_path=str(_align_meta(tmp_path)))
     assert "EMERGENT" not in rep
     assert "*" not in rep.replace("**", "")             # no markers anywhere
+
+
+# --------------------------------------------------------------------------- #
+# --strip-audit / --collinearity                                              #
+# --------------------------------------------------------------------------- #
+def _make_collin_run(tmp_path, name, *, dag_source="mondo_native",
+                     colliding_cid=None):
+    """4 nodes under root 0, n_bg=1, tpn=2, V0=10, V1=4. Engine 3 (cid 5020,
+    'parentC') is the parent of engines 1 and 2 (cids 4995/5010: the CREDITED
+    pair, both boosted topics tilted onto the SAME profile tokens {2,3});
+    engine 4 (cid 5030) is an uncredited FED node sharp on idx 7; parentC is
+    fed on idx 8. Readout heads: the credited pair load on parentC's block and
+    BG only (own share 0); the fed nodes load on their own block."""
+    d = tmp_path / name
+    d.mkdir()
+    n_bg, tpn, n_nodes, V = 1, 2, 4, 10
+    K = n_bg + tpn * n_nodes                      # 9
+    C = n_nodes + 1
+    lam0 = np.full((K, V), 0.01)
+    lam0[1, [2, 3]] += 0.002                      # eng1 boosted (t=1): faint profile tilt, starved, at the prior floor
+    lam0[3, [2, 3]] += 0.002                      # eng2 boosted (t=3): same tilt
+    lam0[5, 8] += 500.0                           # eng3 parentC boosted (t=5): fed
+    lam0[7, 7] += 500.0                           # eng4 boosted (t=7): fed
+    lam1 = np.full((K, 4), 0.01)
+    cids = {0: 1, 1: 4995, 2: 5010, 3: 5020, 4: 5030}
+    if colliding_cid is not None:
+        cids[4] = colliding_cid
+    np.savez(d / "gated_pc_result.npz", lambda_0=lam0, lambda_1=lam1,
+             alpha=np.full(K, 0.5), w_CK=np.zeros((C, K)), b_CK=np.zeros(C))
+    V_heads = np.zeros((C, K))
+    V_heads[1, [5, 6]] = 3.0; V_heads[1, 0] = 1.0     # eng1: ancestor + bg
+    V_heads[2, [5, 6]] = 3.0; V_heads[2, 0] = 1.0     # eng2: ancestor + bg
+    V_heads[3, 5] = 4.0                               # parentC: own
+    V_heads[4, 7] = 4.0                               # eng4: own
+    np.savez(d / "readout_heads_gated_pc.npz", V=V_heads, b_raw=np.zeros(C),
+             degenerate=np.zeros(C, dtype=bool))
+    int2cid = {str(e): c for e, c in cids.items()}
+    manifest = {
+        "K": K, "C": C, "n_bg": n_bg, "tpn": tpn,
+        "domain_names": ["condition", "drug"], "domain_vocab_sizes": [V, 4],
+        "strip_mode": "both", "window_mode": "lookback",
+        "corpus_manifest": {
+            "int2cid": int2cid, "dag_source": dag_source, "strip_mode": "both",
+            "window_mode": "lookback", "index_mode": "population",
+            "name_by_id": {"1": "root", "4995": "nodeA", "5010": "nodeB",
+                           "5020": "parentC", "5030": "nodeD",
+                           **({str(colliding_cid): "nodeD"}
+                              if colliding_cid is not None else {})}},
+    }
+    (d / "manifest.json").write_text(json.dumps(manifest))
+    meta = tmp_path / f"{name}_meta.json"
+    meta.write_text(json.dumps({
+        "int2cid": int2cid,
+        "vocab_maps": [{str(100 + i): i for i in range(V)},
+                       {str(900 + i): i for i in range(4)}],
+        "parent_int": {"1": [3], "2": [3], "3": [0], "4": [0]},
+    }))
+    return d, meta
+
+
+def test_strip_audit_native_ids_are_a_noop(tmp_path):
+    run, meta = _make_collin_run(tmp_path, "sa")
+    rep = it.build_strip_audit(run, bundle_meta_path=str(meta),
+                               profile_file=str(_align_tsv(tmp_path)))
+    assert "dag_source=mondo_native" in rep
+    assert "Mondo numerics" in rep
+    # no Mondo numeric (4995, 5010, ...) is an OMOP vocab key (100..109)
+    assert "domain 0 (condition): 0 of 10 vocab dims" in rep
+    assert "domain 1 (drug): 0 of 4 vocab dims" in rep
+    assert "NO-OP" in rep
+    # profile concepts 102,103,104 live in vocab 0; none equals a node id
+    assert "3 in the condition vocab (live), 0 equal to a node id" in rep
+
+
+def test_strip_audit_counts_a_colliding_dim(tmp_path):
+    # node cid 105 == vocab concept 105 (idx 5): one dim the strip WOULD drop
+    run, meta = _make_collin_run(tmp_path, "sb", colliding_cid=105)
+    rep = it.build_strip_audit(run, bundle_meta_path=str(meta))
+    assert "domain 0 (condition): 1 of 10 vocab dims" in rep
+    assert "NO-OP" in rep                       # 1 hit is still within the coincidence budget
+
+
+def test_strip_audit_anchor_path_reports_real_strip(tmp_path):
+    run, meta = _make_collin_run(tmp_path, "sc", dag_source="mondo",
+                                 colliding_cid=105)
+    rep = it.build_strip_audit(run, bundle_meta_path=str(meta))
+    assert "node ids are OMOP concept ids" in rep
+    assert "VERDICT: 1 DAG-node dims stripped" in rep
+    assert "NO-OP" not in rep
+
+
+def test_collinearity_credited_pair_is_collinear_and_decoded_elsewhere(tmp_path):
+    run, meta = _make_collin_run(tmp_path, "cl")
+    rep = it.build_collinearity(run, str(_align_tsv(tmp_path)),
+                                bundle_meta_path=str(meta))
+    # groups: 2 credited (A,B), 2 uncredited fed (parentC, D), 0 starved
+    assert "credited=2 uncredited fed=2 starved=0" in rep
+    # A and B share profile token idx 2 (A={2,3}, B={2,4}) -> Jaccard 1/3
+    assert "median-of-max=0.33" in rep
+    # identically tilted boosted topics: peer cosine 1.00 for the credited pair;
+    # the fed pair are sharp on DIFFERENT words: peer cosine ~0
+    top = [l for l in rep.splitlines() if " peer=" in l]
+    cred_top = [l for l in top if l.startswith("  credited:")][0]
+    fed_top = [l for l in top if l.startswith("  uncredited fed:")][0]
+    assert "peer=1.00" in cred_top
+    # the fed pair share only their FLAT drug-domain halves (cos 0.20), well
+    # below the credited pair's identical-content 1.00
+    assert "peer=0.20" in fed_top
+    # credited topics sit AT the flat floor (flat=1.00): their peer/bg/anc
+    # agreement is the starvation-floor artefact the flat column exists to
+    # expose (parentC's block has a flat 2nd topic -> anc=1.00), not content
+    assert "flat=1.00" in cred_top and "anc=1.00" in cred_top and "(n_anc=2)" in cred_top
+    assert "flat=0.53" in fed_top
+    # decoder: credited heads put 0 on their own block, 0.75 on the ancestor
+    # (parentC) block, 0.25 on BG; fed heads put 1.00 on their own block
+    dec = [l for l in rep.splitlines() if l.startswith("  ")]
+    cred_dec = [l for l in dec if l.startswith("  credited: n=2 own=")][0]
+    # |w| = 3+3 on parentC's block + 1 on BG0: anc 6/7, bg 1/7, own 0
+    assert "own=0.00" in cred_dec and "anc=0.86" in cred_dec and "bg=0.14" in cred_dec
+    assert "own<0.05: 2/2" in cred_dec
+    fed_dec = [l for l in dec if l.startswith("  uncredited fed: n=2 own=")][0]
+    assert "own=1.00" in fed_dec
+    # evidence: both credited boosted topics are at the prior floor
+    ev = [l for l in rep.splitlines() if "at floor" in l]
+    assert any(l.startswith("  credited:") and "2/2" in l for l in ev)
+    assert any(l.startswith("  uncredited fed:") and "0/2" in l for l in ev)
+
+
+def test_collinearity_without_heads_says_so(tmp_path):
+    run, meta = _make_collin_run(tmp_path, "cn")
+    (run / "readout_heads_gated_pc.npz").unlink()
+    rep = it.build_collinearity(run, str(_align_tsv(tmp_path)),
+                                bundle_meta_path=str(meta))
+    assert "decoder: no readout heads/checkpoint on disk" in rep
