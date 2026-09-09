@@ -1070,12 +1070,18 @@ def main(argv=None) -> int:
                 _cprint(f"[readout]   incident eligibility column: {_elig_col!r} "
                       f"({_pw.get('version')})", flush=True)
             _fmask, _mtag = None, None
+            if args.readout_theta_topm is not None:
+                # A CLI top-m override is a pricing experiment, not the record:
+                # tag its outputs so they never overwrite results_readout.json
+                # (or a mask run at the manifest's top-m).
+                _mtag = f"topm{int(args.readout_theta_topm)}"
             if args.readout_feature_mask != "all":
                 _fmask = build_readout_feature_mask(
                     args.readout_feature_mask, C, int(manifest["K"]),
                     int(manifest["n_bg"]), int(manifest["tpn"]),
                     parent_int=getattr(bundle, "parent_int", None))
-                _mtag = args.readout_feature_mask.replace("-", "_")
+                _mtag = (args.readout_feature_mask.replace("-", "_")
+                         + (f"_{_mtag}" if _mtag else ""))
                 _cprint(f"[readout]   FEATURE ABLATION mode={args.readout_feature_mask}: "
                       f"results -> results_readout_{_mtag}.json, heads -> "
                       f"readout_heads_gated_pc_{_mtag}.npz (record untouched)",
