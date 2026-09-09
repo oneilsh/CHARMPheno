@@ -165,7 +165,12 @@ def load_readout_heads(run_dir, label="gated_pc"):
         # low-variance (starved) topics, so V is the scoring decoder but NOT an
         # honest importance ranking. Prefer the checkpoint's standardized W_std
         # for the loadings display; fall back to V with a caveat if absent.
-        if ckpt_Wstd is not None and ckpt_Wstd.shape == V.shape:
+        if "W_std" in z.files and np.asarray(z["W_std"]).shape == V.shape:
+            # The sidecar carries the solve's own standardized weights (written
+            # since the W_std-in-heads change): the honest scale, no ckpt needed.
+            W_load, load_std = np.asarray(z["W_std"], dtype=np.float64), True
+            load_note = "standardized W_std from the heads sidecar"
+        elif ckpt_Wstd is not None and ckpt_Wstd.shape == V.shape:
             W_load, load_std = ckpt_Wstd, True
             load_note = f"standardized W_std from ckpt iter {ckpt_iter}"
         else:
@@ -1666,6 +1671,13 @@ def build_collinearity(run_dir, profile_file, *, bundle_meta_path,
         L.append(f"decoder ({heads['src'].split(';')[0]}): median share of |w| "
                  "on [own block | background | ancestors' blocks]; own<0.05 = "
                  "head ignores its own topic")
+        if not heads.get("standardized"):
+            L.append("  INCONCLUSIVE: only the raw-θ decoder V is on disk, and "
+                     "V = W_std/sd explodes on low-variance (starved) topics, so "
+                     "the |w| mass below is dominated by ~constant topics, not "
+                     "by what the head uses. Re-run the readout under the "
+                     "W_std-in-heads code (or keep the solver checkpoint) for "
+                     "an honest read.")
         for name, members in groups:
             s = stats.get(name)
             if not s or not s["own"]:

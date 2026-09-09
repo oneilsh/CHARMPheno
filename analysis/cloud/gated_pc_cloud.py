@@ -1795,7 +1795,7 @@ def _readout_heads_fingerprint(C, K, theta_topm, label, degenerate):
 
 
 def _write_readout_heads(run_dir, label, V, b_raw, const, degenerate, C, K,
-                         theta_topm):
+                         theta_topm, W_std=None):
     """Persist a COMPLETED readout fit's raw-θ scoring params to the run dir.
 
     Everything a scoring pass needs to turn a doc's θ into per-node proba —
@@ -1815,7 +1815,12 @@ def _write_readout_heads(run_dir, label, V, b_raw, const, degenerate, C, K,
     True on success.
 
     NOTE: pre-existing fits (e.g. 0110's) predate this file and lack it until a
-    readout is re-run under this code — `make gated-pc-readout ID=<n>` once."""
+    readout is re-run under this code — `make gated-pc-readout ID=<n>` once.
+
+    `W_std` (optional, (C,K)): the solve's STANDARDIZED weights, stored beside V
+    so the off-cluster loadings read (`inspect_topics`) has an honest importance
+    scale once the solver checkpoint is gone — V is W_std/sd and explodes on
+    low-variance (starved) topics. Additive; older sidecars simply lack it."""
     path = _readout_heads_path(run_dir, label)
     tmp = path.with_name(path.name + ".tmp")
     fp = _readout_heads_fingerprint(C, K, theta_topm, label, degenerate)
@@ -1824,10 +1829,13 @@ def _write_readout_heads(run_dir, label, V, b_raw, const, degenerate, C, K,
         with open(tmp, "wb") as fh:
             # File OBJECT, not a name: np.savez appends `.npz` to a str path,
             # which would make the tmp name (and thus the rename) a guess.
+            extra = ({"W_std": np.ascontiguousarray(W_std, dtype=np.float64)}
+                     if W_std is not None else {})
             np.savez(fh,
                      version=np.str_(_HEADS_VERSION),
                      label=np.str_(label or "arm"),
                      V=np.ascontiguousarray(V, dtype=np.float64),
+                     **extra,
                      b_raw=np.ascontiguousarray(b_raw, dtype=np.float64),
                      const=np.ascontiguousarray(const, dtype=np.float64),
                      degenerate=np.ascontiguousarray(degenerate, dtype=bool),
@@ -2137,6 +2145,10 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
           f"{int(info['stalled'][keep].sum())} stalled), max|grad|={gmax:.3g}, "
           f"max iters={int(info['n_iter'].max())}, "
           f"line-search failures={int(info['line_search_failures'])}", flush=True)
+    # The STANDARDIZED weights ride along for the heads sidecar: V = W_std/sd is
+    # the scoring decoder but inflates on low-variance (starved) topics, so any
+    # loadings/importance read off-cluster needs W_std (inspect_topics).
+    info["W_std"] = np.asarray(W_std, dtype=np.float64)
     return V, b_raw, const, degenerate, info
 
 
@@ -2208,7 +2220,7 @@ def distributed_score_arm(train_scored, test_scored, C, K, *, recall_targets,
         # fit and the calibration sub-fit (no checkpoint_dir) are correctly
         # excluded. Additive.
         _write_readout_heads(checkpoint_dir, label, V, b_raw, const, degenerate,
-                             C, K, theta_topm)
+                             C, K, theta_topm, W_std=_info.get("W_std"))
     proba, y_te, m_te, doc_keys, elig = _collect_lean_proba(
         test_scored, C, V, b_raw, degenerate=degenerate, const=const,
         score_col=topic_col, label_col=label_col, mask_col=mask_col, id_col=id_col,
@@ -4619,13 +4631,14 @@ def main() -> int:
                 # therefore do not exist; the conditional/detection axes that need
                 # them are skipped below on `proba_gp is None`.
                 _ck = Path(out) / "readout_ckpt_gated_pc.npz" if out else None
-                _V_gp, _b_gp, _const_gp, _deg_gp, _ = _fit_readout_heads(
+                _V_gp, _b_gp, _const_gp, _deg_gp, _info_gp = _fit_readout_heads(
                     train_scored, C, lay.K, label="gated_pc",
                     max_iter=args.readout_max_iter, theta_topm=theta_topm,
                     checkpoint_path=_ck, checkpoint_every=10)
                 if out:
                     _write_readout_heads(out, "gated_pc", _V_gp, _b_gp, _const_gp,
-                                         _deg_gp, C, lay.K, theta_topm)
+                                         _deg_gp, C, lay.K, theta_topm,
+                                         W_std=_info_gp.get("W_std"))
                 results["gated_pc"], _inc_dist = distributed_ranking_readout(
                     test_scored, C, _V_gp, _b_gp, recall_targets=rt, fdr_targets=ft,
                     min_count=args.min_label_count, elig_col=elig_col,

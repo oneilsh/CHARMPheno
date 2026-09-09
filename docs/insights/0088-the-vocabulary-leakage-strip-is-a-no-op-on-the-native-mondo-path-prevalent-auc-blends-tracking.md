@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-09
 **Topic:** leakage, evaluation, native-mondo, strip_mode, case-finding, exp 0110–0120
-**Status:** Established by code reading (mechanism below is unambiguous); the confirming count is the off-YARN `inspect_topics --strip-audit` on any 0110+ run (expected: ~0 dims per domain). Not yet run on the cluster.
+**Status:** CONFIRMED on exp 0120 (2026-09-09, `inspect_topics --strip-audit`, off-YARN): **0 of 5000 condition, 0 of 5000 measurement, 0 of 1601 drug vocab dims** match any of the 298 post-prune node ids. Mechanism by code reading below. Also measured there: of the 36 credited HPO profiles' 3,135 distinct positive concepts, only **834 (27%) are in the condition vocab** at all (the 5000-cap) — 2,301 are absent from the feature space, none is a node id.
 
 ## Observation
 
@@ -55,8 +55,7 @@ caveat ("the strip is only a partial backstop"); the backstop is in fact absent.
 
 ## What to do
 
-1. Run the audit on 0120 (off-YARN, seconds) to record the count:
-   `make -C analysis/cloud inspect-topics ID=120 CREDITED=1 INSPECT_ARGS="--strip-audit"`.
+1. ~~Run the audit on 0120~~ — done, see Status.
 2. Read 0113–0120 as prevalent/tracking numbers; the honest case-finding read needs the
    incident arm (`preindex_closure: true` + the R_d witness), which is exactly what the
    episode program's incident evaluation provides. Any "ceiling classifier" test (LR on codes)

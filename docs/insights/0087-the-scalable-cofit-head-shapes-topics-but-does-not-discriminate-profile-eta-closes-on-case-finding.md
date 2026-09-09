@@ -82,6 +82,38 @@ signal the macro AUC hides, and localizes it to where data already is.
   that static topic mixtures do not — the necessary precondition VOI has been
   waiting on.
 
+## Refinement (2026-09-09, `inspect_topics --collinearity` + `--strip-audit` on 0120) — two claims above are downgraded, and the mechanism is sharper
+
+- **Point 3's `self-w ≈ 0` is UNVERIFIED as stated.** The decoder view it came from
+  used the raw-θ heads `V = W_std/sd`, which explodes on low-variance (starved)
+  topics; with ~1000 starved topics at K=1498 the |w| mass is dominated by
+  ~constant features, so "own share 0.00" comes out for EVERY group (credited 28/28,
+  uncredited fed 100/100, starved 131/131) and says nothing about what the head
+  uses. The solver checkpoint (standardized W_std) was gone; the heads sidecar now
+  persists W_std so the next readout gives an honest read. Until then, do not cite
+  the routing claim.
+- **The credited topics are NOT near-duplicates of each other or of shared topics.**
+  Profile Jaccard among credited nodes: median-of-max 0.25, median-of-median 0.02, no
+  token in ≥ half the profiles. Boosted-topic cosine: peers 0.09, background 0.05,
+  ancestors 0.15, flat 0.06 (vs starved uncredited: 0.99/0.28/0.96/0.99). The
+  profile prior makes each credited topic SHARP and DISTINCT.
+- **They are sharp because of the prior, not the data — and that is the mechanism.**
+  Boosted-topic evidence (λ mass): credited median **65.2 vs prior floor 60.7**
+  (≈4.5 pseudo-counts of data above the prior; 0/36 flagged "at floor" only because
+  the prior itself is above the flat floor), against **1318.7** for uncredited fed
+  topics. Of the profiles' 3,135 mapped concepts only 834 are in the condition
+  vocab at all, and (stage-2 probe) 53% of a node's positives carry none of those.
+  So the aligned topic is a legible label with essentially no posterior evidence:
+  θ on it cannot vary across documents, and no decoder — the co-fit head or a fresh
+  LR — could ever load on it. "Legibility ≠ discriminability" resolves to
+  "prior-shaped ≠ data-shaped."
+- **The AUC numbers above are prevalent readouts under a no-op leakage strip
+  (insight 0088)**: the disease's own pre-index codes were in the features for
+  every node whose chart carried them before the random index. The credited <
+  uncredited gap (0.734 < 0.767) and the depth slide are therefore a TRACKING
+  gradient as much as a discriminability one. The honest verdict on PC needs the
+  incident cohort, which this arc never ran.
+
 ## Reproduce
 
 ```bash

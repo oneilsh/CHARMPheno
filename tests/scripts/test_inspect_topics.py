@@ -686,3 +686,29 @@ def test_collinearity_without_heads_says_so(tmp_path):
     rep = it.build_collinearity(run, str(_align_tsv(tmp_path)),
                                 bundle_meta_path=str(meta))
     assert "decoder: no readout heads/checkpoint on disk" in rep
+
+
+def test_heads_sidecar_w_std_is_preferred_over_raw_v(tmp_path):
+    _make_run(tmp_path)
+    _, manifest = it.load_run(tmp_path)
+    K, C = manifest["K"], manifest["C"]
+    V = np.zeros((C, K)); V[2, 3] = 900.0            # inflated raw coefficient
+    W = np.zeros((C, K)); W[2, 3] = 0.9              # honest standardized one
+    np.savez(tmp_path / "readout_heads_gated_pc.npz", V=V, b_raw=np.zeros(C),
+             degenerate=np.zeros(C, dtype=bool), W_std=W)
+    h = it.load_readout_heads(tmp_path)
+    assert h["standardized"] and "heads sidecar" in h["src"]
+    assert h["W_load"][2, 3] == 0.9
+
+
+def test_collinearity_flags_raw_v_decoder_as_inconclusive(tmp_path):
+    run, meta = _make_collin_run(tmp_path, "rv")
+    rep = it.build_collinearity(run, str(_align_tsv(tmp_path)),
+                                bundle_meta_path=str(meta))
+    assert "INCONCLUSIVE: only the raw-θ decoder V is on disk" in rep
+    z = np.load(run / "readout_heads_gated_pc.npz")
+    np.savez(run / "readout_heads_gated_pc.npz", V=z["V"], b_raw=z["b_raw"],
+             degenerate=z["degenerate"], W_std=z["V"])
+    rep = it.build_collinearity(run, str(_align_tsv(tmp_path)),
+                                bundle_meta_path=str(meta))
+    assert "INCONCLUSIVE" not in rep
