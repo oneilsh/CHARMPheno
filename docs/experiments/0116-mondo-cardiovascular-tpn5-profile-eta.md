@@ -250,3 +250,12 @@ insight
 [0084](../insights/0084-profile-eta-strength-1-tilts-the-floor-legibly-but-cannot-buy-theta.md);
 the pre-registered ladder continues at `profile_eta_strength: 3.0`
 ([0117](0117-mondo-cardiovascular-tpn5-profile-eta-s3.md)).
+
+## Readout re-analysis (2026-09-09, ridge 100; insights 0088 / 0089)
+
+Re-read on the cached bundle at `--readout-l2 100` (234/259 heads converged): macro AUC
+**0.8098** (AP 0.5507), detection 0.590. Paired vs 0113 at the same ridge, 193 shared nodes:
+median dAUC **−0.0008**, 91 up / 102 down; credited (14) +0.010 (9/5), uncredited −0.001. The
+primary non-inferiority read holds at a converged head, and the credited nodes now decode at
+median 0.847 vs uncredited 0.817 — the l2=1 "credited < uncredited" was the instrument.
+Caveats carried from 0088: prevalent, no leakage strip in force.

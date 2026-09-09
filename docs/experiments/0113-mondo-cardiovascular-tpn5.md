@@ -257,3 +257,10 @@ Cardiomyopathy-family matched median 0.876 vs rest 0.788. These are the RANDOM-i
 baseline numbers for the 0114 A/B — see insight 0083: random init beats spectral on
 every case-finding axis despite 72% starved topics, because a starved flat topic leaves
 θ on ancestors/background that the localized head reads as honest signal.
+
+## Readout re-analysis (2026-09-09, ridge 100; insights 0088 / 0089)
+
+Re-read on the cached bundle at `--readout-l2 100` (234/259 heads converged): macro AUC
+**0.8087** (AP 0.5451), detection 0.604 — vs 0.7813 at the record's l2=1. This is the arc's
+baseline at a converged head; 0116 pairs at −0.0008 and 0120 at −0.016 against it (0089).
+Caveats carried from 0088: prevalent, no leakage strip in force.

@@ -1,7 +1,7 @@
 ---
 id: 120
 slug: mondo-cardiovascular-tpn5-profile-eta-pc-lbfgs
-status: done  # readout verdict withdrawn 2026-09-09, see 'Readout re-analysis'
+status: done  # readout verdict re-established PAIRED at ridge 100 (2026-09-09), see 'Readout re-analysis'
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -350,8 +350,13 @@ Three findings that change how the Results above read, none of which touch the f
    blocks. Credited boosted topics are distinct (cos 0.09) but prior-shaped: λ mass 65 vs
    floor 61 vs fed 1319 (0087 refinement).
 
-Verdict status: **"PC closes on the merits" is withdrawn as unproven.** What stands is
-engineering (the head scales) and the mechanism (profile-eta builds data-empty topics).
-The discriminability question is re-opened on two corrected axes — a regularized head and
-the incident cohort — plus the own-block ablation.
+Verdict status (after the paired ridge-100 re-read of 0113/0116/0120, insight 0089):
+**"PC closes on the merits" is RE-ESTABLISHED, paired**: 0120 − 0116 median dAUC −0.015,
+144/193 nodes down, uniform across depth and across credited/uncredited (macro 0.7927 vs
+0.8098; profile-eta itself is a paired null, 0116 − 0113 = −0.0008). What changes is the
+magnitude (−0.017 mean, not −0.025) and the mechanism: not "hurt where aimed" (credited
+nodes decode at or above uncredited at a converged head) and not own-topic decoupling
+(`self-w ≈ 0` is universal) — the label term perturbs the shared representation. The
+own-block ablation and the incident cohort remain the two corrections before any number
+here leaves the arc.
 

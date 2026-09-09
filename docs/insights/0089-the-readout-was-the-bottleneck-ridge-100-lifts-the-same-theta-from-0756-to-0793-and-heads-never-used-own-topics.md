@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-09
 **Topic:** readout, evaluation, regularization, case-finding, gated-pc, exp 0120, insight ladder 0082–0087
-**Status:** Confirmed on exp 0120 (three re-readouts on the cached transform, same θ, same split, `gated-pc-readout --readout-l2`; and `inspect_topics --collinearity` on the standardized heads). Pooled figures only.
+**Status:** Confirmed on exp 0120 (three re-readouts on the cached transform, same θ, same split, `gated-pc-readout --readout-l2`; `inspect_topics --collinearity` on the standardized heads), then on the PAIRED re-read of 0113 / 0116 / 0120 at ridge 100 (section below). Pooled figures only.
 
 ## Observation
 
@@ -64,6 +64,53 @@ sit on unrelated nodes' blocks.
 - **Together with 0088 (the strip is a no-op; prevalent numbers blend tracking) the
   0113–0120 arc's numbers need two corrections before any of them is compared:** a
   regularized head, and the incident cohort.
+
+## The paired re-read at ridge 100 (2026-09-09, 0113 / 0116 / 0120 re-readouts + `readout-ab`)
+
+All three arc runs re-read on the cached bundle at `--readout-l2 100` (converged: 234 / 234 /
+226 of 259 heads), then paired per node on the 193 shared scored nodes:
+
+| run | what it adds | macro AUC @ l2=1 (record) | macro AUC @ l2=100 | detection AUC @100 |
+|---|---|--:|--:|--:|
+| 0113 | random init, no prior, no head | 0.7813 | **0.8087** | 0.604 |
+| 0116 | + profile-eta S=1.0 | 0.7804 | **0.8098** | 0.590 |
+| 0120 | + L-BFGS co-fit head (w_y=12, trust 0.03) | 0.7555 | **0.7927** | 0.492 |
+
+| paired (this − base) | all (n=193) median / mean | up/down | credited (n=14) | uncredited (n=179) |
+|---|---|---|---|---|
+| 0116 − 0113 | −0.0008 / +0.0012 | 91/102 | +0.0104 (9/5) | −0.0014 (82/97) |
+| 0120 − 0116 | **−0.0151 / −0.0172** | **48/144** | −0.0138 (2/12) | −0.0151 (46/132) |
+
+Three verdicts, now each on a converged, paired footing:
+
+1. **The instrument was worth +0.027 to +0.037 on every run** — the same size as, or larger
+   than, every delta the ladder reported. The record numbers (0.78 / 0.78 / 0.7555) were
+   under-converged, under-regularized readouts of representations that support 0.81 / 0.81 /
+   0.79.
+2. **Profile-eta is a clean AUC null, paired.** −0.0008 median, 91 up / 102 down; the credited
+   nodes +0.010 on n=14 (9 up / 5 down — not distinguishable from zero). 0084/0085's "the prior
+   is an interpretability lever, not an AUC lever" SURVIVES the correction; 0085's "and starts
+   costing by 3×" (0117) needs the same re-read before it is cited.
+3. **The co-fit head's cost is real, and UNIFORM.** −0.015 median, 144 of 193 nodes down,
+   every depth d2–d7 negative (−0.005 to −0.023), credited and uncredited alike. 0087's
+   verdict ("shaping does not discriminate and mildly hurts") is RE-ESTABLISHED on a paired
+   converged read, with a corrected magnitude (−0.017 mean, not −0.025) — but 0087's
+   mechanism story is not: it did not "hurt most where aimed" (credited −0.014 ≈ uncredited
+   −0.015), and `self-w ≈ 0` is universal, not the head's doing. A uniform cost across nodes
+   the localized head never pulled on says the label term perturbs the SHARED representation
+   the decoder actually reads (the PC θ-inference and sstats are global even when the head is
+   block-local). Detection AUC 0.604 → 0.492 under the head says the same thing louder.
+4. **"Credited < uncredited" flips.** At the converged head the profiled rare nodes decode at
+   least as well as the rest (0116: credited median 0.847 vs uncredited 0.817; 0120: 0.799 vs
+   0.796). 0087's "it hurt most where it was aimed" and the l2=1 depth slide (d2 0.816 → d7
+   0.729) were instrument artefacts; the converged depth slide is d2 0.829 → d7 0.773.
+
+So the arc's honest summary is: **profile-eta buys legibility at zero AUC cost; the co-fit
+head costs ~0.015 AUC uniformly and buys nothing; the representation itself supports ~0.81
+prevalent macro on this branch** — read through a decoder that ignores the per-node blocks,
+on a corpus with no leakage strip (0088). The own-block ablation and the incident cohort
+are the two remaining corrections before any number here is compared to anything outside
+the arc.
 
 ## What changed in the tree
 
