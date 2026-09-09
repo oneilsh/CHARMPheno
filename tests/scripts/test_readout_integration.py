@@ -940,3 +940,17 @@ def test_stdout_tee_batches_between_flush_intervals(tmp_path):
     tee.write("[driver] three\n")
     tee._flush_pending()
     assert log.read_text().endswith("[driver] three\n")
+
+
+def test_parse_args_readout_l2_default_is_the_record_and_is_forwarded(monkeypatch):
+    """`--readout-l2` defaults to the record's 1.0 (sklearn C=1.0 on the summed
+    loss) and reaches both head solves of `run_readout` as `l2=`."""
+    a = gpr.build_parser().parse_args(["--run-dir", "/tmp/r"])
+    assert a.readout_l2 == 1.0
+    b = gpr.build_parser().parse_args(["--run-dir", "/tmp/r", "--readout-l2", "1e4"])
+    assert b.readout_l2 == 1e4
+    import inspect
+    sig = inspect.signature(gpr.run_readout)
+    assert sig.parameters["readout_l2"].default == 1.0
+    src = inspect.getsource(gpr.run_readout)
+    assert src.count("l2=readout_l2") == 2        # distributed-eval solve + driver-eval arm

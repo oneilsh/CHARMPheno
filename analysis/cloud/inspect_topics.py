@@ -1616,6 +1616,7 @@ def build_collinearity(run_dir, profile_file, *, bundle_meta_path,
         peers_pool = list(members)
         s = {"cos_peer": [], "cos_bg": [], "cos_anc": [], "cos_flat": [],
              "own": [], "bg": [], "anc": [], "desc": [], "other": [], "top10": [],
+             "own_fed": [], "other_fed": [], "top10_fed": [], "n_fed_topics": 0,
              "top5_rel": {"own": 0, "anc": 0, "desc": 0, "bg": 0, "other": 0},
              "ev": [], "n_anc": 0, "n_dec": 0}
         for e in members:
@@ -1656,6 +1657,25 @@ def build_collinearity(run_dir, profile_file, *, bundle_meta_path,
                     s["other"].append(max(0.0, 1.0 - own_s - bg_s - anc_s - desc_s))
                     order = np.argsort(-row)
                     s["top10"].append(float(row[order[:10]].sum()) / tot)
+                    # FED-topics-only view: ~K starved topics are near-constant
+                    # and, standardized, become unit-variance NOISE features
+                    # that soak up |w| mass; restricting to topics with data
+                    # (support_frac <= starved_frac) asks where the weight
+                    # sits among features that could carry signal.
+                    fed_mask = sh["support_frac"] <= starved_frac
+                    fed_mask[:n_bg] = True
+                    rf = row * fed_mask
+                    tf = float(rf.sum())
+                    if tf > 0:
+                        s["n_fed_topics"] = int(fed_mask.sum())
+                        s["own_fed"].append(float(rf[block[e]].sum()) / tf)
+                        s["other_fed"].append(max(0.0, 1.0 - (
+                            float(rf[block[e]].sum()) + float(rf[:n_bg].sum())
+                            + (float(rf[anc_topics].sum()) if anc_topics else 0.0)
+                            + (float(rf[desc_topics].sum()) if desc_topics else 0.0)
+                        ) / tf))
+                        s["top10_fed"].append(
+                            float(np.sort(rf)[::-1][:10].sum()) / tf)
                     own_set, anc_set = set(block[e]), set(anc_topics)
                     desc_set = set(desc_topics)
                     for tt in order[:5]:
@@ -1728,6 +1748,10 @@ def build_collinearity(run_dir, profile_file, *, bundle_meta_path,
                      f"bg={_med(s['bg']):.2f} anc={_med(s['anc']):.2f} "
                      f"desc={_med(s['desc']):.2f} other={_med(s['other']):.2f} "
                      f"top10={_med(s['top10']):.2f} · own<0.05: {low}/{s['n_dec']}")
+            if s["own_fed"]:
+                L.append(f"    among FED topics only ({s['n_fed_topics']} of {K}): "
+                         f"own={_med(s['own_fed']):.2f} other={_med(s['other_fed']):.2f} "
+                         f"top10={_med(s['top10_fed']):.2f}")
             rel = s["top5_rel"]
             tot5 = max(1, sum(rel.values()))
             L.append("    top-5 loaded topics by relation: " + " ".join(
