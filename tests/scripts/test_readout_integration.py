@@ -986,6 +986,15 @@ def test_build_readout_feature_mask_modes_on_a_small_dag():
     assert (~do[2]).tolist() == [False] * 4 + [True, True] + [False] * 4
     dc = gpr.build_readout_feature_mask("drop-closure", C, K, n_bg, tpn, pi)
     assert dc[2].tolist() == [True, True, False, False, False, False, True, True, True, True]
+    # family: node 2's siblings under parent 1 = {3}; own [4,5] + sib [6,7] + bg
+    fam = gpr.build_readout_feature_mask("family", C, K, n_bg, tpn, pi)
+    assert fam[2].tolist() == [True, True, False, False, True, True, True, True, False, False]
+    # node 1's siblings under root = {4}
+    assert fam[1].tolist() == [True, True, True, True, False, False, False, False, True, True]
+    fc = gpr.build_readout_feature_mask("family-closure", C, K, n_bg, tpn, pi)
+    assert fc[2].tolist() == [True, True, True, True, True, True, True, True, False, False]
+    with pytest.raises(ValueError):
+        gpr.build_readout_feature_mask("family", C, K, n_bg, tpn)       # needs parent_int
     with pytest.raises(ValueError):
         gpr.build_readout_feature_mask("closure", C, K, n_bg, tpn)      # needs parent_int
     with pytest.raises(ValueError):

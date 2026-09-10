@@ -117,7 +117,7 @@ def resolve_readout_max_iter(cli_value, manifest):
 
 
 _FEATURE_MASK_MODES = ("all", "own", "own-bg", "bg", "closure", "drop-own",
-                       "drop-closure")
+                       "drop-closure", "family", "family-closure")
 
 
 def build_readout_feature_mask(mode, C, K, n_bg, tpn, parent_int=None):
@@ -134,9 +134,14 @@ def build_readout_feature_mask(mode, C, K, n_bg, tpn, parent_int=None):
                    gate's allowed set for a document attested at this node
       drop-own     everything EXCEPT the own block
       drop-closure everything except own + ancestors' blocks (background kept)
+      family       own + SIBLINGS' blocks (other children of the node's parents)
+                   + background — the sibling-contrast decoder: under the closure
+                   label mask a node's negatives are its siblings, so their own
+                   topics firing is the direct evidence AGAINST this node
+      family-closure  family + every ancestor's block
 
     `parent_int` (`{child: [parents]}` in engine ids) is needed by the closure
-    modes only. Pure numpy; unit-tested off-cluster."""
+    and family modes only. Pure numpy; unit-tested off-cluster."""
     if mode not in _FEATURE_MASK_MODES:
         raise ValueError(f"unknown feature mask mode {mode!r}; "
                          f"choose from {_FEATURE_MASK_MODES}")
@@ -148,8 +153,20 @@ def build_readout_feature_mask(mode, C, K, n_bg, tpn, parent_int=None):
              for i, e in enumerate(nodes)}
     parents = {int(c): [int(p) for p in ps]
                for c, ps in (parent_int or {}).items()}
-    if mode in ("closure", "drop-closure") and not parents:
+    needs_dag = ("closure", "drop-closure", "family", "family-closure")
+    if mode in needs_dag and not parents:
         raise ValueError(f"feature mask mode {mode!r} needs parent_int")
+    children = {}
+    for c, ps in parents.items():
+        for q in ps:
+            children.setdefault(q, []).append(c)
+
+    def siblings(e):
+        out = set()
+        for q in parents.get(e, []):
+            out.update(children.get(q, []))
+        out.discard(e)
+        return out
 
     def ancestors(e):
         out, stack = set(), [e]
@@ -163,7 +180,9 @@ def build_readout_feature_mask(mode, C, K, n_bg, tpn, parent_int=None):
     for e in range(C):
         own = block.get(e, [])
         anc = ([t for a in ancestors(e) for t in block.get(a, [])]
-               if mode in ("closure", "drop-closure") else [])
+               if mode in ("closure", "drop-closure", "family-closure") else [])
+        sib = ([t for a in siblings(e) for t in block.get(a, [])]
+               if mode in ("family", "family-closure") else [])
         if mode == "own":
             m[e, own] = True
         elif mode == "own-bg":
@@ -176,6 +195,10 @@ def build_readout_feature_mask(mode, C, K, n_bg, tpn, parent_int=None):
             m[e, :] = True; m[e, own] = False
         elif mode == "drop-closure":
             m[e, :] = True; m[e, own] = False; m[e, anc] = False
+        elif mode == "family":
+            m[e, own] = True; m[e, sib] = True; m[e, :n_bg] = True
+        elif mode == "family-closure":
+            m[e, own] = True; m[e, sib] = True; m[e, anc] = True; m[e, :n_bg] = True
     return m
 
 
