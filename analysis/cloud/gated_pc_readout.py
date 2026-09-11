@@ -54,12 +54,14 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import sys
 import os
 from pathlib import Path
 
 import numpy as np
 
-from _driver_common import _phase, configure_logging, make_spark_session
+from _driver_common import (_phase, configure_logging, install_stdout_tee,
+                            make_spark_session)
 from disk_telemetry import start_disk_telemetry
 from gated_pc_cloud import (
     _DRIVER_READOUT_MAX_C, _MONDO_DAG_SOURCES, _collect_head_proba,
@@ -924,7 +926,15 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging()
     run_dir = resolve_run_dir(args.run_dir)
+    # Every [readout]/[driver] line is teed to a durable readout_log.md IN THE
+    # RUN DIR (the workspace disk survives cluster restarts; ~ and /tmp do not).
+    # Appended, so a re-readout, an ablation sweep, and a ridge sweep all land
+    # in one chronological file beside the results they produced. Separate from
+    # the fit's driver_log.md, which `gated_pc_report --summary` digests.
+    install_stdout_tee(run_dir / "readout_log.md")
     _cprint(f"[readout]   run dir: {run_dir}", flush=True)
+    _argv = list(sys.argv[1:]) if argv is None else list(argv)
+    _cprint(f"[readout]   argv: {' '.join(_argv)}", flush=True)
     manifest = json.loads((run_dir / "manifest.json").read_text())
     C = int(manifest["C"])
     rt = [float(x) for x in args.recall_targets.split(",") if x]

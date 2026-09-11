@@ -1011,3 +1011,16 @@ def test_parse_args_readout_feature_mask_default_all():
     sig = inspect.signature(gpr.run_readout)
     assert sig.parameters["feature_mask"].default is None
     assert sig.parameters["mask_tag"].default is None
+
+
+def test_readout_main_tees_its_log_into_the_run_dir_before_scoring():
+    """The re-readout persists its own stdout to <run-dir>/readout_log.md, the
+    way the fit driver persists driver_log.md: ~ and /tmp die with the cluster,
+    the workspace runs dir does not. Installed right after the run dir is
+    resolved, before the manifest is even read."""
+    import inspect
+    src = inspect.getsource(gpr.main)
+    i_tee = src.index('install_stdout_tee(run_dir / "readout_log.md")')
+    i_manifest = src.index('manifest = json.loads')
+    i_score = src.index("run_readout(")
+    assert i_tee < i_manifest < i_score
