@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-11
 **Topic:** gated-pc, decoder, ablation, deflation, ancestor-capture, tpn, profile-eta, HPOA, case-finding
-**Status:** Confirmed on exp 0116 (CV branch, tpn=5, profile-eta S=1.0, `optimize_doc_concentration: true`), readout at ridge 100 with `--readout-feature-mask` (insight 0089's instrument), `--profile-support`, and the stage-2 probe re-run. Pooled figures and counts-of-nodes only.
+**Status:** Confirmed on exp 0116 (CV branch, tpn=5, profile-eta S=1.0; `optimize_doc_concentration: true` in front matter but INERT on the PC path — α fixed at 0.5, see point 4), readout at ridge 100 with `--readout-feature-mask` (insight 0089's instrument), `--profile-support`, and the stage-2 probe re-run. Pooled figures and counts-of-nodes only.
 
 ## Observation
 
@@ -48,11 +48,18 @@ Both separate the node from its siblings; neither is what HPO describes. The IDF
 in the prior made it worse: PAH's boosted topic is juvenile rheumatoid arthritis, leukemias
 and autism — the rare syndromic end of the profile, least likely in a pre-index chart.
 
-**4. The learned α was on the whole time.** Every 0113+ run carries
-`optimize_doc_concentration: true` (the per-node tied empirical-Bayes α of insight 0059).
-It did not prevent capture: empirical Bayes ratifies the posteriors it observes, and a
-child's α is estimated from documents whose θ already sits on the ancestors. A knob-free
-α tilt has therefore already been tested at this scale and is null on own-block identity.
+**4. CORRECTION (2026-09-11): the learned α was NEVER on in this arc — the flag was
+inert.** Every 0113+ front matter says `optimize_doc_concentration: true`, and the driver
+passes it to the estimator; but the Gated-PC estimator builds its gated engine and INJECTS
+it into `OnlinePCLDA`, which treats an injected engine's LDA kwargs as the engine's own —
+`optimize_alpha` never reached `GatedOnlineLDA`, and no frontier histogram was ever
+computed on that path (`mllib/topic/pc.py`, engine construction vs `OnlinePCLDA.__init__`).
+**α was fixed at `doc_concentration` = 0.5 on every gated PC fit, 0113–0120 included.**
+The per-node tied empirical-Bayes α (insight 0059) is therefore UNTESTED at this scale on
+this path, not null. Wired properly in the 0121 build (`set_alpha_policy` on the engine,
+histogram from the document RDD); the front-matter flag now does what it says, which
+means every fit after this date learns α unless it turns the flag off — read
+comparisons across that date with this in mind.
 
 ## Why it matters
 
@@ -60,12 +67,15 @@ child's α is estimated from documents whose θ already sits on the ancestors. A
   is.** Any compact decoder at whole-Mondo scale must be closure ∪ siblings, and will pay
   ~0.03 for it on this fit. That is the tractable design, and it is honest about what the
   gated model built.
-- **tpn=5 is the mechanism's enabler.** Spare topics on ancestors are where children's
-  words land. With one topic per node an ancestor has no spare capacity; a child's words
-  must go to the child block or the background. Whether that CONCENTRATES identity in own
-  blocks (good for legibility and for any head aimed at them) or dumps it in the background
-  is the decisive next test, and it is a cheap fit: exp 0121 (tpn=2, everything else 0113)
-  and its tpn=1 companion.
+- **The competition, not the budget, is the lever to test first.** Spare topics on
+  ancestors are where children's words land, but reducing tpn only relocates the same
+  competition (the user's read; agreed). The untested lever is the PRIOR ASYMMETRY that
+  seeds capture: an ancestor block is visible to every document under it, a leaf's to few,
+  so a uniform α hands the ancestor N_anc·α of prior mass and the leaf N_leaf·α. Exp 0121
+  inverts that with a derived, knob-free init (equal TOTAL prior pseudo-count per block,
+  α ∝ 1/N_docs_seeing_block) and then lets the empirical-Bayes α run; exp 0122 is the
+  uniform-init control that isolates the init from the optimizer (which, per point 4, has
+  never actually run on this path).
 - **Profile-eta closes with a sharper reason than 0084/0085 gave.** Not "the prior can't
   move θ" in the abstract: the prior's words are present but owned by the ancestors, and
   the residual the child can own is context. A phenotype prior aimed at own blocks in this

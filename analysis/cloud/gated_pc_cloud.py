@@ -2829,6 +2829,7 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
         anchorScope=str(getattr(args, "anchor_scope", "closure")),
         spectralTopoOrder=str(getattr(args, "spectral_topo_order", "forward")),
         countTransform=str(getattr(args, "count_transform", "none")),
+        alphaInit=str(getattr(args, "alpha_init", "uniform")),
         # Profile-eta word-side prior (plan WP-3): the four Params are the
         # provenance record (path + knobs); the boost itself is built
         # driver-side (profile_eta.build_profile_eta_boost, from the TSV +
@@ -3815,6 +3816,14 @@ def parse_args(argv=None):
                    help="deflation order: 'forward' (ancestors-first, node = increment "
                         "over ancestors) or 'reverse' (leaves-first, node = residual "
                         "after descendants).")
+    p.add_argument("--alpha-init", choices=["uniform", "equalized"], default="uniform",
+                   help="initial doc-concentration policy for the gated engine: "
+                        "'uniform' (doc_concentration everywhere) or 'equalized' "
+                        "(children-first: equal TOTAL prior pseudo-count per topic "
+                        "block across the corpus, alpha ∝ 1/N_docs_seeing_block, "
+                        "rescaled to the doc_concentration mean; exp 0121). With "
+                        "--optimize-doc-concentration the empirical-Bayes step takes "
+                        "over from it — an init, not a strength knob.")
     p.add_argument("--count-transform", choices=["none", "binary", "log1p"],
                    default="none",
                    help="per-token BOW count transform before seed+fit: 'none' (raw "
@@ -4536,6 +4545,7 @@ def main() -> int:
             # to 200 and the operator had to remember to pass --readout-max-iter 60.
             "readout_max_iter": int(args.readout_max_iter),
             "readout_l2": float(args.readout_l2),
+            "alpha_init": str(getattr(args, "alpha_init", "uniform")),
             "recall_targets": args._recall_targets,
             "fdr_targets": args._fdr_targets,
             "with_dag_head": args.with_dag_head,

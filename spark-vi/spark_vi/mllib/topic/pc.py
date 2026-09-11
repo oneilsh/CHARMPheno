@@ -462,6 +462,16 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
                               "or 'reverse' (leaves-first, each deflated against its "
                               "descendants)",
                               typeConverter=TypeConverters.toString)
+    alphaInit = Param(Params._dummy(), "alphaInit",
+                      "initial doc-concentration policy for the GATED engine: 'uniform' "
+                      "(docConcentration on every topic, the historical behaviour) or "
+                      "'equalized' (children-first: every topic block receives the same "
+                      "TOTAL prior pseudo-count across the training corpus, alpha_b ∝ "
+                      "1/N_b, rescaled to the docConcentration mean — "
+                      "spark_vi.models.topic.gated_lda.equalized_alpha). An init, not a "
+                      "strength: with optimizeDocConcentration the per-node empirical-"
+                      "Bayes step takes over from it.",
+                      typeConverter=TypeConverters.toString)
     countTransform = Param(Params._dummy(), "countTransform",
                            "per-token count transform applied to EVERY document's BOW "
                            "before the spectral seed AND the fit: 'none' (default; raw "
@@ -807,6 +817,7 @@ _ONLINE_PCLDA_DEFAULTS = dict(
     init="random", spectralMaxVocab=8000, spectralMethod="auto", spectralD=0,
     spectralMinDocFreq=5, anchorScope="closure", spectralTopoOrder="forward",
     countTransform="none",
+    alphaInit="uniform",
     profileEta="", profileEtaStrength=1.0, profileEtaTopics=1,
     profileEtaMinCoverage=0.0,
     featuresCols=[],   # domainBounds intentionally omitted: it uses isSet (no default)
@@ -875,6 +886,7 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         anchorScope: str = "closure",
         spectralTopoOrder: str = "forward",
         countTransform: str = "none",
+        alphaInit: str = "uniform",
         profileEta: str = "",
         profileEtaStrength: float = 1.0,
         profileEtaTopics: int = 1,
@@ -1146,6 +1158,28 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
                     "anchor_scope": self.getOrDefault("anchorScope"),
                     "topo_order": self.getOrDefault("spectralTopoOrder"),
                 }
+
+        # Alpha policy for the GATED engine (exp 0121; insight 0090 correction).
+        # The estimator's optimizeDocConcentration never reached an INJECTED topic
+        # engine — OnlinePCLDA treats an injected engine's LDA kwargs as the
+        # engine's own — so every gated PC fit before this ran with alpha FIXED at
+        # docConcentration while its front matter said otherwise. The per-node
+        # tied empirical-Bayes alpha (insight 0059) needs the static frontier
+        # histogram, which only exists once the document RDD does: compute it here
+        # (one countByValue over frontiers) and hand it to the engine together with
+        # the initial-alpha policy ('uniform' | 'equalized', see alphaInit). Inert
+        # on the ungated path.
+        _ainit = str(self.getOrDefault("alphaInit"))
+        _aopt = bool(self.getOrDefault("optimizeDocConcentration"))
+        if gated and (_aopt or _ainit != "uniform"):
+            _hist = {fr: int(n) for fr, n in
+                     pc_rdd.map(lambda d: d.frontier).countByValue().items()}
+            model_obj._lda.set_alpha_policy(_hist, optimize=_aopt, init=_ainit)
+            _a = model_obj._lda.alpha
+            print(f"[pc] gated alpha policy: init={_ainit} optimize={_aopt} "
+                  f"({len(_hist)} frontier groups; alpha mean={float(np.mean(_a)):.4f} "
+                  f"min={float(np.min(_a)):.4g} max={float(np.max(_a)):.4g})",
+                  flush=True)
 
         # lbfgs co-fit head: inject the driver-supplied distributed re-scoring
         # provider onto the engine before the fit. Without it the engine degrades

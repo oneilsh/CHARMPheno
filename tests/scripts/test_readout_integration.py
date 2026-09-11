@@ -1024,3 +1024,11 @@ def test_readout_main_tees_its_log_into_the_run_dir_before_scoring():
     i_manifest = src.index('manifest = json.loads')
     i_score = src.index("run_readout(")
     assert i_tee < i_manifest < i_score
+
+
+def test_parse_args_alpha_init_default_uniform():
+    a = gpc.parse_args(["--cdr", "x", "--billing", "y", "--out-dir", "/tmp/o"])
+    assert a.alpha_init == "uniform"
+    b = gpc.parse_args(["--cdr", "x", "--billing", "y", "--out-dir", "/tmp/o",
+                        "--alpha-init", "equalized"])
+    assert b.alpha_init == "equalized"
