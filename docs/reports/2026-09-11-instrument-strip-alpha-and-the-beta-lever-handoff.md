@@ -169,6 +169,13 @@ ridge 100). So the base does not need rethinking — the anchors do. §5.1 (HPO-
 anchors on the spectral base) is the build that addresses exactly this; §5.2–5.4 remain
 on the table but nothing in 0115 argues for them over §5.1. No build has started.
 
+**Next run (user's call, 2026-09-11): exp 0123 = 0115 with raw counts** (`count_transform:
+none`, otherwise verbatim). Splits 0115's −0.019 between the binary representation and
+spectral's anchor choice — 0114 was this config but lost its λ and was only read at ridge
+1. Read: full / own-bg / family-closure at ridge 100, paired AB vs 0115 AND 0113. The
+user's stated prior: binary and log1p both discard counts that carry meaning; if binary
+costs case-finding, fix the anchors at the anchor search, not by flattening the data.
+
 Also unfinished: 0121's own-bg ablation (low value now); kill stale `nohup` wrappers
 (`jobs -l`, `ps -ef | grep -c "[s]park-submit"`).
 
