@@ -232,7 +232,36 @@ reasonable default representation independent of the alignment question.
 
 macro AUC **0.7898** / AP 0.5263 over 193 nodes; detection 0.6042. vs 0113 (random init,
 same ridge): 0.8087 / 0.5451 / 0.6043. **Spectral's case-finding cost at a converged head is
-−0.019 macro** (0083's −0.025 was the ridge-1 instrument), detection unchanged. Own-bg and
-family-closure ablations + `readout-ab` vs 0113 pending in `<run>/sweep_log.md`; the own-bg
-number is the decisive one (0116, unfed leaves: 0.669) — see the 2026-09-11 handoff §4.
+−0.019 macro** (0083's −0.025 was the ridge-1 instrument), detection unchanged.
+
+**Paired per-node AB vs 0113 (`inspect-topics ID=115 COMPARE=113 --readout-auc`, no
+credited split — 0115 feeds no profile, so the credit line is not a contrast here):**
+193 shared scored nodes, median dAUC **−0.0202** mean −0.0189 (p25 −0.039, p75 −0.004),
+up/down **42/151**. By depth (median dAUC): d2 −0.018 (n=4), d3 −0.016 (34), d4 −0.020
+(51), d5 −0.027 (54), d6 −0.018 (37), d7 +0.001 (13). Per-depth medians 0.81/0.80/0.80/
+0.80/0.79/0.69 (d2..d7). The cost is **broad and uniform**, not a depth story: 78% of
+nodes are down, and the deep levels where spectral fed the blocks (d5–d6; starvation 1%
+vs 0113's 72%) lose as much as the shallow ones — feeding the block did not buy the head
+any case-finding at depth. The one flat level, d7, is 13 nodes.
+
+**Ablation ladder at ridge 100 (same masks as 0116 / insight 0090):**
+
+| head may load on | 0115 (spectral, fed) | 0116 (random, unfed) |
+|---|--:|--:|
+| own block + background (`own-bg`) | pending (in `<run>/sweep2_log.md`, `results_readout_own_bg.json`) | 0.669 |
+| + ancestors (`family-closure`) | **0.7851** (AP 0.516; det 0.536 / AP 0.689) | 0.777 |
+| everything | 0.7898 (det 0.604) | 0.810 |
+
+family-closure sits **0.0047 under the full head** — closer to full than 0116's
+(0.777 vs 0.810, −0.033): with fed blocks, ancestors+own carry nearly everything the full
+head reads, and the rest of the topic space adds little. Detection at 0.536 for a
+family-restricted head is expected (near chance: the family mask throws away the
+background topics that separate case from non-case). The own-bg number is the decisive
+one (does a FED leaf block carry its own node's signal?) — see the 2026-09-11 handoff §4.
+
+Both masked readouts ran under `timeout` on pre-`5205d0d` code and ended rc=124: the
+client-mode driver wedged in teardown AFTER its results were written (the sweep-chain
+hang fixed in `5205d0d`); the numbers are valid. `readout-ab` with its default
+`CREDITED=1` crashed on the profile-eta TSV (dies with the cluster); the plain
+`inspect-topics` AB above is the read.
 
