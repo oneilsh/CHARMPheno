@@ -45,6 +45,10 @@ re-read at ridge 100; the recommended next build is HPO-guided spectral anchors.
 - **The eta TSV** (`data/ontology/profile_eta_MONDO_0004995.tsv`) dies with the cluster;
   regenerate with `hpoa-profile-survey --emit-codes` then `hpoa-stage2-probe ID=116 --emit-eta`
   (bundle HIT needed) before any `CREDITED=1` read.
+- **Front-matter landmine:** `optimize_doc_concentration: true` in 0113–0120 was inert on
+  the PC path (α fixed 0.5) and is LIVE since 0121's `set_alpha_policy` wiring. Any new
+  experiment copied from those docs must set it `false` to reproduce their effective α, or
+  learned α collapses to the floor and re-starves depth (0091). Bit 0123's first launch.
 - **Egress floor** unchanged. **Cache-key landmine** unchanged (nothing hashed was edited).
 - **Instrument defaults changed this session** — read cross-date comparisons with care:
   `readout_l2` (default still 1.0 = the record; new experiments set 100 explicitly and

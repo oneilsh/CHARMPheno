@@ -86,7 +86,13 @@ lookback_days: 1825
 label_window_days: 365
 strip_mode: both
 n_bg: 8
-optimize_doc_concentration: true
+# LANDMINE (2026-09-11): 0113-0120 all say `optimize_doc_concentration: true` but the flag
+# was INERT on the PC path until 0121 wired it (pc.py `set_alpha_policy`); their alpha was
+# FIXED at 0.5. Copying that line now turns the empirical-Bayes alpha ON, and learned alpha
+# collapses to the floor and re-starves depth (insight 0091; 0121: 79% starved). The first
+# 0123 launch did exactly that (alpha mean 0.5 -> 0.21 by iter 19, background block 0.28
+# and falling ~2.5%/iter) and was killed. `false` here reproduces 0115's EFFECTIVE alpha.
+optimize_doc_concentration: false
 head_optimizer: newton
 head_newton_ridge: 0.05
 head_l2: 0.01
@@ -169,5 +175,11 @@ grep -E "gated_pc(_own_bg|_family_closure)? \(pc_topics_lr\): (macro|detection)|
 ```
 
 ## Run log
+
+**2026-09-11 — first launch killed at iter ~20.** Copied 0115's `optimize_doc_concentration:
+true`, which was inert for 0115 but live since 0121's wiring: learned tied alpha was
+collapsing (mean 0.5 → 0.21 by iter 19, background 0.28 → 0.27 → 0.27 per iter). Not a
+clean A/B; killed and relaunched with `optimize_doc_concentration: false` (alpha fixed
+0.5, 0115's effective setting).
 
 ## Results
