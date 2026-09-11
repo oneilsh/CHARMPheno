@@ -881,6 +881,8 @@ def build_gated_pc_args(
         ])
     if str(effective.get("count_transform", "none")) != "none":
         args.extend(["--count-transform", str(effective["count_transform"])])
+    if str(effective.get("alpha_init", "uniform")) != "uniform":
+        args.extend(["--alpha-init", str(effective["alpha_init"])])
     # Profile-eta word-side prior (plan 2026-09-06, exp 0116). Emitted ONLY when
     # `profile_eta` is set — the driver defaults to '' (no prior), so omitting
     # the flags keeps every existing gated_pc run's arg string byte-identical

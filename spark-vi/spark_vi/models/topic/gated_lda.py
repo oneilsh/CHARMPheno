@@ -250,6 +250,62 @@ def _resolve_eta_boost(eta_boost, K: int, boost_v: int, eta: float):
     return out
 
 
+
+def equalized_alpha(lay, frontier_histogram, mean_alpha):
+    """Children-first initial alpha: the SAME total prior pseudo-count for every
+    topic block across the training corpus.
+
+    Why this shape. Under the gate a document with frontier F may use the
+    background plus the blocks of every node in the closure of F. An ancestor's
+    block is therefore visible to every document under it — N_anc documents —
+    while a leaf's block is visible to N_leaf ≪ N_anc. With a uniform alpha the
+    corpus hands the ancestor N_anc·α of prior mass and the leaf N_leaf·α, and
+    that asymmetry is the seed of ancestor capture (insight 0090: a child's words
+    land in the parent's spare topics and the child's own block starves). Setting
+    α_b ∝ 1/N_b makes the TOTAL prior pseudo-count N_b·α_b equal for every block:
+    per document, the most specific block a document can see carries the most
+    prior weight. It is a derived quantity, not a strength knob — the only free
+    scale is fixed by rescaling so the mean over the K topics equals
+    ``mean_alpha`` (the constructor's alpha), and the empirical-Bayes step, when
+    on, takes over from here (this is an INIT that picks the basin — single fits
+    are multimodal in alpha, insight 0059 — not a fixed asymmetry).
+
+    N_b counts, from the static frontier histogram ``{frozenset(frontier):
+    n_docs}``, the documents whose allowed set contains block b; the background
+    is seen by every document. A block no training document can see (N_b = 0)
+    takes the background's alpha: it never enters a gated E-step during training,
+    and an inflated alpha on it would only pull θ toward an unused topic at
+    (ungated) transform time.
+
+    Returns a length-K float64 alpha vector laid out like `DagLayout` (background
+    first, then one tpn-wide block per node in `lay.nodes` order)."""
+    K, n_bg, tpn = int(lay.K), int(lay.n_bg), int(lay.tpn)
+    nodes = list(lay.nodes)
+    node_pos = {u: i for i, u in enumerate(nodes)}
+    n_seen = np.zeros(len(nodes), dtype=np.float64)
+    n_total = 0.0
+    for fr, n in dict(frontier_histogram).items():
+        n = float(n)
+        n_total += n
+        seen = set()
+        for k in lay.allowed_set(frozenset(int(x) for x in fr)):
+            if k >= n_bg:
+                seen.add((int(k) - n_bg) // tpn)
+        for i in seen:
+            n_seen[i] += n
+    if n_total <= 0:
+        return np.full(K, float(mean_alpha), dtype=np.float64)
+    raw_bg = 1.0 / n_total
+    raw = np.where(n_seen > 0, 1.0 / np.maximum(n_seen, 1.0), raw_bg)
+    # scale so the mean over all K topics equals mean_alpha
+    total = n_bg * raw_bg + tpn * float(raw.sum())
+    scale = float(mean_alpha) * K / total
+    alpha = np.empty(K, dtype=np.float64)
+    alpha[:n_bg] = raw_bg * scale
+    for i, u in enumerate(nodes):
+        alpha[lay.block[u]] = raw[i] * scale
+    return alpha
+
 class GatedOnlineLDA(OnlineLDA):
     def __init__(self, lay: DagLayout, vocab_size: int, *, init: str = "random",
                  optimize_alpha: bool = False,
@@ -919,6 +975,28 @@ class GatedOnlineLDA(OnlineLDA):
         if self.optimize_alpha:
             new_alpha = self._gated_alpha_update(alpha, target_stats, learning_rate)
         return {"lambda": new_lam, "alpha": new_alpha, "eta": eta}
+
+    def set_alpha_policy(self, frontier_histogram, *, optimize, init="uniform"):
+        """Attach the static frontier histogram and choose the INITIAL alpha after
+        construction — the seam the Gated-PC estimator uses, because the
+        histogram comes from the persisted document RDD, which exists only after
+        the engine has been built and injected.
+
+        ``optimize`` turns on the per-node tied empirical-Bayes alpha (the gated
+        Newton step, insight 0059); ``init`` is 'uniform' (keep the constructor's
+        alpha) or 'equalized' (`equalized_alpha`: children-first, same TOTAL prior
+        pseudo-count per block across the corpus, rescaled to the constructor
+        alpha's mean). Both are read by `initialize_global`, so call this before
+        the fit starts. Idempotent."""
+        hist = {frozenset(int(x) for x in fr): int(n)
+                for fr, n in dict(frontier_histogram).items()}
+        self._frontier_histogram = hist
+        self.optimize_alpha = bool(optimize)
+        if init == "equalized":
+            self.alpha = equalized_alpha(self.lay, hist, float(np.mean(self.alpha)))
+        elif init != "uniform":
+            raise ValueError(f"alpha init must be 'uniform' or 'equalized', got {init!r}")
+        return self
 
     def _gated_alpha_update(self, alpha_full, target_stats, learning_rate):
         """Contract α to tied space, take one damped gated Newton step, expand back.

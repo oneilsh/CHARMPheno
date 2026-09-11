@@ -470,3 +470,11 @@ def test_build_gated_pc_args_readout_l2_forwarded_only_when_set(monkeypatch):
     assert "--readout-l2" not in args
     args = mod.build_gated_pc_args({**_base_eff(), "readout_l2": 100}, "/out")
     assert args[args.index("--readout-l2") + 1] == "100"
+
+
+def test_build_gated_pc_args_alpha_init_forwarded_only_when_non_uniform(monkeypatch):
+    mod = _run_exp(monkeypatch)
+    args = mod.build_gated_pc_args(_base_eff(), "/out")
+    assert "--alpha-init" not in args
+    args = mod.build_gated_pc_args({**_base_eff(), "alpha_init": "equalized"}, "/out")
+    assert args[args.index("--alpha-init") + 1] == "equalized"
