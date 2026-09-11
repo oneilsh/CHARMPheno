@@ -151,3 +151,20 @@ from an equalized init of mean 0.5 with a ~1000× leaf/ancestor spread. The empi
 change from 0113's fixed 0.5: far sparser θ), NOT the children-first tilt. 0122 re-specced
 to hold the tilt (optimizer off). Readouts pending.
 
+### 2026-09-11 — digest vs 0113: the tilt left no mark; learned α feeds FEWER deep nodes
+
+| | 0113 (α 0.5 fixed) | 0121 (equalized init → learned ≈0.001) |
+|---|--:|--:|
+| starved topics (frac > 0.5) | 72% | 79% |
+| fed through depth | 3 | 2 |
+| depth-3 median evidence | 160 | 65.8 (floor 60.7) |
+| p90 evidence | 5.83e3 | 1.28e3 |
+
+The cliff moved UP a level. Mechanism: the ELBO's preferred α (~1/K) makes θ
+winner-take-all among a document's allowed topics, and the winners are the ancestor and
+background blocks. So ancestor capture is the marginal-likelihood OPTIMUM on this corpus,
+not an optimization failure — which is why every fit-side lever that lets the model
+optimize ratifies it. 0122 (equalized α HELD, optimizer off) is the first arm that
+overrides the objective; read its digest first. 0121's readouts now price "the
+ELBO-optimal α" on the decoder (all + own-bg only).
+
