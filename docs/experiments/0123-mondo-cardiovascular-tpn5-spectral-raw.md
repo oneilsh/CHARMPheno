@@ -139,18 +139,17 @@ is the three-way split in the front matter: tax gone / tax stays / worse.
 
 ## Run
 
-```bash
-cd ~/repos/CHARMPheno && git fetch origin claude/gated-conditional-voi && git checkout claude/gated-conditional-voi && git pull --ff-only
-make -C analysis/cloud exp ID=123
-```
-
-Then the readout sweep, chained, wrapper output into the run dir (the driver now
-hard-exits after each readout — `5205d0d` — so no `timeout` wrappers):
+One launch does everything: the fit-only fit, then the ridge-100 readout sweep, then the
+two paired ABs. The run dir name is fixed per experiment and the fit tolerates a
+pre-created dir, so the wrapper log can live there from the start. The readout driver
+hard-exits after each step (`5205d0d`), so no `timeout` wrappers.
 
 ```bash
 cd ~/repos/CHARMPheno && git fetch origin claude/gated-conditional-voi && git checkout claude/gated-conditional-voi && git pull --ff-only
-RUN=$(ls -d /home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs/0123-*)
+RUN=/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs/0123-mondo-cardiovascular-tpn5-spectral-raw
+mkdir -p "$RUN"
 nohup bash -c '
+  make -C analysis/cloud exp ID=123 || exit 1
   make -C analysis/cloud gated-pc-readout ID=123 GPR_ARGS="--readout-mode distributed --readout-l2 100"
   for m in own-bg family-closure; do
     make -C analysis/cloud gated-pc-readout ID=123 GPR_ARGS="--readout-mode distributed --readout-l2 100 --readout-feature-mask $m"
@@ -160,10 +159,13 @@ nohup bash -c '
 ' > "$RUN"/sweep_log.md 2>&1 &
 ```
 
+Progress: `tail -3 "$RUN"/sweep_log.md` (the fit also tees to `"$RUN"/driver_log.md`).
+Expect ~2h for seed + fit, then ~15 min per readout step.
+
 Pull the numbers with:
 
 ```bash
-grep -E "gated_pc(_own_bg|_family_closure)? \(pc_topics_lr\): (macro|detection)|^all: n=|^by depth" "$RUN"/sweep_log.md
+grep -E "gated_pc(_own_bg|_family_closure)? \(pc_topics_lr\): (macro|detection)|^all: n=|^by depth|starved" "$RUN"/sweep_log.md
 ```
 
 ## Run log
