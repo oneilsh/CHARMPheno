@@ -140,3 +140,14 @@ paired per-node deltas vs 0113 from `readout-ab`.
 ## Results
 
 *(pending)*
+
+## Run log
+
+### 2026-09-11 — fit landed (1274.7s, 50 iters, K=1498): the optimizer erased the init
+
+Learned α at iter 50: min 0.0010 (the Newton step's floor), max 0.0026, mean 0.0012 —
+from an equalized init of mean 0.5 with a ~1000× leaf/ancestor spread. The empirical-Bayes
+α walks to ~1/K within the run from any start, so this arm tests "learned α" (a large
+change from 0113's fixed 0.5: far sparser θ), NOT the children-first tilt. 0122 re-specced
+to hold the tilt (optimizer off). Readouts pending.
+
