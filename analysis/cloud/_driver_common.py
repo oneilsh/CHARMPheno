@@ -231,3 +231,19 @@ def install_stdout_tee(path) -> None:
     # Clean exits upload the tail batch; crashes lose at most flush_every_s of
     # lines — the acceptable cost of not mutation-storming the gcsfuse object.
     atexit.register(tee._flush_pending)
+
+
+def flush_stdout_tee() -> None:
+    """Force the durable tee's pending batch to disk NOW, if one is installed.
+
+    A client-mode `spark-submit` driver can fail to exit after `main` returns:
+    the SparkSession is stopped (its `__exit__` unregisters the YARN app), but
+    a lingering non-daemon py4j/gateway thread keeps the Python process alive,
+    which wedges any CHAINED sweep waiting for the process to exit before it
+    launches the next step. The drivers dodge that with `os._exit`, which is a
+    hard teardown that SKIPS the `atexit` above — so the run-dir log would lose
+    its tail batch (the very lines a reader copies out) unless the pending
+    batch is flushed first. Call this immediately before `os._exit`."""
+    import sys
+    if isinstance(sys.stdout, _StdoutTee):
+        sys.stdout._flush_pending()
