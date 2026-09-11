@@ -116,6 +116,13 @@ Cluster runs happen on the user's Dataproc cluster, checked out at
    - This applies ONLY to commands the user runs on the cluster. Commands run in
      the session's own working copy do not need it.
 
+   - **Nothing durable goes in `~` or `/tmp` on the cluster** — both are wiped
+     with every cluster restart. Logs, `nohup` output, and any file a human
+     will read later go in the RUN DIR under the workspace `runs/` disk (which
+     survives restarts). The fit driver tees to `<run>/driver_log.md` and the
+     re-readout to `<run>/readout_log.md` by themselves; a shell wrapper's own
+     output should be redirected there too (e.g. `> "$RUN"/sweep_log.md`).
+
 2. **Caches on HDFS are cluster-local and ephemeral.** Bundle, corpus, and
    sidecar caches default to `hdfs://…`, which dies with the cluster — a fresh
    cluster has empty HDFS and must rebuild. Expensive artifacts (the sidecar,
