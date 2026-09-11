@@ -145,8 +145,8 @@ on θ can't route a word to a flat β). Do not spend another fit on α.
 ## 4. In flight (the user has the command; results not yet seen)
 
 **0115 re-read at ridge 100** — spectral init + binary counts (fit-only, dir intact, never
-read out): full, `own-bg`, `family-closure`, then `readout-ab ID=115 BASE=113`. It is the
-first spectral number at a converged head. Decision tree:
+read out): full, `own-bg`, `family-closure`, then `readout-ab ID=115 BASE=113`. The full number landed: **0.7898 vs 0113's 0.8087 (−0.019), detection identical** — the
+middle of the tree; the own-bg ablation decides. Decision tree:
 - cost vs 0113 small (≲0.01) → spectral is the base; build HPO-guided anchors (§5.1).
 - cost real → guided anchors still fix the pregnancy-by-volume problem, but the base
   needs thought; weigh §5.2–5.4.
@@ -216,7 +216,7 @@ prior on child blocks (nothing to hold), tpn as a lever (relocates the competiti
 |---|---|--:|--:|--:|---|
 | 0113 | baseline (random, α 0.5 fixed) | 0.7813 | 0.8087 | 72% | fed through d3 |
 | 0114 | + spectral init | 0.7567 (unconverged) | — (λ overwritten) | 1% | 0082/0083 |
-| 0115 | + spectral + binary counts | never read | **in flight** | ? | dir intact |
+| 0115 | + spectral + binary counts | never read | **0.7898** (det 0.604) | 1%-ish (0114: 1%) | own-bg / family-closure / readout-ab pending |
 | 0116 | + profile-eta S=1 | 0.7804 | 0.8098 | 72% | ablation ladder §2.3 |
 | 0120 | + profile-eta + L-BFGS head | 0.7555 | 0.7927 | — | head −0.015 paired |
 | 0121 | equalized α init → learned | — | 0.7895 | 79% | cliff up a level |
