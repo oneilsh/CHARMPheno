@@ -1,7 +1,7 @@
 ---
 id: 121
 slug: mondo-cardiovascular-alpha-equalized
-status: planned
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -139,7 +139,10 @@ paired per-node deltas vs 0113 from `readout-ab`.
 
 ## Results
 
-*(pending)*
+**Readout at ridge 100 (from the manifest):** macro AUC **0.7895** / AP 0.5008 over 193 nodes
+(0113: 0.8087 / 0.5451; 0116: 0.8098), detection 0.420. Learned α (≈1/K, far sparser θ)
+costs ~0.02 on the full decoder and does not feed deep nodes (digest above). Own-bg ablation
+pending in the sweep log; whatever it says, the representation is worse on both axes.
 
 ## Run log
 

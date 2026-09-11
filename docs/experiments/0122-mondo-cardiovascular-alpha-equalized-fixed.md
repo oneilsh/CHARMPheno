@@ -1,7 +1,7 @@
 ---
 id: 122
 slug: mondo-cardiovascular-alpha-equalized-fixed
-status: planned
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -104,4 +104,10 @@ Same as 0121 with `ID=122` (see that doc); same bundle key.
 
 ## Results
 
-*(pending)*
+**Digest (fit-only, 50 iters, held equalized α):** 77% starved, fed through depth 2, depth-3
+median evidence 66.8 (floor 60.7), p90 1.51e3 — vs 0113 (uniform 0.5): 72% / depth 3 / 160 /
+5.83e3, and vs 0121 (learned ≈0.001): 79% / depth 2 / 65.8 / 1.28e3. **The held
+children-first tilt did not feed a single extra depth; it is indistinguishable from the
+collapsed learned α and slightly worse than uniform.** α is closed as a lever in both
+directions (insight 0091). Readout ladder not run — no reason to price a representation
+that did not move.
