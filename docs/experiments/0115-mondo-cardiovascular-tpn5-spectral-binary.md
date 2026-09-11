@@ -248,7 +248,7 @@ any case-finding at depth. The one flat level, d7, is 13 nodes.
 
 | head may load on | 0115 (spectral, fed) | 0116 (random, unfed) |
 |---|--:|--:|
-| own block + background (`own-bg`) | pending (in `<run>/sweep2_log.md`, `results_readout_own_bg.json`) | 0.669 |
+| own block + background (`own-bg`) | **0.7309** (AP 0.482; det 0.497, 39 constant node cols excluded) | 0.669 |
 | + ancestors (`family-closure`) | **0.7851** (AP 0.516; det 0.536 / AP 0.689) | 0.777 |
 | everything | 0.7898 (det 0.604) | 0.810 |
 
@@ -256,8 +256,28 @@ family-closure sits **0.0047 under the full head** — closer to full than 0116'
 (0.777 vs 0.810, −0.033): with fed blocks, ancestors+own carry nearly everything the full
 head reads, and the rest of the topic space adds little. Detection at 0.536 for a
 family-restricted head is expected (near chance: the family mask throws away the
-background topics that separate case from non-case). The own-bg number is the decisive
-one (does a FED leaf block carry its own node's signal?) — see the 2026-09-11 handoff §4.
+background topics that separate case from non-case).
+
+**own-bg = 0.7309 — a FED leaf block carries its own node's signal.** The decisive read
+(handoff §4): 0116's unfed own-bg was 0.669, and its gap to the full head was 0.141;
+here the gap is **0.059** (0.731 → 0.790). Own block + background recovers 93% of the
+full head's macro AUC when the block is fed, vs 83% unfed. The ladder increments say the
+same thing: ancestors add +0.054 here vs +0.108 in 0116, and "everything else" adds
++0.005 vs +0.033. When the block holds real content the head reads it from the block; it
+only borrows from ancestors and the rest of the space when the block is empty. **The
+gate's per-node block is the right unit when fed.** (own-bg detection at 0.497 with 39
+constant node columns: with only ~5 own topics + background, 39 of the 193 heads
+collapsed to a constant score in the detection matrix — expected of a starved-of-features
+ridge head at 100, not a signal; same near-chance shape as family-closure.)
+
+**Verdict.** Spectral feeding works as a mechanism (starvation 72% → 1%, and the fed
+blocks carry own signal), but the current anchors cost a uniform −0.019 on the full head
+across every depth. This run cannot separate that tax between anchor CHOICE (spectral
+picks by volume — the pregnancy-by-volume problem, insight 0082/0083) and binary counts
+(0114, spectral alone, was never read at ridge 100: λ overwritten). The base question the
+handoff's "cost real" branch raises is therefore narrower than it looked: the block unit
+and the feeding are sound; what is wrong is which words anchor which block. That is
+exactly what HPO-guided anchors (handoff §5.1) change and nothing else does.
 
 Both masked readouts ran under `timeout` on pre-`5205d0d` code and ended rc=124: the
 client-mode driver wedged in teardown AFTER its results were written (the sweep-chain
