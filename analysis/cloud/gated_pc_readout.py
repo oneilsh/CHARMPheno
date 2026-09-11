@@ -60,8 +60,8 @@ from pathlib import Path
 
 import numpy as np
 
-from _driver_common import (_phase, configure_logging, install_stdout_tee,
-                            make_spark_session)
+from _driver_common import (_phase, configure_logging, flush_stdout_tee,
+                            install_stdout_tee, make_spark_session)
 from disk_telemetry import start_disk_telemetry
 from gated_pc_cloud import (
     _DRIVER_READOUT_MAX_C, _MONDO_DAG_SOURCES, _collect_head_proba,
@@ -1158,4 +1158,14 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # A client-mode spark-submit driver can hang AFTER main() returns 0: the
+    # SparkSession is stopped (YARN app unregistered), but a lingering
+    # non-daemon py4j/gateway thread keeps the process alive. A single readout
+    # never noticed — its numbers were already in the log. A CHAINED sweep does:
+    # the wedged process never exits, so the next `make` in the loop never
+    # launches (obs 2026-09-11, a 0115 ablation sweep sat idle ~50 min on step
+    # 1 with results long since written). Force a hard exit, flushing the
+    # durable tee's tail batch first (os._exit skips the atexit that would).
+    _rc = main()
+    flush_stdout_tee()
+    os._exit(_rc)
