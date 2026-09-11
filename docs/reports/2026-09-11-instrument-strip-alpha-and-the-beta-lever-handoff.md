@@ -152,14 +152,22 @@ middle of the tree; the own-bg ablation decides. Since landed (exp 0115 doc, Rea
   as the shallow ones. That is the "cost real" branch below.
 - **family-closure:** 0.7851 (−0.005 vs full; 0116's was −0.033 vs its full) — with fed
   blocks, own+ancestors carry nearly the whole head.
-- **own-bg:** written (`<run>/sweep2_log.md`, `results_readout_own_bg.json`), not yet
-  read. Compare to 0116's 0.669.
-Decision tree:
+- **own-bg: 0.7309** (0116 unfed: 0.669). Gap to full 0.059 vs 0116's 0.141: a fed leaf
+  block carries its own node's signal — **the per-node block is the right unit when fed.**
+Decision tree (RESOLVED 2026-09-11, see exp 0115 Readout → Verdict):
 - cost vs 0113 small (≲0.01) → spectral is the base; build HPO-guided anchors (§5.1).
 - cost real → guided anchors still fix the pregnancy-by-volume problem, but the base
   needs thought; weigh §5.2–5.4.
 Either way, read own-bg: a FED leaf block that still carries no own signal would say the
 gate's per-node block is the wrong unit even when fed.
+
+**Resolution:** the "cost real" branch, but own-bg clears the block unit. The feeding
+mechanism is sound and the −0.019 tax is uniform across depth, i.e. a head-side cost of
+WHICH words spectral anchored (volume-driven, the pregnancy-by-volume problem), not of
+feeding per se (this run cannot split the tax from binary counts; 0114 was never read at
+ridge 100). So the base does not need rethinking — the anchors do. §5.1 (HPO-guided
+anchors on the spectral base) is the build that addresses exactly this; §5.2–5.4 remain
+on the table but nothing in 0115 argues for them over §5.1. No build has started.
 
 Also unfinished: 0121's own-bg ablation (low value now); kill stale `nohup` wrappers
 (`jobs -l`, `ps -ef | grep -c "[s]park-submit"`).
@@ -224,7 +232,7 @@ prior on child blocks (nothing to hold), tpn as a lever (relocates the competiti
 |---|---|--:|--:|--:|---|
 | 0113 | baseline (random, α 0.5 fixed) | 0.7813 | 0.8087 | 72% | fed through d3 |
 | 0114 | + spectral init | 0.7567 (unconverged) | — (λ overwritten) | 1% | 0082/0083 |
-| 0115 | + spectral + binary counts | never read | **0.7898** (det 0.604) | 1%-ish (0114: 1%) | AB vs 0113: median −0.020, 42/151, uniform by depth; family-closure 0.7851; own-bg pending |
+| 0115 | + spectral + binary counts | never read | **0.7898** (det 0.604) | 1%-ish (0114: 1%) | AB vs 0113: median −0.020, 42/151, uniform by depth; own-bg **0.7309** (0116: 0.669); family-closure 0.7851 |
 | 0116 | + profile-eta S=1 | 0.7804 | 0.8098 | 72% | ablation ladder §2.3 |
 | 0120 | + profile-eta + L-BFGS head | 0.7555 | 0.7927 | — | head −0.015 paired |
 | 0121 | equalized α init → learned | — | 0.7895 | 79% | cliff up a level |
