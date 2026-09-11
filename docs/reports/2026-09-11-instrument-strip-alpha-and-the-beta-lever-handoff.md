@@ -146,7 +146,15 @@ on θ can't route a word to a flat β). Do not spend another fit on α.
 
 **0115 re-read at ridge 100** — spectral init + binary counts (fit-only, dir intact, never
 read out): full, `own-bg`, `family-closure`, then `readout-ab ID=115 BASE=113`. The full number landed: **0.7898 vs 0113's 0.8087 (−0.019), detection identical** — the
-middle of the tree; the own-bg ablation decides. Decision tree:
+middle of the tree; the own-bg ablation decides. Since landed (exp 0115 doc, Readout):
+- **paired AB vs 0113:** median dAUC −0.020, up/down 42/151, uniform d2–d6 (−0.016 to
+  −0.027), d7 flat (n=13). The cost is real and broad — the fed deep levels lose as much
+  as the shallow ones. That is the "cost real" branch below.
+- **family-closure:** 0.7851 (−0.005 vs full; 0116's was −0.033 vs its full) — with fed
+  blocks, own+ancestors carry nearly the whole head.
+- **own-bg:** written (`<run>/sweep2_log.md`, `results_readout_own_bg.json`), not yet
+  read. Compare to 0116's 0.669.
+Decision tree:
 - cost vs 0113 small (≲0.01) → spectral is the base; build HPO-guided anchors (§5.1).
 - cost real → guided anchors still fix the pregnancy-by-volume problem, but the base
   needs thought; weigh §5.2–5.4.
@@ -216,7 +224,7 @@ prior on child blocks (nothing to hold), tpn as a lever (relocates the competiti
 |---|---|--:|--:|--:|---|
 | 0113 | baseline (random, α 0.5 fixed) | 0.7813 | 0.8087 | 72% | fed through d3 |
 | 0114 | + spectral init | 0.7567 (unconverged) | — (λ overwritten) | 1% | 0082/0083 |
-| 0115 | + spectral + binary counts | never read | **0.7898** (det 0.604) | 1%-ish (0114: 1%) | own-bg / family-closure / readout-ab pending |
+| 0115 | + spectral + binary counts | never read | **0.7898** (det 0.604) | 1%-ish (0114: 1%) | AB vs 0113: median −0.020, 42/151, uniform by depth; family-closure 0.7851; own-bg pending |
 | 0116 | + profile-eta S=1 | 0.7804 | 0.8098 | 72% | ablation ladder §2.3 |
 | 0120 | + profile-eta + L-BFGS head | 0.7555 | 0.7927 | — | head −0.015 paired |
 | 0121 | equalized α init → learned | — | 0.7895 | 79% | cliff up a level |
