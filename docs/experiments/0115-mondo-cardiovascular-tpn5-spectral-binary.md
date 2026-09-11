@@ -227,3 +227,12 @@ supervision / nuisance-deflation worth the compute.
 
 Secondary: binary presence did not hurt (cleaner redundancy, floor held), so it is a
 reasonable default representation independent of the alignment question.
+
+## Readout (2026-09-11, first ever; ridge 100, 257/259 heads converged)
+
+macro AUC **0.7898** / AP 0.5263 over 193 nodes; detection 0.6042. vs 0113 (random init,
+same ridge): 0.8087 / 0.5451 / 0.6043. **Spectral's case-finding cost at a converged head is
+−0.019 macro** (0083's −0.025 was the ridge-1 instrument), detection unchanged. Own-bg and
+family-closure ablations + `readout-ab` vs 0113 pending in `<run>/sweep_log.md`; the own-bg
+number is the decisive one (0116, unfed leaves: 0.669) — see the 2026-09-11 handoff §4.
+
