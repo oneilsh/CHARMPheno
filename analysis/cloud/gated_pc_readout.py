@@ -60,7 +60,7 @@ from pathlib import Path
 
 import numpy as np
 
-from _driver_common import (_phase, configure_logging, flush_stdout_tee,
+from _driver_common import (_phase, configure_logging, hard_exit,
                             install_stdout_tee, make_spark_session)
 from disk_telemetry import start_disk_telemetry
 from gated_pc_cloud import (
@@ -1158,14 +1158,18 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    # A client-mode spark-submit driver can hang AFTER main() returns 0: the
-    # SparkSession is stopped (YARN app unregistered), but a lingering
-    # non-daemon py4j/gateway thread keeps the process alive. A single readout
-    # never noticed — its numbers were already in the log. A CHAINED sweep does:
-    # the wedged process never exits, so the next `make` in the loop never
-    # launches (obs 2026-09-11, a 0115 ablation sweep sat idle ~50 min on step
-    # 1 with results long since written). Force a hard exit, flushing the
-    # durable tee's tail batch first (os._exit skips the atexit that would).
-    _rc = main()
-    flush_stdout_tee()
-    os._exit(_rc)
+    # A client-mode spark-submit driver does not end when main() returns: the
+    # SparkSubmit JVM that owns this process waits on a non-daemon Dataproc
+    # metrics-publisher thread stuck in a socket write (jstack, 2026-09-12),
+    # and a CHAINED sweep waits on the JVM. `hard_exit` flushes the durable
+    # log, takes the JVM down through the gateway, then os._exit's — see its
+    # docstring in _driver_common for the full diagnosis.
+    try:
+        _rc = main()
+    except SystemExit as _e:                      # argparse errors etc.
+        _rc = _e.code if isinstance(_e.code, int) else 1
+    except BaseException:                         # a crash must not wedge the sweep either
+        import traceback
+        traceback.print_exc()
+        _rc = 1
+    hard_exit(_rc)
