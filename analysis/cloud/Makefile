@@ -488,6 +488,15 @@ GPR_DOC_MIN_LENGTH ?=
 # stale 0076-multidomain-...); gated_pc_readout.resolve_run_dir globs it and keeps
 # only the dir with gated_pc_result.npz. Override with an exact dir via GPR_RUN_DIR.
 GPR_RUN_DIR        ?= $(RUNS_DIR)/$(shell printf '%04d' $(ID))-*
+# `spark.dataproc.listeners=` (empty) drops Dataproc's DataprocMetricsListener,
+# registered cluster-wide in spark-defaults. Its publisher pushes a usage payload
+# to the master's metrics collector on a NON-DAEMON pool thread that sat in
+# socketWrite0 for hours at app end inside the enclave (jstack 2026-09-12), which
+# kept the client-mode SparkSubmit JVM — the process `make` waits on — alive after
+# the Python driver had exited, wedging every chained sweep. gated_pc_readout's
+# `hard_exit` already takes the JVM down regardless; this removes the cause. Not
+# yet on the fit's submit (run_experiment.py): verify a readout starts clean with
+# it first, then port — the fit's JVM clears on its own after ~13 min.
 gated-pc-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	EXP_SPARK_CONF="$$(python3 $(REPO_ROOT)/scripts/run_experiment.py \
@@ -508,6 +517,7 @@ gated-pc-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	    --conf spark.python.worker.memory=2g \
 	    --conf spark.task.maxFailures=8 \
 	    --conf spark.excludeOnFailure.enabled=true \
+	    --conf spark.dataproc.listeners= \
 	    $$EXP_CONF_FLAGS \
 	    $(foreach kv,$(GPR_SPARK_CONF),--conf $(kv)) \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/distributed_readout.py,$(REPO_ROOT)/analysis/cloud/preindex_closure.py \
