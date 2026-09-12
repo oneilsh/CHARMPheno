@@ -51,8 +51,10 @@ re-read at ridge 100; the recommended next build is HPO-guided spectral anchors.
   The fit driver still exits by itself (its JVM eventually clears; ~13 min gap observed
   between the 0123 fit's app end and the next make) — port `hard_exit` there if a fit-led
   chain ever wedges. Orphaned readout JVMs from `timeout`-wrapped steps hold 8g heap
-  ceilings on the master: sweep them with
-  `ps -eo pid,etimes,cmd | awk '/[S]parkSubmit/ && /gated_pc_readout/ && $2>1800{print $1}' | xargs -r kill`.
+  ceilings on the master. `ps` output truncates the JVM's long command line (it missed a
+  live one on 2026-09-12); use `pgrep -f`, which reads the full cmdline:
+  `pgrep -f "SparkSubmit.*gated_pc_readout" | xargs -r ps -o pid,etimes --no-headers -p` to
+  list, then kill any whose Python driver is gone (no `python3.*gated_pc_readout` sibling).
 - **Run dir names are fixed per experiment** (`runs/NNNN-slug`). A re-run OVERWRITES —
   the MAX_ITER=2 bootstrap of 0114 destroyed its spectral λ. 0115's dir is intact.
 - **The eta TSV** (`data/ontology/profile_eta_MONDO_0004995.tsv`) dies with the cluster;
