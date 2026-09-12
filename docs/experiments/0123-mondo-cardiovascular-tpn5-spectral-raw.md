@@ -202,7 +202,22 @@ converged (186 gtol, 73 stalled; same shape as 0115's 257/259).
 Node-macro P@R0.5/0.8/0.9 = 0.517/0.395/0.357; R@FDR0.1/0.25/0.5 = 0.254/0.395/0.551
 (0115: 0.513/0.390/0.351; 0.247/0.373/0.528).
 
-**Read (full head only; ladder + paired ABs pending).** Putting the raw counts back
+**Ablation ladder at ridge 100 (own-bg landed; family-closure pending):**
+
+| head may load on | 0123 (spectral, raw) | 0115 (spectral, binary) | 0116 (random, unfed) |
+|---|--:|--:|--:|
+| own block + background (`own-bg`) | **0.7298** (AP 0.482; det 0.543) | 0.7309 (det 0.497) | 0.669 |
+| + ancestors (`family-closure`) | pending | 0.7851 | 0.777 |
+| everything | 0.7946 (det 0.630) | 0.7898 (det 0.604) | 0.810 |
+
+own-bg is unchanged by the count representation (0.730 vs 0.731): a fed block carries
+its own node's signal, and how the counts are represented has nothing to do with
+whether it does. The gap own-bg → full is 0.065 here vs 0.059 on binary — the raw counts'
++0.005 on the full head comes from OUTSIDE the own block (ancestors / the rest), and the
+detection gain shows up even at own-bg (0.543 vs 0.497). Nothing about the block-unit
+conclusion from 0115 changes.
+
+**Read (full head + own-bg; family-closure + paired ABs pending).** Putting the raw counts back
 recovers about a quarter of 0115's cost: macro +0.005 vs binary, and the spectral arm now
 sits −0.014 under 0113 instead of −0.019. So the split is roughly **0.005 to the count
 representation, 0.014 to spectral's anchor choice** — the "tax stays" outcome, mostly.
