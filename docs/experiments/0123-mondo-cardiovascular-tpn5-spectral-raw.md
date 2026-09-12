@@ -182,4 +182,32 @@ collapsing (mean 0.5 → 0.21 by iter 19, background 0.28 → 0.27 → 0.27 per 
 clean A/B; killed and relaunched with `optimize_doc_concentration: false` (alpha fixed
 0.5, 0115's effective setting).
 
+**2026-09-12 — relaunch (alpha fixed 0.5) fit + full readout at ridge 100.** 258/259 heads
+converged (186 gtol, 73 stalled; same shape as 0115's 257/259).
+
 ## Results
+
+**Full head, ridge 100 (pc_topics_lr, 193 nodes):**
+
+| | macro AUC | AP | detection AUC | det AP |
+|---|--:|--:|--:|--:|
+| 0113 random init, raw counts | 0.8087 | 0.5451 | 0.6043 | — |
+| 0115 spectral, binary | 0.7898 | 0.5263 | 0.6042 | 0.7272 |
+| **0123 spectral, raw** | **0.7946** | **0.5327** | **0.6299** | **0.7600** |
+
+Node-macro P@R0.5/0.8/0.9 = 0.517/0.395/0.357; R@FDR0.1/0.25/0.5 = 0.254/0.395/0.551
+(0115: 0.513/0.390/0.351; 0.247/0.373/0.528).
+
+**Read (full head only; ladder + paired ABs pending).** Putting the raw counts back
+recovers about a quarter of 0115's cost: macro +0.005 vs binary, and the spectral arm now
+sits −0.014 under 0113 instead of −0.019. So the split is roughly **0.005 to the count
+representation, 0.014 to spectral's anchor choice** — the "tax stays" outcome, mostly.
+Binary counts were not free, but the anchors are the larger piece and the lever.
+
+The bigger move is **detection: 0.604 → 0.630** (AP 0.727 → 0.760). Case-vs-background
+separation is where repetition carries meaning — a code recorded at every visit for years
+IS a different patient from one recorded once — and binarizing threw that away. This is
+the user's prior on binary ("some counts do have meaning") landing in the number. The
+per-node ranking, which contrasts a node against its siblings inside the parent's
+closure, cares much less (+0.005): siblings share the utilization stratum.
+
