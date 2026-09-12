@@ -182,7 +182,11 @@ collapsing (mean 0.5 → 0.21 by iter 19, background 0.28 → 0.27 → 0.27 per 
 clean A/B; killed and relaunched with `optimize_doc_concentration: false` (alpha fixed
 0.5, 0115's effective setting).
 
-**2026-09-12 — relaunch (alpha fixed 0.5) fit + full readout at ridge 100.** 258/259 heads
+**2026-09-12 — relaunch (alpha fixed 0.5) fit + full readout at ridge 100.** The chain
+then wedged on the full readout's SparkSubmit JVM (Dataproc metrics publisher, non-daemon
+thread in a socket write; see the handoff's cluster facts) — the readout numbers were
+already on disk. Remaining steps relaunched `timeout`-wrapped into `sweep2_log.md`
+(own-bg START 04:04); the driver-side fix (`hard_exit`) landed after that relaunch. 258/259 heads
 converged (186 gtol, 73 stalled; same shape as 0115's 257/259).
 
 ## Results

@@ -40,6 +40,19 @@ re-read at ridge 100; the recommended next build is HPO-guided spectral anchors.
   restarts ~daily; **`~` and `/tmp` are wiped** — logs go in the RUN DIR (`<run>/driver_log.md`
   from the fit, `<run>/readout_log.md` from re-readouts, wrapper output to `<run>/sweep_log.md`).
   RUNS_DIR = `/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs`.
+- **Chained readout sweeps wedged after each step's results were written** (0115 twice,
+  0123 once). ROOT CAUSE (jstack 2026-09-12): under client-mode spark-submit the Python
+  driver is a child of the SparkSubmit JVM and `make` waits on the JVM; Dataproc's
+  `DataprocMetricsPublisher` holds a non-daemon pool thread in `socketWrite0` for hours at
+  app end, so the JVM never exits. 5205d0d's Python-side `os._exit` was aimed at the wrong
+  process (the earlier "lingering py4j thread" story was a guess from a `ps -ef` whose
+  java line was truncated at terminal width). Fixed for real by `_driver_common.hard_exit`
+  (tee flush → `System.exit(rc)` via the gateway → `os._exit`), used by the readout guard.
+  The fit driver still exits by itself (its JVM eventually clears; ~13 min gap observed
+  between the 0123 fit's app end and the next make) — port `hard_exit` there if a fit-led
+  chain ever wedges. Orphaned readout JVMs from `timeout`-wrapped steps hold 8g heap
+  ceilings on the master: sweep them with
+  `ps -eo pid,etimes,cmd | awk '/[S]parkSubmit/ && /gated_pc_readout/ && $2>1800{print $1}' | xargs -r kill`.
 - **Run dir names are fixed per experiment** (`runs/NNNN-slug`). A re-run OVERWRITES —
   the MAX_ITER=2 bootstrap of 0114 destroyed its spectral λ. 0115's dir is intact.
 - **The eta TSV** (`data/ontology/profile_eta_MONDO_0004995.tsv`) dies with the cluster;

@@ -1032,3 +1032,37 @@ def test_parse_args_alpha_init_default_uniform():
     b = gpc.parse_args(["--cdr", "x", "--billing", "y", "--out-dir", "/tmp/o",
                         "--alpha-init", "equalized"])
     assert b.alpha_init == "equalized"
+
+
+def test_hard_exit_flushes_the_tee_then_os_exits_with_the_rc(monkeypatch, tmp_path):
+    """`hard_exit` must (1) land the tee's pending batch on disk BEFORE `os._exit`
+    (which skips atexit), (2) ask the JVM to `System.exit(rc)` through the py4j
+    gateway, and (3) `os._exit` with the same rc. The gateway is STUBBED: the
+    suite shares a live local-Spark JVM, and a real `System.exit` on it takes
+    the session fixture down with it (which is exactly what the helper is for
+    on the cluster — but not here)."""
+    import os
+    import sys
+    from types import SimpleNamespace
+    import pyspark
+    import _driver_common as dc
+
+    log = tmp_path / "readout_log.md"
+    real = sys.stdout
+    tee = dc._StdoutTee(log, real, flush_every_s=1e9)   # never time-flushes
+    monkeypatch.setattr(sys, "stdout", tee)
+    exits, jvm_exits = [], []
+    monkeypatch.setattr(os, "_exit", lambda rc: exits.append(rc))
+    monkeypatch.setattr(dc.time, "sleep", lambda s: None)
+    stub_gw = SimpleNamespace(jvm=SimpleNamespace(java=SimpleNamespace(
+        lang=SimpleNamespace(System=SimpleNamespace(exit=lambda rc: jvm_exits.append(rc))))))
+    monkeypatch.setattr(pyspark.SparkContext, "_gateway", stub_gw)
+    try:
+        print("last line of the readout")
+        assert not log.exists() or "last line" not in log.read_text()
+        dc.hard_exit(3)
+    finally:
+        monkeypatch.setattr(sys, "stdout", real)
+    assert jvm_exits == [3], "the JVM must be asked to exit with the driver's rc"
+    assert exits == [3]
+    assert "last line of the readout" in log.read_text()

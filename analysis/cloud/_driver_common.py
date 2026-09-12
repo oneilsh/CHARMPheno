@@ -236,14 +236,52 @@ def install_stdout_tee(path) -> None:
 def flush_stdout_tee() -> None:
     """Force the durable tee's pending batch to disk NOW, if one is installed.
 
-    A client-mode `spark-submit` driver can fail to exit after `main` returns:
-    the SparkSession is stopped (its `__exit__` unregisters the YARN app), but
-    a lingering non-daemon py4j/gateway thread keeps the Python process alive,
-    which wedges any CHAINED sweep waiting for the process to exit before it
-    launches the next step. The drivers dodge that with `os._exit`, which is a
-    hard teardown that SKIPS the `atexit` above — so the run-dir log would lose
-    its tail batch (the very lines a reader copies out) unless the pending
-    batch is flushed first. Call this immediately before `os._exit`."""
+    `hard_exit` below tears the process down with `os._exit`, which SKIPS the
+    `atexit` registered in `install_stdout_tee` — so the run-dir log would lose
+    its tail batch (the very lines a reader copies out) unless the pending batch
+    is flushed first. Call this immediately before any hard teardown."""
     import sys
     if isinstance(sys.stdout, _StdoutTee):
         sys.stdout._flush_pending()
+
+
+def hard_exit(rc: int) -> None:
+    """Exit a client-mode spark-submit driver for real: flush the durable tee,
+    take the spark-submit JVM down, then `os._exit`.
+
+    WHY (obs 2026-09-11/12, two wedged ablation sweeps, diagnosed by jstack):
+    under `spark-submit --deploy-mode client` the Python driver is a CHILD of
+    the SparkSubmit JVM, and `make` waits on the JVM, not on Python. After
+    `main` returns and the SparkSession is stopped (YARN app unregistered),
+    the JVM's `DestroyJavaVM` still waits for every non-daemon thread — and
+    Dataproc's `com.google.cloud.spark.performance.DataprocMetricsPublisher`
+    submits a usage payload on a non-daemon pool thread that sat in
+    `SocketOutputStream.socketWrite0` for 2h+ (the endpoint never answers from
+    inside the enclave). A single readout never notices — its numbers are in
+    the log — but a CHAINED sweep never advances, because the next `make` in
+    the loop waits for this one's JVM. A Python-side `os._exit` (5205d0d) was
+    necessary but NOT sufficient: it ends the child, not the parent.
+
+    So: (1) flush the tee (the run-dir copy is durable regardless of what
+    happens next); (2) flush Python's stdout and give the JVM's redirect
+    thread a moment to copy it to the wrapper's log; (3) ask the JVM to
+    `System.exit(rc)` through the still-open py4j gateway — it dies mid-call,
+    which surfaces as a py4j error here and is expected; (4) `os._exit(rc)`.
+    Off-cluster (no gateway) this is just flush + `os._exit`."""
+    import os
+    import sys
+    import time
+    flush_stdout_tee()
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
+    try:
+        from pyspark import SparkContext
+        gw = getattr(SparkContext, "_gateway", None)
+        if gw is not None:
+            time.sleep(1.0)     # let the JVM's stdout-redirect thread drain the pipe
+            gw.jvm.java.lang.System.exit(int(rc))
+    except Exception:
+        pass                    # the JVM is gone (expected) or never existed
+    os._exit(int(rc))
