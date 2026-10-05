@@ -156,6 +156,25 @@ def summarize_anchor_stats(anchor_stats, *, n_nodes: int, tpn: int) -> dict:
             "nodes_fallback_only": fallback}
 
 
+def anchor_dump_payload(anchor_stats, *, int2cid=None, name_by_id=None) -> dict:
+    """Per-node anchor record for `<run>/spectral_anchors.json`: {engine node id:
+    {"cid", "name", "anchors": [vocab idx...], "from_profile": [bool...],
+    "n_preferred", "n_eligible"}}. Vocab indices + ontology ids/names only —
+    no patient data, no counts of people. ``int2cid`` / ``name_by_id`` are the
+    bundle's maps; absent → ids only."""
+    out = {}
+    for u, v in sorted((anchor_stats or {}).items()):
+        anchors = list(v[4]) if len(v) > 4 else []
+        flags = list(v[5]) if len(v) > 5 else []
+        cid = (int2cid or {}).get(int(u))
+        out[str(int(u))] = {
+            "cid": cid, "name": (name_by_id or {}).get(cid) if cid is not None else None,
+            "anchors": [int(a) for a in anchors],
+            "from_profile": [bool(f) for f in flags],
+            "n_preferred": int(v[0]), "n_eligible": v[1]}
+    return out
+
+
 def _preferred_for(anchor_candidates, u):
     """The guided-anchor preferred set for node ``u`` (spec 2026-10-05), or None.
 
@@ -189,15 +208,21 @@ def _n_eligible(pref, df_w, min_doc_freq: int):
 
 def _record_anchor_stats(anchor_stats, u, pref, fg_anchors, *, n_eligible):
     """Append one node's guided-anchor tally to the caller's ``anchor_stats``
-    dict (``None`` → no-op). Values are COUNTS OF WORDS, never patients:
-    ``(n_preferred, n_eligible, n_from_preferred, n_anchors)``. ``n_eligible``
-    is None on the dense path (its floor is marginal-relative, not a df)."""
+    dict (``None`` → no-op). Values are COUNTS OF WORDS and WORD IDS, never
+    patients: ``(n_preferred, n_eligible, n_from_preferred, n_anchors,
+    anchors, from_preferred)`` where ``anchors`` is the tuple of chosen vocab
+    ids in selection order and ``from_preferred`` the parallel tuple of bools.
+    The ids are what lets a reader see WHICH word a block was anchored on
+    (exp 0124: a block's misplacement had to be inferred from its recovered
+    topic because the anchors were never written down). ``n_eligible`` is
+    None on the dense path (its floor is marginal-relative, not a df)."""
     if anchor_stats is None:
         return
     pref_set = set(int(i) for i in (pref or []))
+    anchors = tuple(int(a) for a in fg_anchors)
+    flags = tuple(a in pref_set for a in anchors)
     anchor_stats[int(u)] = (
-        len(pref_set), n_eligible,
-        sum(1 for a in fg_anchors if int(a) in pref_set), len(fg_anchors))
+        len(pref_set), n_eligible, int(sum(flags)), len(anchors), anchors, flags)
 
 
 def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = SPECTRAL_LAMBDA_SCALE,

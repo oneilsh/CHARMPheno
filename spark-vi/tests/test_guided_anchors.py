@@ -143,6 +143,9 @@ def test_dense_gated_init_threads_candidates_and_reports_counts():
     # guided: node 2 drew its one anchor from its preferred set; node 1 untouched
     assert stats_g[2][0] == 2 and stats_g[2][2] == 1 and stats_g[2][3] == 1
     assert stats_g[1] == stats_open[1]
+    # the tally carries the anchor ids and their from-preferred flags
+    assert stats_g[2][4][0] in (2, 3) and stats_g[2][5] == (True,)
+    assert stats_open[2][5] == (False,)
     b2_open, b2_g = lam_open[lay.block[2][0]], lam_g[lay.block[2][0]]
     assert np.allclose(lam_open[lay.block[1][0]], lam_g[lay.block[1][0]])
     # the guided block puts more of its mass on the phenotype tokens than the
@@ -198,3 +201,18 @@ def test_estimator_param_roundtrip_and_random_init_guard():
     assert est.getSpectralAnchorCandidates() == {}
     with pytest.raises(TypeError):
         est.setSpectralAnchorCandidates({3: [1.5]})              # float id must not truncate
+
+
+def test_anchor_dump_payload_is_ids_and_ontology_names_only():
+    from spark_vi.models.topic.gated_init import anchor_dump_payload
+    st = {2: (2, 1, 1, 1, (3,), (True,)), 1: (0, None, 0, 1, (0,), (False,))}
+    pay = anchor_dump_payload(st, int2cid={1: 4994, 2: 5021},
+                              name_by_id={4994: "cardiomyopathy", 5021: "dilated CM"})
+    assert list(pay) == ["1", "2"]                       # sorted by engine id
+    assert pay["2"] == {"cid": 5021, "name": "dilated CM", "anchors": [3],
+                        "from_profile": [True], "n_preferred": 2, "n_eligible": 1}
+    assert pay["1"]["name"] == "cardiomyopathy" and pay["1"]["from_profile"] == [False]
+    # no maps -> ids only, never a crash
+    assert anchor_dump_payload(st)["2"]["cid"] is None
+    # old 4-tuples (pre-ids) still summarize and dump without anchors
+    assert anchor_dump_payload({5: (1, 1, 0, 1)})["5"]["anchors"] == []
