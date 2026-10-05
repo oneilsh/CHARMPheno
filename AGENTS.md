@@ -131,7 +131,10 @@ Cluster runs happen on the user's Dataproc cluster, checked out at
    Do not guess bucket names — the Makefile defaults may be stale; ask the user
    for the current in-boundary staging bucket before writing to GCS.
    Right-size the master for the driver-collect wall of record runs, not just
-   the smoke.
+   the smoke: **n2-standard-8 master (32 GB) and 8+ non-preemptible n2-standard-4
+   workers** (handoff 2026-08-31). The default n2-standard-2 master (8 GB, ~2 GB
+   free after the cluster's own services) OOM-kills every bundle rebuild (exit
+   137) at any driver-heap setting — seen 2026-09-04 and again 2026-10-05.
 
 ## Read these before suggesting architectural changes
 

@@ -55,6 +55,10 @@ re-read at ridge 100; the recommended next build is HPO-guided spectral anchors.
   live one on 2026-09-12); use `pgrep -f`, which reads the full cmdline:
   `pgrep -f "SparkSubmit.*gated_pc_readout" | xargs -r ps -o pid,etimes --no-headers -p` to
   list, then kill any whose Python driver is gone (no `python3.*gated_pc_readout` sibling).
+- **Master size (2026-10-05):** a fresh cluster with the default n2-standard-2 master
+  (7 GB, 2 GB free) OOM-kills the readout's bundle rebuild (exit 137, `Killed`) at 8g AND
+  4g driver heap — the remedy is the cluster shape, not the heap: n2-standard-8 master.
+  The `inspect-topics` ABs need no Spark and ran fine on it (0123 ABs recorded).
 - **Run dir names are fixed per experiment** (`runs/NNNN-slug`). A re-run OVERWRITES —
   the MAX_ITER=2 bootstrap of 0114 destroyed its spectral λ. 0115's dir is intact.
 - **The eta TSV** (`data/ontology/profile_eta_MONDO_0004995.tsv`) dies with the cluster;
