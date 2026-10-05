@@ -55,6 +55,8 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.optimize import nnls
 
+from .spectral_init import _preferred_mask
+
 log = logging.getLogger(__name__)
 
 
@@ -310,7 +312,7 @@ _EPS = 1e-12
 
 def find_anchors_projected(QR: np.ndarray, p_w: np.ndarray, df_w: np.ndarray,
                            n: int, *, seed_rows=None,
-                           min_doc_freq: int = 5) -> list[int]:
+                           min_doc_freq: int = 5, preferred=None) -> list[int]:
     """Greedy pivoted-QR anchor selection on the p_w-row-normalized sketch.
 
     Same geometry as dense ``spectral_init.find_anchors`` (Gram–Schmidt: keep an
@@ -328,7 +330,12 @@ def find_anchors_projected(QR: np.ndarray, p_w: np.ndarray, df_w: np.ndarray,
     ``norm > EPS`` guard is kept (a degenerate all-zero row is never an anchor).
 
     ``seed_rows`` (optional word ids) pre-seeds the basis (deflation) WITHOUT
-    being returned. Returns the ``n`` newly chosen anchor ids in selection order.
+    being returned. ``preferred`` (optional word ids) runs the search in two
+    stages over one shared basis — guided picks from ``preferred`` ∩ the floor
+    first, then the open pool for the remainder; ``None``/empty is today's
+    single stage exactly. See dense ``spectral_init.find_anchors`` for why the
+    guide is a SET (a pool, not a weight). Returns the ``n`` newly chosen anchor
+    ids in selection order.
     """
     Qbar = _row_normalize_projected(QR, p_w)
     V = Qbar.shape[0]
@@ -356,20 +363,27 @@ def find_anchors_projected(QR: np.ndarray, p_w: np.ndarray, df_w: np.ndarray,
 
     anchors: list[int] = []
     chosen = set(int(s) for s in (seed_rows or []))
-    for _ in range(n):
-        best_id, best_res = -1, -np.inf
-        for i in range(V):
-            if i in chosen or norms[i] <= _EPS or not candidate[i]:
-                continue
-            r = project_out(Qbar[i])
-            res = r @ r
-            if res > best_res:
-                best_res, best_id = res, i
-        if best_id < 0:                           # exhausted distinct directions
-            break
-        anchors.append(best_id)
-        chosen.add(best_id)
-        add_to_basis(best_id)
+
+    def greedy(pool: np.ndarray, n_left: int) -> None:
+        for _ in range(n_left):
+            best_id, best_res = -1, -np.inf
+            for i in range(V):
+                if i in chosen or norms[i] <= _EPS or not pool[i]:
+                    continue
+                r = project_out(Qbar[i])
+                res = r @ r
+                if res > best_res:
+                    best_res, best_id = res, i
+            if best_id < 0:                       # exhausted distinct directions
+                break
+            anchors.append(best_id)
+            chosen.add(best_id)
+            add_to_basis(best_id)
+
+    pref = _preferred_mask(preferred, V)
+    if pref is not None:
+        greedy(candidate & pref, n)               # stage 1: guided picks
+    greedy(candidate, n - len(anchors))           # stage 2: the open search
     return anchors
 
 

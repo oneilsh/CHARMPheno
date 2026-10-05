@@ -1066,3 +1066,17 @@ def test_hard_exit_flushes_the_tee_then_os_exits_with_the_rc(monkeypatch, tmp_pa
     assert jvm_exits == [3], "the JVM must be asked to exit with the driver's rc"
     assert exits == [3]
     assert "last line of the readout" in log.read_text()
+
+
+def test_gated_pc_args_emit_spectral_anchor_profile_only_when_set(monkeypatch):
+    """`spectral_anchor_profile` (spec 2026-10-05) rides the profile-eta pattern:
+    absent -> nothing emitted (byte-identical argv for every older doc)."""
+    monkeypatch.setenv("WORKSPACE_CDR", "cdr")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
+    base = {"source_table": "t", "person_mod": 1, "vocab_size": 5000, "min_df": 20,
+            "min_patient_count": 20, "doc_min_length": 10, "max_iter": 100,
+            "min_n": 0, "n_bg": 8, "tpn": 1, "seed": 0, "init": "spectral"}
+    argv = rex.build_gated_pc_args(
+        dict(base, spectral_anchor_profile="data/ontology/profile_eta_X.tsv"), "/tmp/out")
+    assert argv[argv.index("--spectral-anchor-profile") + 1] == "data/ontology/profile_eta_X.tsv"
+    assert "--spectral-anchor-profile" not in rex.build_gated_pc_args(dict(base), "/tmp/out")

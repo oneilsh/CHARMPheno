@@ -2864,6 +2864,9 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
         pe_boost = getattr(args, "_profile_eta_boost", None)
         if pe_boost:
             est.setEtaBoost(pe_boost)
+        cands = getattr(args, "_anchor_candidates", None)
+        if cands:
+            est.setSpectralAnchorCandidates(cands)
     if closure_parents is not None:
         est.setClosureParents(closure_parents)
     return est
@@ -3837,6 +3840,16 @@ def parse_args(argv=None):
     # maps it into the bundle's condition vocab / gate blocks and hands the
     # built boost to the estimator. A fit parameter only: no bundle/corpus
     # cache-key change. Default '' preserves prior behavior byte-identically.
+    p.add_argument("--spectral-anchor-profile", default="", metavar="PATH",
+                   help="HPO-GUIDED spectral anchors (spec 2026-10-05): the "
+                        "profile-eta TSV (hpoa_stage2_probe --emit-eta) whose "
+                        "positive, weight>0, in-vocab condition concepts become "
+                        "each profiled node's PREFERRED anchor candidates; the "
+                        "spectral search picks from them first (those clearing "
+                        "the node's own df floor) and falls back to the open "
+                        "search for the rest. A set, not a weight — no "
+                        "strength knob. '' (default) = unguided. Requires "
+                        "--init spectral and the gate.")
     p.add_argument("--profile-eta", default="", metavar="PATH",
                    help="profile-eta prior TSV (hpoa_stage2_probe --emit-eta: "
                         "mondo_id, concept_id, weight, neg, coverage). Each "
@@ -4304,6 +4317,44 @@ def main() -> int:
                 args._profile_eta_stats = pe_stats
                 _cprint(f"[driver]   profile-eta: {json.dumps(pe_stats)}",
                       flush=True)
+        # Guided spectral anchors (spec 2026-10-05): the preferred candidate sets,
+        # built here from the SAME TSV + the same Mondo->engine-id and concept->
+        # vocab maps the profile-eta prior uses, handed to the estimator as ids
+        # (setSpectralAnchorCandidates). A fit parameter only: no cache-key
+        # change. EGRESS: stats are counts of nodes/concepts only.
+        args._anchor_candidates = None
+        if getattr(args, "spectral_anchor_profile", ""):
+            if str(getattr(args, "init", "random")) != "spectral":
+                raise ValueError("--spectral-anchor-profile requires --init spectral")
+            with _phase("build guided-anchor candidates (driver-side)"):
+                import pandas as pd
+                from mondo_native_dag import mondo_cid
+                from profile_eta import build_anchor_candidates
+                ap_df = pd.read_csv(args.spectral_anchor_profile, sep="\t")
+                ap_eid = {}
+                for mid in ap_df["mondo_id"].astype(str).unique():
+                    try:
+                        eid = bundle.cid2int.get(mondo_cid(mid))
+                    except ValueError:
+                        eid = None
+                    if eid is not None:
+                        ap_eid[str(mid)] = int(eid)
+                if not ap_eid:
+                    raise ValueError(
+                        "--spectral-anchor-profile: no profiled node maps into "
+                        "this run's label DAG — is this a mondo_native run?")
+                cands, ap_stats = build_anchor_candidates(
+                    ap_df, eid_by_mondo=ap_eid,
+                    vocab_index_by_concept=vocab_maps[0])
+                if not cands:
+                    raise ValueError(
+                        "--spectral-anchor-profile produced NO candidates (no "
+                        "node survived the rules) — the run's one change would "
+                        "be silently absent; check the TSV")
+                args._anchor_candidates = cands
+                args._anchor_candidate_stats = ap_stats
+                _cprint(f"[driver]   anchor guide: {json.dumps(ap_stats)}",
+                        flush=True)
         v_desc = " + ".join(f"{n}:{len(vm)}"
                             for n, vm in zip(args._domain_names, vocab_maps))
         _cprint(f"[driver]   corpus: V=({v_desc}) vocab, "
@@ -4615,6 +4666,15 @@ def main() -> int:
                 **args._profile_eta_stats,      # counts only (egress-safe)
             }
 
+        # Guided-anchor provenance (spec 2026-10-05): a FIT parameter recorded
+        # in the manifest; added ONLY when set (byte-identical manifests
+        # otherwise). The seed-side pooled counts are appended after the fit.
+        if getattr(args, "spectral_anchor_profile", ""):
+            manifest_fields["spectral_anchor_profile"] = {
+                "path": args.spectral_anchor_profile,
+                **args._anchor_candidate_stats,   # counts only (egress-safe)
+            }
+
         with _phase(f"gated_pc fit (weightY={args.weight_y}, K={lay.K})"):
             pc_est = _build_pc_estimator(args, weight_y=args.weight_y, gated=True)
             # Per-iteration hooks, composed: the optional eval logger (eval_every)
@@ -4673,6 +4733,11 @@ def main() -> int:
             finally:
                 if _cofit_provider.get("provider") is not None:
                     _cofit_provider["provider"].close()
+            # Seed-side guided-anchor counts (how many anchors the profiles actually
+            # decided), pooled by the estimator after the spectral seed.
+            _ag = getattr(pc_est, "_anchor_guide_summary", None)
+            if _ag and "spectral_anchor_profile" in manifest_fields:
+                manifest_fields["spectral_anchor_profile"]["seed"] = dict(_ag)
             # EARLY SAVE, before any readout work touches the cluster: the fit is
             # the hours-long unrepeatable half and the readout is where runs die,
             # so the model reaches durable storage the moment it exists. The final

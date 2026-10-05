@@ -206,8 +206,11 @@ Also unfinished: 0121's own-bg ablation (low value now); kill stale `nohup` wrap
 
 ## 5. Design options on the table (ranked by the user's stated priorities)
 
-1. **HPO-guided spectral anchors (recommended next build; spec drafted 2026-10-05:
-   `docs/superpowers/specs/2026-10-05-hpo-guided-spectral-anchors.md`, awaiting review).** Spectral = choose each
+1. **HPO-guided spectral anchors (BUILT 2026-10-05: spec
+   `docs/superpowers/specs/2026-10-05-hpo-guided-spectral-anchors.md`; engine kwarg
+   `preferred` / `anchor_candidates`, estimator Param `spectralAnchorCandidates`, driver
+   `--spectral-anchor-profile`, front matter `spectral_anchor_profile`; exp 0124 = 0123 +
+   the guide, awaiting the cluster run).** Spectral = choose each
    node's anchor words by co-occurrence geometry, then recover the block's β from data
    given the anchors (`gated_init.py`, `spectral_init.find_anchors`; scalable sketch path
    at gated_init ~600–750). Let the node's in-vocab HPO tokens that clear the co-occurrence
@@ -264,6 +267,8 @@ prior on child blocks (nothing to hold), tpn as a lever (relocates the competiti
 | 0113 | baseline (random, α 0.5 fixed) | 0.7813 | 0.8087 | 72% | fed through d3 |
 | 0114 | + spectral init | 0.7567 (unconverged) | — (λ overwritten) | 1% | 0082/0083 |
 | 0115 | + spectral + binary counts | never read | **0.7898** (det 0.604) | 1%-ish (0114: 1%) | AB vs 0113: median −0.020, 42/151, uniform by depth; own-bg **0.7309** (0116: 0.669); family-closure 0.7851 |
+| 0123 | + spectral, RAW counts (alpha fixed) | — | **0.7946** (det 0.630) | ~1% | AB vs 0115 +0.003 (111/82); vs 0113 −0.016 (48/145); own-bg 0.730; family-closure pending |
+| 0124 | + spectral, raw, HPO-GUIDED anchors | — | pending | — | the anchor-search fix; legibility read first |
 | 0116 | + profile-eta S=1 | 0.7804 | 0.8098 | 72% | ablation ladder §2.3 |
 | 0120 | + profile-eta + L-BFGS head | 0.7555 | 0.7927 | — | head −0.015 paired |
 | 0121 | equalized α init → learned | — | 0.7895 | 79% | cliff up a level |

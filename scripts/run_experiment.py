@@ -883,6 +883,12 @@ def build_gated_pc_args(
         args.extend(["--count-transform", str(effective["count_transform"])])
     if str(effective.get("alpha_init", "uniform")) != "uniform":
         args.extend(["--alpha-init", str(effective["alpha_init"])])
+    # HPO-guided spectral anchors (spec 2026-10-05, exp 0124). Emitted ONLY
+    # when set — the driver defaults to '' — so every existing arg string stays
+    # byte-identical. The value is a path to the profile-eta TSV.
+    if effective.get("spectral_anchor_profile"):
+        args.extend(["--spectral-anchor-profile",
+                     str(effective["spectral_anchor_profile"])])
     # Profile-eta word-side prior (plan 2026-09-06, exp 0116). Emitted ONLY when
     # `profile_eta` is set — the driver defaults to '' (no prior), so omitting
     # the flags keeps every existing gated_pc run's arg string byte-identical
