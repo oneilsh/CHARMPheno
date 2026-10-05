@@ -202,7 +202,8 @@ Also unfinished: 0121's own-bg ablation (low value now); kill stale `nohup` wrap
 
 ## 5. Design options on the table (ranked by the user's stated priorities)
 
-1. **HPO-guided spectral anchors (recommended next build).** Spectral = choose each
+1. **HPO-guided spectral anchors (recommended next build; spec drafted 2026-10-05:
+   `docs/superpowers/specs/2026-10-05-hpo-guided-spectral-anchors.md`, awaiting review).** Spectral = choose each
    node's anchor words by co-occurrence geometry, then recover the block's β from data
    given the anchors (`gated_init.py`, `spectral_init.find_anchors`; scalable sketch path
    at gated_init ~600–750). Let the node's in-vocab HPO tokens that clear the co-occurrence
