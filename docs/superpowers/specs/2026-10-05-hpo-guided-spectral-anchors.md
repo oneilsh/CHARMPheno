@@ -54,6 +54,21 @@ For node u, the preferred set P_u is the set of condition-domain vocabulary rows
 `coverage` and the magnitude of `weight` are NOT used: using them would be a strength
 knob. The preferred set is a set.
 
+**Which nodes have a set.** The emitted table is the `--rollup` one (report 2026-09-06,
+stage 2b): a label node's profile is the union of its Mondo-descendants' annotations,
+frequency-max-pooled, so an internal node without direct HPO terms inherits from BELOW.
+On the CV branch that reaches 132 of 299 label nodes; the other 167 have no annotated
+descendant and get today's open search unchanged. Profiles are deliberately NOT rolled
+DOWN from parent to child: unannotated siblings would then share one preferred set,
+anchor on the same words, and their blocks would converge — the worst case for the
+sibling-contrast readout. If the 0124 digest shows unprofiled children of profiled
+parents still misanchored, the derived fallback to try is "parent's set minus the
+parent's chosen anchors", recorded here so it is not reinvented as a knob.
+
+**Deflation order** stays `forward` (ancestors first), as in 0115/0123: the parent takes
+its profile terms, the child takes its own minus what the parent claimed. `reverse`
+(leaves first, spec 2026-07-23) remains an orthogonal knob for a later A/B.
+
 ## The search (what changes in `find_anchors_projected`)
 
 Today (per node u, scalable path, `gated_init.scalable_block_aligned_lambda`):
