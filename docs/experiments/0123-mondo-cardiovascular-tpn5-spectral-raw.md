@@ -1,7 +1,7 @@
 ---
 id: 123
 slug: mondo-cardiovascular-tpn5-spectral-raw
-status: pending
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -176,6 +176,11 @@ grep -E "gated_pc(_own_bg|_family_closure)? \(pc_topics_lr\): (macro|detection)|
 
 ## Run log
 
+**2026-10-05 — closeout complete on the n2-standard-8 cluster.** family-closure readout
+rc=0 (bundle rebuilt first); the two ABs rerun with the bundle present for by-depth rows;
+the profile-eta table for 0124 emitted (132 nodes, 3798 concepts, 99,517 rows). Status →
+done.
+
 **2026-10-05 — closeout on a fresh cluster (empty HDFS).** The family-closure readout
 began the bundle rebuild and was host-OOM-killed (exit 137) ~3 min in: the 8g driver
 JVM + the rebuild's Python-side download on this master — the Makefile's documented
@@ -215,7 +220,7 @@ Node-macro P@R0.5/0.8/0.9 = 0.517/0.395/0.357; R@FDR0.1/0.25/0.5 = 0.254/0.395/0
 | head may load on | 0123 (spectral, raw) | 0115 (spectral, binary) | 0116 (random, unfed) |
 |---|--:|--:|--:|
 | own block + background (`own-bg`) | **0.7298** (AP 0.482; det 0.543) | 0.7309 (det 0.497) | 0.669 |
-| + ancestors (`family-closure`) | pending | 0.7851 | 0.777 |
+| + ancestors (`family-closure`) | **0.7869** (AP 0.519; det 0.598 / AP 0.745) | 0.7851 (det 0.536) | 0.777 |
 | everything | 0.7946 (det 0.630) | 0.7898 (det 0.604) | 0.810 |
 
 own-bg is unchanged by the count representation (0.730 vs 0.731): a fed block carries
@@ -225,20 +230,36 @@ whether it does. The gap own-bg → full is 0.065 here vs 0.059 on binary — th
 detection gain shows up even at own-bg (0.543 vs 0.497). Nothing about the block-unit
 conclusion from 0115 changes.
 
-**Paired per-node ABs (`inspect-topics --readout-auc`, 193 shared scored nodes; by-depth
-rows to be added from `sweep3_log.md`):**
+**Paired per-node ABs (`inspect-topics --readout-auc`, 193 shared scored nodes):**
 
 | this run minus | median dAUC | mean | up / down |
 |---|--:|--:|--:|
 | 0115 (spectral, binary) | **+0.0028** | +0.0048 | 111 / 82 |
 | 0113 (random init, raw) | **−0.0155** | −0.0141 | 48 / 145 |
 
-Raw vs binary is a small, broad positive (p25 −0.007, p75 +0.013): most nodes move a
-little, in the expected direction. The remaining spectral-vs-random loss is −0.016 at the
-median with three quarters of nodes down — the same uniform shape 0115 showed, a bit
-smaller. The anchors, not the counts, are the tax.
+By depth (median dAUC):
 
-**Read (full head + own-bg + paired ABs; family-closure pending).** Putting the raw counts back
+| depth (n) | d2 (4) | d3 (34) | d4 (51) | d5 (54) | d6 (37) | d7 (13) |
+|---|--:|--:|--:|--:|--:|--:|
+| 0123 − 0115 (raw − binary) | +0.008 | +0.003 | +0.003 | +0.003 | −0.001 | −0.007 |
+| 0123 − 0113 (spectral − random) | −0.004 | −0.010 | −0.014 | **−0.026** | −0.011 | −0.006 |
+| 0115 − 0113 (for reference) | −0.018 | −0.016 | −0.020 | −0.027 | −0.018 | +0.001 |
+
+Raw vs binary is a small, broad positive (p25 −0.007, p75 +0.013), slightly negative only
+at d6–d7. Against the random-init baseline the picture is no longer flat: raw counts
+recovered most of the shallow cost (d2–d4 went from about −0.018 to −0.004…−0.014) and
+**left d5 untouched at −0.026** — the level with the most nodes (54) and the deepest one
+spectral feeds heavily. So the remaining spectral tax is concentrated where the fed
+blocks are, which is exactly where the anchor words are decided by the search. The
+anchors, not the counts, are the tax, and 0124 (guided anchors) is aimed at that level.
+
+**family-closure 0.7869** sits 0.008 under the full head (0115: 0.005 under its full;
+0116: 0.033 under). Its detection, 0.598, is far above 0115's 0.536 at the same mask: with
+raw counts the family's own topics separate case from background almost as well as the
+full head does (0.630), where on binary they could not. Same message as the full-head
+detection gain, seen from inside the family.
+
+**Read (all arms in).** Putting the raw counts back
 recovers about a quarter of 0115's cost: macro +0.005 vs binary, and the spectral arm now
 sits −0.014 under 0113 instead of −0.019. So the split is roughly **0.005 to the count
 representation, 0.014 to spectral's anchor choice** — the "tax stays" outcome, mostly.
