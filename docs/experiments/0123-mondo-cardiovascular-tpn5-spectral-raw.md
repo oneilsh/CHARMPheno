@@ -176,6 +176,14 @@ grep -E "gated_pc(_own_bg|_family_closure)? \(pc_topics_lr\): (macro|detection)|
 
 ## Run log
 
+**2026-10-05 — closeout on a fresh cluster (empty HDFS).** The family-closure readout
+began the bundle rebuild and was host-OOM-killed (exit 137) ~3 min in: the 8g driver
+JVM + the rebuild's Python-side download on this master — the Makefile's documented
+exp-0109 failure; remedy `GPR_DRIVER_MEMORY=4g`. The two `inspect-topics` ABs need no
+Spark and ran (Results). The profile-table probe then missed the bundle (never rebuilt)
+— rerun after the readout lands the bundle. `spark.dataproc.listeners=` was accepted at
+startup.
+
 **2026-09-11 — first launch killed at iter ~20.** Copied 0115's `optimize_doc_concentration:
 true`, which was inert for 0115 but live since 0121's wiring: learned tied alpha was
 collapsing (mean 0.5 → 0.21 by iter 19, background 0.28 → 0.27 → 0.27 per iter). Not a
@@ -217,7 +225,20 @@ whether it does. The gap own-bg → full is 0.065 here vs 0.059 on binary — th
 detection gain shows up even at own-bg (0.543 vs 0.497). Nothing about the block-unit
 conclusion from 0115 changes.
 
-**Read (full head + own-bg; family-closure + paired ABs pending).** Putting the raw counts back
+**Paired per-node ABs (`inspect-topics --readout-auc`, 193 shared scored nodes; by-depth
+rows to be added from `sweep3_log.md`):**
+
+| this run minus | median dAUC | mean | up / down |
+|---|--:|--:|--:|
+| 0115 (spectral, binary) | **+0.0028** | +0.0048 | 111 / 82 |
+| 0113 (random init, raw) | **−0.0155** | −0.0141 | 48 / 145 |
+
+Raw vs binary is a small, broad positive (p25 −0.007, p75 +0.013): most nodes move a
+little, in the expected direction. The remaining spectral-vs-random loss is −0.016 at the
+median with three quarters of nodes down — the same uniform shape 0115 showed, a bit
+smaller. The anchors, not the counts, are the tax.
+
+**Read (full head + own-bg + paired ABs; family-closure pending).** Putting the raw counts back
 recovers about a quarter of 0115's cost: macro +0.005 vs binary, and the spectral arm now
 sits −0.014 under 0113 instead of −0.019. So the split is roughly **0.005 to the count
 representation, 0.014 to spectral's anchor choice** — the "tax stays" outcome, mostly.
