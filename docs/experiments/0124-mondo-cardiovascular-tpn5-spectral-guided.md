@@ -218,15 +218,36 @@ is −0.001 with a near-even split; detection is unchanged (+0.003). Replacing 4
 anchors (594 of 1490) with profile terms cost the heads nothing. The remaining tax vs
 random init is still at d5 (−0.031, n=54): guided anchors did not recover it either.
 
-**Legibility: the digest is in, the read is NOT yet made.** The cids print without
-names (`RESOLVE_NAMES=1` not set on this chain). One pattern is visible without names:
-the `dilated cardiomyopathy` (d5) topic shares ≥6 of its top-15 concepts with the
-`hypertension, pregnancy-induced` and `toxemia of pregnancy` topics (4307820, 4239938,
-444094, 43530950, 4188598, 4244438), i.e. the pregnancy stratum is still in that block
-after guiding. Likely mechanism, to confirm with names: the `--rollup` profile of dilated
-cardiomyopathy INHERITS peripartum cardiomyopathy's annotations (a Mondo descendant, and
-a label node of its own), so pregnancy terms are IN its preferred set and pass the IDF
-rule (few credited nodes share them). If confirmed, the derived fix is to roll up only
-from UNPOWERED descendants — a term whose own label node will claim it must not also
-guide its parent (the survey's codes table carries the `inherited` flag; the eta table
-does not yet).
+**Legibility (named digests, 0124 vs 0123, same grep, top-25 by evidence):**
+
+- **WIN — `cardiomyopathy` (d3).** 0123: *Headache · Abdominal pain · Backache · Migraine
+  · Cough · Nausea · Acute pharyngitis · URI · …* — the generic primary-care topic that
+  insight 0082 named as the misalignment. 0124: *Cardiomyopathy · Primary cardiomyopathy
+  · Dilated cardiomyopathy · Heart failure · Chronic systolic HF · CHF · Left bundle
+  branch block · Cardiomegaly · Hypertensive HF* // carvedilol · spironolactone ·
+  lisinopril. A textbook cardiomyopathy block where there was none.
+- **WIN (to confirm) — `intrinsic cardiomyopathy` (d4).** 0123 had TWO intrinsic-CM
+  topics in the top 25, both pure gestation-week lists (*Gestation period, 32/34/37/36…
+  weeks*). Neither appears in 0124's top 25: the gestation stratum no longer carries
+  intrinsic CM's evidence. (Its 0124 topics still need a direct look — `grep intrinsic`.)
+- **REMAINING — `dilated cardiomyopathy` (d5).** 0124: *Carrier of cystic fibrosis gene
+  mutation · Unplanned pregnancy · First trimester pregnancy · Abnormal cytological
+  finding · Gestation period, 11 weeks · Pregnancy test negative/positive · ASCUS ·
+  Obesity · High risk pregnancy* — the prenatal-screening stratum, one level DOWN from
+  where it sat in 0123 (intrinsic CM, DCM's parent). Mechanism, to confirm from the
+  codes table: the `--rollup` profile of DCM INHERITS peripartum cardiomyopathy's
+  annotations (a Mondo child of DCM and a label node of its own), so pregnancy terms
+  are in DCM's preferred set and pass the IDF rule (few credited nodes share them); once
+  the guide moved intrinsic CM off the pregnancy direction, ancestor deflation no longer
+  removed it from DCM's documents and DCM's own guided search landed on it.
+- Heart failure / CHF / systolic HF / valve topics: clean in both runs.
+- Pregnancy label nodes (`toxemia of pregnancy`, `hypertension, pregnancy-induced`)
+  carry the pregnancy stratum in both — correct; those ARE cardiovascular branch nodes.
+
+**Verdict (provisional, pending the two checks above).** Guided anchors fixed the
+headline misalignment (cardiomyopathy d3, intrinsic CM d4) at zero readout cost. The one
+residual is a roll-up artefact, not an anchor-search failure: a term that a POWERED
+descendant's own block will claim must not also guide its parent. The derived fix is to
+roll profiles up only from UNPOWERED descendants (the survey's codes table carries the
+`inherited` flag per row; the eta table does not yet) — no knob — and re-emit the
+table. That is exp 0125 if the codes table confirms the mechanism.
