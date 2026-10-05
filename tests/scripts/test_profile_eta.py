@@ -218,3 +218,30 @@ def test_stats_are_counts_only_no_coverage_values():
         "dropped_min_coverage", "")
     for k, v in stats.items():
         assert isinstance(v, (int, float))
+
+
+def test_build_anchor_candidates_applies_the_three_set_rules_and_counts():
+    """Spec 2026-10-05 rules 1-3 (in vocab, not NOT-annotated, weight > 0) and
+    the 'absent, not empty' contract for a node with nothing left."""
+    df = pd.DataFrame({
+        "mondo_id":   ["MONDO:1"] * 5 + ["MONDO:2", "MONDO:3"],
+        "concept_id": [11, 12, 13, 14, 12, 21, 31],
+        "weight":     [0.5, 0.0, 0.7, 0.9, 0.1, 0.4, 0.6],
+        "neg":        [0, 0, 0, 0, 1, 0, 0],
+        "coverage":   [0.9] * 7,
+    })
+    cands, st = pe.build_anchor_candidates(
+        df, eid_by_mondo={"MONDO:1": 7, "MONDO:2": 8},
+        vocab_index_by_concept={11: 100, 12: 101, 13: 102})
+    assert cands == {7: [100, 102]}          # 12 contested by a NOT row; 14 unmapped
+    assert 8 not in cands                    # node 2's only concept is unmapped -> absent
+    assert st["n_nodes_skipped_not_in_dag"] == 1 and st["n_nodes_in_dag"] == 2
+    assert st["n_nodes_guided"] == 1 and st["n_nodes_empty_after_rules"] == 1
+    assert st["n_concepts_dropped_neg"] == 1 and st["n_concepts_dropped_unmapped"] == 2
+    assert st["n_candidates_total"] == 2
+    # weight-0 exclusion, in isolation
+    df0 = pd.DataFrame({"mondo_id": ["MONDO:1"], "concept_id": [11], "weight": [0.0],
+                        "neg": [0], "coverage": [0.5]})
+    c0, s0 = pe.build_anchor_candidates(
+        df0, eid_by_mondo={"MONDO:1": 7}, vocab_index_by_concept={11: 100})
+    assert c0 == {} and s0["n_concepts_dropped_weight0"] == 1

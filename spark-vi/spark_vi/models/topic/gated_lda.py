@@ -488,7 +488,9 @@ class GatedOnlineLDA(OnlineLDA):
                     topo = (data_summary or {}).get("topo_order", "forward")
                     lam = MULTIDOMAIN_INIT_STRATEGIES[self.init](
                         data_summary, self.lay, self.domains,
-                        anchor_scope=scope, topo_order=topo)
+                        anchor_scope=scope, topo_order=topo,
+                        anchor_candidates=(data_summary or {}).get("anchor_candidates"),
+                        anchor_stats=(data_summary or {}).get("anchor_stats"))
             return {
                 "lambda": lam,
                 "alpha": self.alpha.copy(),         # defensive copy — runner mutates
@@ -511,8 +513,13 @@ class GatedOnlineLDA(OnlineLDA):
         else:
             scope = (data_summary or {}).get("anchor_scope", "closure")
             topo = (data_summary or {}).get("topo_order", "forward")
+            # Guided anchors (spec 2026-10-05): the shim passes the per-node
+            # preferred sets and an (optional) stats dict through data_summary,
+            # the same channel as anchor_scope/topo_order; absent -> unguided.
             gp["lambda"] = INIT_STRATEGIES[self.init](
-                data_summary, self.lay, self.V, anchor_scope=scope, topo_order=topo)
+                data_summary, self.lay, self.V, anchor_scope=scope, topo_order=topo,
+                anchor_candidates=(data_summary or {}).get("anchor_candidates"),
+                anchor_stats=(data_summary or {}).get("anchor_stats"))
         return gp
 
     def _random_domain_lambda(self) -> dict[int, np.ndarray]:

@@ -492,6 +492,15 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
     # RDD alone). These four record WHICH file and knobs produced that boost,
     # so the run manifest / model params carry the full provenance, and the
     # D5 resume/warm-start guard in `_fit` keys off them.
+    spectralAnchorCandidates = Param(
+        Params._dummy(), "spectralAnchorCandidates",
+        "JSON-encoded {engine_node_id: [vocab_idx, ...]} — the GUIDED-ANCHOR "
+        "preferred sets (spec 2026-10-05): for each listed node the spectral "
+        "anchor search picks from these vocab rows first (those that clear the "
+        "node's own df floor), then falls back to the open search for the rest. "
+        "Built driver-side from a node's HPO profile; the estimator only sees "
+        "ids. Empty (default) = unguided. Requires init='spectral'. A set, not a "
+        "weight: no strength knob.")
     profileEta = Param(Params._dummy(), "profileEta",
                        "path to the profile-eta prior TSV (hpoa_stage2_probe "
                        "--emit-eta: mondo_id, concept_id, weight, neg, "
@@ -598,6 +607,25 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
 
     def getEtaBoost(self) -> str:
         return str(self.getOrDefault(self.etaBoost))
+
+    def setSpectralAnchorCandidates(self, cands) -> "OnlinePCLDAEstimator":
+        """Set the guided-anchor preferred sets from {engine_node_id: vocab_idx
+        sequence} (JSON-encoded into the string Param) or a pre-encoded JSON
+        string. Empty/None = unguided. operator.index on every id: a float id
+        would otherwise truncate silently and prefer the wrong token."""
+        if cands is None or cands == "" or cands == {}:
+            return self._set(spectralAnchorCandidates="")
+        encoded = cands if isinstance(cands, str) else json.dumps(
+            {int(operator.index(k)): sorted({operator.index(i) for i in v})
+             for k, v in cands.items() if v})
+        return self._set(spectralAnchorCandidates=encoded)
+
+    def getSpectralAnchorCandidates(self) -> dict:
+        """Decoded {int node id: [int vocab idx, ...]}; {} when unguided."""
+        raw = str(self.getOrDefault(self.spectralAnchorCandidates))
+        if not raw:
+            return {}
+        return {int(k): [int(i) for i in v] for k, v in json.loads(raw).items()}
 
     def setGateParent(self, parent) -> "OnlinePCLDAEstimator":
         """Select the GATED topic engine from a DAG parent map {child: parent |
@@ -818,6 +846,7 @@ _ONLINE_PCLDA_DEFAULTS = dict(
     spectralMinDocFreq=5, anchorScope="closure", spectralTopoOrder="forward",
     countTransform="none",
     alphaInit="uniform",
+    spectralAnchorCandidates="",
     profileEta="", profileEtaStrength=1.0, profileEtaTopics=1,
     profileEtaMinCoverage=0.0,
     featuresCols=[],   # domainBounds intentionally omitted: it uses isSet (no default)
@@ -887,6 +916,7 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         spectralTopoOrder: str = "forward",
         countTransform: str = "none",
         alphaInit: str = "uniform",
+        spectralAnchorCandidates: str = "",
         profileEta: str = "",
         profileEtaStrength: float = 1.0,
         profileEtaTopics: int = 1,
@@ -1102,6 +1132,10 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         # with resume/warm-start (a checkpoint's lambda would override the seed).
         data_summary = None
         init_mode = str(self.getOrDefault("init"))
+        if init_mode == "random" and self.getSpectralAnchorCandidates():
+            raise ValueError(
+                "spectralAnchorCandidates requires init='spectral': the guide only "
+                "steers the spectral anchor search, a random init has no anchors.")
         if init_mode != "random":
             if not gated:
                 raise ValueError(
@@ -1121,17 +1155,33 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
             resolved = resolve_spectral_method(
                 self.getOrDefault("spectralMethod"), vocab_size,
                 threshold=self.getOrDefault("spectralMaxVocab"))
+            _anchor_cands = self.getSpectralAnchorCandidates()
             if resolved == "scalable":
                 from spark_vi.models.topic.gated_init import (
                     scalable_block_aligned_lambda, SPECTRAL_LAMBDA_SCALE,
                 )
                 sd = int(self.getOrDefault("spectralD"))
+                _anchor_stats: dict = {}
                 lam0 = scalable_block_aligned_lambda(
                     pc_rdd, lay, vocab_size,
                     d=(sd if sd > 0 else None), seed=(seed or 0),
                     min_doc_freq=int(self.getOrDefault("spectralMinDocFreq")),
                     anchor_scope=self.getOrDefault("anchorScope"),
-                    topo_order=self.getOrDefault("spectralTopoOrder"))
+                    topo_order=self.getOrDefault("spectralTopoOrder"),
+                    anchor_candidates=(_anchor_cands or None),
+                    anchor_stats=_anchor_stats)
+                if _anchor_cands:
+                    from spark_vi.models.topic.gated_init import summarize_anchor_stats
+                    _ag = summarize_anchor_stats(
+                        _anchor_stats, n_nodes=len(lay.nodes), tpn=lay.tpn)
+                    self._anchor_guide_summary = _ag
+                    print(f"[pc] spectral anchor guide: nodes guided="
+                          f"{_ag['nodes_guided']}/{_ag['nodes_total']}; anchors from "
+                          f"profile={_ag['anchors_from_profile']}/{_ag['anchors_total']} "
+                          f"(possible {_ag['anchors_possible']}); nodes fully guided="
+                          f"{_ag['nodes_fully_guided']}, partially="
+                          f"{_ag['nodes_partially_guided']}, fallback-only="
+                          f"{_ag['nodes_fallback_only']}", flush=True)
                 if domain_sizes:
                     # scalable returns the JOINT (K, V) lambda; the multi-domain engine
                     # consumes a per-domain dict {m: (K, V_m)}. Convert exactly as the
@@ -1157,6 +1207,7 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
                     "train_labels": [c[1] for c in collected],
                     "anchor_scope": self.getOrDefault("anchorScope"),
                     "topo_order": self.getOrDefault("spectralTopoOrder"),
+                    "anchor_candidates": (_anchor_cands or None),
                 }
 
         # Alpha policy for the GATED engine (exp 0121; insight 0090 correction).

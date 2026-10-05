@@ -235,3 +235,83 @@ def build_profile_eta_boost(eta_df, *, eid_by_mondo, block_of,
         stats["nnz"] += int(len(idx_arr)) * topics
 
     return boost, stats
+
+
+def build_anchor_candidates(eta_df, *, eid_by_mondo, vocab_index_by_concept):
+    """Build the GUIDED-ANCHOR preferred sets from the emitted prior table
+    (spec 2026-10-05, HPO-guided spectral anchors): {engine node id: [condition-
+    domain vocab idx, ...]} — the words the node's spectral anchor search may
+    draw from FIRST, before falling back to the open search.
+
+    Why these rules and no others (each is a set membership, none a strength):
+      1. the concept must be in ``vocab_index_by_concept`` (the bundle's domain-0
+         vocab map) — the survivorship test: leakage strip, min_df, cap;
+      2. ``neg == 0`` — a NOT-annotated phenotype must never anchor a block;
+      3. ``weight > 0`` — the emitted weight is freq x IDF with IDF over the
+         credited label nodes, so a term EVERY credited node shares has weight 0.
+         This is the knob-free exclusion of profile-generic terms, derived by the
+         survey, not chosen here. The MAGNITUDE of weight, and ``coverage``, are
+         deliberately NOT used: using them would be a strength knob.
+    The fourth rule of the spec (the node's own document-frequency floor) lives
+    in the engine, where ``df_w`` exists.
+
+    A concept listed as both pos and neg for one node is excluded (rule 2 wins:
+    the annotation is contested). A node whose surviving set is empty is ABSENT
+    from the dict (not an empty list) so the engine takes its unguided path.
+    Returns ``(candidates, stats)``; stats are counts of nodes / concepts only
+    (never coverage values, never patient counts) for the log and manifest."""
+    mids = eta_df["mondo_id"].astype(str).to_numpy()
+    cids = eta_df["concept_id"].astype("int64").to_numpy()
+    weights = eta_df["weight"].astype("float64").to_numpy()
+    negs = _neg_flags(eta_df["neg"].tolist())
+
+    stats = {
+        "n_rows": int(len(eta_df)),
+        "n_nodes_profiled": int(len(set(mids.tolist()))),
+        "n_nodes_skipped_not_in_dag": 0,
+        "n_nodes_in_dag": 0,
+        "n_nodes_guided": 0,                 # ended with >= 1 candidate
+        "n_nodes_empty_after_rules": 0,
+        "n_concepts_dropped_neg": 0,         # pos rows removed by a neg row
+        "n_concepts_dropped_weight0": 0,
+        "n_concepts_dropped_unmapped": 0,
+        "n_candidates_total": 0,
+    }
+    by_node: dict[str, dict] = {}
+    for mid, cid, w, neg in zip(mids, cids, weights, negs):
+        d = by_node.setdefault(str(mid), {"pos": {}, "neg": set()})
+        if neg:
+            d["neg"].add(int(cid))
+        else:
+            # keep the max weight if a concept repeats as pos
+            d["pos"][int(cid)] = max(float(w), d["pos"].get(int(cid), -1.0))
+
+    out: dict[int, list[int]] = {}
+    for mid in sorted(by_node):
+        eid = eid_by_mondo.get(mid)
+        if eid is None:
+            stats["n_nodes_skipped_not_in_dag"] += 1
+            continue
+        stats["n_nodes_in_dag"] += 1
+        d = by_node[mid]
+        idxs: set[int] = set()
+        for cid, w in d["pos"].items():
+            if cid in d["neg"]:
+                stats["n_concepts_dropped_neg"] += 1
+                continue
+            if not (w > 0.0):
+                stats["n_concepts_dropped_weight0"] += 1
+                continue
+            vi = vocab_index_by_concept.get(int(cid))
+            if vi is None:
+                stats["n_concepts_dropped_unmapped"] += 1
+                continue
+            idxs.add(int(vi))
+        if not idxs:
+            stats["n_nodes_empty_after_rules"] += 1
+            continue
+        out[int(eid)] = sorted(idxs)
+        stats["n_nodes_guided"] += 1
+        stats["n_candidates_total"] += len(idxs)
+    return out, stats
+

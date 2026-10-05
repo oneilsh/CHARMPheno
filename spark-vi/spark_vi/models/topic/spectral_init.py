@@ -114,7 +114,7 @@ def _domain_candidate_mask(marginal, min_marginal_frac, domain_bounds):
 
 def find_anchors(Q: np.ndarray, n: int, *, seed_rows=None,
                  min_marginal_frac: float = 1.0,
-                 domain_bounds=None) -> list[int]:
+                 domain_bounds=None, preferred=None) -> list[int]:
     """Greedy farthest-point anchor selection on the row-normalized rows of Q.
 
     Gram–Schmidt "pivoted QR" geometry (Arora et al. 2013, Algorithm 4): build
@@ -157,6 +157,18 @@ def find_anchors(Q: np.ndarray, n: int, *, seed_rows=None,
     behavior returned FEWER anchors than asked for, with every column past the
     last bound permanently ineligible.
 
+    ``preferred`` (optional word ids) is the GUIDED-ANCHOR seam (spec
+    2026-10-05, HPO-guided spectral anchors): the same greedy search runs in two
+    stages over ONE shared basis — stage 1 may pick only from ``preferred`` (∩
+    the candidate floor), stage 2 fills whatever stage 1 could not from the full
+    candidate pool. Why a set and not a weight: the point is to let an outside
+    source of meaning (a node's HPO profile) decide WHICH words may anchor its
+    block, while the co-occurrence geometry still decides which of those are the
+    vertices and the recovery still decides what the topic IS — a set changes
+    the pool, never the criterion, so there is no strength to tune. ``None`` or
+    an empty set reproduces the single-stage search exactly (stage 2 alone IS
+    today's loop).
+
     Returns the ``n`` newly chosen anchor word ids in selection order.
     """
     Qbar = _row_normalize(Q)
@@ -187,22 +199,45 @@ def find_anchors(Q: np.ndarray, n: int, *, seed_rows=None,
 
     anchors: list[int] = []
     chosen = set(int(s) for s in (seed_rows or []))
-    for _ in range(n):
-        # residual squared norm after projecting each row onto current basis
-        best_id, best_res = -1, -np.inf
-        for i in range(V):
-            if i in chosen or norms[i] <= EPS or not candidate[i]:
-                continue
-            r = project_out(Qbar[i])
-            res = r @ r
-            if res > best_res:
-                best_res, best_id = res, i
-        if best_id < 0:                           # exhausted distinct directions
-            break
-        anchors.append(best_id)
-        chosen.add(best_id)
-        add_to_basis(best_id)
+
+    def greedy(pool: np.ndarray, n_left: int) -> None:
+        for _ in range(n_left):
+            # residual squared norm after projecting each row onto current basis
+            best_id, best_res = -1, -np.inf
+            for i in range(V):
+                if i in chosen or norms[i] <= EPS or not pool[i]:
+                    continue
+                r = project_out(Qbar[i])
+                res = r @ r
+                if res > best_res:
+                    best_res, best_id = res, i
+            if best_id < 0:                       # exhausted distinct directions
+                break
+            anchors.append(best_id)
+            chosen.add(best_id)
+            add_to_basis(best_id)
+
+    pref = _preferred_mask(preferred, V)
+    if pref is not None:
+        greedy(candidate & pref, n)               # stage 1: guided picks
+    greedy(candidate, n - len(anchors))           # stage 2: the open search
     return anchors
+
+
+def _preferred_mask(preferred, V: int):
+    """Boolean (V,) mask of the preferred ids, or None when there are none.
+    Ids outside [0, V) are ignored (a vocab index from a different bundle is
+    a caller bug the anchor search should not crash on; the builder counts
+    them)."""
+    if preferred is None:
+        return None
+    ids = np.asarray([int(i) for i in preferred], dtype=np.int64)
+    ids = ids[(ids >= 0) & (ids < V)]
+    if ids.size == 0:
+        return None
+    mask = np.zeros(V, dtype=bool)
+    mask[ids] = True
+    return mask
 
 
 def recover_beta(Q: np.ndarray, anchors, rows=None) -> np.ndarray:

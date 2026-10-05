@@ -133,10 +133,78 @@ def _anchor_node_set(front, lay, anchor_scope):
     return {int(u) for u in front if u != 0}          # "frontier"
 
 
+def summarize_anchor_stats(anchor_stats, *, n_nodes: int, tpn: int) -> dict:
+    """Pool the per-node guided-anchor tallies into disclosure-safe counts for the
+    log line and the manifest (counts of nodes and of words only).
+
+    ``nodes_guided``: nodes that had a non-empty preferred set; ``fully``: all of
+    the node's anchors came from it; ``partially``: some; ``fallback_only``: a
+    guided node that drew none (its profile words were below its own floor, or
+    already claimed by ancestors) — the count that tells a reader whether the
+    guide is reaching the blocks or being exhausted by the floor."""
+    st = anchor_stats or {}
+    guided = {u: v for u, v in st.items() if v[0] > 0}
+    from_pref = sum(v[2] for v in guided.values())
+    anchors = sum(v[3] for v in st.values())
+    fully = sum(1 for v in guided.values() if v[3] > 0 and v[2] == v[3])
+    partially = sum(1 for v in guided.values() if 0 < v[2] < v[3])
+    fallback = sum(1 for v in guided.values() if v[2] == 0)
+    return {"nodes_seeded": len(st), "nodes_total": int(n_nodes),
+            "nodes_guided": len(guided), "anchors_from_profile": int(from_pref),
+            "anchors_total": int(anchors), "anchors_possible": int(n_nodes) * int(tpn),
+            "nodes_fully_guided": fully, "nodes_partially_guided": partially,
+            "nodes_fallback_only": fallback}
+
+
+def _preferred_for(anchor_candidates, u):
+    """The guided-anchor preferred set for node ``u`` (spec 2026-10-05), or None.
+
+    ``anchor_candidates`` maps node id -> word ids (the node's own HPO-profile
+    terms that survived the vocabulary; built driver-side, the engine only sees
+    ids). A node absent from the map — or mapped to an empty set — gets ``None``,
+    which makes its search byte-identical to the unguided one. The two spectral
+    paths both call this so "which nodes are guided" has exactly one definition.
+    """
+    if not anchor_candidates:
+        return None
+    ids = anchor_candidates.get(int(u))
+    if ids is None:
+        ids = anchor_candidates.get(u)
+    if not ids:
+        return None
+    return [int(i) for i in ids]
+
+
+def _n_eligible(pref, df_w, min_doc_freq: int):
+    """How many of a node's preferred ids clear ITS OWN document-frequency floor
+    (the `find_anchors_projected` candidate rule) — the count that explains a
+    'fallback-only' node: profiled, but its profile words are not in its docs."""
+    if pref is None:
+        return None
+    df = np.asarray(df_w)
+    ids = np.asarray(pref, dtype=np.int64)
+    ids = ids[(ids >= 0) & (ids < df.shape[0])]
+    return int((df[ids] >= int(min_doc_freq)).sum()) if ids.size else 0
+
+
+def _record_anchor_stats(anchor_stats, u, pref, fg_anchors, *, n_eligible):
+    """Append one node's guided-anchor tally to the caller's ``anchor_stats``
+    dict (``None`` → no-op). Values are COUNTS OF WORDS, never patients:
+    ``(n_preferred, n_eligible, n_from_preferred, n_anchors)``. ``n_eligible``
+    is None on the dense path (its floor is marginal-relative, not a df)."""
+    if anchor_stats is None:
+        return
+    pref_set = set(int(i) for i in (pref or []))
+    anchor_stats[int(u)] = (
+        len(pref_set), n_eligible,
+        sum(1 for a in fg_anchors if int(a) in pref_set), len(fg_anchors))
+
+
 def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = SPECTRAL_LAMBDA_SCALE,
                                   anchor_scope: str = "closure",
                                   topo_order: str = "forward",
-                                  domain_bounds=None) -> np.ndarray:
+                                  domain_bounds=None,
+                                 anchor_candidates=None, anchor_stats=None) -> np.ndarray:
     """Block-aligned spectral lambda seed (topological, direction set by `topo_order`).
 
     data_summary carries {"train_docs": [token-id arrays], "train_labels": [node id or
@@ -235,7 +303,10 @@ def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = SPECTR
         Q_u = word_cooccurrence(docs_u, V)
         anc = relatives(u)
         seed = list(bg_anchors) + [a for p in anc for a in node_anchors.get(p, [])]
-        fg_anchors = find_anchors(Q_u, lay.tpn, seed_rows=seed, domain_bounds=domain_bounds)
+        pref_u = _preferred_for(anchor_candidates, u)
+        fg_anchors = find_anchors(Q_u, lay.tpn, seed_rows=seed, domain_bounds=domain_bounds,
+                                  preferred=pref_u)
+        _record_anchor_stats(anchor_stats, u, pref_u, fg_anchors, n_eligible=None)
         if not fg_anchors:
             logger.warning(
                 "spectral_block_aligned_lambda: node %s found no anchors "
@@ -256,7 +327,8 @@ def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = SPECTR
 
 def multidomain_spectral_lambda(data_summary, lay, domains, *, scale: float = SPECTRAL_LAMBDA_SCALE,
                                 anchor_scope: str = "closure",
-                                topo_order: str = "forward") -> dict:
+                                topo_order: str = "forward",
+                                anchor_candidates=None, anchor_stats=None) -> dict:
     """Per-domain dict-lambda spectral seed for the multi-domain gated model.
 
     Runs the block-aligned anchor recipe (spectral_block_aligned_lambda) on the
@@ -282,7 +354,8 @@ def multidomain_spectral_lambda(data_summary, lay, domains, *, scale: float = SP
     bounds = domains_to_bounds(domains).tolist()
     beta_joint = spectral_block_aligned_lambda(
         data_summary, lay, V, scale=1.0, anchor_scope=anchor_scope,
-        topo_order=topo_order, domain_bounds=bounds)          # (K, V), rows joint distributions
+        topo_order=topo_order, domain_bounds=bounds,
+        anchor_candidates=anchor_candidates, anchor_stats=anchor_stats)          # (K, V), rows joint distributions
     per_domain = split_domains(beta_joint, bounds)            # each row-normalized within its domain
     return {m: per_domain[m] * float(scale) + 1e-9 for m in range(len(domains))}
 
@@ -421,7 +494,9 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                                   scale: float = SPECTRAL_LAMBDA_SCALE,
                                   anchor_scope: str = "closure",
                                   topo_order: str = "forward",
-                                  batch_size: int = 0) -> np.ndarray:
+                                  batch_size: int = 0,
+                                  anchor_candidates=None,
+                                  anchor_stats=None) -> np.ndarray:
     """Distributed random-projection analogue of `spectral_block_aligned_lambda`.
 
     `rdd` is an RDD of GatedBOWDocument. Never forms a driver V×V matrix (ADR
@@ -733,9 +808,12 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                         "floor": [float(x) for x in _floor_pa[:150]],
                         "pa_k": int(_pa_k), "pa_k_all": int(_pa_k_all),
                     }
+            pref_u = _preferred_for(anchor_candidates, u)
             fg_anchors = find_anchors_projected(
                 res_u.pooled_QR, res_u.p_w, res_u.df_w, lay.tpn,
-                seed_rows=seed_rows, min_doc_freq=min_doc_freq)
+                seed_rows=seed_rows, min_doc_freq=min_doc_freq, preferred=pref_u)
+            _record_anchor_stats(anchor_stats, u, pref_u, fg_anchors,
+                                 n_eligible=_n_eligible(pref_u, res_u.df_w, min_doc_freq))
             if not fg_anchors:
                 logger.warning(
                     "scalable_block_aligned_lambda: node %s found no anchors "
@@ -767,9 +845,12 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                     return
                 seed_rows = list(bg_anchors) + [a for p in relatives(u)
                                                 for a in node_anchors.get(p, [])]
+                pref_u = _preferred_for(anchor_candidates, u)
                 fg_anchors = find_anchors_projected(
                     QR, pw, dfw, lay.tpn, seed_rows=seed_rows,
-                    min_doc_freq=min_doc_freq)
+                    min_doc_freq=min_doc_freq, preferred=pref_u)
+                _record_anchor_stats(anchor_stats, u, pref_u, fg_anchors,
+                                     n_eligible=_n_eligible(pref_u, dfw, min_doc_freq))
                 if not fg_anchors:
                     logger.warning(
                         "scalable_block_aligned_lambda: node %s found no anchors "
