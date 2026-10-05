@@ -234,20 +234,32 @@ random init is still at d5 (−0.031, n=54): guided anchors did not recover it e
   mutation · Unplanned pregnancy · First trimester pregnancy · Abnormal cytological
   finding · Gestation period, 11 weeks · Pregnancy test negative/positive · ASCUS ·
   Obesity · High risk pregnancy* — the prenatal-screening stratum, one level DOWN from
-  where it sat in 0123 (intrinsic CM, DCM's parent). Mechanism, to confirm from the
-  codes table: the `--rollup` profile of DCM INHERITS peripartum cardiomyopathy's
-  annotations (a Mondo child of DCM and a label node of its own), so pregnancy terms
-  are in DCM's preferred set and pass the IDF rule (few credited nodes share them); once
-  the guide moved intrinsic CM off the pregnancy direction, ancestor deflation no longer
-  removed it from DCM's documents and DCM's own guided search landed on it.
+  where it sat in 0123 (intrinsic CM, DCM's parent). **Mechanism, confirmed from the
+  tables (2026-10-05):** NOT peripartum CM's profile (peripartum IS DCM's child in this
+  DAG, but DCM's 1,744 code rows / 331 HPO terms are all inherited and contain only four
+  pregnancy-related terms, all FETAL: decreased fetal movement, hydrops fetalis, fetal
+  ascites). Of DCM's 355 in-vocab candidates, exactly one is an obstetric code:
+  **77619 "Reduced fetal movement"** — HP:0001558 realized to a SNOMED finding that is
+  recorded in the MOTHER's chart. In an adult EHR that code marks a pregnancy and nothing
+  about the patient's own phenotype. Once the guide moved intrinsic CM (DCM's parent) onto
+  proper cardiomyopathy terms, ancestor deflation no longer removed the pregnancy
+  direction from DCM's documents, "Reduced fetal movement" became DCM's purest remaining
+  candidate, the search anchored on it, and β recovery filled the block with the
+  prenatal-visit codes that co-occur with it. (Intrinsic CM and the d3 cardiomyopathy
+  node carry the SAME 3,798-concept rolled-up set — the whole subtree's union — and
+  contain the same code; they anchored elsewhere first because at their level stronger
+  cardiomyopathy directions remained.)
 - Heart failure / CHF / systolic HF / valve topics: clean in both runs.
 - Pregnancy label nodes (`toxemia of pregnancy`, `hypertension, pregnancy-induced`)
   carry the pregnancy stratum in both — correct; those ARE cardiovascular branch nodes.
 
-**Verdict (provisional, pending the two checks above).** Guided anchors fixed the
-headline misalignment (cardiomyopathy d3, intrinsic CM d4) at zero readout cost. The one
-residual is a roll-up artefact, not an anchor-search failure: a term that a POWERED
-descendant's own block will claim must not also guide its parent. The derived fix is to
-roll profiles up only from UNPOWERED descendants (the survey's codes table carries the
-`inherited` flag per row; the eta table does not yet) — no knob — and re-emit the
-table. That is exp 0125 if the codes table confirms the mechanism.
+**Verdict.** Guided anchors fixed the headline misalignment (cardiomyopathy d3,
+intrinsic CM d4) at zero readout cost. The one residual is a realization artefact, not an
+anchor-search failure: **a fetal phenotype term must not guide a block**, because its
+realized code lives in the mother's record. The derived fix (no knob): drop profile terms
+under HPO's `Abnormality of prenatal development or birth` (HP:0001197) subtree from the
+GUIDE — the obo parse the survey already does gives the closure — and re-emit the table.
+Pregnancy label nodes are unaffected (their own terms — pre-eclampsia, gestational
+hypertension — are maternal phenotypes, not under HP:0001197). Second change for the next
+run: dump each node's chosen anchors (vocab ids, from-profile flag) to the run dir so the
+anchor read is direct instead of inferred from the recovered topic. That is exp 0125.
