@@ -1170,6 +1170,10 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
                     topo_order=self.getOrDefault("spectralTopoOrder"),
                     anchor_candidates=(_anchor_cands or None),
                     anchor_stats=_anchor_stats)
+                # Always keep the per-node anchors (guided or not): the driver
+                # writes them to the run dir so "which word anchored this block"
+                # is read directly, not inferred from the recovered topic.
+                self._anchor_stats = _anchor_stats
                 if _anchor_cands:
                     from spark_vi.models.topic.gated_init import summarize_anchor_stats
                     _ag = summarize_anchor_stats(

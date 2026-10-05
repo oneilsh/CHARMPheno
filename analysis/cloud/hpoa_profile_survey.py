@@ -296,6 +296,53 @@ def survey_rows(profiles, closure_ids, depth, names, snomed_direct, snomed_closu
     return pd.DataFrame(rows)
 
 
+PRENATAL_ROOT = "HP:0001197"   # Abnormality of prenatal development or birth
+
+
+def hpo_subtree(hp_parents, root: str) -> set:
+    """All HPO ids at or below ``root`` (root included) under ``hp_parents``
+    ({child: [parents]} as `parse_hpo_dag` returns)."""
+    children: dict[str, list] = {}
+    for child, ps in hp_parents.items():
+        for parent in ps:
+            children.setdefault(parent, []).append(child)
+    seen, stack = {root}, [root]
+    while stack:
+        t = stack.pop()
+        for c in children.get(t, ()):
+            if c not in seen:
+                seen.add(c)
+                stack.append(c)
+    return seen
+
+
+def exclude_hpo_subtree(profiles, hp_parents, root: str = PRENATAL_ROOT):
+    """Drop profile rows whose term lies under ``root`` (self included).
+
+    WHY, for the default root (exp 0124, 2026-10-05): a FETAL phenotype —
+    `Decreased fetal movement`, `Hydrops fetalis` — describes the fetus, but
+    the SNOMED code it realizes to is recorded in the MOTHER's chart. In an
+    adult EHR that code marks a pregnancy, not the patient's own phenotype.
+    Rolled up into `dilated cardiomyopathy` from a fetal-onset subtype, one
+    such term anchored DCM's block on the prenatal-visit stratum (0124's one
+    residual misplacement after guided anchors). The exclusion is an ontology
+    fact, not a tuned threshold: terms under `Abnormality of prenatal
+    development or birth` cannot be observed as the patient's own code in this
+    cohort. Maternal phenotypes (pre-eclampsia HP:0100602, maternal
+    hypertension HP:0008071) are NOT under it, so pregnancy nodes keep theirs.
+
+    Returns ``(kept_profiles, stats)`` with counts of rows / distinct terms /
+    nodes touched — ontology counts, nothing patient-level."""
+    sub = hpo_subtree(hp_parents, root)
+    mask = profiles["hpo_id"].isin(sub)
+    dropped = profiles[mask]
+    stats = {"root": root, "n_subtree_terms": len(sub),
+             "n_rows_dropped": int(mask.sum()),
+             "n_terms_dropped": int(dropped["hpo_id"].nunique()),
+             "n_nodes_touched": int(dropped["mondo_id"].nunique())}
+    return profiles[~mask].reset_index(drop=True), stats
+
+
 def profile_code_rows(profiles, hp_parents, xref_rows, vocabs=("SNOMED",)) -> pd.DataFrame:
     """One row per (mondo_id, hp_id, vocab, code): the codes that EVIDENCE a
     profile term, collected over the term's HPO descendant-OR-SELF closure.
@@ -452,6 +499,13 @@ def main(argv=None) -> int:
                         "profiles (freq pools by max, neg by unanimity), "
                         "appending an `inherited` provenance column; without "
                         "it, emission is byte-identical to the old contract")
+    p.add_argument("--keep-prenatal", action="store_true",
+                   help="--emit-codes only: KEEP profile terms under HPO "
+                        f"{PRENATAL_ROOT} (Abnormality of prenatal development "
+                        "or birth). By default they are dropped: a fetal "
+                        "phenotype's realized code lives in the mother's chart "
+                        "and marks a pregnancy, not the patient's phenotype "
+                        "(exp 0124). Escape hatch to reproduce older tables.")
     args = p.parse_args(argv)
 
     cache = Path(args.cache_dir)
@@ -508,6 +562,12 @@ def main(argv=None) -> int:
             # outputs above) stay untouched — seconds-scale, offline.
             emit_profiles = rollup_profiles(
                 profiles, _disease_child_adjacency(edges_df, nodes_df), closure)
+        if not args.keep_prenatal:
+            emit_profiles, _px = exclude_hpo_subtree(emit_profiles, hp_parents)
+            sys.stderr.write(f"[hpoa-survey] prenatal exclusion ({_px['root']}, "
+                             f"{_px['n_subtree_terms']} subtree terms): dropped "
+                             f"{_px['n_rows_dropped']} rows / {_px['n_terms_dropped']} "
+                             f"terms across {_px['n_nodes_touched']} nodes\n")
         t0 = time.perf_counter()
         codes = profile_code_rows(emit_profiles, hp_parents,
                                   parse_hpo_xrefs(obo_text))

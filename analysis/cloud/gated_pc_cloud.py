@@ -4738,6 +4738,21 @@ def main() -> int:
             _ag = getattr(pc_est, "_anchor_guide_summary", None)
             if _ag and "spectral_anchor_profile" in manifest_fields:
                 manifest_fields["spectral_anchor_profile"]["seed"] = dict(_ag)
+            # Per-node spectral anchors -> <run>/spectral_anchors.json (vocab
+            # indices + ontology names only; no patient data). Written for every
+            # spectral fit, guided or not, so a block's anchor word is on record
+            # (exp 0124 had to infer DCM's anchor from its recovered topic).
+            _ast = getattr(pc_est, "_anchor_stats", None)
+            if _ast:
+                from spark_vi.models.topic.gated_init import anchor_dump_payload
+                _payload = anchor_dump_payload(
+                    _ast, int2cid=bundle.int2cid, name_by_id=bundle.name_by_id)
+                Path(out).mkdir(parents=True, exist_ok=True)   # out = the run dir
+                _ap = Path(out) / "spectral_anchors.json"
+                with open(_ap, "w") as _fh:
+                    json.dump({"vocab_domain": 0, "nodes": _payload}, _fh)
+                _cprint(f"[driver]   wrote spectral anchors for {len(_payload)} node(s) "
+                        f"-> {_ap}", flush=True)
             # EARLY SAVE, before any readout work touches the cluster: the fit is
             # the hours-long unrepeatable half and the readout is where runs die,
             # so the model reaches durable storage the moment it exists. The final
