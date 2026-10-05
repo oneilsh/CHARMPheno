@@ -190,4 +190,43 @@ grep -E "anchor guide|^=== |gated_pc(_own_bg|_family_closure)? \(pc_topics_lr\):
 
 ## Run log
 
+**2026-10-05 — fit + full chain, first try (n2-standard-8 cluster, bundle HIT, eta TSV
+from the 0123 probe).** Guide reached the seed:
+`anchor guide` (driver builder): 132/132 profiled nodes in the DAG and guided, 28,441
+candidates total (972 concepts dropped as NOT-annotated, 0 as weight-0, 68,197 rows
+dropped as not in the fitted vocabulary).
+`spectral anchor guide` (seed): nodes guided 132/298; **anchors from profile 594/1490**;
+nodes fully guided 112, partially 17, fallback-only 3. Starvation 1% (unchanged).
+
 ## Results
+
+**Full head, ridge 100 (193 nodes):**
+
+| | macro AUC | AP | detection AUC | det AP |
+|---|--:|--:|--:|--:|
+| 0113 random init, raw | 0.8087 | 0.5451 | 0.6043 | — |
+| 0123 spectral, raw | 0.7946 | 0.5327 | 0.6299 | 0.7600 |
+| **0124 spectral, raw, guided** | **0.7920** | 0.5261 | **0.6325** | 0.7595 |
+
+Paired vs 0123: median dAUC **−0.0013** mean −0.0026 (p25 −0.011, p75 +0.009), up/down
+87/106; by depth d2 −0.001, d3 +0.001, d4 −0.002, d5 −0.001, d6 −0.006, d7 +0.004. Paired
+vs 0113: median −0.0177, up/down 53/140; by depth d2 −0.013, d3 −0.010, d4 −0.015,
+**d5 −0.031**, d6 −0.005, d7 +0.006.
+
+**Guardrail: MET.** −0.003 macro vs 0123 is inside the ~0.005 bar and the paired median
+is −0.001 with a near-even split; detection is unchanged (+0.003). Replacing 40% of all
+anchors (594 of 1490) with profile terms cost the heads nothing. The remaining tax vs
+random init is still at d5 (−0.031, n=54): guided anchors did not recover it either.
+
+**Legibility: the digest is in, the read is NOT yet made.** The cids print without
+names (`RESOLVE_NAMES=1` not set on this chain). One pattern is visible without names:
+the `dilated cardiomyopathy` (d5) topic shares ≥6 of its top-15 concepts with the
+`hypertension, pregnancy-induced` and `toxemia of pregnancy` topics (4307820, 4239938,
+444094, 43530950, 4188598, 4244438), i.e. the pregnancy stratum is still in that block
+after guiding. Likely mechanism, to confirm with names: the `--rollup` profile of dilated
+cardiomyopathy INHERITS peripartum cardiomyopathy's annotations (a Mondo descendant, and
+a label node of its own), so pregnancy terms are IN its preferred set and pass the IDF
+rule (few credited nodes share them). If confirmed, the derived fix is to roll up only
+from UNPOWERED descendants — a term whose own label node will claim it must not also
+guide its parent (the survey's codes table carries the `inherited` flag; the eta table
+does not yet).
