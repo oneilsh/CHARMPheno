@@ -201,4 +201,13 @@ python3 ~/repos/CHARMPheno/analysis/cloud/name_spectral_anchors.py "$RUN" \
 
 ## Run log
 
+**2026-10-05 — launched (n2-standard-8 cluster, bundle HIT).** Table regeneration:
+`prenatal exclusion (HP:0001197, 266 subtree terms): dropped 502 rows / 38 terms across
+145 nodes` (branch nodes; 132 are label nodes). Eta table 99,348 rows (0124's: 99,517).
+Driver builder: 132/132 nodes guided, **28,438 candidates (0124: 28,441)** — the
+exclusion removed THREE in-vocab candidate concepts across the whole branch. The fetal
+terms realize to almost nothing in this adult vocabulary; `Reduced fetal movement` was
+essentially the only one, which is why one term could do what it did. The seed should
+therefore differ from 0124 only at the nodes where such a candidate was actually chosen.
+
 ## Results
