@@ -182,6 +182,11 @@ E-step touches all 1498 topics per document where a gated document sees a few do
 ~100 min for 50 iters; λ mass concentrated fast from a random start (iter 5: heaviest
 condition topic 5.4e5 vs lightest 6.7e3). Stacked readout 260/260 heads converged.
 
+**Alive topics (off the saved λ, data mass per topic above the η prior):** all 1498 alive,
+none under 10× prior; 50 / 90 / 99 % of the mass in 263 / 1,248 / 1,473 topics. The early
+concentration did not persist: the flat fit used ~1,250 strata, not a few hundred. A
+blend arm's background cannot be cut to a few hundred topics without losing mass.
+
 ## Results
 
 **Three fits under the same two decoders (ridge 100; 193 within-cohort / 224 de-novo
