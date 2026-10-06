@@ -1,7 +1,7 @@
 ---
 id: 129
 slug: cardiomyopathy-subtree-floor-guided
-status: pending
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -105,3 +105,5 @@ See the front matter. Launched with its sibling (one chain in 0130's Run section
 ## Run log
 
 ## Results
+
+See 0130 (the pair's results are recorded there).
