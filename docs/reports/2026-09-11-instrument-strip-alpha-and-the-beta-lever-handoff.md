@@ -273,7 +273,7 @@ prior on child blocks (nothing to hold), tpn as a lever (relocates the competiti
 | 0126 | 0125 + `spectral_topo_order: reverse` (leaves-first deflation) | — | pending | — | the structural fix; cost to weigh: ancestors become residuals |
 | 0127/0128 | subtree probe pair (17 nodes): forward vs leaves-first | — | 0.912 / 0.907 (7 nodes) | — | reverse SPREADS the pregnancy stratum (deflation only removes what the child's rare-code anchors span) and thins parents; 0126 NOT run |
 | 0129/0130 | subtree: mean-frequency candidate floor (guided / all) | — | 0.910 / 0.901 | — | anchors became common words; blocks UNCHANGED — a block is a 5-way split of its seed docs' strata |
-| 0131 | subtree: `anchor_scope: frontier` (seed docs = most-specific-node docs only) | — | pending | — | removes peripartum patients from DCM's seed; the mechanism's direct fix |
+| 0131 | subtree: `anchor_scope: frontier` | — | 0.891 (−0.015 vs 0127, 0/7 up) | 2% | **pregnancy OUT of DCM** (a real DCM topic appears); intrinsic CM gets no seed (no frontier docs) → junk; next: frontier-if-≥min_positives-else-closure. SUPERSEDED as the handoff by `2026-10-06-guided-anchors-and-stratum-capture-handoff.md` |
 | 0116 | + profile-eta S=1 | 0.7804 | 0.8098 | 72% | ablation ladder §2.3 |
 | 0120 | + profile-eta + L-BFGS head | 0.7555 | 0.7927 | — | head −0.015 paired |
 | 0121 | equalized α init → learned | — | 0.7895 | 79% | cliff up a level |
