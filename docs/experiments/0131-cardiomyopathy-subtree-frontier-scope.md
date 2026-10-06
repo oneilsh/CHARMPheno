@@ -1,7 +1,7 @@
 ---
 id: 131
 slug: cardiomyopathy-subtree-frontier-scope
-status: pending
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -128,4 +128,24 @@ grep -nE "^  (dilated|intrinsic|peripartum)? ?cardiomyopathy +d[0-9]|^(dilated |
 
 ## Run log
 
-## Results
+## Results (2026-10-06)
+
+macro 0.8905 (0127: 0.9123), det 0.679; paired vs 0127 median **−0.0147**, 0/7 up, d2 −0.022
+(n=3), d3 −0.006 (n=4). Seed: 51/80 anchors from profile, fallback-only 1, **intrinsic
+cardiomyopathy got ZERO anchors** (no patient has it as their most specific code → no
+frontier docs → block at the floor, filled by the fit with junk strata: bronchiectasis,
+hypogonadism, placenta previa). Starved 2%.
+
+**DCM: the pregnancy stratum is GONE** — five topics: acute-inpatient symptoms (2e5) ·
+anemia/UTI/vit-D/ADHD (3.3e4, young women, no pregnancy) · HTN/OSA/SLE/ILD · **Dilated
+cardiomyopathy · CHF · arrhythmia · HF · primary CM · systolic HF (2.2e4)** · hyperlipidemia/
+palpitations. Peripartum: pregnancy is its TOP topic (3.9e5) + infertility/pregnancy.
+Cardiomyopathy d1: cardiac-risk generic (3.2e5) · textbook CM (1.8e5) · CKD · CHF/CAD ·
+COPD/OSA — legible.
+
+**Verdict.** Frontier scope is the first and only change that removed the stratum, by
+removing the documents that carry it. Its cost is structural and predictable: grouping
+classes with no frontier documents get no seed, and the readout pays (−0.015 on 7 nodes,
+concentrated where that node sits). Derived next step (NOT built): per-node scope —
+seed from frontier docs when the node has ≥ `min_positives` of them (the existing label
+floor, not a new knob), else from its closure. See the 2026-10-06 handoff.
