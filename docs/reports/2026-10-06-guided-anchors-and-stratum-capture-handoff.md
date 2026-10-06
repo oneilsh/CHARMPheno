@@ -43,14 +43,31 @@ is the control; pairs 0128/0129/0130/0131 each changed one line. The compact rea
 ## 3. Next — DECIDED 2026-10-06 (user): revisit HSLDA's output-side hierarchy
 
 Spec: `docs/superpowers/specs/2026-10-06-stacked-closure-readout-and-hslda-arm.md`.
-Part A (build first, no fit): a `--readout-stacked` arm — closure-product of the per-node
-conditionals σ(z_a) over the saved readout heads, scored for DETECTION (the number that
-has sat at 0.60–0.63 because no node head ever saw the background) and per-node ranking;
-run on the saved 0123/0124 fits. Part B: an UNGATED flat-topic fit at K=1498 (exp 0132 =
-0113 with the gate off) read with the same stacked head — HSLDA proper. The per-node
-scope rule below is NOT being built (user: same kind of trick, tried many ways); tpn=1
-is the user's lean for the gated side, to be asked under the stacked head (caveat: the
-signature was the minority topic in every 0127–0131 block).
+**Both parts are BUILT (2026-10-06); three cluster runs are queued, nothing has run.**
+
+- **Part A — `--readout-stacked`** on `gated_pc_readout.py`: P_stack(c) = Π over
+  closure(c) (root included) of σ(z_a). The finding that shaped it: under the closure
+  mask the ROOT head is the degenerate constant 1.0 (observed only on foreground rows),
+  so a product over the saved heads alone cannot move detection — the arm observes the
+  root on every TRAIN row (`observe_root_everywhere`), the per-node-independent solve
+  gives a case-vs-background root head and the prevalent arm's own heads for nodes ≥ 1.
+  Block `gated_pc_stacked`: detection three ways (flat max / root head alone / stacked
+  max), paired per-node ranking delta by depth, marginal ECE by depth. Outputs tagged
+  `*_stacked`; record untouched. Commands are in the 0123 and 0124 docs ("Stacked
+  readout" section), ~15 min each on a warm bundle.
+- **Part B — a FLAT layout through the gated engine** (`tpn: 0`, `n_bg: 1498`): every
+  node's block is empty and the background is the whole topic range, so every document
+  sees all K — plain LDA on the same corpus, same saved format, same tools, no driver
+  change (a real gate-off switch would need a fused-features path: the estimator refuses
+  multi-domain columns without a gate). Exp **0132** = 0113 so configured + the ridge-100
+  readout + the stacked readout. Command in the 0132 doc.
+- **Read them together:** 0123-stacked (gated topics + stacked heads) vs 0132-stacked
+  (flat topics + stacked heads), same tool, same corpus. Acceptance for Part A is in the
+  spec: stacked detection above 0.63 AND above the root head alone, ranking not worse.
+
+The per-node scope rule below is NOT being built (user: same kind of trick, tried many
+ways); tpn=1 is the user's lean for the gated side, to be asked under the stacked head
+(caveat: the signature was the minority topic in every 0127–0131 block).
 
 Superseded options, kept for the record:
 
