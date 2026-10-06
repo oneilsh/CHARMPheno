@@ -281,6 +281,12 @@ def equalized_alpha(lay, frontier_histogram, mean_alpha):
     first, then one tpn-wide block per node in `lay.nodes` order)."""
     K, n_bg, tpn = int(lay.K), int(lay.n_bg), int(lay.tpn)
     nodes = list(lay.nodes)
+    if tpn <= 0 or not nodes:
+        # A FLAT layout (tpn=0: every node's block is empty, K == n_bg — the
+        # gated engine running as plain LDA, exp 0132) has no per-node blocks
+        # to equalize; the only topics are the background's, seen by every
+        # document, so the equalized and uniform alphas coincide.
+        return np.full(K, float(mean_alpha), dtype=np.float64)
     node_pos = {u: i for i, u in enumerate(nodes)}
     n_seen = np.zeros(len(nodes), dtype=np.float64)
     n_total = 0.0

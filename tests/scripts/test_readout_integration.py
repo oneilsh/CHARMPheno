@@ -1177,3 +1177,4 @@ def test_re_readout_stacked_refuses_the_driver_mode():
         gpr.run_readout(None, None, {"C": C, "K": K}, recall_targets=RECALL_TARGETS,
                         fdr_targets=FDR_TARGETS, min_count=0, readout_mode="driver",
                         stacked=True, parent_int=PARENT_INT)
+

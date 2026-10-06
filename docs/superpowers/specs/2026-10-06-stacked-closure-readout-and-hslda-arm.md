@@ -1,7 +1,7 @@
 # Stacked closure readout + an HSLDA-like flat-topic arm — design
 
-**Status:** Part A built 2026-10-06 (branch `claude/gated-conditional-voi`), awaiting its
-two cluster runs; Part B pending. Follows the 2026-10-06 handoff
+**Status:** Parts A and B built 2026-10-06 (branch `claude/gated-conditional-voi`);
+awaiting the cluster runs (Part A on 0123/0124, Part B = exp 0132). Follows the 2026-10-06 handoff
 (`docs/reports/2026-10-06-guided-anchors-and-stratum-capture-handoff.md`).
 
 ## Why (two sentences)
@@ -63,18 +63,31 @@ stacked detection AUC materially above 0.63 AND above the root head alone, with 
 ranking not worse (paired median ≥ 0). If stacked ≈ root-only, the heads' conditionals
 add nothing to detection and the question moves to Part B.
 
-## Part B — the HSLDA-like arm: flat topics + stacked heads
+## Part B — the HSLDA-like arm: flat topics + stacked heads — BUILT 2026-10-06, exp 0132
 
-Same readout (Part A), applied to an UNGATED fit: the existing ungated path
-(`skip_unsup_gated: false` / the ungated arm in `gated_pc_cloud.py`; no `gateParent`),
-K fixed at the gated run's 1498 so the comparison is like for like (K is a knob in flat
-LDA; matching the gated K is the non-arbitrary choice), same bundle, same split, spectral
-or random init as 0113 (random; spectral's anchors are per-node and do not apply). Exp
-doc: 0132 = 0113's config with the gate off, K=1498, readout with `--readout-stacked`.
-Reads: stacked detection and per-node ranking vs 0123's; the digest (flat topics are
-strata by construction — the question is whether the heads map them to nodes as well as
-the gated blocks do); cost (a flat fit at K=1498 is cheaper than the gated one: no gate,
-no spectral seed).
+Same readout (Part A), applied to a FLAT fit. There was no usable existing path: the
+driver's only ungated arm (`--with-dag-head`, the co-fit `DagClosureHead`) never saves its
+globals, `skip_unsup_gated` governs a GATED twin, and the estimator refuses multi-domain
+feature columns without a gate (`featuresCols ... require gateParent`) — so a true
+"gate off" switch would have needed a fused-features path through the fit, the save, the
+drift gate and the readout. Instead the flat model is the gated engine with a FLAT LAYOUT:
+`tpn: 0` (every node's block is empty) and `n_bg: 1498` (the background IS the topic
+range). Every document's allowed set is then all K topics — plain online LDA — on the
+same multi-domain corpus, saved in the same format, re-read by the same tools with no
+driver change. Pinned by `spark-vi/tests/test_flat_layout_tpn0.py` (layout K and blocks,
+the E-step touching every topic for every doc, the equalized-alpha init returning
+uniform instead of dividing by tpn — the one engine edit).
+
+Exp doc: `0132` = 0113's config with `tpn: 0`, `n_bg: 1498` (the gated K, 8 + 298×5),
+`init: random`, `optimize_doc_concentration: false` (live since 0121), `diag_only`; then
+the ridge-100 readout (record + ABs vs 0123/0113) and the stacked readout. Reads: stacked
+detection and per-node ranking vs 0123's stacked block (Part A on the gated fit — the
+paired control, same tool); the flat heads' macro vs 0123's; cost. The digest has no
+node blocks to report (every topic is background); interpretability on a flat fit lives
+in the HEAD loadings (`--top-loadings`): which strata a node's conditional reads. Cost
+note: with empty blocks the E-step touches all K per document where a gated document
+sees only its closure's blocks, so an iteration is slower than 0123's; there is no
+spectral seed.
 
 Where this leaves tpn=1: if Part A/B say the stacked head is the right decoder, the
 topic side only has to supply a signature per node, and tpn=1 (gated) vs flat-K (ungated)
