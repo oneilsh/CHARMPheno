@@ -236,6 +236,49 @@ Paired vs 0113: median −0.0180, 44/149; by depth d2 −0.006, d3 −0.012, d4 
 
 **Guardrail: MET** (−0.001 vs 0124, −0.003 vs 0123; detection −0.008 vs 0124, within the
 run-to-run band). The exclusion changed three candidates and the readout did not move.
+Seed: nodes guided 132/298, anchors from profile 594/1490, fully 112 / partially 17 /
+fallback-only 3 — identical counts to 0124. Starvation: 0 topics.
+
+**Ablation ladder at ridge 100:**
+
+| head may load on | 0125 | 0123 (unguided) | 0115 (binary) |
+|---|--:|--:|--:|
+| own block only (`own`, new rung) | 0.6943 (det 0.531) | — | — |
+| own block + background (`own-bg`) | 0.7232 (det 0.527) | 0.7298 | 0.7309 |
+| + ancestors (`family-closure`) | 0.7858 (det 0.572) | 0.7869 | 0.7851 |
+| everything | 0.7914 (det 0.625) | 0.7946 | 0.7898 |
+
+**The anchor dump — the finding of this run (2026-10-06, `name_spectral_anchors.py`,
+`*` = from profile):**
+
+```
+cardiomyopathy                  | Obstructive hydrocephalus* · Vitiligo* · Permanent atrial fibrillation* · Abnormal behavior* · Pterygium*
+intrinsic cardiomyopathy        | Dermatographic urticaria* · Mixed conductive AND sensorineural hearing loss* · Retinal lattice degeneration* · Acute otitis media* · Scleritis*
+dilated cardiomyopathy          | ESR raised* · Glycosuria* · Congenital pes cavus* · Spasmodic torticollis* · Edema of eyelid*
+hypertension, pregnancy-induced | Obstructive hydrocephalus* · Homonymous hemianopia* · Edema of eyelid* · Cataplexy* · Autistic disorder*
+peripartum cardiomyopathy       | Toxic diffuse goiter* · Type 1 diabetes mellitus* · Subclinical hypothyroidism* · Rheumatoid factor positive* · Hashimoto thyroiditis*
+toxemia of pregnancy            | Attention deficit hyperactivity disorder* · Abnormal vision* · Spasmodic torticollis* · Borderline personality disorder* · Type 1 diabetes mellitus*
+```
+
+Every anchor is a profile term (the guide works as built) and almost none is a word the
+disease is "about". This is the greedy farthest-point search doing what it does: among
+thousands of candidates the PUREST rows — the hull vertices — are rare codes that occur
+only inside a small odd stratum of the node's patients (syndromic terms rolled up from
+rare subtypes), and the scalable path's candidate floor (`spectral_min_doc_freq` = 5
+documents, ADR 0032's deliberate replacement of the dense path's mean-relative floor so
+minority arms could anchor on rare-but-pure phenotype words) admits them. β recovery
+then assigns the node's COMMON words to whichever vertex they are nearest, which is why
+0124's cardiomyopathy block reads as textbook cardiomyopathy under anchors like vitiligo
+and pterygium, why guiding costs the readout nothing, and why a single fetal code could
+take a block: any rare pure stratum can. **Anchors are vertex labels, not topic
+descriptions.** The guide still decides WHICH rare codes label the vertices — and 0124
+showed that matters — but "HPO decides which words the topic is about" overstated it.
+
+**Derived next step (not built):** for the GUIDED stage only, require a candidate to
+clear the node's own mean within-node marginal (the dense `find_anchors` floor,
+`min_marginal_frac=1.0`: at least as common as the average word in that node's docs);
+the open fallback keeps the df floor. Rarity-as-purity is the property the profile makes
+unnecessary. Decide after the 0125 digest (DCM's block without the fetal code).
 
 **`--profile-align` vs 0124 (132 credited nodes, boosted = FIRST topic of each block):**
 fed n=132, median profile mass 0.108 / top-15 overlap 0.13; 0124 baseline 0.126 / 0.13.
