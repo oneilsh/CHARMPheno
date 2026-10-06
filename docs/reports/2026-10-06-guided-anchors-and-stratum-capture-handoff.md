@@ -49,8 +49,12 @@ hurts within-cohort ranking (−0.041, by construction); the product is a calibr
 marginal. De novo (per-node AUC over ALL docs, HSLDA's metric): flat 0.712 → stacked
 0.850, paired +0.116, 219/4 of 224, gain growing with depth. 0124-stacked has RUN:
 identical to 0123 within ~0.002 on every read (de novo 0.848; guided anchors change
-nothing under this head either). Next: 0132 — compare its stacked de-novo macro and
-paired-by-depth to 0123's 0.850 / 0124's 0.848.**
+nothing under this head either). 0132 (flat K=1498) has RUN (insight 0093): the gate
+buys +0.03 within-cohort / +0.014 de-novo AUC / +0.05 de-novo AP over flat strata,
+uniform by depth; the root head is indifferent (0.806 vs 0.798); stacking gains +0.11 on
+every topic side. Gate stays, job sized. NEXT: exp 0133 = 0123 at tpn=1 (K=306) under the
+stacked head — does one topic per node hold the gap? If not, 0134 = blend (flat
+background + one residual topic per node).**
 
 - **Part A — `--readout-stacked`** on `gated_pc_readout.py`: P_stack(c) = Π over
   closure(c) (root included) of σ(z_a). The finding that shaped it: under the closure

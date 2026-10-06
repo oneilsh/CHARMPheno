@@ -1,7 +1,7 @@
 ---
 id: 132
 slug: mondo-cardiovascular-flat-k1498-stacked
-status: planned
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -176,8 +176,48 @@ grep -E "^=== |corpus: V=|gated_pc(_stacked)? \(pc_topics_lr\): (macro|detection
 
 ## Run log
 
-(none yet)
+**2026-10-06 — fit + both readouts + AB, first try (bundle HIT).** The corpus line read
+`K=1498 gated topics (1498 bg + 298 nodes x 0 tpn)` as required. Fit ~2 min/iter (the
+E-step touches all 1498 topics per document where a gated document sees a few dozen),
+~100 min for 50 iters; λ mass concentrated fast from a random start (iter 5: heaviest
+condition topic 5.4e5 vs lightest 6.7e3). Stacked readout 260/260 heads converged.
 
 ## Results
 
-(pending)
+**Three fits under the same two decoders (ridge 100; 193 within-cohort / 224 de-novo
+nodes; 54,753 test persons). 0123 = gated tpn=5 spectral-raw, 0124 = 0123 + guided
+anchors, 0132 = flat K=1498 (this run):**
+
+| read | 0123 gated | 0124 gated+guided | **0132 flat** |
+|---|--:|--:|--:|
+| flat head, within-cohort macro AUC / AP | 0.7946 / 0.533 | 0.7920 / 0.526 | **0.7612 / 0.476** |
+| flat head, detection (max over nodes) | 0.630 | 0.633 | 0.484 |
+| root head alone (= stacked detection) | 0.8065 / AP 0.886 | 0.8040 / 0.884 | 0.7983 / 0.881 |
+| stacked, within-cohort macro AUC | 0.7209 | 0.7201 | 0.7005 |
+| stacked, de-novo per-node macro AUC / AP | 0.8497 / 0.236 | 0.8483 / 0.231 | **0.8362 / 0.185** |
+| de-novo paired (stacked − own flat) | +0.116, 219/4 | +0.106, 221/2 | +0.118, 220/3 |
+
+Paired per-node, 0132 minus 0123 on the within-cohort flat heads (193 shared): median
+**−0.028**, 33 up / 160 down, and the same at every depth (d2 −0.012, d3 −0.020, d4
+−0.028, d5 −0.027, d6 −0.049, d7 −0.030). Within-cohort AUC by depth on 0132: 0.81 /
+0.78 / 0.76 / 0.77 / 0.76 / 0.69 (d2–d7).
+
+**Read.** The gate buys a modest, uniform amount of node signal that flat strata do not
+carry: +0.03 within-cohort, +0.014 de-novo AUC, and the largest gap is de-novo AP, 0.236
+vs 0.185 (+28% relative) — precision at the top of the list, the case-finding operating
+point. It is not the "flat matches gated" outcome; it is also not a large gap: with no
+topic knowing the DAG, the stacked head still reaches 0.836 de novo and the root head
+0.798, within a hundredth of the gated fits. The root head is nearly indifferent to the
+topic side (0.806 / 0.804 / 0.798): case-vs-background lives in the strata.
+
+Two things the flat fit says on its own: (1) the conditionals read as marginals are
+BELOW chance (0.484 — 39 constant columns, and flat strata give a within-cohort head
+nothing that transfers outside its cohort), so the max-over-nodes detection number is
+meaningless on any fit, not just a bad read on the gated ones; (2) the de-novo gain from
+stacking is the same size on every topic side (+0.106 to +0.118) — the label-side
+hierarchy is worth the same whatever the topics are.
+
+**Outcome among the three in the front matter:** the second one, softened. The blocks
+carry node signal the heads cannot fully recover from strata; the gate stays; tpn=1 vs
+tpn=5 is the next pair under the stacked head (exp 0133). The topic side's job is now
+clear: supply what the strata lack (the +0.03 / +0.05 AP), as legibly as possible.
