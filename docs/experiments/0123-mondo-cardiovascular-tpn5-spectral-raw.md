@@ -250,8 +250,25 @@ conditional decoder; P_stack is the marginal one. They answer different question
 Marginal calibration over all test docs (ECE by depth): flat 0.08–0.48, stacked
 0.003–0.015 — the product is a calibrated marginal P(c | d), which the flat head cannot be.
 
-Missing from this run (added to the block after it): the per-node AUC over ALL docs
-(de-novo, HSLDA's own read). Re-run to get it; see insight 0092.
+**Per-node AUC over ALL test docs (de-novo: y_c vs everyone; HSLDA's own metric), re-run
+2026-10-06, 224 scoreable nodes (more than the 193 within-cohort: negatives abound):**
+
+| arm | macro AUC | macro AP |
+|---|--:|--:|
+| flat σ(z_c) read as a marginal | 0.7118 | 0.1313 |
+| **stacked P_stack(c)** | **0.8497** | **0.2356** |
+
+Paired (stacked − flat): median **+0.116**, 219 up / 4 down / 1 tie of 224. The gain
+grows with depth — depth 2 +0.018, depth 3 +0.033, depth 4 +0.097, depth 5 +0.143,
+depth 6 +0.214, depth 7 +0.204, depth 8 +0.360, depth 9 +0.405 (small n past depth 7).
+Depth 1 (+0.307) is the cardiovascular-disorder node going from a constant to the root
+head. This is the number the program never had: a per-node "does this person have c",
+from θ alone, at 0.85 macro AUC and calibrated (ECE ≤ 0.015). The deeper the node the
+less its own conditional can say about the whole population and the more the chain of
+ancestors' discriminations is worth — exactly HSLDA's argument. Insight 0092.
+
+The two paired reads point opposite ways and both are right: within a known cohort the
+conditional wins (−0.041); de novo the product wins (+0.116). Report both, never one.
 
 
 **Full head, ridge 100 (pc_topics_lr, 193 nodes):**
