@@ -652,6 +652,31 @@ def stacked_readout(proba, y_te, m_te, parent_int, C, *, recall_targets,
                                  recall_targets, doc_keys=doc_keys)
     _, depth = _dag_children_and_depth(parent_int, C)
     n_terms = M.sum(axis=1)
+    # HSLDA's own read — per-node AUC over ALL test docs (y_c vs everyone, no
+    # cohort): the de-novo case-finding question the within-cohort ranking never
+    # asks. The flat head is a P(c | parent) and is expected to collapse here (it
+    # never saw the background); the product is the arm that claims a marginal.
+    # Same scorer, all-ones mask, both arms, paired. Read next to the pooled
+    # detection, which on a branch with ONE degenerate depth-1 node is exactly
+    # the root head (P_stack(depth-1) = sigma(z_0) * 1) and says nothing per node.
+    from analysis.pc.evaluate import _bundle_masked
+    ones = np.ones_like(np.asarray(y_te), dtype=np.uint8)
+    marg_flat = _bundle_masked(proba, y_te, ones, C, min_count)
+    marg_stk = _bundle_masked(P, y_te, ones, C, min_count)
+
+    def _scored(bm):
+        return {c: r for c, r in bm["per_label"].items()
+                if r.get("skipped") is None and r.get("auc") is not None}
+
+    marginal = {
+        "definition": "per-node AUC of P(c|d) over ALL test docs (all-ones mask: "
+                      "y_c vs everyone), the de-novo read; same scorer and "
+                      "min_count as the within-cohort ranking",
+        "flat": {"macro": marg_flat["macro"], "per_node": _scored(marg_flat)},
+        "stacked": {"macro": marg_stk["macro"], "per_node": _scored(marg_stk)},
+    }
+    marginal["paired"] = _paired_per_node(marginal["flat"]["per_node"],
+                                          marginal["stacked"]["per_node"], depth)
     block = {
         "naming": STACKED_NAMING,
         "definition": "log P_stack(c|d) = sum_{a in closure(c)} log sigma(z_a(d)); "
@@ -660,6 +685,7 @@ def stacked_readout(proba, y_te, m_te, parent_int, C, *, recall_targets,
         "min_count": int(min_count),
         "closure_terms": {"mean": float(n_terms.mean()), "max": int(n_terms.max())},
         "readout": readout,
+        "marginal_ranking": marginal,
         "root_only_detection": root_det,
         "marginal_ece_by_depth": _marginal_ece_by_depth(
             proba, P, y_te, sorted(set(readout["per_node"]) | {0}), depth),
@@ -708,6 +734,22 @@ def format_stacked_readout(block) -> str:
         for d, s in pv["by_depth"].items():
             lines.append(f"    depth {d}: n={s['n']} median={_med(s['median'])} "
                          f"wins/losses={s['wins']}/{s['losses']}")
+    mg = block.get("marginal_ranking")
+    if mg:
+        fm, sm = mg["flat"]["macro"], mg["stacked"]["macro"]
+        lines.append("  per-node AUC over ALL test docs (de-novo, y_c vs everyone; "
+                     "HSLDA's read):")
+        lines.append(f"    flat sigma(z_c):     macro AUC={_f(fm['auc']).strip()} "
+                     f"AP={_f(fm['ap']).strip()} (over {fm['n_labels_scored']} nodes)")
+        lines.append(f"    stacked P_stack(c):  macro AUC={_f(sm['auc']).strip()} "
+                     f"AP={_f(sm['ap']).strip()} (over {sm['n_labels_scored']} nodes)")
+        a = mg["paired"]["all"]
+        lines.append(f"    paired delta (stacked - flat): median={_med(a['median'])} "
+                     f"wins/losses/ties={a['wins']}/{a['losses']}/{a['ties']} "
+                     f"(n={a['n']})")
+        for d, st in mg["paired"]["by_depth"].items():
+            lines.append(f"      depth {d}: n={st['n']} median={_med(st['median'])} "
+                         f"wins/losses={st['wins']}/{st['losses']}")
     ece = block.get("marginal_ece_by_depth") or {}
     if ece:
         lines.append("  marginal ECE over ALL test docs (flat sigma(z_c) vs "

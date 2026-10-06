@@ -114,8 +114,18 @@ def test_stacked_readout_block_has_the_three_detection_reads_and_paired_bookkeep
     ece = blk["marginal_ece_by_depth"]
     assert "0" in ece and ece["0"]["n_nodes"] == 1          # the root head itself
     assert all(0.0 <= v[k] <= 1.0 for v in ece.values() for k in ("flat", "stacked"))
+    # The de-novo read: per-node AUC over ALL docs, both arms, same scorer.
+    from analysis.pc.evaluate import _bundle_masked
+    mg = blk["marginal_ranking"]
+    ref = _bundle_masked(gpc.stacked_proba(p, M), y, np.ones_like(y), C, 0)
+    for c, r in mg["stacked"]["per_node"].items():
+        assert r["auc"] == pytest.approx(ref["per_label"][c]["auc"])
+    assert mg["stacked"]["macro"]["auc"] == pytest.approx(ref["macro"]["auc"])
+    assert mg["paired"]["all"]["n"] == len(
+        set(mg["flat"]["per_node"]) & set(mg["stacked"]["per_node"]))
     text = gpc.format_stacked_readout(blk)
     assert "root head alone" in text and "stacked: max_c P_stack(c)" in text
+    assert "de-novo" in text
 
 
 def test_a_constant_root_leaves_depth_one_ranking_tied_with_the_flat_arm():
