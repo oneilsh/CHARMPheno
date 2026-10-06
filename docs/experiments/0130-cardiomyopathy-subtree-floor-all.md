@@ -102,6 +102,35 @@ spark_conf:
 
 See the front matter. Launched with its sibling (one chain in 0130's Run section).
 
+## Run (BOTH arms, one chain; bundle HIT; ~50 min)
+
+```bash
+cd ~/repos/CHARMPheno && git fetch origin claude/gated-conditional-voi && git checkout claude/gated-conditional-voi && git pull --ff-only
+RUNS=/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs
+mkdir -p "$RUNS"/0129-cardiomyopathy-subtree-floor-guided "$RUNS"/0130-cardiomyopathy-subtree-floor-all
+G='cardiomyopathy|myocarditis|pregnan|gestation|heart failure'
+nohup bash -c '
+  for ID in 129 130; do
+    RUN=$(ls -d '"$RUNS"'/0${ID}-*)
+    echo "=== $ID fit START $(date)"
+    make -C analysis/cloud exp ID=$ID || exit 1
+    make -C analysis/cloud gated-pc-readout ID=$ID GPR_ARGS="--readout-mode distributed --readout-l2 100"
+    make -C analysis/cloud inspect-topics ID=$ID COMPARE=127 INSPECT_ARGS="--readout-auc"
+    make -C analysis/cloud inspect-topics ID=$ID RESOLVE_NAMES=1 INSPECT_ARGS="--digest --redundancy 30 --grep \"'"$G"'\""
+    python3 analysis/cloud/name_spectral_anchors.py "$RUN" --bundle-meta /tmp/inspect_meta_$ID.json --concept-names /tmp/concept_names_$ID.csv
+    echo "=== $ID DONE $(date)"
+  done
+' > "$RUNS"/0130-cardiomyopathy-subtree-floor-all/pair_log.md 2>&1 &
+```
+
+Compact read (four nodes only):
+
+```bash
+L=/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs/0130-cardiomyopathy-subtree-floor-all/pair_log.md
+grep -nE "^=== |spectral anchor guide|gated_pc \(pc_topics_lr\): (macro|detection)|^all: n=|^by depth|starved" "$L" | cut -c1-160
+grep -nE "^  (dilated|intrinsic|peripartum)? ?cardiomyopathy +d[0-9]|^(dilated |intrinsic |peripartum )?cardiomyopathy \|" "$L" | cut -c1-230
+```
+
 ## Run log
 
 ## Results
