@@ -499,6 +499,226 @@ def format_incident_readout(block) -> str:
                      for ln in lines)
 
 
+# --------------------------------------------------------------------------- #
+# STACKED (closure-product) arm — HSLDA's output-side hierarchy on the readout #
+# heads (spec 2026-10-06 stacked-closure-readout, Part A).                     #
+# --------------------------------------------------------------------------- #
+# The per-node readout head is already HSLDA's conditional: under
+# `label_mask_mode=closure` node c's head is fit on the rows inside its parent's
+# closure with siblings as negatives, so σ(z_c) ≈ P(c | parent(c)). What the
+# readout never formed is the PRODUCT down the closure,
+#
+#     log P_stack(c | d) = Σ_{a ∈ closure(c)} log σ(z_a(d)),
+#
+# closure = c plus every ancestor including the root, each counted once (the
+# `DagClosureHead` convention, diamond-safe). Two consequences the flat arm does
+# not have: P(child) ≤ P(parent) by construction, and the root's factor carries
+# the population prior down the tree — PROVIDED the root head saw the
+# background. Under the closure mask it did not (the root is observed only on
+# foreground rows, all positive, so its head is the degenerate constant 1.0);
+# `gated_pc_readout.observe_root_everywhere` is what makes the root head a real
+# case-vs-background logistic for this arm, and `root_only_detection` below is
+# that single head read on its own, so the stacked detection can be told apart
+# from "a detection head would have done it".
+STACKED_NAMING = ("closure-PRODUCT of the per-node readout heads (HSLDA's label-"
+                  "side gating on post-hoc heads): P_stack(c) = Π_{a ∈ closure(c)} "
+                  "σ(z_a), root head fit on EVERY train row (case vs background); "
+                  "the heads of nodes ≥ 1 are the prevalent arm's own")
+
+
+def closure_matrix(parent_int, C):
+    """(C, C) float64 `M[c, a] = 1` iff `a ∈ closure(c)` — c itself plus every
+    ancestor, each ONCE under diamonds, root included.
+
+    Same construction as `DagClosureHead.__init__` (memoized DFS over the
+    direct-parent lists), kept here so the readout's stacked arm and the co-fit
+    closure head agree on what "closure" means without importing the engine.
+    `parent_int` is the bundle's `{child: [parents]}` over engine ids."""
+    C = int(C)
+    parents = dag_closure_parents(parent_int, C)
+    clo = [None] * C
+
+    def _closure(node):
+        if clo[node] is None:
+            acc = {node}
+            for p in parents[node]:
+                if 0 <= p < C and p != node:
+                    acc |= _closure(p)
+            clo[node] = acc
+        return clo[node]
+
+    M = np.zeros((C, C), dtype=np.float64)
+    for c in range(C):
+        for a in _closure(c):
+            M[c, a] = 1.0
+    return M
+
+
+def stacked_proba(proba, M, *, chunk_rows=8192, floor=1e-12):
+    """`P_stack = exp(log(proba) @ M.T)` — the closure product per (doc, node).
+
+    Row-chunked so the (D, C) log matrix never exists in full beside the float32
+    input (at whole-Mondo, D_te×C float64 is ~2 GB). `floor` clips the input
+    probabilities before the log: a degenerate-negative node's constant fallback
+    is exactly 0.0, and log(0) would turn every descendant's product into 0
+    (a constant column) through a single ancestor the solver refused to fit.
+    Returns float32 (the lean collect's own dtype)."""
+    proba = np.asarray(proba)
+    D, C = proba.shape
+    MT = np.asarray(M, dtype=np.float64).T
+    out = np.empty((D, C), dtype=np.float32)
+    for s in range(0, D, int(chunk_rows)):
+        blk = np.log(np.clip(proba[s:s + chunk_rows].astype(np.float64),
+                             floor, 1.0))
+        out[s:s + chunk_rows] = np.exp(blk @ MT)
+    return out
+
+
+def _paired_per_node(base_per_node, new_per_node, depth):
+    """Paired per-node AUC delta (new − base) over the nodes both arms scored,
+    pooled and by depth: median, wins/losses/ties, n. Counts of nodes only —
+    nothing per-node leaves this function."""
+    shared = sorted(set(base_per_node) & set(new_per_node))
+    deltas = {c: float(new_per_node[c]["auc"]) - float(base_per_node[c]["auc"])
+              for c in shared}
+
+    def _summ(cs):
+        d = np.asarray([deltas[c] for c in cs], dtype=np.float64)
+        if d.size == 0:
+            return {"n": 0, "median": None, "mean": None,
+                    "wins": 0, "losses": 0, "ties": 0}
+        return {"n": int(d.size), "median": float(np.median(d)),
+                "mean": float(d.mean()),
+                "wins": int((d > 0).sum()), "losses": int((d < 0).sum()),
+                "ties": int((d == 0).sum())}
+
+    by_depth = {}
+    for c in shared:
+        by_depth.setdefault(int(depth.get(c) if depth.get(c) is not None else -1),
+                            []).append(c)
+    return {"all": _summ(shared),
+            "by_depth": {str(k): _summ(v) for k, v in sorted(by_depth.items())}}
+
+
+def _marginal_ece_by_depth(proba, stacked, y, scored_nodes, depth, n_bins=10):
+    """Pooled MARGINAL calibration (ECE over ALL test docs, not the parent cohort)
+    per depth, for both arms. The flat head's σ(z_c) is a P(c | parent) and is
+    expected to be badly calibrated as a marginal (it never saw the background);
+    the product is the arm that claims to be a marginal P(c | d). Depth 0 is the
+    root head itself — the detection head's own calibration."""
+    groups = {}
+    for c in scored_nodes:
+        groups.setdefault(int(depth.get(c) if depth.get(c) is not None else -1),
+                          []).append(int(c))
+    out = {}
+    for d, cs in sorted(groups.items()):
+        yy = np.asarray(y[:, cs], dtype=np.float64).ravel()
+        out[str(d)] = {"n_nodes": len(cs),
+                       "flat": _ece(yy, np.asarray(proba[:, cs], dtype=np.float64)
+                                    .ravel(), n_bins),
+                       "stacked": _ece(yy, np.asarray(stacked[:, cs],
+                                                      dtype=np.float64).ravel(),
+                                       n_bins)}
+    return out
+
+
+def stacked_readout(proba, y_te, m_te, parent_int, C, *, recall_targets,
+                    fdr_targets, min_count=0, prevalent=None, doc_keys=None,
+                    arm_label="gated_pc"):
+    """The `gated_pc_stacked` results block: `readout_from_proba` on the closure
+    product of the SAME per-doc probabilities the prevalent arm scored, plus the
+    reads that make the product interpretable next to it:
+
+      * `readout` — ranking / PR / detection / per_node on `P_stack`, the same
+        mask and the same person-grain detection pool as the prevalent arm;
+      * `root_only_detection` — `detection_readout` on the root head alone
+        (column 0, which under the stacked arm is a case-vs-background logistic):
+        if the stacked detection does not beat this, the product adds nothing a
+        single detection head would not;
+      * `paired_vs_prevalent` — per-node AUC delta (stacked − flat) over the
+        shared scored nodes, pooled and by depth (counts of nodes only);
+      * `marginal_ece_by_depth` — pooled marginal ECE of both arms by depth.
+
+    Pure numpy + sklearn, off-Spark testable. `proba` is the lean collect's
+    (D, C) float32; `parent_int` the bundle's engine-id parent map."""
+    C = int(C)
+    M = closure_matrix(parent_int, C)
+    P = stacked_proba(proba, M)
+    readout = readout_from_proba(
+        P, y_te, m_te, C, recall_targets=recall_targets, fdr_targets=fdr_targets,
+        min_count=min_count, doc_keys=doc_keys)
+    root_col = np.asarray(proba[:, 0], dtype=np.float32)
+    root_det = detection_readout(np.stack([root_col, root_col], axis=1), y_te,
+                                 recall_targets, doc_keys=doc_keys)
+    _, depth = _dag_children_and_depth(parent_int, C)
+    n_terms = M.sum(axis=1)
+    block = {
+        "naming": STACKED_NAMING,
+        "definition": "log P_stack(c|d) = sum_{a in closure(c)} log sigma(z_a(d)); "
+                      "closure = c + all ancestors incl. root, each once",
+        "arm_label": arm_label,
+        "min_count": int(min_count),
+        "closure_terms": {"mean": float(n_terms.mean()), "max": int(n_terms.max())},
+        "readout": readout,
+        "root_only_detection": root_det,
+        "marginal_ece_by_depth": _marginal_ece_by_depth(
+            proba, P, y_te, sorted(set(readout["per_node"]) | {0}), depth),
+    }
+    if prevalent is not None:
+        block["paired_vs_prevalent"] = _paired_per_node(
+            prevalent["per_node"], readout["per_node"], depth)
+        block["prevalent_detection"] = prevalent.get("detection")
+    return block
+
+
+def format_stacked_readout(block) -> str:
+    """The stacked block as driver log lines: the three detection numbers side by
+    side (flat max-over-nodes / root head alone / stacked max-over-nodes), the
+    ranking macro, the paired per-node delta by depth, and the marginal ECE."""
+    r = block["readout"]
+    lines = [f"[stacked readout: {block['arm_label']}]  {block['naming']}",
+             f"  {block['definition']}  (closure terms: mean="
+             f"{block['closure_terms']['mean']:.2f} max={block['closure_terms']['max']})"]
+
+    def _det(name, d):
+        if not d or d.get("skipped"):
+            return f"    {name:<28} skipped ({(d or {}).get('skipped')})"
+        return (f"    {name:<28} AUC={d['auc']:.4f} AP={d['ap']:.4f} "
+                f"prev={d['prevalence']:.3f} ({d.get('n_units')} {d.get('grain')}s)")
+
+    lines.append("  detection (case vs bg), three reads of the SAME test split:")
+    lines.append(_det("flat: max_c sigma(z_c)", block.get("prevalent_detection")))
+    lines.append(_det("root head alone", block["root_only_detection"]))
+    lines.append(_det("stacked: max_c P_stack(c)", r["detection"]))
+    rk = r["ranking"]
+    lines.append(f"  ranking (within parent cohort, same mask): macro AUC="
+                 f"{_f(rk['auc']).strip()} AP={_f(rk['ap']).strip()} "
+                 f"(over {rk['n_labels_scored']} nodes)")
+
+    def _med(v):
+        return "n/a" if v is None else f"{v:+.4f}"
+
+    pv = block.get("paired_vs_prevalent")
+    if pv:
+        a = pv["all"]
+        lines.append(f"  paired per-node AUC delta (stacked - flat): median="
+                     f"{_med(a['median'])} "
+                     f"wins/losses/ties={a['wins']}/{a['losses']}/{a['ties']} "
+                     f"(n={a['n']})")
+        for d, s in pv["by_depth"].items():
+            lines.append(f"    depth {d}: n={s['n']} median={_med(s['median'])} "
+                         f"wins/losses={s['wins']}/{s['losses']}")
+    ece = block.get("marginal_ece_by_depth") or {}
+    if ece:
+        lines.append("  marginal ECE over ALL test docs (flat sigma(z_c) vs "
+                     "stacked), by depth [depth 0 = root head]:")
+        for d, s in ece.items():
+            lines.append(f"    depth {d}: n_nodes={s['n_nodes']} flat="
+                         f"{_f(s['flat']).strip()} stacked={_f(s['stacked']).strip()}")
+    return "\n".join("[driver] " + ln if not ln.startswith("[") else ln
+                     for ln in lines)
+
+
 def score_arm(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, C, *, recall_targets,
               fdr_targets, min_count=0, doc_keys=None):
     """Full readout for one arm's theta via the pc_topics_lr proba (a fresh per-node

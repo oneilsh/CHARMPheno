@@ -1080,3 +1080,100 @@ def test_gated_pc_args_emit_spectral_anchor_profile_only_when_set(monkeypatch):
         dict(base, spectral_anchor_profile="data/ontology/profile_eta_X.tsv"), "/tmp/out")
     assert argv[argv.index("--spectral-anchor-profile") + 1] == "data/ontology/profile_eta_X.tsv"
     assert "--spectral-anchor-profile" not in rex.build_gated_pc_args(dict(base), "/tmp/out")
+
+
+# --------------------------------------------------------------------------- #
+# Stacked (closure-product) arm — spec 2026-10-06 Part A.                      #
+# --------------------------------------------------------------------------- #
+# Depth-2 nodes hang under node 2 (fit), not node 1 (degenerate-negative: its
+# constant 0.0 head would scale every descendant's product by one number).
+PARENT_INT = {1: [0], 2: [0], 3: [2], 4: [2], 5: [2]}
+
+
+def _arrays_with_background(seed):
+    """`_make_arrays` plus what the real closure-mask corpus has and the fixture
+    lacks: BACKGROUND train rows (root label 0) that the root head never observes
+    under the closure mask (`m_tr[:, 0] = y_tr[:, 0]`), so the flag-off root is
+    degenerate all-positive exactly as on the cluster, and `observe_root_everywhere`
+    is what hands the root head its negatives."""
+    Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te = _make_arrays(seed=seed)
+    rng = np.random.default_rng(seed + 100)
+    y_tr[:, 0] = (rng.random(D_TR) < 0.7).astype(np.float64)
+    m_tr[:, 0] = y_tr[:, 0]
+    return Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te
+
+
+def test_parse_args_readout_stacked_default_off():
+    assert gpr.build_parser().parse_args(["--run-dir", "x"]).readout_stacked is False
+    assert gpr.build_parser().parse_args(
+        ["--run-dir", "x", "--readout-stacked"]).readout_stacked is True
+
+
+@pytest.mark.slow
+def test_observe_root_everywhere_sets_only_the_root_flag(spark):
+    Pi_tr, y_tr, m_tr, *_ = _make_arrays(seed=2)
+    m_tr[:, 0] = 0.0                                   # nobody observes the root
+    df = gpr.observe_root_everywhere(_make_df(spark, Pi_tr, y_tr, m_tr), C)
+    rows = sorted(df.select("person_id", "labelMask").collect())
+    got = np.asarray([r["labelMask"] for r in rows])
+    assert got.shape == (D_TR, C)
+    assert (got[:, 0] == 1.0).all()
+    assert np.array_equal(got[:, 1:], m_tr[:, 1:])
+    assert dict(df.dtypes)["labelMask"] == "array<double>"
+
+
+@pytest.mark.slow
+def test_re_readout_stacked_arm_adds_the_block_and_leaves_the_other_heads_alone(
+        spark, tmp_path, capsys):
+    """`run_readout(stacked=True)`: the gated_pc_stacked block lands beside the
+    prevalent arm; the root head becomes a real case-vs-background logistic
+    (its column is no longer constant); and every head of a node >= 1 is the
+    same head the flag-off readout fits (per-node independent solve)."""
+    Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te = _arrays_with_background(seed=4)
+    train_df = _make_df(spark, Pi_tr, y_tr, m_tr)
+    test_df = _make_df(spark, Pi_te, y_te, m_te, offset=10_000)
+    manifest = {"C": C, "K": K, "weight_y": 0.0}
+    base = gpr.run_readout(train_df, test_df, manifest, recall_targets=RECALL_TARGETS,
+                           fdr_targets=FDR_TARGETS, min_count=0,
+                           readout_mode="distributed", out_dir=tmp_path)
+    stk = gpr.run_readout(train_df, test_df, manifest, recall_targets=RECALL_TARGETS,
+                          fdr_targets=FDR_TARGETS, min_count=0,
+                          readout_mode="distributed", out_dir=tmp_path,
+                          mask_tag="stacked", stacked=True, parent_int=PARENT_INT)
+    assert set(base) == {"gated_pc"}
+    assert set(stk) == {"gated_pc", "gated_pc_stacked"}
+    blk = stk["gated_pc_stacked"]
+    assert blk["naming"] == gpc.STACKED_NAMING
+    # Heads of nodes >= 1: untouched by the root's changed mask.
+    for c in base["gated_pc"]["per_node"]:
+        if c == 0:
+            continue
+        assert stk["gated_pc"]["per_node"][c]["auc"] == pytest.approx(
+            base["gated_pc"]["per_node"][c]["auc"], abs=1e-9), c
+    # The root head: constant under the flag-off solve (degenerate all-positive
+    # train column), a real per-doc score under the stacked solve.
+    hb = np.load(tmp_path / "readout_heads_gated_pc.npz")
+    hs = np.load(tmp_path / "readout_heads_gated_pc_stacked.npz")
+    assert bool(hb["degenerate"][0]) and not bool(hs["degenerate"][0])
+    assert np.allclose(hb["V"][1:], hs["V"][1:], atol=1e-9)
+    assert not blk["root_only_detection"].get("skipped")
+    assert not blk["readout"]["detection"].get("skipped")
+    pv = blk["paired_vs_prevalent"]
+    assert pv["all"]["n"] >= 3
+    # A fit root factor varies per doc, so depth-1 rankings genuinely move.
+    assert pv["by_depth"]["1"]["ties"] < pv["by_depth"]["1"]["n"]
+    # Record files untouched by the tagged run; the tagged results carry the block.
+    got = json.loads((tmp_path / "results_readout.json").read_text())
+    assert set(got) == {"gated_pc"}
+    got_s = json.loads((tmp_path / "results_readout_stacked.json").read_text())
+    assert set(got_s) == {"gated_pc", "gated_pc_stacked"}
+    out = capsys.readouterr().out
+    assert "STACKED arm: root head fit on EVERY train row" in out
+    assert "root head alone" in out
+
+
+def test_re_readout_stacked_refuses_the_driver_mode():
+    with pytest.raises(SystemExit, match="readout-stacked"):
+        gpr.run_readout(None, None, {"C": C, "K": K}, recall_targets=RECALL_TARGETS,
+                        fdr_targets=FDR_TARGETS, min_count=0, readout_mode="driver",
+                        stacked=True, parent_int=PARENT_INT)

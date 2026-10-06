@@ -68,9 +68,9 @@ from gated_pc_cloud import (
     _collect_lean_proba, _collect_theta_labels, _dump_partial_results,
     _fit_readout_heads, _write_readout_heads, distributed_ranking_readout,
     distributed_score_arm, format_arm_readout, format_incident_readout,
-    incident_readout, multidomain_cache_key, multidomain_load_or_build,
-    readout_ab_report, readout_from_proba, resolve_eval_path,
-    resolve_readout_mode, score_arm,
+    format_stacked_readout, incident_readout, multidomain_cache_key,
+    multidomain_load_or_build, readout_ab_report, readout_from_proba,
+    resolve_eval_path, resolve_readout_mode, score_arm, stacked_readout,
 )
 
 # What the batched solve got before fits recorded their own cap. Runs older than
@@ -216,6 +216,29 @@ def resolve_readout_l2(cli_value, manifest):
     return 1.0, "legacy default"
 
 
+def observe_root_everywhere(df, C, mask_col="labelMask"):
+    """Return `df` with `mask_col[0]` (the ROOT's observation flag) set to 1.0 on
+    every row; every other element untouched.
+
+    The stacked arm's whole mechanism (spec 2026-10-06 Part A): under
+    `label_mask_mode=closure` the root is observed only on foreground rows, all
+    positive, so its readout head is the degenerate constant 1.0 and the closure
+    product `Π_{a ∈ closure(c)} σ(z_a)` carries no population prior. Observing the
+    root on every row makes its head a case-vs-background logistic — the one
+    HSLDA's root conditional is — while the batched solve stays per-node
+    independent (`solve_batched_lr`), so the heads of nodes ≥ 1 are byte-identical
+    to the prevalent arm's. Applied to the TRAIN split only; the test mask is the
+    corpus's own, so the ranking axis scores the same cells it always did.
+
+    Pure column arithmetic on the `array<double>` mask (no UDF): `[1.0] ++
+    mask[1:]`."""
+    from pyspark.sql import functions as F
+    C = int(C)
+    tail = (F.slice(F.col(mask_col), 2, C - 1) if C > 1
+            else F.array().cast("array<double>"))
+    return df.withColumn(mask_col, F.concat(F.array(F.lit(1.0)), tail))
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Post-hoc case-finding readout on a finished gated_pc run "
@@ -355,6 +378,18 @@ def build_parser() -> argparse.ArgumentParser:
                         "only. Writes results_readout_<mode>.json and "
                         "readout_heads_gated_pc_<mode>.npz — the record files are "
                         "never touched.")
+    p.add_argument("--readout-stacked", action="store_true",
+                   help="Add the STACKED arm (spec 2026-10-06 Part A): the root "
+                        "head is fit on every train row (case vs background) in "
+                        "the same batched solve, and each node is scored by the "
+                        "closure PRODUCT of its ancestors' heads, "
+                        "P_stack(c)=prod_{a in closure(c)} sigma(z_a) — HSLDA's "
+                        "label-side gating on post-hoc heads. Outputs go to "
+                        "results_readout_stacked.json / "
+                        "readout_heads_gated_pc_stacked.npz (the record files are "
+                        "untouched); the block carries the flat, root-only and "
+                        "stacked detection side by side. Distributed readout + "
+                        "driver eval path only.")
     return p
 
 
@@ -706,7 +741,7 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
                 min_count, readout_mode="auto", ab_check=False, out_dir=None,
                 theta_topm=None, readout_max_iter=None, elig_col=None,
                 eval_path="driver", readout_l2=None, feature_mask=None,
-                mask_tag=None):
+                mask_tag=None, stacked=False, parent_int=None):
     """Score both gated_pc arms off two already-TRANSFORMED splits. No argparse.
 
     The whole body of this tool that is worth testing: given the frames a finished
@@ -739,7 +774,17 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
     and this returns a `gated_pc_incident` block beside the prevalent one — which is
     how the incident numbers are actually produced: a re-readout of a SAVED FIT, no
     re-fit, warm bundle. Without it the incident arm is SKIPPED with a printed line
-    and every other number is byte-identical to what it was."""
+    and every other number is byte-identical to what it was.
+
+    `stacked=True` (spec 2026-10-06 Part A) adds the `gated_pc_stacked` block: the
+    TRAIN mask gets the root observed on every row (`observe_root_everywhere`), the
+    same batched solve then yields the prevalent heads for nodes ≥ 1 plus a real
+    case-vs-background root head, and the closure product of the per-doc
+    probabilities is scored by `gated_pc_cloud.stacked_readout`. Needs
+    `parent_int` (the bundle's engine-id parent map) and the distributed readout
+    on the driver eval path (the product is formed on the collected (D,C) proba).
+    The caller tags the outputs (`mask_tag="stacked"`) so the record's
+    `results_readout.json` / `readout_heads_gated_pc.npz` are never touched."""
     C = int(manifest["C"])
     mode = resolve_readout_mode(readout_mode, C)
     K = int(manifest.get("K") or 0)
@@ -765,6 +810,20 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
     if feature_mask is not None and mode != "distributed":
         raise SystemExit("[readout] --readout-feature-mask needs the distributed "
                          "readout (the driver-collect sklearn path has no mask)")
+    if stacked:
+        if mode != "distributed" or resolve_eval_path(eval_path, mode) != "driver":
+            raise SystemExit("[readout] --readout-stacked needs the distributed "
+                             "readout on the DRIVER eval path (the closure product "
+                             "is formed on the collected (D,C) proba)")
+        if parent_int is None:
+            raise SystemExit("[readout] --readout-stacked needs the bundle's "
+                             "parent_int (no DAG, no closure)")
+        # The one change to the solve: the root is observed on every train row,
+        # so its head is case-vs-background instead of the degenerate constant.
+        train_scored = observe_root_everywhere(train_scored, C)
+        _cprint("[readout]   STACKED arm: root head fit on EVERY train row (case vs "
+              "background); heads of nodes >= 1 unchanged (per-node independent "
+              "solve)", flush=True)
 
     def _dump(results):
         if out_dir is not None:
@@ -880,6 +939,17 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
         results["gated_pc_incident"] = _inc
         _dump(results)
         print(format_incident_readout(_inc).replace("[driver]", "[readout]"),
+              flush=True)
+    if stacked and dist is not None:
+        # Same collected proba the prevalent arm was scored on — one closure
+        # product, no second collect, no second solve.
+        _stk = stacked_readout(
+            dist[1], dist[2], dist[3], parent_int, C, recall_targets=recall_targets,
+            fdr_targets=fdr_targets, min_count=min_count,
+            prevalent=results["gated_pc"], doc_keys=dist[4], arm_label=arm)
+        results["gated_pc_stacked"] = _stk
+        _dump(results)
+        print(format_stacked_readout(_stk).replace("[driver]", "[readout]"),
               flush=True)
     if ab and dist is not None:
         # Reuses the distributed result just computed, so the gate costs one extra
@@ -1119,6 +1189,15 @@ def main(argv=None) -> int:
                       f"results -> results_readout_{_mtag}.json, heads -> "
                       f"readout_heads_gated_pc_{_mtag}.npz (record untouched)",
                       flush=True)
+            if args.readout_stacked:
+                # Its own tag: the arm re-solves the SAME heads plus a changed
+                # root head, and the record's results/heads files stay the
+                # prevalent arm's.
+                _mtag = "stacked" + (f"_{_mtag}" if _mtag else "")
+                _cprint(f"[readout]   STACKED arm requested: results -> "
+                      f"results_readout_{_mtag}.json, heads -> "
+                      f"readout_heads_gated_pc_{_mtag}.npz (record untouched)",
+                      flush=True)
             _rname = ("results_readout.json" if not _mtag
                       else f"results_readout_{_mtag}.json")
             run_readout(train_scored, test_scored, manifest, recall_targets=rt,
@@ -1129,7 +1208,8 @@ def main(argv=None) -> int:
                         readout_max_iter=args.readout_max_iter,
                         elig_col=_elig_col, eval_path=args.eval_path,
                         readout_l2=args.readout_l2, feature_mask=_fmask,
-                        mask_tag=_mtag)
+                        mask_tag=_mtag, stacked=bool(args.readout_stacked),
+                        parent_int=getattr(bundle, "parent_int", None))
             _cprint(f"[readout]   arm results written to {run_dir / _rname}",
                   flush=True)
             train_scored.unpersist(); test_scored.unpersist()

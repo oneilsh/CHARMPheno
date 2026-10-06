@@ -174,6 +174,25 @@ Pull the numbers with:
 grep -E "gated_pc(_own_bg|_family_closure)? \(pc_topics_lr\): (macro|detection)|^all: n=|^by depth|starved" "$RUN"/sweep_log.md
 ```
 
+### Stacked readout (spec 2026-10-06 Part A) — re-readout of the saved fit, no refit
+
+The closure-product arm: root head fit on every train row (case vs background), each
+node scored by Π over its closure of the per-node heads. Tagged outputs
+(`results_readout_stacked.json`, `readout_heads_gated_pc_stacked.npz`); the record is
+untouched. ~15 min on a warm bundle (+~20 min rebuild on a fresh cluster).
+
+```bash
+cd ~/repos/CHARMPheno && git fetch origin claude/gated-conditional-voi && git checkout claude/gated-conditional-voi && git pull --ff-only
+RUN=$(ls -d /home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs/0123-*)
+nohup make -C analysis/cloud gated-pc-readout ID=123 GPR_ARGS="--readout-mode distributed --readout-l2 100 --readout-stacked" > "$RUN"/stacked_log.md 2>&1 &
+```
+
+Pull the numbers with:
+
+```bash
+grep -E "STACKED|stacked readout|three reads|flat: max|root head alone|stacked: max|ranking \(within|paired per-node|depth [0-9]+:|marginal ECE" "$RUN"/stacked_log.md
+```
+
 ## Run log
 
 **2026-10-05 — closeout complete on the n2-standard-8 cluster.** family-closure readout
