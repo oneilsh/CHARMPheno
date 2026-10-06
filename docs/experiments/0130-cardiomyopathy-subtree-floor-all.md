@@ -1,7 +1,7 @@
 ---
 id: 130
 slug: cardiomyopathy-subtree-floor-all
-status: pending
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -133,4 +133,24 @@ grep -nE "^  (dilated|intrinsic|peripartum)? ?cardiomyopathy +d[0-9]|^(dilated |
 
 ## Run log
 
-## Results
+## Results (2026-10-06)
+
+| arm | macro (7) | det | paired vs 0127 | anchors (cardiomyopathy / DCM) |
+|---|--:|--:|--:|---|
+| 0129 floor=guided | 0.9101 | 0.701 | −0.003 (1/6) | Epilepsy · PVT · T1DM · Verruca · Acne / PCOS · Atopic dermatitis · Stiff neck · Hypothyroidism · PAF |
+| 0130 floor=all | 0.9011 | 0.689 | −0.005 (3/4), d2 −0.019 | identical to 0129 (all guided nodes drew 5/5 from the profile pool) |
+
+**The floor worked as built (common words now anchor) and the blocks did not move.** DCM:
+acute-inpatient symptoms (1.9e5) · pregnancy (1.1e5) · hypothyroid/pregnancy · PCOS/
+vaginitis · ONE cardiac topic (mitral stenosis/LVH, 4e4; hypercholesterolemia/CAD in 0130).
+Intrinsic CM: anxiety/depression · pregnancy+nevus · pregnancy · infertility · one DCM-ish
+cardiac topic. Cardiomyopathy d1: textbook topic UP (4.3e5 vs 3.2e5), pregnancy no longer
+in its block (moved down to intrinsic/DCM). Peripartum: pregnancy ×3, generic ×2.
+
+**Verdict.** A node's block is a five-way split of its PATIENTS into their dominant
+co-occurrence strata; anchors (rare or common, guided or not) only label those strata and
+deflation only removes what the anchors span. The pregnancy stratum is in DCM's block
+because peripartum patients are in DCM's seed DOCUMENTS (closure scope). The derived fix
+is to not train DCM's seed on them: `anchor_scope: frontier` (exp 0131, built, one line).
+The tpn=5 "five strata per node" structure is a separate, representation-level question
+(what a block should be) — parked, with the evidence above, for the user.

@@ -1,19 +1,20 @@
 ---
-id: 129
-slug: cardiomyopathy-subtree-floor-guided
-status: done
+id: 131
+slug: cardiomyopathy-subtree-frontier-scope
+status: pending
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
 disease: rare_priority
-# CANDIDATE-FLOOR ARM (guided). 0127's config (cardiomyopathy subtree, forward order,
-# guided anchors) with ONE line added: spectral_marginal_floor: guided. The profile pool must clear the floor; the open fallback keeps df>=5.
-# WHY (0128): rare-code anchors (df>=5 floor) sit in small strata, recovery hands whole
-# strata to the nearest vertex, and a parent deflated against a child's rare-code anchors
-# keeps the child's real signal. The dense path's rule — a candidate must be at least as
-# common as the node's AVERAGE word (mean nonzero p_w) — is the derived cure.
-# READ: anchors (should be common disease words); DCM's block (pregnancy strata gone?);
-# parent's textbook topic kept; paired AB vs 0127. Bundle HIT; ~25 min.
+# FRONTIER ANCHOR SCOPE. 0127's config (subtree, forward, guided) with ONE line changed:
+# anchor_scope: frontier. WHY (0127-0130): a node's block is a five-way split of its seed
+# documents' strata; anchors only label them, deflation only removes what anchors span,
+# and the frequency floor only relabels. DCM carries the pregnancy stratum because
+# peripartum patients are in its CLOSURE seed documents. Frontier scope trains each
+# node's seed only on documents where it is the most specific attested node, so DCM's
+# seed never sees a peripartum patient. (The fit itself is unchanged: the gate still
+# lets closure docs use the block.) READ: DCM's five topics; parent legibility; anchors;
+# paired AB vs 0127. Bundle HIT; ~25 min.
 dag_source: mondo_native
 mondo_branch: MONDO:0004994   # cardiomyopathy SUBTREE (was MONDO:0004995, the whole CV branch): ~30 nodes, minutes not hours
 tpn: 5
@@ -23,11 +24,10 @@ diag_only: true
 init: spectral
 spectral_method: scalable   # concatenated V ~11.6k >= 8000 threshold; dense = driver wall
 spectral_d: 768             # random-projection dim: smaller = faster + bigger safe batch (see COST)
-anchor_scope: closure       # node trained from its whole closure; ancestors deflated by topo order
+anchor_scope: frontier      # THE ONLY CHANGE vs 0127: a node's seed docs = those where it is the MOST SPECIFIC attested node (peripartum patients no longer train DCM's block)
 spectral_topo_order: forward  # ancestors-first: each node's seed = its increment over ancestors
 count_transform: none       # raw per-visit counts, as 0123 (binary was a detection tax, 0123)
 # --- THE ONLY CHANGE vs 0123: HPO-guided spectral anchors (spec 2026-10-05) ---
-spectral_marginal_floor: guided   # THE ONLY CHANGE vs 0127
 spectral_anchor_profile: ~/repos/CHARMPheno/data/ontology/profile_eta_MONDO_0004995.tsv  # REGENERATED with the prenatal exclusion (see COST)
 # ------------------------------------------------------------------------------------
 preindex_closure: false
@@ -98,12 +98,34 @@ spark_conf:
 ---
 
 
-# 129 — subtree, forward, guided, candidate floor `guided`
+# 0131 — subtree, forward, guided, `anchor_scope: frontier`
 
-See the front matter. Launched with its sibling (one chain in 0130's Run section).
+## Run
+
+```bash
+cd ~/repos/CHARMPheno && git fetch origin claude/gated-conditional-voi && git checkout claude/gated-conditional-voi && git pull --ff-only
+RUNS=/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs
+mkdir -p "$RUNS"/0131-cardiomyopathy-subtree-frontier-scope
+nohup bash -c '
+  RUN='"$RUNS"'/0131-cardiomyopathy-subtree-frontier-scope
+  echo "=== 131 fit START $(date)"
+  make -C analysis/cloud exp ID=131 || exit 1
+  make -C analysis/cloud gated-pc-readout ID=131 GPR_ARGS="--readout-mode distributed --readout-l2 100"
+  make -C analysis/cloud inspect-topics ID=131 COMPARE=127 INSPECT_ARGS="--readout-auc"
+  make -C analysis/cloud inspect-topics ID=131 RESOLVE_NAMES=1 INSPECT_ARGS="--digest --redundancy 30 --grep \"cardiomyopathy|myocarditis|pregnan|gestation|heart failure\""
+  python3 analysis/cloud/name_spectral_anchors.py "$RUN" --bundle-meta /tmp/inspect_meta_131.json --concept-names /tmp/concept_names_131.csv
+  echo "=== 131 DONE $(date)"
+' > "$RUNS"/0131-cardiomyopathy-subtree-frontier-scope/sweep_log.md 2>&1 &
+```
+
+Compact read:
+
+```bash
+L=/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs/0131-cardiomyopathy-subtree-frontier-scope/sweep_log.md
+grep -nE "^=== |spectral anchor guide|gated_pc \(pc_topics_lr\): (macro|detection)|^all: n=|^by depth|starved|zero training docs" "$L" | cut -c1-160
+grep -nE "^  (dilated|intrinsic|peripartum)? ?cardiomyopathy +d[0-9]|^(dilated |intrinsic |peripartum )?cardiomyopathy \|" "$L" | cut -c1-230 | awk '!seen[$0]++'
+```
 
 ## Run log
 
 ## Results
-
-See 0130 (the pair's results are recorded there).

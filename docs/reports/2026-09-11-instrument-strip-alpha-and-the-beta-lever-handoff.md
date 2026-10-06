@@ -272,7 +272,8 @@ prior on child blocks (nothing to hold), tpn as a lever (relocates the competiti
 | 0125 | 0124 + prenatal HPO subtree excluded from the guide; anchor dump | — | **0.7914** (det 0.625) | 0 | guardrail met; DCM block UNCHANGED with non-pregnancy anchors → stratum enters via RECOVERY (peripartum CM's patients train DCM's block; forward deflation never removes a child's direction); anchors are rare profile codes (hull vertices under the 5-doc floor), not topic words |
 | 0126 | 0125 + `spectral_topo_order: reverse` (leaves-first deflation) | — | pending | — | the structural fix; cost to weigh: ancestors become residuals |
 | 0127/0128 | subtree probe pair (17 nodes): forward vs leaves-first | — | 0.912 / 0.907 (7 nodes) | — | reverse SPREADS the pregnancy stratum (deflation only removes what the child's rare-code anchors span) and thins parents; 0126 NOT run |
-| 0129/0130 | subtree: candidate floor = node's mean word frequency, guided pool / all candidates | — | pending | — | the lever: common-word anchors so recovery and deflation act on real directions |
+| 0129/0130 | subtree: mean-frequency candidate floor (guided / all) | — | 0.910 / 0.901 | — | anchors became common words; blocks UNCHANGED — a block is a 5-way split of its seed docs' strata |
+| 0131 | subtree: `anchor_scope: frontier` (seed docs = most-specific-node docs only) | — | pending | — | removes peripartum patients from DCM's seed; the mechanism's direct fix |
 | 0116 | + profile-eta S=1 | 0.7804 | 0.8098 | 72% | ablation ladder §2.3 |
 | 0120 | + profile-eta + L-BFGS head | 0.7555 | 0.7927 | — | head −0.015 paired |
 | 0121 | equalized α init → learned | — | 0.7895 | 79% | cliff up a level |
