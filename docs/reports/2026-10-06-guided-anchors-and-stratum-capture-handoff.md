@@ -40,7 +40,19 @@ readout+digest+anchors in ~25 min (bundle cached per cluster). 0127 (forward, cl
 is the control; pairs 0128/0129/0130/0131 each changed one line. The compact read is in
 0130's / 0131's Run sections. Numbers do not pair with the CV branch; mechanisms do.
 
-## 3. Next (derived, not built; the user decides)
+## 3. Next — DECIDED 2026-10-06 (user): revisit HSLDA's output-side hierarchy
+
+Spec: `docs/superpowers/specs/2026-10-06-stacked-closure-readout-and-hslda-arm.md`.
+Part A (build first, no fit): a `--readout-stacked` arm — closure-product of the per-node
+conditionals σ(z_a) over the saved readout heads, scored for DETECTION (the number that
+has sat at 0.60–0.63 because no node head ever saw the background) and per-node ranking;
+run on the saved 0123/0124 fits. Part B: an UNGATED flat-topic fit at K=1498 (exp 0132 =
+0113 with the gate off) read with the same stacked head — HSLDA proper. The per-node
+scope rule below is NOT being built (user: same kind of trick, tried many ways); tpn=1
+is the user's lean for the gated side, to be asked under the stacked head (caveat: the
+signature was the minority topic in every 0127–0131 block).
+
+Superseded options, kept for the record:
 
 - **Per-node scope:** seed from frontier docs when the node has ≥ `min_positives` of them
   (the existing label floor), else from its closure. Keeps DCM clean, re-seeds intrinsic
