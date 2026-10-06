@@ -1,7 +1,7 @@
 ---
 id: 125
 slug: mondo-cardiovascular-tpn5-spectral-guided-noprenatal
-status: pending
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -274,7 +274,37 @@ take a block: any rare pure stratum can. **Anchors are vertex labels, not topic
 descriptions.** The guide still decides WHICH rare codes label the vertices — and 0124
 showed that matters — but "HPO decides which words the topic is about" overstated it.
 
-**Derived next step (not built):** for the GUIDED stage only, require a candidate to
+**The digest (2026-10-06, names, no stars; cardiomyopathy/pregnancy grep, top 25 by ev):**
+`dilated cardiomyopathy` (d5) is UNCHANGED from 0124: *Carrier of cystic fibrosis gene
+mutation · First trimester pregnancy · Gestation period, 11 weeks · Abnormal cytological
+finding · Unplanned pregnancy · Obesity · Finding related to pregnancy · Complication
+occurring during pregnancy · Pregnancy test …* — with anchors that are now ESR raised /
+glycosuria / pes cavus / torticollis / eyelid edema, none pregnancy-related.
+`cardiomyopathy` (d3) stays textbook (*Cardiomyopathy · Primary CM · Dilated CM · Chronic
+systolic HF · … · Left bundle branch block*). The heart-failure / CHF blocks show the
+tpn=5 structure plainly: each of a node's five topics takes a comorbidity stratum of its
+patients (sleep-apnea/obesity; pleural effusion/orthopnea; CKD/renal; diabetes/neuropathy;
+respiratory distress).
+
+**Verdict: the fetal-term hypothesis is REFUTED as the mechanism.** Removing the fetal
+code changed DCM's anchors and not its block. The prenatal stratum is not brought in by
+an anchor; it is brought in by RECOVERY, because it is in DCM's training documents:
+`peripartum cardiomyopathy` is DCM's child (verified in this DAG), so every peripartum
+patient — pregnant, with a prenatal-visit record — trains DCM's block under
+`anchor_scope: closure`. Forward deflation removes DCM's ANCESTORS' directions, never its
+children's, so the pregnancy direction survives into DCM's search, and whichever of its
+five vertices sits nearest that stratum (fetal movement in 0124, glycosuria in 0125)
+collects the whole stratum in β recovery. In 0123 the same stratum sat one level up, in
+intrinsic CM, for the same reason. The prenatal exclusion stays (it is right in
+principle and cost nothing) but it was not the lever.
+
+**Derived next step → exp 0126: `spectral_topo_order: reverse`** (leaves-first
+deflation, spec 2026-07-23, built, never run on this branch). Peripartum CM anchors
+first and claims the pregnancy direction; DCM is deflated against its descendants before
+its own search. A topological order, not a knob; one config line. Known cost to test:
+ancestors become residuals after their children claim their signal, so the d3 blocks the
+guide just fixed may degrade — that is the A/B. Second derived option, held in reserve:
+for the GUIDED stage only, require a candidate to
 clear the node's own mean within-node marginal (the dense `find_anchors` floor,
 `min_marginal_frac=1.0`: at least as common as the average word in that node's docs);
 the open fallback keeps the df floor. Rarity-as-purity is the property the profile makes

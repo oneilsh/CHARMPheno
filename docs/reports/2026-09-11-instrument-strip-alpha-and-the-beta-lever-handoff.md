@@ -269,7 +269,8 @@ prior on child blocks (nothing to hold), tpn as a lever (relocates the competiti
 | 0115 | + spectral + binary counts | never read | **0.7898** (det 0.604) | 1%-ish (0114: 1%) | AB vs 0113: median −0.020, 42/151, uniform by depth; own-bg **0.7309** (0116: 0.669); family-closure 0.7851 |
 | 0123 | + spectral, RAW counts (alpha fixed) | — | **0.7946** (det 0.630) | ~1% | AB vs 0115 +0.003 (111/82); vs 0113 −0.016 (48/145), concentrated at d5 (−0.026); own-bg 0.730; family-closure 0.787 (det 0.598) |
 | 0124 | + spectral, raw, HPO-GUIDED anchors | — | **0.7920** (det 0.633) | 1% | 594/1490 anchors from profiles; paired vs 0123 −0.001 (87/106): guardrail MET; LEGIBILITY: cardiomyopathy d3 fixed (generic symptoms → textbook block), intrinsic CM off gestation; residual DCM anchored on a FETAL term's maternal code → 0125 |
-| 0125 | 0124 + prenatal HPO subtree excluded from the guide; anchor dump | — | pending | — | the realization fix; starred digest + profile-align are the systematic reads |
+| 0125 | 0124 + prenatal HPO subtree excluded from the guide; anchor dump | — | **0.7914** (det 0.625) | 0 | guardrail met; DCM block UNCHANGED with non-pregnancy anchors → stratum enters via RECOVERY (peripartum CM's patients train DCM's block; forward deflation never removes a child's direction); anchors are rare profile codes (hull vertices under the 5-doc floor), not topic words |
+| 0126 | 0125 + `spectral_topo_order: reverse` (leaves-first deflation) | — | pending | — | the structural fix; cost to weigh: ancestors become residuals |
 | 0116 | + profile-eta S=1 | 0.7804 | 0.8098 | 72% | ablation ladder §2.3 |
 | 0120 | + profile-eta + L-BFGS head | 0.7555 | 0.7927 | — | head −0.015 paired |
 | 0121 | equalized α init → learned | — | 0.7895 | 79% | cliff up a level |
