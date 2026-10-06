@@ -223,6 +223,37 @@ converged (186 gtol, 73 stalled; same shape as 0115's 257/259).
 
 ## Results
 
+**Stacked readout (spec 2026-10-06 Part A), 2026-10-06 — on the saved fit, ridge 100,
+root head fit on every train row.** Detection, three reads of the same test split
+(persons, prevalence 0.635):
+
+| read | AUC | AP |
+|---|--:|--:|
+| flat: max over nodes of σ(z_c) (the record's number) | 0.6299 | 0.7600 |
+| root head alone: σ(z_0), one case-vs-background logistic on θ | **0.8065** | **0.8859** |
+| stacked: max over nodes of P_stack(c) | 0.8065 | 0.8859 |
+
+Stacked equals root-only to four decimals, and it must: the branch has ONE depth-1 node
+(cardiovascular disorder) which every case carries, so its head is the degenerate
+constant 1.0 and P_stack(depth-1) = σ(z_0)·1 — the max over nodes is the root head.
+So the +0.18 is entirely the root head, i.e. the thing the readout never had: a head
+that saw the background. θ carries case-vs-background signal at 0.81; the max-over-
+conditionals read was the wrong read, not the representation.
+
+Within-cohort ranking (same mask as the record): stacked is WORSE at every depth —
+paired median −0.041, 33 up / 160 down of 193, and the loss grows with depth (depth 3
+−0.011, depth 5 −0.057, depth 6 −0.125). Also by construction: inside a parent's cohort
+the parent is known, and multiplying by the ancestors' varying confidence that the
+document belongs there injects noise, more of it per extra factor. σ(z_c) alone IS the
+conditional decoder; P_stack is the marginal one. They answer different questions.
+
+Marginal calibration over all test docs (ECE by depth): flat 0.08–0.48, stacked
+0.003–0.015 — the product is a calibrated marginal P(c | d), which the flat head cannot be.
+
+Missing from this run (added to the block after it): the per-node AUC over ALL docs
+(de-novo, HSLDA's own read). Re-run to get it; see insight 0092.
+
+
 **Full head, ridge 100 (pc_topics_lr, 193 nodes):**
 
 | | macro AUC | AP | detection AUC | det AP |
