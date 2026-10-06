@@ -312,7 +312,8 @@ _EPS = 1e-12
 
 def find_anchors_projected(QR: np.ndarray, p_w: np.ndarray, df_w: np.ndarray,
                            n: int, *, seed_rows=None,
-                           min_doc_freq: int = 5, preferred=None) -> list[int]:
+                           min_doc_freq: int = 5, preferred=None,
+                           marginal_floor: str = "none") -> list[int]:
     """Greedy pivoted-QR anchor selection on the p_w-row-normalized sketch.
 
     Same geometry as dense ``spectral_init.find_anchors`` (Gram–Schmidt: keep an
@@ -342,6 +343,23 @@ def find_anchors_projected(QR: np.ndarray, p_w: np.ndarray, df_w: np.ndarray,
     norms = (Qbar * Qbar).sum(axis=1)            # squared row norms
     df = np.asarray(df_w)
     candidate = df >= min_doc_freq               # eligible to BE an anchor
+    # ``marginal_floor`` (exps 0125/0128, 2026-10-06): the df>=5 floor lets a
+    # word seen in five of a node's tens of thousands of documents be a hull
+    # vertex, so the anchors are rare syndromic codes; a block's vertices then
+    # sit in small odd strata, recovery hands whole strata to whichever vertex
+    # is nearest, and deflating a parent against such anchors removes none of
+    # the child's real signal. The dense path's rule — a candidate must be at
+    # least as common as the AVERAGE word in the node's own documents (mean
+    # nonzero p_w) — is the derived cure. "guided": apply it to the preferred
+    # pool only (the profile already says which words; rarity-as-purity is not
+    # needed). "all": apply it to every candidate (changes unguided nodes too).
+    if marginal_floor not in ("none", "guided", "all"):
+        raise ValueError(f"marginal_floor must be none|guided|all, got {marginal_floor!r}")
+    pw = np.asarray(p_w, dtype=np.float64)
+    pos = pw > 0
+    common = pw >= (pw[pos].mean() if pos.any() else 0.0)
+    if marginal_floor == "all":
+        candidate = candidate & common
 
     basis: list[np.ndarray] = []                  # orthonormal residual basis
 
@@ -382,7 +400,10 @@ def find_anchors_projected(QR: np.ndarray, p_w: np.ndarray, df_w: np.ndarray,
 
     pref = _preferred_mask(preferred, V)
     if pref is not None:
-        greedy(candidate & pref, n)               # stage 1: guided picks
+        pool1 = candidate & pref
+        if marginal_floor == "guided":
+            pool1 = pool1 & common
+        greedy(pool1, n)                          # stage 1: guided picks
     greedy(candidate, n - len(anchors))           # stage 2: the open search
     return anchors
 

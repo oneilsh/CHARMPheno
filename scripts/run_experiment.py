@@ -886,6 +886,8 @@ def build_gated_pc_args(
     # HPO-guided spectral anchors (spec 2026-10-05, exp 0124). Emitted ONLY
     # when set — the driver defaults to '' — so every existing arg string stays
     # byte-identical. The value is a path to the profile-eta TSV.
+    if str(effective.get("spectral_marginal_floor", "none")) != "none":
+        args.extend(["--spectral-marginal-floor", str(effective["spectral_marginal_floor"])])
     if effective.get("spectral_anchor_profile"):
         args.extend(["--spectral-anchor-profile",
                      str(effective["spectral_anchor_profile"])])

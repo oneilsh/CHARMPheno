@@ -216,3 +216,19 @@ def test_anchor_dump_payload_is_ids_and_ontology_names_only():
     assert anchor_dump_payload(st)["2"]["cid"] is None
     # old 4-tuples (pre-ids) still summarize and dump without anchors
     assert anchor_dump_payload({5: (1, 1, 0, 1)})["5"]["anchors"] == []
+
+
+def test_projected_marginal_floor_guided_and_all():
+    QR, p_w, df_w = _sketch()
+    p_w = p_w.copy(); p_w[[2, 6]] = 1e-4            # two rare preferred words
+    base = find_anchors_projected(QR, p_w, df_w, 3, preferred=[2, 6, 10])
+    assert base[0] in (2, 6, 10)
+    g = find_anchors_projected(QR, p_w, df_w, 3, preferred=[2, 6, 10], marginal_floor="guided")
+    assert g[0] == 10 and 2 not in g[:1] and 6 not in g[:1]     # rare preferred rows cannot lead
+    a = find_anchors_projected(QR, p_w, df_w, 3, preferred=[2, 6, 10], marginal_floor="all")
+    assert 2 not in a and 6 not in a                           # nor anchor at all
+    assert find_anchors_projected(QR, p_w, df_w, 3, marginal_floor="none") == \
+        find_anchors_projected(QR, p_w, df_w, 3)
+    import pytest
+    with pytest.raises(ValueError):
+        find_anchors_projected(QR, p_w, df_w, 3, marginal_floor="bogus")

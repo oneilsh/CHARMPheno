@@ -1,7 +1,7 @@
 ---
 id: 128
 slug: cardiomyopathy-subtree-guided-reverse
-status: pending
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -161,4 +161,21 @@ grep -nE "cardiomyopathy|pregnan|toxemia|myocarditis" "$L" | grep -E "fed \|| \|
 
 ## Run log
 
-## Results
+## Results (2026-10-06; 17 nodes, K=93, 7 scored; 12 guided, 56/85 anchors from profile)
+
+| arm | macro AUC (7) | detection | DCM block | parent (cardiomyopathy d1) |
+|---|--:|--:|---|---|
+| 0127 forward | 0.9123 | 0.713 | 4 of 5 topics pregnancy strata | textbook topic ev 3.2e5 |
+| 0128 reverse | 0.9069 | 0.709 | 2 of 5 pregnancy; ONE real DCM topic appears (ev 3.4e4) | textbook topic ev 9.1e4; pregnancy now intrinsic CM's TOP topic |
+
+Paired 0128−0127: median −0.0004 (2/5 up); d2 −0.023 (n=3), d3 +0.008 (n=4).
+
+**Verdict: leaves-first deflation does NOT remove the stratum; it spreads it** (intrinsic
+CM's top topic, still DCM, less in peripartum) and thins the parents as predicted.
+Mechanism: deflation removes only the directions the child's ANCHORS span, and
+peripartum's anchors (toxic goiter, T1DM, hypothyroidism, RF positive) do not span the
+pregnancy direction — rare-code anchors defeat deflation as surely as they defeat
+legibility. **The lever is the candidate floor** (df ≥ 5 admits rare syndromic codes as
+vertices): exps 0129/0130 apply the dense path's rule — at least as common as the node's
+average word — to the guided pool / to every candidate. 0126 (full branch, reverse) is
+NOT run.
