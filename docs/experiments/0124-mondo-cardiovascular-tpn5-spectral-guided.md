@@ -219,6 +219,26 @@ nodes fully guided 112, partially 17, fallback-only 3. Starvation 1% (unchanged)
 
 ## Results
 
+**Stacked readout (spec 2026-10-06 Part A), 2026-10-06 — paired with 0123's (insight
+0092).** Same tool, same corpus, guided anchors vs raw spectral:
+
+| read | 0123 (raw spectral) | 0124 (guided) |
+|---|--:|--:|
+| detection: flat max over nodes | 0.6299 | 0.6325 |
+| detection: root head alone = stacked max | 0.8065 / AP 0.8859 | 0.8040 / AP 0.8844 |
+| within-cohort ranking, paired stacked − flat (193) | −0.041, 33/160 | −0.037, 35/158 |
+| de novo per-node over ALL docs, flat → stacked (224) | 0.7118 → 0.8497 | 0.7097 → 0.8483 |
+| de novo paired delta | +0.116, 219/4 | +0.106, 221/2 |
+| marginal ECE, stacked, by depth | 0.003–0.015 | 0.003–0.016 |
+
+Within a thousandth or two everywhere; the depth profiles of both paired reads match
+0123's shape (de novo +0.03 at depth 3 rising to +0.20 at depth 6; within-cohort −0.011
+at depth 3 to −0.12 at depth 6). The guided anchors, which moved topic legibility
+(cardiomyopathy at depth 3 reads as a textbook block) and nothing on the flat head
+(−0.003 paired vs 0123), move nothing under the stacked head either. The decoder, not
+the anchors, owns these numbers.
+
+
 **Full head, ridge 100 (193 nodes):**
 
 | | macro AUC | AP | detection AUC | det AP |
