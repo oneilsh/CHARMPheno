@@ -173,13 +173,16 @@ nohup bash -c '
     make -C analysis/cloud gated-pc-readout ID=125 GPR_ARGS="--readout-mode distributed --readout-l2 100 --readout-feature-mask $m"
   done
   for b in 124 123 113; do make -C analysis/cloud inspect-topics ID=125 COMPARE=$b INSPECT_ARGS="--readout-auc"; done
-  make -C analysis/cloud inspect-topics ID=125 CREDITED=1 RESOLVE_NAMES=1 INSPECT_ARGS="--digest --redundancy 30 --grep cardiomyopathy|atrial.fibrillation|heart.valve|mitral|aortic|myocardial.infarction|heart.failure|pregnan|gestation"
+  make -C analysis/cloud inspect-topics ID=125 CREDITED=1 RESOLVE_NAMES=1 INSPECT_ARGS="--digest --redundancy 30 --grep \"cardiomyopathy|atrial fibrillation|heart valve|mitral|aortic|myocardial infarction|heart failure|pregnan|gestation\""
   make -C analysis/cloud inspect-topics ID=125 CREDITED=1 COMPARE=124 INSPECT_ARGS="--profile-align"
   echo "=== DONE $(date)"
 ' > "$RUN"/sweep_log.md 2>&1 &
 ```
 
-(The grep pattern uses `.` for spaces so it needs no quoting inside the wrapper.)
+(`INSPECT_ARGS` is expanded UNQUOTED into the recipe's shell, so a `--grep` pattern with
+`|` must carry its own quotes — escaped double quotes inside the single-quoted wrapper.
+The first 0125 launch dropped them and the shell ran `mitral`, `aortic`, … as commands;
+only the digest step was lost.)
 
 Early checks: `grep -E "prenatal exclusion|anchor guide" "$RUN"/sweep_log.md` (the
 survey's drop counts, then the builder's and the seed's guide counts).
@@ -210,4 +213,38 @@ terms realize to almost nothing in this adult vocabulary; `Reduced fetal movemen
 essentially the only one, which is why one term could do what it did. The seed should
 therefore differ from 0124 only at the nodes where such a candidate was actually chosen.
 
+**2026-10-05 21:29 — chain DONE; the cluster died right after.** Everything but the
+digest ran (the digest's `--grep` pattern was unquoted — `|` became shell pipes; see the
+note in Run). Run-dir artefacts survive; the HDFS bundle and `/tmp` names/meta do not.
+Recovery chain (new cluster, 2026-10-06): the `own` ablation readout (rebuilds the
+bundle), the digest with names, the named anchors.
+
 ## Results
+
+**Full head, ridge 100 (193 nodes):**
+
+| | macro AUC | AP | detection AUC | det AP |
+|---|--:|--:|--:|--:|
+| 0123 spectral, raw | 0.7946 | 0.5327 | 0.6299 | 0.7600 |
+| 0124 guided | 0.7920 | 0.5261 | 0.6325 | 0.7595 |
+| **0125 guided, no prenatal** | **0.7914** | 0.5277 | 0.6245 | 0.7570 |
+
+Paired vs 0123: median **−0.0021** mean −0.0031 (p25 −0.014, p75 +0.007), up/down
+79/114; by depth d2 −0.002, d3 −0.001, d4 −0.003, d5 −0.002, d6 −0.005, d7 +0.009.
+Paired vs 0113: median −0.0180, 44/149; by depth d2 −0.006, d3 −0.012, d4 −0.020,
+**d5 −0.031**, d6 −0.014, d7 +0.003 — 0124's shape exactly.
+
+**Guardrail: MET** (−0.001 vs 0124, −0.003 vs 0123; detection −0.008 vs 0124, within the
+run-to-run band). The exclusion changed three candidates and the readout did not move.
+
+**`--profile-align` vs 0124 (132 credited nodes, boosted = FIRST topic of each block):**
+fed n=132, median profile mass 0.108 / top-15 overlap 0.13; 0124 baseline 0.126 / 0.13.
+Least aligned: vein disorder, cardiac rhythm disease, vascular occlusion disorder (0.00);
+most: cardiovascular disorder 0.67, heart disorder 0.60, cerebrovascular disorder 0.60.
+Read with care: this scorecard scores only the first topic of a block against the
+profile, which was the right unit for profile-ETA (one boosted topic per block) but
+under guided anchors every topic is guided and the first is merely the first anchor.
+A median of ~2 profile words in the top 15 says the recovered blocks are mostly
+non-profile words (labs, drugs, visit codes) — expected for an EHR topic — and tells us
+nothing about WHICH word anchored a block. The anchor dump does; pending the recovery.
+
