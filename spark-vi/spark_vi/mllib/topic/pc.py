@@ -492,6 +492,13 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
     # RDD alone). These four record WHICH file and knobs produced that boost,
     # so the run manifest / model params carry the full provenance, and the
     # D5 resume/warm-start guard in `_fit` keys off them.
+    spectralMarginalFloor = Param(
+        Params._dummy(), "spectralMarginalFloor",
+        "scalable spectral anchor candidate floor: 'none' (default; df >= "
+        "spectralMinDocFreq only), 'guided' (the preferred/profile pool must "
+        "also be at least as common as the node's average word), or 'all' "
+        "(every candidate must). A derived rule, not a strength: rare-code "
+        "vertices capture strata and defeat deflation (exps 0125/0128).")
     spectralAnchorCandidates = Param(
         Params._dummy(), "spectralAnchorCandidates",
         "JSON-encoded {engine_node_id: [vocab_idx, ...]} — the GUIDED-ANCHOR "
@@ -847,6 +854,7 @@ _ONLINE_PCLDA_DEFAULTS = dict(
     countTransform="none",
     alphaInit="uniform",
     spectralAnchorCandidates="",
+    spectralMarginalFloor="none",
     profileEta="", profileEtaStrength=1.0, profileEtaTopics=1,
     profileEtaMinCoverage=0.0,
     featuresCols=[],   # domainBounds intentionally omitted: it uses isSet (no default)
@@ -917,6 +925,7 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         countTransform: str = "none",
         alphaInit: str = "uniform",
         spectralAnchorCandidates: str = "",
+        spectralMarginalFloor: str = "none",
         profileEta: str = "",
         profileEtaStrength: float = 1.0,
         profileEtaTopics: int = 1,
@@ -1169,7 +1178,8 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
                     anchor_scope=self.getOrDefault("anchorScope"),
                     topo_order=self.getOrDefault("spectralTopoOrder"),
                     anchor_candidates=(_anchor_cands or None),
-                    anchor_stats=_anchor_stats)
+                    anchor_stats=_anchor_stats,
+                    marginal_floor=str(self.getOrDefault("spectralMarginalFloor")))
                 # Always keep the per-node anchors (guided or not): the driver
                 # writes them to the run dir so "which word anchored this block"
                 # is read directly, not inferred from the recovered topic.

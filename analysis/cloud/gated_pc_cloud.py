@@ -2825,6 +2825,7 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
         spectralMethod=str(getattr(args, "spectral_method", "auto")),
         spectralMaxVocab=int(getattr(args, "spectral_max_vocab", 8000)),
         spectralD=int(getattr(args, "spectral_d", 0)),
+        spectralMarginalFloor=str(getattr(args, "spectral_marginal_floor", "none")),
         spectralMinDocFreq=int(getattr(args, "spectral_min_doc_freq", 5)),
         anchorScope=str(getattr(args, "anchor_scope", "closure")),
         spectralTopoOrder=str(getattr(args, "spectral_topo_order", "forward")),
@@ -3840,6 +3841,11 @@ def parse_args(argv=None):
     # maps it into the bundle's condition vocab / gate blocks and hands the
     # built boost to the estimator. A fit parameter only: no bundle/corpus
     # cache-key change. Default '' preserves prior behavior byte-identically.
+    p.add_argument("--spectral-marginal-floor", choices=["none", "guided", "all"],
+                   default="none",
+                   help="scalable spectral candidate floor (exps 0125/0128): 'guided' "
+                        "= profile candidates must be at least as common as the node's "
+                        "average word; 'all' = every candidate must. Derived, no knob.")
     p.add_argument("--spectral-anchor-profile", default="", metavar="PATH",
                    help="HPO-GUIDED spectral anchors (spec 2026-10-05): the "
                         "profile-eta TSV (hpoa_stage2_probe --emit-eta) whose "

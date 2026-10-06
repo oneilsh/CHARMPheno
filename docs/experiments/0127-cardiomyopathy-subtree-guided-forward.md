@@ -1,7 +1,7 @@
 ---
 id: 127
 slug: cardiomyopathy-subtree-guided-forward
-status: pending
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -124,3 +124,5 @@ again and 0128's result cannot be attributed to the order.
 ## Run log
 
 ## Results
+
+See 0128 (the pair's results are recorded there).

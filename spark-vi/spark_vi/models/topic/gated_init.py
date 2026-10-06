@@ -521,7 +521,8 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                                   topo_order: str = "forward",
                                   batch_size: int = 0,
                                   anchor_candidates=None,
-                                  anchor_stats=None) -> np.ndarray:
+                                  anchor_stats=None,
+                                  marginal_floor: str = "none") -> np.ndarray:
     """Distributed random-projection analogue of `spectral_block_aligned_lambda`.
 
     `rdd` is an RDD of GatedBOWDocument. Never forms a driver V×V matrix (ADR
@@ -836,7 +837,8 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
             pref_u = _preferred_for(anchor_candidates, u)
             fg_anchors = find_anchors_projected(
                 res_u.pooled_QR, res_u.p_w, res_u.df_w, lay.tpn,
-                seed_rows=seed_rows, min_doc_freq=min_doc_freq, preferred=pref_u)
+                seed_rows=seed_rows, min_doc_freq=min_doc_freq, preferred=pref_u,
+                marginal_floor=marginal_floor)
             _record_anchor_stats(anchor_stats, u, pref_u, fg_anchors,
                                  n_eligible=_n_eligible(pref_u, res_u.df_w, min_doc_freq))
             if not fg_anchors:
@@ -873,7 +875,8 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                 pref_u = _preferred_for(anchor_candidates, u)
                 fg_anchors = find_anchors_projected(
                     QR, pw, dfw, lay.tpn, seed_rows=seed_rows,
-                    min_doc_freq=min_doc_freq, preferred=pref_u)
+                    min_doc_freq=min_doc_freq, preferred=pref_u,
+                    marginal_floor=marginal_floor)
                 _record_anchor_stats(anchor_stats, u, pref_u, fg_anchors,
                                      n_eligible=_n_eligible(pref_u, dfw, min_doc_freq))
                 if not fg_anchors:
