@@ -18,6 +18,12 @@ Within-cohort ranking, stacked vs flat, paired over 193 nodes: median −0.041, 
 160 down; depth 3 −0.011, depth 4 −0.039, depth 5 −0.057, depth 6 −0.125. Marginal ECE
 over all docs: flat 0.08–0.48 by depth, stacked 0.003–0.015.
 
+**Per-node AUC over ALL docs (de novo, y_c vs everyone — HSLDA's own metric), 224
+scoreable nodes:** flat 0.7118 / AP 0.131 → stacked **0.8497 / AP 0.236**; paired median
+**+0.116**, 219 up / 4 down. Gain by depth: 2 +0.018, 3 +0.033, 4 +0.097, 5 +0.143,
+6 +0.214, 7 +0.204 (8–9: +0.36/+0.40, n=3). The deeper the node, the more the chain of
+ancestors' discriminations is worth.
+
 ## Why
 
 1. **The 0.60–0.63 detection was an artifact of the read.** Under the closure mask every
@@ -37,7 +43,13 @@ over all docs: flat 0.08–0.48 by depth, stacked 0.003–0.015.
    factor adds more — the depth gradient. The per-node head is the right conditional
    decoder; the product is the right marginal decoder. HSLDA's product is for the
    marginal question. The two reads must not be collapsed into one headline.
-4. **The product is a calibrated marginal.** ECE 0.003–0.015 over all docs at every
+4. **De novo, the product wins by as much as it loses within-cohort, and for the mirror
+   reason.** A deep node's conditional was fit against siblings inside a small cohort and
+   knows nothing about the other 99% of the population; the product multiplies in every
+   ancestor's "is this person even in my cohort", each of which WAS fit on the right
+   contrast at its level. The two paired reads (−0.041 within-cohort, +0.116 de novo)
+   are not in tension: they measure the two decoders on their own questions.
+5. **The product is a calibrated marginal.** ECE 0.003–0.015 over all docs at every
    depth, vs 0.08–0.48 for the conditionals read as marginals. For VOI / a diagnostic
    aid this is the number that had never been available.
 
@@ -45,7 +57,8 @@ over all docs: flat 0.08–0.48 by depth, stacked 0.003–0.015.
 
 Detection stops being a representation complaint. The readout now has two decoders with
 two uses: σ(z_c) for "which child, given the parent" (ranking, unchanged) and P_stack
-for "does this person have c, de novo" (calibrated, carries the root's background
-head). The open question Part B (0132, flat topics) answers is whether the TOPIC side
+for "does this person have c, de novo" (0.85 macro AUC over 224 nodes, calibrated,
+carries the root's background head) — the per-node case-finding score the program never
+had. The open question Part B (0132, flat topics) answers is whether the TOPIC side
 still matters once the label side carries the hierarchy: compare 0132-stacked to
 0123-stacked on the per-node all-docs read and on within-cohort ranking.

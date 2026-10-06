@@ -46,8 +46,9 @@ Spec: `docs/superpowers/specs/2026-10-06-stacked-closure-readout-and-hslda-arm.m
 **Both parts are BUILT (2026-10-06). 0123-stacked has RUN (insight 0092): detection
 0.63 → 0.81 and it is entirely the root head (stacked = root-only, structural); stacking
 hurts within-cohort ranking (−0.041, by construction); the product is a calibrated
-marginal. The per-node all-docs read was added to the block AFTER that run — re-run
-0123-stacked (15 min) to get it, then 0124-stacked, then 0132.**
+marginal. De novo (per-node AUC over ALL docs, HSLDA's metric): flat 0.712 → stacked
+0.850, paired +0.116, 219/4 of 224, gain growing with depth. Next: 0124-stacked, then
+0132 — compare its stacked de-novo macro and paired-by-depth to 0123's 0.850.**
 
 - **Part A — `--readout-stacked`** on `gated_pc_readout.py`: P_stack(c) = Π over
   closure(c) (root included) of σ(z_a). The finding that shaped it: under the closure
