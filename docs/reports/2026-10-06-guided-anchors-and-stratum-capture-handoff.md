@@ -52,9 +52,11 @@ identical to 0123 within ~0.002 on every read (de novo 0.848; guided anchors cha
 nothing under this head either). 0132 (flat K=1498) has RUN (insight 0093): the gate
 buys +0.03 within-cohort / +0.014 de-novo AUC / +0.05 de-novo AP over flat strata,
 uniform by depth; the root head is indifferent (0.806 vs 0.798); stacking gains +0.11 on
-every topic side. Gate stays, job sized. NEXT: exp 0133 = 0123 at tpn=1 (K=306) under the
-stacked head — does one topic per node hold the gap? If not, 0134 = blend (flat
-background + one residual topic per node).**
+every topic side. Gate stays, job sized. 0133 (tpn=1, K=306) has RUN (insight 0094): holds the gap
+on ranking (+0.008 vs tpn=5, +0.038 vs flat), de-novo AUC 0.855, 0% starved, the most
+legible topic side yet; loses the root head (0.781) and de-novo AP (0.198) — a width
+effect. NEXT: exp 0134 = 0133 + 1,200 background topics (K=1498 matched, spectral_d
+2048) — the blend: shared strata for the root, one signature per node for the rest.**
 
 - **Part A — `--readout-stacked`** on `gated_pc_readout.py`: P_stack(c) = Π over
   closure(c) (root included) of σ(z_a). The finding that shaped it: under the closure
