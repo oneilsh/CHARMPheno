@@ -445,6 +445,66 @@ def build_native_label_dag(kept_ids, parent_adj, coded_ids, *, names=None,
     return collapsed, stats
 
 
+def apply_label_set_filter(kept_terms, label_set, parent_adj, *, known_terms=None,
+                           name="") -> tuple:
+    """Restrict the powered set to an explicit label set (the DisMech ribbon) and
+    account for every member that did not make it — pure, so the receipt is
+    unit-testable without BigQuery.
+
+    `kept_terms` is the post-powering set (closure support >= min_positives,
+    optionally branch-restricted); `label_set` the Mondo curies the fit may label;
+    `parent_adj` Mondo's own `{child: [parents]}`; `known_terms` (optional) the
+    ids of this Mondo release, so a member DisMech names that this release lacks
+    (a newer term, a retired one) is reported as `unknown` rather than silently
+    counted as unpowered.
+
+    Returns `(kept, stats)` with `kept = kept_terms & label_set` and
+      n_members           |label_set|
+      n_kept              |kept|
+      n_unknown           members not in this Mondo release
+      n_unpowered         known members below min_positives (or outside the branch)
+      n_nested_pairs      (ancestor, descendant) pairs WITHIN `kept` under Mondo —
+                          the ribbon is treated as flat regardless (spec: a DisMech
+                          curation question, surfaced not acted on), and the stacked
+                          read still sees the real hierarchy; the count is the
+                          receipt that says how flat the ribbon actually is.
+      n_nested_members    distinct kept members that are an ancestor of another
+    The nested pairs are computed by walking each kept member's ancestor closure
+    (`ancestor_closure`), so the cost is |kept| x depth — trivial."""
+    label_set = {str(x) for x in label_set}
+    kept_terms = {str(x) for x in kept_terms}
+    kept = kept_terms & label_set
+    unknown = (label_set - set(map(str, known_terms))) if known_terms is not None \
+        else set()
+    unpowered = label_set - kept - unknown
+    nested_pairs = set()
+    for t in kept:
+        for a in ancestor_closure(t, parent_adj):
+            if a != t and a in kept:
+                nested_pairs.add((a, t))
+    stats = {
+        "name": str(name or ""),
+        "n_members": len(label_set), "n_kept": len(kept),
+        "n_unknown": len(unknown), "n_unpowered": len(unpowered),
+        "n_nested_pairs": len(nested_pairs),
+        "n_nested_members": len({a for a, _ in nested_pairs}),
+    }
+    return kept, stats
+
+
+def format_label_set_report(stats) -> str:
+    """The ribbon receipt (spec §D1), printed with the powering report."""
+    ls = stats.get("label_set") if isinstance(stats, dict) else None
+    if not ls:
+        return "[mondo-native] label set: none (whole powered set)"
+    return (
+        f"[mondo-native] label set {ls['name'] or '(unnamed)'}: {ls['n_members']} "
+        f"member(s) -> {ls['n_kept']} kept; {ls['n_unknown']} not in this Mondo "
+        f"release, {ls['n_unpowered']} unpowered; {ls['n_nested_pairs']} nested "
+        f"(ancestor, descendant) pair(s) within the kept set over "
+        f"{ls['n_nested_members']} ancestor member(s) — treated as flat")
+
+
 def format_native_build_report(stats) -> str:
     """The one-line DAG-build diagnostic, printed BEFORE any fit so the structural
     claim is on the record ahead of the readout's own banner (the same discipline
@@ -484,6 +544,7 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
                                   mondo_version="2026-06-02",
                                   mondo_cache_dir="data/mondo",
                                   min_positives=100, branch_root=None,
+                                  label_set=None, label_set_name="",
                                   condition_source_table="condition_occurrence"):
     """Build the native-Mondo `before_dag` + the per-code attestation map (BQ).
 
@@ -504,6 +565,17 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
     `branch_root` (optional) restricts the kept set to one body-system subtree
     (the template-branch knob `mondo_dag.branch_mondo_id_set` provides); `None` =
     whole Mondo, which is what exp 0110 runs.
+
+    `label_set` (optional; spec 2026-10-07 §D1) restricts the kept set to an
+    explicit set of Mondo curies — the DisMech ribbon (`dismech_ribbon.py`) — so
+    the FIT sees a flat forest of disorders while everything a patient's codes
+    resolve to UNDER a member still rolls up to it (`roll_terms_to_kept`), and
+    anything under no member is background-only. Powering is unchanged (closure
+    support >= `min_positives`); the filter is applied after it, like
+    `branch_root`, through `apply_label_set_filter`, whose receipt (members not in
+    this Mondo release, unpowered members, members Mondo nests under another
+    member) lands in `stats["label_set"]`. `label_set_name` is the citable
+    identity printed in the receipt (e.g. `dismech:<commit>:<n>:<digest>`).
 
     Returns `(before_dag, code_map_sdf, kept_cids, support_of, stats)`:
       before_dag    integer-id `ConditionDag` over Mondo term ids (feed to the
@@ -631,6 +703,11 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
     if branch_root:
         kept_terms &= branch_mondo_id_set(branch_root, edges_df=edges_df,
                                           nodes_df=nodes_df)
+    label_set_stats = None
+    if label_set is not None:
+        kept_terms, label_set_stats = apply_label_set_filter(
+            kept_terms, label_set, parent_adj, known_terms=all_ids,
+            name=label_set_name)
 
     # --- 4. the label DAG, and 5. the code map against its FINAL node set ------
     before_dag, stats = build_native_label_dag(
@@ -655,7 +732,8 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
                  min_support_kept=min((support_of[mondo_cid(t)]
                                        for t in kept_terms), default=0),
                  n_codes_attesting=len({c for c, _ in rows}),
-                 branch=str(branch_root or ""))
+                 branch=str(branch_root or ""),
+                 label_set=label_set_stats)
     kept_cids = {c for c in before_dag.nodes() if c != MONDO_NATIVE_ROOT_CID}
     return before_dag, code_map_sdf, kept_cids, support_of, stats
 

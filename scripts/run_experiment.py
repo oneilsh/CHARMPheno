@@ -913,6 +913,15 @@ def build_gated_pc_args(
         args.extend(["--mondo-branch", str(effective["mondo_branch"])])
     if effective.get("min_positives") is not None:
         args.extend(["--min-positives", str(effective["min_positives"])])
+    # Spec 2026-10-07 §D1: `label_set: <tsv>` in front matter selects the DisMech
+    # ribbon on the native path. A relative path is resolved against the repo root
+    # (the committed TSV lives under analysis/cloud/anchor_selection_data/), so the
+    # doc reads the same on a laptop and on the cluster checkout.
+    if effective.get("label_set"):
+        ls = Path(str(effective["label_set"]))
+        if not ls.is_absolute():
+            ls = REPO_ROOT / ls
+        args.extend(["--label-set", str(ls)])
     if effective.get("mondo_version"):
         args.extend(["--mondo-version", str(effective["mondo_version"])])
     if effective.get("mondo_cache_dir"):

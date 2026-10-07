@@ -3198,6 +3198,26 @@ def doc_spec_identity() -> str:
     return PatientCohortDocSpec().name
 
 
+def _label_set_spec_fields(args) -> dict:
+    """`{label_set, label_set_path}` for the corpus spec from `--label-set <tsv>`.
+
+    Reads the TSV once here (local, cheap) so the key identity is computed at
+    spec-build time and recorded in the manifest; the assemble closure re-reads
+    the same path for the ids on a cache MISS. Only the native path takes a label
+    set — on the anchor hierarchy the kept set is terminals + class covers, which
+    an explicit disease list does not describe."""
+    path = str(getattr(args, "label_set", "") or "")
+    if not path:
+        return {"label_set": "", "label_set_path": ""}
+    if str(args.dag_source) != "mondo_native":
+        raise ValueError(
+            f"--label-set is defined only on --dag-source mondo_native (the kept "
+            f"set is Mondo terms there); got --dag-source {args.dag_source}.")
+    from dismech_ribbon import load_label_set
+    _ids, identity, _rb = load_label_set(path)
+    return {"label_set": identity, "label_set_path": path}
+
+
 def multidomain_corpus_spec(args, extra_domains) -> dict:
     """The corpus_manifest block for a multi-domain / Mondo fit.
 
@@ -3254,6 +3274,12 @@ def multidomain_corpus_spec(args, extra_domains) -> dict:
         "mondo_branch": (args.mondo_branch or "") if mondo else "",
         "min_positives": args.min_positives if mondo else 0,
         "mondo_cache_dir": args.mondo_cache_dir if mondo else "",
+        # Spec 2026-10-07 §D1: an explicit label set (the DisMech ribbon) on the
+        # NATIVE path. `label_set` is the cache-key identity (commit + member
+        # digest, `dismech_ribbon.label_set_identity`); `label_set_path` is the
+        # rebuild input (where the TSV lives). Both '' when unused, so every
+        # existing native spec — and its key — is byte-identical.
+        **_label_set_spec_fields(args),
         # exp 0109's splice-to-fixpoint DAG reduction. Mondo-only (it names class
         # nodes of the Mondo hierarchy) and OFF by default, so an existing
         # experiment's spec — and therefore its bundle key — is unchanged.
@@ -3354,6 +3380,10 @@ def _multidomain_params(spec):
             from mondo_native_dag import MONDO_NATIVE_VERSION
             key_extra.update(mondo_native=True,
                              mondo_native_version=MONDO_NATIVE_VERSION)
+            # Folded ONLY when set (spec 2026-10-07 §D1): a whole-powered-set
+            # native spec keys byte-identically to one written before the ribbon.
+            if spec.get("label_set"):
+                key_extra["label_set"] = str(spec["label_set"])
         # E1. Folded ONLY when on (R1.2): a bundle carrying the pre-index column
         # is a different artifact, but a spec that does not ask for it must key
         # byte-identically to one written before this existed.
@@ -3878,13 +3908,29 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
         build = _build_inputs or build_mondo_native_fit_inputs
         assemble = _assemble or assemble_multidomain_case_finding_corpus
         branch = spec.get("mondo_branch") or ""
-        with _phase(f"build native Mondo label DAG (branch={branch or 'ALL'})"):
+        # Spec 2026-10-07 §D1: the explicit label set (DisMech ribbon). The ids are
+        # re-read from the recorded path on this MISS; the identity in the spec is
+        # what keyed the bundle, and the two must agree or the recorded key names a
+        # different ribbon than the one about to be built.
+        label_ids, label_name = None, ""
+        if spec.get("label_set"):
+            from dismech_ribbon import load_label_set
+            label_ids, label_name, _rb = load_label_set(spec["label_set_path"])
+            if label_name != str(spec["label_set"]):
+                raise ValueError(
+                    f"--label-set {spec['label_set_path']} now has identity "
+                    f"{label_name} but the corpus spec recorded "
+                    f"{spec['label_set']}: the TSV changed under the key. Re-cut "
+                    "the ribbon into a new file or pass the original.")
+        with _phase(f"build native Mondo label DAG (branch={branch or 'ALL'}, "
+                    f"label set={label_name or 'ALL'})"):
             before_dag, code_map_sdf, kept_cids, support_of, stats = build(
                 spark, cdr=spec["cdr"], billing=spec["billing"],
                 mondo_version=spec["mondo_version"],
                 mondo_cache_dir=spec.get("mondo_cache_dir") or "data/mondo",
                 min_positives=spec["min_positives"],
-                branch_root=(branch or None))
+                branch_root=(branch or None),
+                label_set=label_ids, label_set_name=label_name)
             # exp 0111 WP-D2: build the external episode/random index (if any) and
             # pick the doc spec BOTH the provider and the assembler use. The code map
             # is normalized inside the seam ONLY on the external path, so the ordinary
@@ -3902,6 +3948,9 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
             # (closure support >= direct support), and the plan says measure,
             # do not guess.
             print(format_native_powering_report(stats), flush=True)
+            if label_ids is not None:
+                from mondo_native_dag import format_label_set_report
+                print(format_label_set_report(stats), flush=True)
             print(format_native_build_report(stats), flush=True)
             if on_inputs is not None:
                 # Same by-products contract as the anchor path, in the native id
@@ -4157,6 +4206,13 @@ def parse_args(argv=None):
     p.add_argument("--min-positives", type=int, default=100,
                    help="mondo: keep anchors with >= this many whole-pop patients "
                         "(the K dial; exp 0088 used 100).")
+    p.add_argument("--label-set", default="",
+                   help="mondo_native only: a ribbon TSV (dismech_ribbon.py; e.g. "
+                        "analysis/cloud/anchor_selection_data/dismech_ribbon.tsv) "
+                        "naming the Mondo terms the fit may label. Powering is "
+                        "unchanged; the powered set is intersected with the ribbon, "
+                        "codes under a member roll up to it, codes under no member "
+                        "are background-only. '' = the whole powered set (exp 0110).")
     p.add_argument("--mondo-version", default="2026-06-02")
     p.add_argument("--mondo-cache-dir", default="data/mondo")
     p.add_argument("--dag-collapse", action="store_true",
@@ -4907,6 +4963,10 @@ def main() -> int:
                 "min_positives": (corpus_spec or {}).get("min_positives", 0),
                 "mondo_cache_dir": (corpus_spec or {}).get("mondo_cache_dir", ""),
                 "dag_collapse": (corpus_spec or {}).get("dag_collapse", False),
+                # Spec 2026-10-07 §D1: the ribbon identity (a key input) and the
+                # TSV path (a rebuild input); '' on every non-ribbon run.
+                "label_set": (corpus_spec or {}).get("label_set", ""),
+                "label_set_path": (corpus_spec or {}).get("label_set_path", ""),
                 # The doc unit (R5.3). Recorded on BOTH paths — the single-domain
                 # assembler hard-codes the same spec — so a re-readout of either
                 # recomputes the fit's own key.

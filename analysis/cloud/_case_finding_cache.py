@@ -74,7 +74,7 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
                              mondo_version="", mondo_branch="",
                              min_positives=0, dag_collapse=False,
                              dag_collapse_version="", mondo_native=False,
-                             mondo_native_version="",
+                             mondo_native_version="", label_set="",
                              doc_spec=DEFAULT_DOC_SPEC,
                              preindex_closure=False,
                              preindex_closure_version="",
@@ -119,6 +119,13 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
     when it differs from today's constant, so every existing key is byte-identical
     while a future doc-unit change (an `EpisodeDocSpec`, say) can no longer land a
     different corpus under the same key.
+
+    `label_set` (spec 2026-10-07 §D1) is the identity of an explicit label set the
+    native build filters its kept terms by — the DisMech ribbon,
+    `dismech_ribbon.label_set_identity` = `dismech:<commit>:<n>:<digest>` of the
+    sorted Mondo ids. A different label set is a different C, K and label columns,
+    so a different corpus. Folded ONLY when non-empty AND on the native path, so
+    every exp-0110-style key (whole powered set) is byte-identical to before.
 
     `preindex_closure` (+ `preindex_closure_version` and the module's source hash)
     marks a bundle that carries E1's per-document pre-index closure column. Mondo
@@ -261,6 +268,13 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
                 payload["mondo_usage_core_src"] = _module_source_hash(
                     mondo_usage_core)
                 payload["native_collapse_src"] = _module_source_hash(mondo_collapse)
+                # The DisMech ribbon (or any explicit label set). Its identity
+                # string already names the DisMech commit and the member digest,
+                # so no module source needs folding for it; `dismech_ribbon.py`
+                # is a pure reader whose edits cannot change which ids are kept
+                # without changing the digest.
+                if label_set:
+                    payload["label_set"] = str(label_set)
             # E1's pre-index closure column: a per-document sparse `R_d` (what the
             # doc already carried BEFORE its index) written into the cached
             # bundle. A bundle with the column is a DIFFERENT artifact from one
