@@ -1,7 +1,7 @@
 ---
 id: 134
 slug: mondo-cardiovascular-blend-bg1200-tpn1-stacked
-status: running
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -195,7 +195,7 @@ start), `spectral_d` back to 768. Third launch on that.
 **2026-10-07 — third launch (spectral_bg_anchors 8, spectral_d 768) ran to the end.** Corpus
 line `K=1498 gated topics (1200 bg + 298 nodes x 1 tpn)`; seed as fast as 0133's; the
 named digest landed from the chain itself. The readout numbers were not pulled into this
-doc before the thread moved — see Results for the grep.
+doc before the thread moved; pulled afterwards (Results).
 
 ## Results
 
@@ -234,14 +234,50 @@ documents after its ancestors claimed the shared vocabulary, and the ancestors' 
 the problem, not the absence of a stratum to absorb the cohort. That closes the
 "background as a home for the cohort" hypothesis from the front matter.
 
-**Readout numbers: not yet recorded here** (thread moved before the paste). Pull them with:
+**Readout numbers (ridge 100; 193 within-cohort / 224 de-novo nodes; 54,753 persons):**
 
-```bash
-RUN=$(ls -d /home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs/0134-*)
-grep -E "^=== |top-m mass|gated_pc(_stacked)? \(pc_topics_lr\): (macro|detection)|root head alone|stacked: max|ranking \(within|paired per-node|paired delta|depth [0-9]+:|flat sigma|stacked P_stack|^## paired|^all: n=|^by depth" "$RUN"/sweep_log.md
-```
+| read | 0123 tpn=5 | 0132 flat | 0133 tpn=1 | **0134 blend** |
+|---|--:|--:|--:|--:|
+| flat head, within-cohort macro AUC / AP | 0.7946 / 0.533 | 0.7612 / 0.476 | **0.8006** / 0.517 | 0.7823 / 0.512 |
+| paired vs 0133 (193) | — | — | — | −0.018 (55/138); d2 +0.021, d3 −0.007, d4–d7 −0.017…−0.024 |
+| paired vs 0123 / vs 0132 | — | — | +0.008 / +0.038 | −0.009 (60/133) / +0.017 (144/49) |
+| root head alone (= stacked detection) | 0.8065 / AP 0.886 | 0.7983 / 0.881 | 0.7807 / 0.866 | **0.8113 / 0.890** |
+| stacked de-novo macro AUC / AP (224) | 0.8497 / **0.236** | 0.8362 / 0.185 | **0.8546** / 0.198 | 0.8456 / 0.224 |
+| de-novo paired (stacked − own flat) | +0.116 | +0.118 | +0.096 | +0.117 (221/2) |
+| stacked within-cohort paired (stacked − flat) | −0.041 | −0.032 | −0.063 | −0.036 |
+| marginal ECE, stacked, by depth | 0.003–0.015 | 0.003–0.016 | 0.002–0.015 | 0.003–0.016 |
 
-and read them against the front matter's three outcomes: the root head (0133: 0.781;
-0123: 0.807; 0132: 0.798) and de-novo AP (0.198 / 0.236 / 0.185) are the numbers the
-blend exists to move; the within-cohort paired delta vs 0133 (0.8006) says whether the
-per-node heads kept their signal next to the strata (the digest says the blocks did).
+**Read.** The blend did what it was built to do and paid for it on the other axis:
+
+- **The root head came back, and then some**: 0.811 / AP 0.890, the best of the series
+  (0133's 0.781 was the width effect; 1,200 strata fixed it). De-novo AP followed: 0.224,
+  within 0.012 of 0123's 0.236, up from 0133's 0.198. The product's within-cohort tax
+  also eased (−0.036 vs 0133's −0.063), as a stronger root factor predicts.
+- **The per-node heads lost a little next to the strata**: within-cohort 0.782, paired
+  −0.018 vs 0133 (55 up / 138 down, uniform from depth 3 down; depth 2 up). Still above
+  0132 (+0.017) and within 0.009 of 0123. The digest says the blocks themselves are
+  intact; two candidate mechanisms for the head loss, both cheap to test: (i) node
+  evidence per document is halved (the strata carry the generic mass), so each node
+  topic is a smaller θ entry for the head to read; (ii) the readout's top-256 θ
+  truncation, which at K=306 (0133) kept 84% of the topics and at K=1498 keeps 17% — a
+  document's top 256 can now be strata, dropping its node entries. (ii) is one
+  re-readout: `gated-pc-readout ID=134 GPR_ARGS="--readout-mode distributed
+  --readout-l2 100 --readout-theta-topm 0"` (tagged `topm0`, ~15 min, no refit).
+- **Across the four topic sides, no arm dominates and every read is within ~0.02**:
+  0133 wins within-cohort and de-novo AUC, 0123 wins de-novo AP by 0.012, 0134 wins the
+  root head, 0132 wins nothing. The decoder-side changes of this week (a root head that
+  saw the background: 0.63 → 0.81; the closure product de novo: +0.11) are five to ten
+  times the size of anything the topic side moves. Insight 0095.
+
+**Outcome among the front matter's three:** the second, softened — the root returned and
+the blocks kept their identity, but the heads read them slightly less well next to
+1,200 strata. Whether that is truncation (fixable, one re-readout) or mass sharing
+(structural) is the one open number.
+
+**Where this leaves the program (for the next thread).** Three topic sides are now
+decodable to within two hundredths of each other under the stacked head. The choice
+between them is an interpretability choice, and on that axis 0133/0134 (one legible
+topic per node, textbook wherever a node's vocabulary is its own) are not close to
+0123 (five-way strata splits) or 0132 (no node topics). The open legibility item is the
+same-vocabulary child (DCM → its parent's cohort), unchanged by any of 0127–0134; the
+open decoding item is the top-m check above.
