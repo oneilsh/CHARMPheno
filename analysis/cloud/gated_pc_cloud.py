@@ -3089,6 +3089,7 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
         spectralD=int(getattr(args, "spectral_d", 0)),
         spectralMarginalFloor=str(getattr(args, "spectral_marginal_floor", "none")),
         spectralMinDocFreq=int(getattr(args, "spectral_min_doc_freq", 5)),
+        spectralBgAnchors=int(getattr(args, "spectral_bg_anchors", 0) or 0),
         anchorScope=str(getattr(args, "anchor_scope", "closure")),
         spectralTopoOrder=str(getattr(args, "spectral_topo_order", "forward")),
         countTransform=str(getattr(args, "count_transform", "none")),
@@ -4122,6 +4123,14 @@ def parse_args(argv=None):
                    help="random-projection dim for scalable init (0 = auto).")
     p.add_argument("--spectral-min-doc-freq", type=int, default=5,
                    help="min within-group doc frequency for a scalable anchor candidate.")
+    p.add_argument("--spectral-bg-anchors", type=int, default=0,
+                   help="how many of the n_bg background topics the spectral seed "
+                        "ANCHORS (0 = all, the historical behaviour). The rest are "
+                        "seeded by the random Gamma init: a wide shared background "
+                        "(exp 0134, n_bg=1200) is not anchorable — the greedy and the "
+                        "per-word recovery both scale with the anchor count — and "
+                        "0132 showed a flat background forms its strata from a random "
+                        "start. The anchored few are the deflation seeds (0133's 8).")
     p.add_argument("--anchor-scope", choices=["closure", "frontier"], default="closure",
                    help="docs feeding each node's anchor set: 'closure' (default) or "
                         "'frontier' (node only from docs where it is most-specific — "
@@ -4997,6 +5006,8 @@ def main() -> int:
         # Guided-anchor provenance (spec 2026-10-05): a FIT parameter recorded
         # in the manifest; added ONLY when set (byte-identical manifests
         # otherwise). The seed-side pooled counts are appended after the fit.
+        if int(getattr(args, "spectral_bg_anchors", 0) or 0) > 0:
+            manifest_fields["spectral_bg_anchors"] = int(args.spectral_bg_anchors)
         if getattr(args, "spectral_anchor_profile", ""):
             manifest_fields["spectral_anchor_profile"] = {
                 "path": args.spectral_anchor_profile,
