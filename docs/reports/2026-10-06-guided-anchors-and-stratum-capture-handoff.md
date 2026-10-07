@@ -59,9 +59,14 @@ effect. 0134 (0133 + 1,200 random-init background topics, K=1498; the background
 NOT anchored — see the 0134 run log for the two seed blow-ups and `spectral_bg_anchors`)
 has RUN: the digest is recorded (per-node blocks are 0133's, intact and sharper next to
 the strata; the same-vocabulary children are NOT rescued by the background — DCM is still
-the young-women cohort). Its READOUT NUMBERS ARE NOT YET IN THE DOC: pull them with the
-grep in the 0134 Results and read root head / de-novo AP / paired-vs-0133 against the
-front matter's outcomes. That read decides whether the blend is the unit.**
+the young-women cohort). Readout (insight 0095): root head 0.811 (best of the series),
+de-novo AP 0.224 (≈0123's 0.236), within-cohort 0.782 (−0.018 vs 0133, +0.017 vs 0132).
+Four topic sides now decode within ~0.02 of each other on every read; the topic side is
+chosen on legibility (one topic per node). NEXT, in order: (1) `gated-pc-readout ID=134
+GPR_ARGS="--readout-mode distributed --readout-l2 100 --readout-theta-topm 0"` — is the
+blend's −0.018 the top-256 truncation (17% of K=1498 vs 84% of K=306)? ~15 min, no
+refit. (2) The same-vocabulary child (DCM → its parent's cohort), unchanged by every
+topic side 0127–0134: a deflation-ORDER question, not a background one.**
 
 - **Part A — `--readout-stacked`** on `gated_pc_readout.py`: P_stack(c) = Π over
   closure(c) (root included) of σ(z_a). The finding that shaped it: under the closure
