@@ -24,10 +24,16 @@ disease: rare_priority
 #                 carry several coherent profiles; 3 is the cheapest ceiling that can show
 #                 >= 2 signatures)
 #   mondo_branch MONDO:0004995 -> '' (the ribbon spans Mondo)
-#   spectral_d 2048 -> 4096 (> n_bg + the largest closure's anchors; a flat forest's
-#                 closure is {node, root}, so 1200 + 3 would do; 4096 is headroom)
-# n_bg stays 1200 PENDING 0134's verdict (if 0134 says width was not it, or that the
-# background swallowed the blocks, revisit before launching).
+#   readout_theta_topm 256 -> 0 (see TOP-M below)
+# n_bg 1200 CONFIRMED by 0134 (insight 0095): 1,200 random-init strata restored the root
+# head (0.811, best of the series) and de-novo AP (0.224) with the per-node blocks intact;
+# `spectral_bg_anchors: 8` because a wide background is not anchorable (0134's two seed
+# blow-ups) — the eight anchored rows are the deflation seeds, the rest start random.
+#
+# TOP-M. 0134's one open decoding number is whether its -0.018 within-cohort vs 0133 is the
+# readout's top-256 theta truncation (84% of topics kept at K=306, 17% at K=1498). At this
+# run's K (~5-6k) top-256 would keep ~5%, so the truncation is OFF here (readout_theta_topm
+# 0): the ribbon's heads read the whole theta. The cost is readout time, not a refit.
 #
 # EXPECTED SIZE. 0110 (whole Mondo, native) kept 2,713 terms at min_positives 100; the
 # ribbon is rare-disease-heavy, so expect roughly 1,200-1,800 kept members -> K about
@@ -39,7 +45,12 @@ disease: rare_priority
 # READ (ridge 100, flat + stacked; the stacked product here is root x node):
 #   - the label-set receipt: how many members are powered; how many nested pairs the
 #     ribbon has under Mondo (treated as flat; this is the flatness number of record).
-#   - starvation rate at tpn=3 (0133 at tpn=1 was 0%; 0123 at tpn=5 had strata).
+#   - starvation rate at tpn=3 (0133/0134 at tpn=1: 0-1%; 0123 at tpn=5 had strata).
+#   - the same-vocabulary-child failure (insight 0094/0095: DCM -> its parent's young-women
+#     cohort under every nested topic side): on the ribbon DCM has NO parent in the fit, so
+#     its seed is its own closure documents with nothing deflated away. If DCM's block is
+#     now cardiomyopathy words, nesting WAS the mechanism; this is the single most
+#     diagnostic digest line of the run.
 #   - within-cohort macro AUC / AP and de-novo AUC / AP, overall and on the nodes SHARED
 #     with the cardiovascular branch runs (0133 / 0134): the pre-registered reads.
 #   - the digest on a few named neighbourhoods (Ehlers-Danlos; dilated cardiomyopathy;
@@ -62,13 +73,13 @@ max_iter: 50
 diag_only: true
 init: spectral
 spectral_method: scalable
-spectral_d: 4096            # > n_bg + the largest closure's anchors (flat: 1200 + 3)
+spectral_d: 768             # 0134's: only 8 bg anchors + 3 per node are anchored
 anchor_scope: closure       # on a flat forest, closure(node) = {node, root}: own block
 spectral_topo_order: forward
 count_transform: none
 preindex_closure: false
 readout_mode: distributed
-readout_theta_topm: 256
+readout_theta_topm: 0       # no top-m truncation at K ~5-6k (see TOP-M)
 weight_y: 0.0
 weight_y_warmup_iters: 0
 skip_unsup_gated: true
@@ -95,7 +106,8 @@ window_mode: lookback
 lookback_days: 1825
 label_window_days: 365
 strip_mode: both
-n_bg: 1200                  # 0134's value, PENDING its verdict
+n_bg: 1200                  # 0134's (insight 0095: width is the root head's lever)
+spectral_bg_anchors: 8      # 0134's: anchor eight bg rows as deflation seeds, random-init the rest
 optimize_doc_concentration: false   # insight 0091; see 0134's LANDMINE note
 head_optimizer: newton
 head_newton_ridge: 0.05
@@ -146,7 +158,6 @@ own right (how flat the ribbon is under Mondo; whether tpn=3 starves).
 
 ## Before launching
 
-- 0134's verdict on `n_bg` (front matter note).
 - WP-A on the cluster: `claude/dismech-ribbon` checked out (the preamble below).
 - A warm cluster has no bundle under this key (new label set) — expect the MISS and the
   sidecar HIT.
@@ -160,11 +171,11 @@ mkdir -p "$RUN"
 nohup bash -c '
   make -C analysis/cloud exp ID=135 || exit 1
   echo "=== readout START $(date)"
-  make -C analysis/cloud gated-pc-readout ID=135 GPR_ARGS="--readout-mode distributed --readout-l2 100"
+  make -C analysis/cloud gated-pc-readout ID=135 GPR_ARGS="--readout-mode distributed --readout-l2 100 --readout-theta-topm 0"
   echo "=== stacked START $(date)"
-  make -C analysis/cloud gated-pc-readout ID=135 GPR_ARGS="--readout-mode distributed --readout-l2 100 --readout-stacked"
+  make -C analysis/cloud gated-pc-readout ID=135 GPR_ARGS="--readout-mode distributed --readout-l2 100 --readout-theta-topm 0 --readout-stacked"
   for b in 134 133; do make -C analysis/cloud inspect-topics ID=135 COMPARE=$b INSPECT_ARGS="--readout-auc"; done
-  make -C analysis/cloud inspect-topics ID=135 RESOLVE_NAMES=1 INSPECT_ARGS="--digest --redundancy 30 --grep '"'"'Ehlers|cardiomyopathy|immunodeficiency|Gaucher|Marfan'"'"'"
+  make -C analysis/cloud inspect-topics ID=135 RESOLVE_NAMES=1 INSPECT_ARGS="--digest --redundancy 30 --grep '"'"'Ehlers|cardiomyopathy|atrial fibrillation|heart failure|pregnan|immunodeficiency|Gaucher|Marfan'"'"'"
   echo "=== DONE $(date)"
 ' > "$RUN"/sweep_log.md 2>&1 &
 ```
