@@ -238,3 +238,30 @@ def test_label_set_is_refused_off_the_native_path(tmp_path):
         dag_source = "mondo_native"
         label_set = ""
     assert gpc._label_set_spec_fields(B()) == {"label_set": "", "label_set_path": ""}
+
+
+def test_run_experiment_passes_label_set_through_repo_relative(monkeypatch):
+    """Front matter `label_set:` -> `--label-set <abs path>` (repo-root-relative,
+    so the doc reads the same on a laptop and the cluster checkout); absent, the
+    argv is byte-identical to before the key existed."""
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    import run_experiment as rex
+    monkeypatch.setenv("WORKSPACE_CDR", "cdr")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
+    base = {"source_table": "t", "person_mod": 1, "vocab_size": 5000, "min_df": 20,
+            "min_patient_count": 20, "doc_min_length": 10, "max_iter": 100,
+            "min_n": 0, "n_bg": 8, "tpn": 1, "seed": 0, "dag_source": "mondo_native",
+            "readout_mode": "distributed"}
+    rel = "analysis/cloud/anchor_selection_data/dismech_ribbon.tsv"
+    argv = rex.build_gated_pc_args(dict(base, label_set=rel), "/tmp/out")
+    got = argv[argv.index("--label-set") + 1]
+    assert got == str(REPO_ROOT / rel) and Path(got).is_absolute()
+    assert "--label-set" not in rex.build_gated_pc_args(dict(base), "/tmp/out")
+
+
+def test_the_committed_ribbon_loads_and_matches_the_spec_pin():
+    rb = dr.load_ribbon(REPO_ROOT / "analysis/cloud/anchor_selection_data/dismech_ribbon.tsv")
+    assert rb.commit == "71cd0452358b01ef7d0b3cc213297f9837be7e54"
+    assert len(rb.mondo_ids) == 3239 and len(rb.rows) == 3260
+    assert dr.label_set_identity(rb) == "dismech:71cd0452358b:3239:5c2dce2aa002"
+    assert all(i.startswith("MONDO:") for i in rb.mondo_ids)
