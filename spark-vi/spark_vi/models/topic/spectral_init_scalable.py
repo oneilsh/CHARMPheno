@@ -55,7 +55,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.optimize import nnls
 
-from .spectral_init import _preferred_mask
+from .spectral_init import _preferred_mask, greedy_anchors
 
 log = logging.getLogger(__name__)
 
@@ -361,51 +361,15 @@ def find_anchors_projected(QR: np.ndarray, p_w: np.ndarray, df_w: np.ndarray,
     if marginal_floor == "all":
         candidate = candidate & common
 
-    basis: list[np.ndarray] = []                  # orthonormal residual basis
-
-    def project_out(vec: np.ndarray) -> np.ndarray:
-        r = vec.copy()
-        for b in basis:
-            r = r - (r @ b) * b
-        return r
-
-    def add_to_basis(row_id: int) -> None:
-        r = project_out(Qbar[row_id])
-        nrm = np.sqrt(r @ r)
-        if nrm > _EPS:
-            basis.append(r / nrm)
-
-    if seed_rows is not None:
-        for s in seed_rows:
-            add_to_basis(int(s))
-
-    anchors: list[int] = []
-    chosen = set(int(s) for s in (seed_rows or []))
-
-    def greedy(pool: np.ndarray, n_left: int) -> None:
-        for _ in range(n_left):
-            best_id, best_res = -1, -np.inf
-            for i in range(V):
-                if i in chosen or norms[i] <= _EPS or not pool[i]:
-                    continue
-                r = project_out(Qbar[i])
-                res = r @ r
-                if res > best_res:
-                    best_res, best_id = res, i
-            if best_id < 0:                       # exhausted distinct directions
-                break
-            anchors.append(best_id)
-            chosen.add(best_id)
-            add_to_basis(best_id)
-
     pref = _preferred_mask(preferred, V)
+    stages = []
     if pref is not None:
         pool1 = candidate & pref
         if marginal_floor == "guided":
             pool1 = pool1 & common
-        greedy(pool1, n)                          # stage 1: guided picks
-    greedy(candidate, n - len(anchors))           # stage 2: the open search
-    return anchors
+        stages.append(pool1)                      # stage 1: guided picks
+    stages.append(candidate)                      # stage 2: the open search
+    return greedy_anchors(Qbar, norms, stages, n, seed_rows=seed_rows, eps=_EPS)
 
 
 def recover_beta_projected(QR: np.ndarray, p_w: np.ndarray, anchors,

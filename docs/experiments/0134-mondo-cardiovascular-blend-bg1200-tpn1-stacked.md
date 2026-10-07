@@ -169,7 +169,15 @@ grep -E "^=== |corpus: V=|starved|top-m mass|gated_pc(_stacked)? \(pc_topics_lr\
 
 ## Run log
 
-(none yet)
+**2026-10-07 — first launch killed in the seed.** 54 minutes of silence after
+`>>> gated_pc fit` with the driver at ~10% CPU: the background anchor greedy
+(`find_anchors_projected`) re-projected every vocabulary row against the whole basis at
+every step — O(n² · V · d) in Python-level dots — fine for 8 background anchors, days for
+1,200. Rewrote both greedies (dense and projected) onto one basis-form search
+(`spectral_init.greedy_anchors`: basis as state, one GEMV per chosen anchor, incremental
+residual norms, seeds spanned in one SVD batch); same anchors up to floating-point ties,
+pinned against the old loop by `spark-vi/tests/test_anchor_greedy_residual_form.py`.
+Relaunched on the fixed code.
 
 ## Results
 

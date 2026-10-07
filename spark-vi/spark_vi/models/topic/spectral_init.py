@@ -178,49 +178,101 @@ def find_anchors(Q: np.ndarray, n: int, *, seed_rows=None,
     marginal = Q.sum(axis=1)
     candidate = _domain_candidate_mask(marginal, min_marginal_frac, domain_bounds)
 
-    basis: list[np.ndarray] = []                  # orthonormal residual basis
-    EPS = 1e-12
+    pref = _preferred_mask(preferred, V)
+    stages = ([candidate & pref] if pref is not None else []) + [candidate]
+    return greedy_anchors(Qbar, norms, stages, n, seed_rows=seed_rows)
 
-    def project_out(vec: np.ndarray) -> np.ndarray:
-        r = vec.copy()
-        for b in basis:
-            r = r - (r @ b) * b
-        return r
 
-    def add_to_basis(row_id: int) -> None:
-        r = project_out(Qbar[row_id])
-        nrm = np.sqrt(r @ r)
-        if nrm > EPS:
-            basis.append(r / nrm)
+_GREEDY_EPS = 1e-12
 
-    if seed_rows is not None:
-        for s in seed_rows:
-            add_to_basis(int(s))
+
+def greedy_anchors(Qbar, norms, stages, n, *, seed_rows=None, eps=_GREEDY_EPS):
+    """Greedy pivoted-QR anchor selection over the rows of ``Qbar`` — the one
+    search both the dense (`find_anchors`) and the projected
+    (`spectral_init_scalable.find_anchors_projected`) paths run.
+
+    Geometry (Arora et al. 2013, Alg. 4): keep an orthonormal basis of the
+    chosen rows' residuals; the next anchor is the eligible row with the
+    largest residual norm after projecting out that span. ``stages`` is a list
+    of boolean (V,) pools searched in order over ONE shared basis (the guided
+    two-stage search: a preferred pool first, then the open pool); ``n`` is the
+    total to return; ``seed_rows`` pre-span the basis (deflation) without being
+    returned; a row with ``norms <= eps`` never anchors.
+
+    Why this form. The earlier form re-projected every candidate row against
+    the whole basis at every step — O(n^2 V d) Python-level dots — which is
+    free for eight background anchors and does not finish in a day for the
+    1,200-topic shared background of exp 0134. This form never touches the
+    (V, d) matrix beyond one GEMV per basis vector: the basis ``B`` (d, k) is
+    the state, a row's residual is formed only when it is chosen
+    (``r = q - B (B^T q)``, done twice for re-orthogonalization), and every
+    row's squared residual norm is kept incrementally as
+    ``res_i -= (q_i . b)^2`` — exact in exact arithmetic because the basis is
+    orthonormal, so the argmax is the same one the reprojection form takes up
+    to floating-point ties. Seeds are spanned in ONE batch (an SVD of the seed
+    rows: the residual against a span does not depend on which basis spans it)
+    instead of one rank-1 update each, so a node seeded with 1,200 background
+    anchors pays one GEMM, not 1,200 passes.
+
+    Returns the anchor ids in selection order (fewer than ``n`` only when every
+    pool is exhausted of distinct directions).
+    """
+    Qbar = np.asarray(Qbar, dtype=np.float64)
+    V, d = Qbar.shape
+    norms = np.asarray(norms, dtype=np.float64)
+    res = norms.copy()                              # squared residual norms
+    chosen = np.zeros(V, dtype=bool)
+    seeds = np.asarray([int(x) for x in (seed_rows or [])], dtype=np.int64)
+    cap = min(d, int(n) + int(seeds.size)) + 1
+    B = np.zeros((d, cap), dtype=np.float64)
+    k = 0
+
+    def _proj_sub(v):
+        # residual of one row against the current basis, re-orthogonalized once
+        if k == 0:
+            return v.copy()
+        Bk = B[:, :k]
+        r = v - Bk @ (Bk.T @ v)
+        return r - Bk @ (Bk.T @ r)
+
+    def _append(bvec):
+        nonlocal k
+        if k >= B.shape[1]:
+            return
+        B[:, k] = bvec
+        k += 1
+        proj = Qbar @ bvec
+        res[:] -= proj * proj
+        np.maximum(res, 0.0, out=res)
+
+    if seeds.size:
+        chosen[seeds] = True
+        S = Qbar[seeds]                             # (k_seed, d)
+        if S.shape[0] and np.any(S):
+            # span the seeds in one batch: right-singular vectors with a
+            # non-negligible singular value are an orthonormal basis of the span
+            _, sv, vt = np.linalg.svd(S, full_matrices=False)
+            keep = sv > eps * max(1.0, float(sv[0]))
+            for bvec in vt[keep]:
+                _append(bvec)
 
     anchors: list[int] = []
-    chosen = set(int(s) for s in (seed_rows or []))
-
-    def greedy(pool: np.ndarray, n_left: int) -> None:
-        for _ in range(n_left):
-            # residual squared norm after projecting each row onto current basis
-            best_id, best_res = -1, -np.inf
-            for i in range(V):
-                if i in chosen or norms[i] <= EPS or not pool[i]:
-                    continue
-                r = project_out(Qbar[i])
-                res = r @ r
-                if res > best_res:
-                    best_res, best_id = res, i
-            if best_id < 0:                       # exhausted distinct directions
+    eligible = norms > eps
+    for pool in stages:
+        pool = np.asarray(pool, dtype=bool)
+        while len(anchors) < n:
+            mask = pool & eligible & ~chosen
+            if not mask.any():                      # pool exhausted
                 break
-            anchors.append(best_id)
-            chosen.add(best_id)
-            add_to_basis(best_id)
-
-    pref = _preferred_mask(preferred, V)
-    if pref is not None:
-        greedy(candidate & pref, n)               # stage 1: guided picks
-    greedy(candidate, n - len(anchors))           # stage 2: the open search
+            best = int(np.argmax(np.where(mask, res, -np.inf)))
+            anchors.append(best)
+            chosen[best] = True
+            r = _proj_sub(Qbar[best])
+            nrm = float(np.sqrt(r @ r))
+            if nrm > eps:
+                _append(r / nrm)
+            else:
+                res[best] = 0.0
     return anchors
 
 
