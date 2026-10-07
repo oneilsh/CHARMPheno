@@ -1042,6 +1042,230 @@ def build_digest(run_dir, *, exemplars=8, t_words=6, bundle_meta_path=None,
     return "\n".join(L).rstrip() + "\n"
 
 
+# --------------------------------------------------------------------------- #
+# --profile-census: how many coherent profiles does each node actually carry?  #
+# --------------------------------------------------------------------------- #
+def classify_block_topics(block_topics, lams, sh, n_bg, *, starved_frac=0.5,
+                          stratum_cos=0.8, dup_cos=0.8, bg_vecs=None):
+    """Classify the topics of ONE node's block (spec 2026-10-07 §D3).
+
+    `tpn` is a CEILING, not the number of profiles a disease has; this reads the
+    number off the fit. Each block topic becomes one of:
+
+      starved    support_frac > starved_frac — the topic sits at the prior floor
+                 (nothing was learned; the usual exps 0113-0133 starvation read).
+      stratum    fed, but its word distribution is within cosine `stratum_cos` of
+                 some BACKGROUND topic — a care-context split of the node's
+                 patients that a shared topic already explains (exps 0127-0131:
+                 tpn=5 blocks were one signature + four such strata). It belongs
+                 to the background, not to the disease.
+      duplicate  fed and specific, but within `dup_cos` of a higher-evidence
+                 SIGNATURE of the same block — the block learned the same profile
+                 twice (capacity it did not need).
+      signature  fed, far from every background topic, and distinct from its
+                 block-mates: a disease-specific co-occurrence profile.
+
+    `n_profiles(node)` = number of signatures. Cosines use `_topic_unit_vec`
+    (mass-weighted multi-domain E[beta]); the thresholds are the same 0.8 the
+    sibling-redundancy "collapsed" read uses, so the three readers agree on what
+    "the same topic" means. Signatures are decided in descending-evidence order
+    so the best-fed version of a repeated profile is the one kept.
+
+    Returns `[(topic, kind, best_bg_cos, best_sig_cos)]` in block order.
+    `bg_vecs` (precomputed `{bg topic: unit vec}`) avoids recomputing the
+    background for every node."""
+    if bg_vecs is None:
+        bg_vecs = {b: _topic_unit_vec(b, lams) for b in range(n_bg)}
+    bg_mat = (np.stack([bg_vecs[b] for b in range(n_bg)])
+              if n_bg else np.zeros((0, 1)))
+    kinds = {}
+    bgc = {}
+    sigc = {}
+    vecs = {}
+    sigs = []
+    for t in sorted(block_topics, key=lambda t: -float(sh["evidence"][t])):
+        if sh["support_frac"][t] > starved_frac:
+            kinds[t] = "starved"; bgc[t] = float("nan"); sigc[t] = float("nan")
+            continue
+        v = _topic_unit_vec(t, lams)
+        vecs[t] = v
+        c_bg = float(np.max(bg_mat @ v)) if n_bg else 0.0
+        bgc[t] = c_bg
+        if c_bg >= stratum_cos:
+            kinds[t] = "stratum"; sigc[t] = float("nan")
+            continue
+        c_sig = max((float(np.dot(vecs[s_], v)) for s_ in sigs), default=0.0)
+        sigc[t] = c_sig
+        if sigs and c_sig >= dup_cos:
+            kinds[t] = "duplicate"
+            continue
+        kinds[t] = "signature"
+        sigs.append(t)
+    return [(t, kinds[t], bgc[t], sigc[t]) for t in block_topics]
+
+
+def build_profile_census(run_dir, *, bundle_meta_path=None, vocab_path=None,
+                         names_path=None, profile_file=None, grep_pattern=None,
+                         exemplars=8, t_words=6, starved_frac=0.5,
+                         stratum_cos=0.8, dup_cos=0.8, top_m=15):
+    """The PROFILE CENSUS (spec 2026-10-07 §D3; exp 0136): per node, how many of
+    its `tpn` block topics are signatures, strata, duplicates, or starved — and
+    therefore what `n_profiles(d)` is and what `tpn_max` should be.
+
+    Pooled output only (counts of nodes and topics, model parameters, concept
+    names): the distribution of n_profiles over nodes (0..tpn), the stratum /
+    duplicate / starved rates, the same by depth when the bundle meta is given,
+    and exemplar nodes with each topic's kind and words. With `profile_file`
+    (the probe's --emit-eta TSV) each SIGNATURE also gets its HPO alignment
+    (`_align_scores`: E[beta] mass on the node's positive profile tokens + top-m
+    overlap), pooled over signatures — splitting a disease's profiles into
+    literature-known and EHR-observed-but-unannotated (spec §D5.2).
+
+    Decision rule printed at the end: if the 90th percentile of n_profiles is
+    below tpn the ceiling is not binding and tpn_max can drop to that value; if a
+    tail sits AT tpn the ceiling is binding and 0137 should raise it."""
+    run_dir = Path(run_dir)
+    npz, manifest = load_run(run_dir)
+    lams = domain_lambdas(npz)
+    K = int(manifest["K"]); n_bg = int(manifest["n_bg"]); tpn = int(manifest["tpn"])
+    labels, topic2engine = topic_labels(manifest)
+    sh = topic_sharpness(lams)
+    nodes, _ = node_order(manifest)
+    block = {e: list(range(n_bg + i * tpn, n_bg + (i + 1) * tpn))
+             for i, e in enumerate(nodes)}
+    dom_names = manifest.get("domain_names") or [f"dom{i}" for i in range(len(lams))]
+    name_by_id = {int(k): v for k, v in
+                  manifest.get("corpus_manifest", {}).get("name_by_id", {}).items()}
+    nnames = node_names(manifest)
+
+    depths = inv_maps = names = prof = None
+    meta = load_bundle_meta(bundle_meta_path) if bundle_meta_path else None
+    if meta:
+        if "parent_int" in meta:
+            depths = node_depths(meta["parent_int"])
+        if "name_by_id" in meta:
+            name_by_id = {int(k): v for k, v in meta["name_by_id"].items()} or name_by_id
+        if not vocab_path and "vocab_maps" in meta:
+            inv_maps = [{int(idx): int(cid) for cid, idx in vm.items()}
+                        for vm in meta["vocab_maps"]]
+        if profile_file and "vocab_maps" in meta:
+            vm0 = {str(kk): int(v) for kk, v in meta["vocab_maps"][0].items()}
+            prof = _profile_vocab_sets(profile_file, manifest, vm0)
+    if vocab_path:
+        inv_maps = load_vocab_maps(vocab_path, len(lams))
+    if names_path:
+        names = load_concept_names(names_path)
+
+    bg_vecs = {b: _topic_unit_vec(b, lams) for b in range(n_bg)}
+    rows = {}
+    for e, blk in block.items():
+        rows[e] = classify_block_topics(
+            blk, lams, sh, n_bg, starved_frac=starved_frac,
+            stratum_cos=stratum_cos, dup_cos=dup_cos, bg_vecs=bg_vecs)
+
+    kinds_all = [k for r in rows.values() for _, k, _, _ in r]
+    n_topics = len(kinds_all)
+    cnt = {k: kinds_all.count(k) for k in ("signature", "stratum", "duplicate",
+                                           "starved")}
+    n_prof = {e: sum(1 for _, k, _, _ in r if k == "signature")
+              for e, r in rows.items()}
+    hist = [sum(1 for v in n_prof.values() if v == i) for i in range(tpn + 1)]
+    vals = sorted(n_prof.values())
+    p90 = vals[min(len(vals) - 1, int(0.9 * len(vals)))] if vals else 0
+
+    L = []
+    w = L.append
+    w(f"# {run_dir.name} — profile census")
+    w(f"K={K} ({n_bg} bg + {K - n_bg} node, tpn={tpn}) · {len(rows)} node(s) · "
+      f"starved = frac>{starved_frac}, stratum = cos>={stratum_cos} to a background "
+      f"topic, duplicate = cos>={dup_cos} to a higher-evidence signature of the "
+      f"same block")
+    w(f"block topics: {n_topics} · signature {cnt['signature']} "
+      f"({100 * cnt['signature'] / max(n_topics, 1):.0f}%) · stratum {cnt['stratum']} "
+      f"({100 * cnt['stratum'] / max(n_topics, 1):.0f}%) · duplicate "
+      f"{cnt['duplicate']} ({100 * cnt['duplicate'] / max(n_topics, 1):.0f}%) · "
+      f"starved {cnt['starved']} ({100 * cnt['starved'] / max(n_topics, 1):.0f}%)")
+    w("n_profiles per node: " + " · ".join(
+        f"{i}: {hist[i]} ({100 * hist[i] / max(len(rows), 1):.0f}%)"
+        for i in range(tpn + 1))
+      + f" · median {vals[len(vals) // 2] if vals else 0} · p90 {p90}")
+    if depths:
+        by_d = {}
+        for e, v in n_prof.items():
+            by_d.setdefault(depths.get(e, -1), []).append(e)
+        w("depth · nodes · mean n_profiles · stratum% · starved%")
+        for dep in sorted(k for k in by_d if k >= 0):
+            es = by_d[dep]
+            ks = [k for e in es for _, k, _, _ in rows[e]]
+            w(f"{dep:>5} · {len(es):>5} · {np.mean([n_prof[e] for e in es]):.2f} · "
+              f"{100 * ks.count('stratum') / max(len(ks), 1):>3.0f}% · "
+              f"{100 * ks.count('starved') / max(len(ks), 1):>3.0f}%")
+    if prof:
+        al = []
+        for e, r in rows.items():
+            pidx = prof.get(e)
+            if not pidx:
+                continue
+            for t, k, _, _ in r:
+                if k == "signature":
+                    m, ov = _align_scores(lams[0], t, pidx, top_m)
+                    al.append((m, ov))
+        if al:
+            ms = sorted(a for a, _ in al); ovs = sorted(b for _, b in al)
+            w(f"HPO alignment over {len(al)} signature(s) of "
+              f"{sum(1 for e in rows if e in prof)} profiled node(s): median "
+              f"profile mass {ms[len(ms) // 2]:.3f}, median top-{top_m} overlap "
+              f"{ovs[len(ovs) // 2]:.2f}; signatures with overlap >= 0.2: "
+              f"{sum(1 for b in ovs if b >= 0.2)} (literature-known), "
+              f"< 0.2: {sum(1 for b in ovs if b < 0.2)} (EHR-observed, unannotated)")
+    w("")
+
+    def words(t, e):
+        if not inv_maps:
+            return ""
+        pidx = prof.get(e) if (prof and e is not None) else None
+        wl = _digest_words(t, lams, sh, inv_maps, names, name_by_id, dom_names,
+                           k=t_words, profile_idx=pidx)
+        return (" | " + wl) if wl else ""
+
+    def node_lines(e):
+        dd = f" d{depths.get(e, -1)}" if depths else ""
+        out = [f"- {_trunc(str(nnames.get(e, e)), 40)}{dd}: n_profiles={n_prof[e]}"]
+        for t, k, cb, cs in rows[e]:
+            extra = (f" bg{cb:.2f}" if cb == cb else "") + (
+                f" sig{cs:.2f}" if cs == cs and k in ("duplicate", "signature")
+                and cs > 0 else "")
+            out.append(f"    {k:<9} ev{sh['evidence'][t]:.3g}{extra}{words(t, e)}")
+        return out
+
+    multi = sorted((e for e in rows if n_prof[e] >= 2),
+                   key=lambda e: -max(sh["evidence"][t] for t in block[e]))
+    w(f"exemplars — nodes with >= 2 signatures (top {min(exemplars, len(multi))} "
+      f"of {len(multi)} by evidence):")
+    for e in multi[:exemplars]:
+        L.extend(node_lines(e))
+    if not multi:
+        w("  (none — every node carries at most one signature)")
+    w("")
+    if grep_pattern:
+        rx = re.compile(grep_pattern, re.I)
+        matched = [e for e in rows if rx.search(str(nnames.get(e, "")))]
+        w(f"grep '{grep_pattern}' — {len(matched)} node(s):")
+        for e in matched[:25]:
+            L.extend(node_lines(e))
+        if not matched:
+            w("  (no node label matched)")
+        w("")
+    if p90 < tpn:
+        w(f"verdict: the ceiling tpn={tpn} is NOT binding (p90 n_profiles = {p90}); "
+          f"tpn_max can drop to {max(p90, 1)}.")
+    else:
+        w(f"verdict: the ceiling tpn={tpn} IS binding ({hist[tpn]} node(s) at the "
+          f"ceiling, {100 * hist[tpn] / max(len(rows), 1):.0f}%); raise tpn_max "
+          f"before the record run.")
+    return "\n".join(L).rstrip() + "\n"
+
+
 def _credited_engine_ids(credited_file, manifest):
     """Engine ids of the nodes named in a TSV's `mondo_id` column.
 
@@ -1995,6 +2219,16 @@ def main():
                          "the HPO profile says, or something else? Needs "
                          "--credited-file, the bundle meta, tpn>=2. "
                          "Suppresses other reports.")
+    ap.add_argument("--profile-census", action="store_true",
+                    help="Emit the PROFILE CENSUS (spec 2026-10-07 §D3, exp "
+                         "0136): each block topic classified starved / stratum "
+                         "(near a background topic) / duplicate (near a sibling "
+                         "signature) / signature, the n_profiles-per-node "
+                         "distribution (by depth with the bundle meta), HPO "
+                         "alignment of signatures with --credited-file, "
+                         "exemplars, --grep, and the tpn_max verdict. Honours "
+                         "--bundle-meta, --top-words, --digest-exemplars. "
+                         "Suppresses other reports.")
     ap.add_argument("--profile-align", action="store_true",
                     help="Emit the ~10-line profile-ALIGNMENT scorecard "
                          "(insight 0084's legibility read, quantified): each "
@@ -2027,6 +2261,13 @@ def main():
             run_dir, args.credited_file, bundle_meta_path=args.bundle_meta,
             readout_label=args.readout_label)
         default_out = "collinearity.md"
+    elif args.profile_census:
+        report = build_profile_census(
+            run_dir, bundle_meta_path=args.bundle_meta, vocab_path=args.vocab_map,
+            names_path=args.concept_names, profile_file=args.credited_file,
+            grep_pattern=args.grep, exemplars=args.digest_exemplars,
+            t_words=args.top_words)
+        default_out = "profile_census.md"
     elif args.profile_align:
         if not args.credited_file:
             raise SystemExit("[inspect_topics] --profile-align needs "

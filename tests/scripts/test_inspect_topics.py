@@ -745,3 +745,86 @@ def test_profile_support_reads_data_only_siblings(tmp_path):
     assert "fed siblings whose top-2 is >=20% profile tokens: 1/1" in rep
     assert "- nodeB:" in rep and "fed, ov 0.50" in rep
     assert "- nodeA:" in rep and "STARVED" in rep
+
+
+# --------------------------------------------------------------------------- #
+# --profile-census (spec 2026-10-07 §D3): tpn is a ceiling, n_profiles is read  #
+# --------------------------------------------------------------------------- #
+def _make_census_run(tmp_path, *, tpn=3, V=12):
+    """Three nodes, three topics each, one background topic (sharp on index 11):
+      node1: signature (idx 0) + a STRATUM (copy of the background) + starved
+      node2: two distinct signatures (idx 2, idx 3) + a DUPLICATE of the first
+      node3: all starved
+    so n_profiles = 1, 2, 0 and the three non-signature kinds each appear once."""
+    n_bg, n_nodes = 1, 3
+    K = n_bg + n_nodes * tpn
+    lam = np.full((K, V), 0.01)
+    lam[0, 11] += 50.0                               # BG0: sharp on idx 11
+    b = lambda i, j: n_bg + i * tpn + j
+    lam[b(0, 0), 0] += 50.0                          # node1 signature
+    lam[b(0, 1)] = lam[0] * 0.6                      # node1 stratum (= BG0 shape)
+    lam[b(1, 0), 2] += 80.0                          # node2 signature A (more evidence)
+    lam[b(1, 1), 3] += 50.0                          # node2 signature B
+    lam[b(1, 2), 2] += 40.0                          # node2 duplicate of A
+    C = n_nodes + 1
+    np.savez(tmp_path / "gated_pc_result.npz", lambda_0=lam, alpha=np.full(K, 0.5),
+             w_CK=np.zeros((C, K)), b_CK=np.zeros(C))
+    manifest = {"K": K, "C": C, "n_bg": n_bg, "tpn": tpn,
+                "domain_names": ["condition"], "domain_vocab_sizes": [V],
+                "corpus_manifest": {
+                    "int2cid": {str(e): 1000 + e for e in range(C)},
+                    "name_by_id": {str(1000 + e): f"node{e}" for e in range(C)}}}
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    return tmp_path
+
+
+def test_census_classifies_signature_stratum_duplicate_starved(tmp_path):
+    _make_census_run(tmp_path)
+    npz, manifest = it.load_run(tmp_path)
+    lams = it.domain_lambdas(npz)
+    sh = it.topic_sharpness(lams)
+    kinds = {t: k for t, k, _, _ in it.classify_block_topics([1, 2, 3], lams, sh, 1)}
+    assert kinds == {1: "signature", 2: "stratum", 3: "starved"}
+    kinds2 = {t: k for t, k, _, _ in it.classify_block_topics([4, 5, 6], lams, sh, 1)}
+    assert kinds2 == {4: "signature", 5: "signature", 6: "duplicate"}
+    kinds3 = {t: k for t, k, _, _ in it.classify_block_topics([7, 8, 9], lams, sh, 1)}
+    assert set(kinds3.values()) == {"starved"}
+
+
+def test_census_report_counts_and_verdict(tmp_path):
+    _make_census_run(tmp_path)
+    rep = it.build_profile_census(tmp_path)
+    assert "n_profiles per node: 0: 1 (33%) · 1: 1 (33%) · 2: 1 (33%) · 3: 0 (0%)" in rep
+    assert "signature 3 (33%)" in rep and "stratum 1 (11%)" in rep
+    assert "duplicate 1 (11%)" in rep and "starved 4 (44%)" in rep
+    assert "NOT binding" in rep and "tpn_max can drop to 2" in rep
+    # the two-signature node is the exemplar, with its duplicate marked
+    assert "node2" in rep and "duplicate" in rep
+
+
+def test_census_binding_ceiling_verdict(tmp_path):
+    """Every node at the ceiling -> 'IS binding'."""
+    n_bg, tpn, V = 1, 2, 10
+    K = n_bg + 2 * tpn
+    lam = np.full((K, V), 0.01)
+    lam[0, 9] += 50.0
+    for t, idx in zip(range(1, K), range(0, 4)):
+        lam[t, idx] += 50.0                           # four distinct signatures
+    np.savez(tmp_path / "gated_pc_result.npz", lambda_0=lam, alpha=np.full(K, 0.5),
+             w_CK=np.zeros((3, K)), b_CK=np.zeros(3))
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "K": K, "C": 3, "n_bg": n_bg, "tpn": tpn, "domain_names": ["condition"],
+        "domain_vocab_sizes": [V],
+        "corpus_manifest": {"int2cid": {"0": 1000, "1": 1001, "2": 1002},
+                            "name_by_id": {"1000": "root", "1001": "a", "1002": "b"}}}))
+    rep = it.build_profile_census(tmp_path)
+    assert "IS binding" in rep and "2: 2 (100%)" in rep
+
+
+def test_census_cli_flag_dispatches(tmp_path, monkeypatch, capsys):
+    _make_census_run(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["inspect_topics", str(tmp_path),
+                                      "--profile-census", "--out", "-"])
+    it.main()
+    out = capsys.readouterr().out
+    assert "profile census" in out and "verdict:" in out

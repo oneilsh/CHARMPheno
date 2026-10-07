@@ -1,6 +1,8 @@
 # DisMech ribbon as the label space — design
 
-**Status:** REVIEWED 2026-10-07 (decisions recorded at the end); WP-A next. Branch `claude/dismech-ribbon` (forked from
+**Status:** REVIEWED 2026-10-07 (decisions recorded at the end). WP-A built (commit
+`bcd580e4`, `--label-set`); WP-C built (`inspect_topics --profile-census`); exp 0135
+launched 2026-10-07; 0136 planned on its fit. Branch `claude/dismech-ribbon` (forked from
 the tip of `claude/gated-conditional-voi`; voi is frozen until the exp 0134 readout is
 in). Nothing here is built yet. Follows the 2026-10-07 arc review (this session) and the
 2026-10-06 handoff
@@ -151,11 +153,12 @@ nested branch, 3 is the cheapest number that can still show ≥ 2 signatures), l
 α off (insight 0091: α is closed). Whole population (insight 0035: for a rare
 foreground the background sample is the load-bearing knob).
 
-### D3 — Estimating `n_profiles(d)` post-fit (new readout)
+### D3 — Estimating `n_profiles(d)` post-fit (new readout) — BUILT 2026-10-07
 
 The orphaned branches found per-node K is ill-posed at init (p ≫ n) and should move to
-post-fit topic usage; that readout was never built. Build it here, in `gated_pc_readout`
-as `--profile-census`, per block topic k of node d:
+post-fit topic usage; that readout was never built. Built here as
+`inspect_topics.py --profile-census` (off-YARN, pure numpy over the saved λ, like the
+digest — no Spark, so it runs mid-fit and on a laptop), per block topic k of node d:
 
 1. **usage** — the node's θ-mass on k (pooled over the node's documents); below a floor
    the topic is *unused* (starved).
@@ -166,16 +169,30 @@ as `--profile-census`, per block topic k of node d:
 4. **HPO alignment** — fraction of top-code mass realizable in the disease's HPOA
    profile via the frozen HP→SNOMED xref pin (v2026-06-23; `hpoa_profile_survey.py`).
 
-`n_profiles(d)` = count of used, specific, coherent topics. Report the pooled
-distribution of `n_profiles` over label nodes and the stratum rate; per-node rows stay in
-the workspace. This also answers "what should tpn be" empirically: if `n_profiles` is ≤ 1
-almost everywhere, `tpn_max` drops; if a tail sits at the ceiling, it rises.
+As built (`classify_block_topics`), each block topic is one of **starved** (support
+fraction > 0.5, the prior floor), **stratum** (fed, cosine ≥ 0.8 to some background
+topic — a care-context split a shared topic already explains), **duplicate** (fed and
+specific, cosine ≥ 0.8 to a higher-evidence signature of the same block), or
+**signature**; `n_profiles(d)` = number of signatures. The 0.8 threshold is the one the
+sibling-redundancy "collapsed" read already uses, so the three readers agree on what
+"the same topic" means. Item 3 (held-out NPMI) needs the corpus and is deferred to the
+readout driver; item 4 (HPO alignment) rides on `--credited-file` where a profile TSV
+covers the label set. The report prints the pooled `n_profiles` histogram (by depth with
+the bundle meta), the four rates, exemplar multi-signature nodes with words, `--grep`,
+and a verdict: p90 of `n_profiles` below the ceiling → `tpn_max` drops to it; a tail at
+the ceiling → raise it before the record. Per-node rows stay in the workspace.
 
 ### D4 — Readouts (hierarchy here, and only here)
 
-- **Within-cohort and de-novo heads** as today: per-node logistic on θ (top-m), ridge
-  100, closure mask with siblings as negatives; root observed on every row
-  (`observe_root_everywhere`); `--readout-stacked` for the closure product. Closures come
+- **Within-cohort and de-novo heads** as today: per-node logistic on θ, ridge 100,
+  closure mask with siblings as negatives; root observed on every row
+  (`observe_root_everywhere`); `--readout-stacked` for the closure product.
+  **θ truncation by mass, not count** (decided 2026-10-07): the top-256 rule kept 84% of
+  topics at K=306 and 17% at K=1498 (0134's open −0.018), and would keep ~5% at the
+  ribbon's K. 0135 reads untruncated (`--readout-theta-topm 0`) as the reference; before
+  0137 the readout gains `--readout-theta-mass q` (smallest per-document m keeping a
+  fraction q of θ mass, q ≈ 0.99), which floats with K and is what the record runs use.
+  Topics are spiky, so m should land in the tens; the "top-m mass" log line is the check. Closures come
   from the readout DAG of §D1, so the stacked read multiplies disorder × ancestors (and
   subtype × disorder × ancestors where a subtype head exists).
 - **Conditional diagnosis.** For a candidate set S ⊆ readout nodes, P(d | θ, S) ∝
@@ -274,6 +291,24 @@ designed for but deferred (decided 2026-10-07); they depend on nothing but a rea
   `case-finding` did in 2026-07 (dead-code sweep + ADR): candidates are the SNOMED
   `--dag-source snomed` path, `--anchor-scope`, `--spectral-topo-order`, the PC head
   arms. Nothing is deleted at branch time; docs are never cruft.
+
+## Scale
+
+The ribbon is designed to be a label set of 3–10k diseases, and nothing in it is
+O(C²). Where cost lives, with C label nodes, K = n_bg + tpn·C topics, V the
+concatenated vocabulary, N documents:
+
+| component | scales as | note |
+|---|---|---|
+| per-document E-step | n_bg + tpn · (labels the doc attests) | a gated doc sees only its own blocks; on a flat forest it attests 1–2 labels, so K_eff ≈ n_bg + tpn regardless of C — cheaper per doc than a nested DAG, where a doc attests its whole closure |
+| global β | K · V | ~280 MB at K=6k, V=11.6k; broadcast once per iteration under the ADR 0047 destroy discipline |
+| spectral seed | 8 background anchors + tpn per node, basis-form greedy | `spectral_bg_anchors 8` is the default here: 0134 showed a wide background is not anchorable, and does not need to be |
+| readout | C heads, distributed batched L-BFGS; θ is K (or m) per document | the one component to watch: with no truncation θ is N·K floats (≈7 GB at K=6k, N=300k); mass-based top-m (above) makes it N·m with m in the tens |
+| stacked product | closure depth | 2 factors on a flat forest; ancestor heads add a few |
+| powering | whole-population closure support over Mondo | unchanged from 0110; independent of the ribbon |
+
+The two numbers every ribbon experiment reports for this table are the per-iteration
+`[cost]` block and the readout wall at its truncation setting.
 
 ## Not in scope
 
