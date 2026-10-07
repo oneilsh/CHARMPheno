@@ -1,7 +1,7 @@
 ---
 id: 134
 slug: mondo-cardiovascular-blend-bg1200-tpn1-stacked
-status: planned
+status: running
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -192,6 +192,56 @@ should not be: the design changes to `spectral_bg_anchors: 8` (0133's eight anch
 background rows, identical deflation seeds) + 1,192 random-init background rows (0132's
 start), `spectral_d` back to 768. Third launch on that.
 
+**2026-10-07 — third launch (spectral_bg_anchors 8, spectral_d 768) ran to the end.** Corpus
+line `K=1498 gated topics (1200 bg + 298 nodes x 1 tpn)`; seed as fast as 0133's; the
+named digest landed from the chain itself. The readout numbers were not pulled into this
+doc before the thread moved — see Results for the grep.
+
 ## Results
 
-(pending)
+**Digest (named; 1,200 background + one topic per node), paired with 0133's by eye:**
+
+| | 0133 (8 bg + 1/node, K=306) | **0134 (1200 bg + 1/node, K=1498)** |
+|---|--:|--:|
+| starved | 0% | 1% |
+| evidence: min / median / p90 / max | 43.5 / 3.8e3 / 9.6e4 / 1.65e6 | 10.7 / 1.69e3 / 5.3e4 / 5.7e5 |
+| median evidence by depth 3 / 5 / 7 | 1.85e4 / 3.8e3 / 1.14e3 | 5.6e3 / 1.69e3 / 802 |
+| parents with ≥2 fed children / collapsed / worst sibling cosine | 80 / 0 / 0.51 | 81 / 0 / 0.41 |
+
+**The per-node topics are 0133's, next to 1,200 strata.** Every textbook block of 0133 is
+still a textbook block here, often sharper: atrial fibrillation (AF, paroxysmal, chronic,
+persistent, flutter // warfarin, metoprolol, diltiazem), paroxysmal AF (// apixaban,
+rivaroxaban), cardiomyopathy d3 (cardiomyopathy, primary CM, HF, DCM, CHF, chronic
+systolic HF, LBBB), systolic HF (// carvedilol, spironolactone, valsartan), diastolic HF,
+congestive HF (// furosemide), hypertrophic CM (HCM, HOCM, cardiomegaly, ventricular
+tachycardia // metoprolol, verapamil), extrinsic CM (amyloidosis, "cardiomyopathy
+associated with another disorder"), alcoholic CM (dependence, withdrawal, subdural
+haemorrhage // thiamine), rheumatic CHF, Takotsubo (Takotsubo CM, NSTEMI, breast
+carcinoma in situ — older women). The background did not empty the blocks: node evidence
+is roughly halved (the shared strata take the generic mass the node topics no longer
+have to carry), but the identity of every block that had one is intact, and sibling
+distinctness improved (worst cosine 0.41 vs 0.51).
+
+**The background did NOT give the same-vocabulary children their words back.** The one
+failure mode of 0133 (insight 0094) is unchanged, node for node: dilated CM is still the
+young-women primary-care stratum (unplanned pregnancy, pharyngitis, myopia, acne);
+intrinsic CM still PCOS / irregular periods; persistent AF still a diabetes stratum;
+non-familial restrictive CM still asthma; heart failure d3 still the CKD / COPD / OSA
+comorbidity stratum; toxemia of pregnancy still generic ED symptoms. A 1,200-topic shared
+background with those strata in it does not stop forward deflation from leaving the
+child's residual AS that stratum: the child's one topic is seeded from its own closure
+documents after its ancestors claimed the shared vocabulary, and the ancestors' claim is
+the problem, not the absence of a stratum to absorb the cohort. That closes the
+"background as a home for the cohort" hypothesis from the front matter.
+
+**Readout numbers: not yet recorded here** (thread moved before the paste). Pull them with:
+
+```bash
+RUN=$(ls -d /home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs/0134-*)
+grep -E "^=== |top-m mass|gated_pc(_stacked)? \(pc_topics_lr\): (macro|detection)|root head alone|stacked: max|ranking \(within|paired per-node|paired delta|depth [0-9]+:|flat sigma|stacked P_stack|^## paired|^all: n=|^by depth" "$RUN"/sweep_log.md
+```
+
+and read them against the front matter's three outcomes: the root head (0133: 0.781;
+0123: 0.807; 0132: 0.798) and de-novo AP (0.198 / 0.236 / 0.185) are the numbers the
+blend exists to move; the within-cohort paired delta vs 0133 (0.8006) says whether the
+per-node heads kept their signal next to the strata (the digest says the blocks did).
