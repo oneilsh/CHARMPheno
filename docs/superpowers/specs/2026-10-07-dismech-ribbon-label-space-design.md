@@ -134,7 +134,7 @@ Which ancestors are heads (decided 2026-10-07, after sizing DisMech's classifica
 every Mondo ancestor of a label node with ≥ 2 label-node descendants (that is where the
 stacked product has something to multiply), from Mondo's own graph, up to and including
 the root. DisMech classifications do not serve here (35% coverage, no hierarchy); they
-serve as candidate sets in §D4. A later ablation can prune the ancestor set.
+serve, selectively, as candidate sets in §D4. A later ablation can prune the ancestor set.
 
 ### D2 — The fit
 
@@ -177,9 +177,14 @@ almost everywhere, `tpn_max` drops; if a tail sits at the ceiling, it rises.
   subtype × disorder × ancestors where a subtype head exists).
 - **Conditional diagnosis.** For a candidate set S ⊆ readout nodes, P(d | θ, S) ∝
   σ(z_d(θ)) over d ∈ S (or the stacked score, when S spans depths). S comes from
-  three sources, all available without a refit: the label-node descendants of a Mondo
-  ancestor; a DisMech `harrisons_chapter` (1,159 disorders) or specialist nosology
-  (ICIMD, ISDS, IUIS, ...); or a hand list. Report
+  three sources, all available without a refit — in this order of preference (decided
+  2026-10-07): the label-node descendants of a **Mondo ancestor** (the default: Mondo
+  groups by what the diseases *are*, so members share phenotype); a DisMech *specialist*
+  nosology where it is phenotypically coherent (ISDS skeletal, ICIMD metabolic, IUIS
+  immunodeficiency, channelopathy — a judgment per set, not a rule); or a hand list.
+  Harrison's chapters and the coarse `category` are too broad to share phenotype
+  (GENETICS_ENVIRONMENT, "Mendelian") and are NOT used as candidate sets; they stay in
+  the ribbon TSV as descriptive columns only. Report
   `cond_AUC` as the sober column (the 2026-08-14 VOI metrics report explains why
   `cond_AP`'s lift is mostly base-rate).
 - **Value of information.** For a code w and candidate set S: expected posterior entropy
@@ -232,8 +237,8 @@ the DisMech devs.
 - **0136 — profile census.** `--profile-census` on 0135: the `n_profiles` distribution,
   stratum rate, HPO alignment; decides `tpn_max` for the record run.
 - **0137 — ribbon record.** Whole population, `tpn_max` from 0136, both readouts, the
-  conditional-diagnosis and VOI tables for two candidate sets (one Mondo-ancestor set,
-  one Harrison's chapter). Export and frequency bands follow as their own experiments
+  conditional-diagnosis and VOI tables for two candidate sets (both Mondo-ancestor sets,
+  e.g. connective-tissue disorders and cardiomyopathies). Export and frequency bands follow as their own experiments
   once the record is read; multi-domain (drug + measurement) as 0137b against 0137.
 
 ## Work packages and what each reuses
@@ -278,7 +283,8 @@ re-litigating α or the count transform; the whole-Mondo nested fit as a mainlin
 1. `tpn_max` = 3 for 0135; no side-by-side with 1.
 2. Readout heads from Mondo ancestors ("≥ 2 label-node descendants" rule). DisMech
    classifications sized: `harrisons_chapter` covers 35%, the rest are niche; they are
-   candidate sets, not heads.
+   not heads; candidate sets default to Mondo ancestors, with specialist nosologies
+   admitted case by case and Harrison's / `category` excluded as too broad.
 3. Subtype heads deferred.
 4. DisMech pinned at `71cd0452` (2026-10-07, "Regenerate pages, app data, dashboard, and
    schema docs (#13662)"); re-pin per experiment.
