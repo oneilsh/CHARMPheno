@@ -33,8 +33,11 @@ infrastructure. All of it is label-space-agnostic and all of it is kept.
 
 - **Ribbon.** The set R of Mondo ids of DisMech *disorders* (`kb/disorders/*.yaml`,
   one `disease_term` MONDO id each). **Pinned to DisMech commit `71cd0452`
-  (2026-10-07):** 3,312 disorder files, 3,273 with a MONDO `disease_term`, 3,218
-  distinct MONDO ids (a few disorders share a term; they collapse to one label node).
+  (2026-10-07):** 3,312 disorder files, 3,260 with a MONDO `disease_term` (52 skipped:
+  poisonings, a few infections, ageing), **3,239 distinct MONDO ids** (21 shared terms
+  collapse to one label node each). Cut by `dismech_ribbon.py` into
+  `analysis/cloud/anchor_selection_data/dismech_ribbon.tsv`, identity
+  `dismech:71cd0452358b:3239:5c2dce2aa002`.
   Subtypes (`has_subtypes`, present on 1,095 disorders) are NOT in R. DisMech's
   selection is already a cross-cut of Mondo at roughly one depth; R is treated as flat
   even where Mondo nests two members (that is a DisMech curation question, surfaced as a

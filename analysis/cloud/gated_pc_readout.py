@@ -297,6 +297,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--mondo-cache-dir", default=None,
                    help="mondo runs: local Mondo OBO cache dir for a rebuild "
                         "(default: the manifest's, else data/mondo).")
+    p.add_argument("--label-set", default=None,
+                   help="ribbon runs: where the fit's label-set TSV lives NOW, for a "
+                        "rebuild on a cache MISS (default: the manifest's path). The "
+                        "ribbon's identity is always the manifest's; a TSV whose "
+                        "identity differs is rejected at build time.")
     p.add_argument("--dag-collapse", choices=["on", "off"], default=None,
                    help="mondo runs: whether the fit used the exp-0109 "
                         "splice-to-fixpoint DAG reduction (--dag-collapse). It is a "
@@ -438,7 +443,8 @@ _SNOMED_KEY_KEYS = (
 def corpus_spec_from_manifest(manifest: dict, *, doc_min_length=None, billing=None,
                               dag_source=None, mondo_version=None, mondo_branch=None,
                               min_positives=None, mondo_cache_dir=None,
-                              dag_collapse=None, preindex_closure=None) -> dict:
+                              dag_collapse=None, preindex_closure=None,
+                              label_set_path=None) -> dict:
     """The corpus SPEC a gated_pc manifest describes — key inputs + rebuild inputs.
 
     The current driver writes this dict into `corpus_manifest` verbatim, so for any
@@ -518,6 +524,14 @@ def corpus_spec_from_manifest(manifest: dict, *, doc_min_length=None, billing=No
         "dag_collapse": (False if dag_source == "mondo_native" else
                          bool(dag_collapse if dag_collapse is not None
                               else _pick("dag_collapse", False))),
+        # Spec 2026-10-07 §D1: the ribbon. `label_set` is the KEY identity and is
+        # always the manifest's (a readout cannot be told to key under a different
+        # ribbon than the fit used); `label_set_path` is the rebuild input and may
+        # be overridden when the TSV moved. Both default to '' — what every
+        # manifest written before the field existed means.
+        "label_set": str(_pick("label_set", "") or ""),
+        "label_set_path": str(label_set_path if label_set_path is not None
+                              else _pick("label_set_path", "") or ""),
         # The DOC UNIT (R5.3 / audit seam 4). A cache-key input as of this
         # change, and the default is what EVERY manifest written before the field
         # existed means — every corpus in the repo was assembled under it — so an
@@ -1017,6 +1031,7 @@ def main(argv=None) -> int:
                      mondo_branch=args.mondo_branch,
                      min_positives=args.min_positives,
                      mondo_cache_dir=args.mondo_cache_dir,
+                     label_set_path=args.label_set,
                      dag_collapse=(None if args.dag_collapse is None
                                    else args.dag_collapse == "on"),
                      preindex_closure=(None if args.preindex_closure is None
