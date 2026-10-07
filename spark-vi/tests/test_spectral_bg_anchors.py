@@ -53,7 +53,9 @@ def test_capped_background_reproduces_the_narrow_layouts_seed(spark):
     lam_n = scalable_block_aligned_lambda(rdd, narrow, V, seed=0, min_doc_freq=1)
     assert lam_w.shape == (6, V) and lam_n.shape == (4, V)
     assert np.allclose(lam_w[:2], lam_n[:2])                       # anchored bg rows
-    assert np.all(lam_w[2:4] == 0.0)                               # unanchored: zero
+    # unanchored rows carry only the seed's uniform floor (no anchor, no
+    # recovery) — the engine replaces them with its random draw
+    assert np.all(lam_w[2:4] < 1e-5) and np.ptp(lam_w[2:4]) == 0.0
     for u in (1, 2):                                               # node rows identical
         assert np.allclose(lam_w[wide.block[u][0]], lam_n[narrow.block[u][0]])
 
