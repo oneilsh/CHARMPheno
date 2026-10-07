@@ -976,6 +976,9 @@ def build_gated_pc_args(
         args.extend(["--readout-max-iter", str(effective["readout_max_iter"])])
     if effective.get("readout_theta_topm") is not None:
         args.extend(["--readout-theta-topm", str(effective["readout_theta_topm"])])
+    if effective.get("readout_theta_mass"):
+        # spec 2026-10-07 §D4: truncate theta by MASS, not count (absent = omitted).
+        args.extend(["--readout-theta-mass", str(effective["readout_theta_mass"])])
     if effective.get("readout_l2") is not None:
         args.extend(["--readout-l2", str(effective["readout_l2"])])
     if effective.get("readout_calibration"):

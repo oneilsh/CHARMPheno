@@ -345,6 +345,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "shipped lean collect. Only meaningful when the readout "
                         "resolves to distributed. This is the flag the WP-B CLUSTER "
                         "parity run flips against the 0110 corpus.")
+    p.add_argument("--readout-theta-mass", type=float, default=None,
+                   help="OVERRIDE: resolve the top-m width from a theta-MASS target "
+                        "on the train frame (spec 2026-10-07 §D4; smallest m in "
+                        "{16,32,...,K} with p10 coverage >= target). Tags outputs "
+                        "mass<pct>. Default: the manifest's resolved "
+                        "readout_theta_topm; a fit-only manifest that recorded a "
+                        "readout_theta_mass but no resolved width re-resolves it.")
     p.add_argument("--readout-theta-topm", type=int, default=None,
                    help="OVERRIDE the manifest's readout_theta_topm for this re-readout "
                         "(0 forces full-K). Default: the manifest's value, which "
@@ -755,7 +762,7 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
                 min_count, readout_mode="auto", ab_check=False, out_dir=None,
                 theta_topm=None, readout_max_iter=None, elig_col=None,
                 eval_path="driver", readout_l2=None, feature_mask=None,
-                mask_tag=None, stacked=False, parent_int=None):
+                mask_tag=None, stacked=False, parent_int=None, theta_mass=None):
     """Score both gated_pc arms off two already-TRANSFORMED splits. No argparse.
 
     The whole body of this tool that is worth testing: given the frames a finished
@@ -867,7 +874,29 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
         # (and crawl at whole-Mondo, the scale where top-m is on). An explicit
         # override (--readout-theta-topm) exists for the truncation-PRICING
         # experiment: force top-m onto a recorded full-K run and read the delta.
-        if theta_topm is None:
+        _mass = None
+        if theta_mass is not None and float(theta_mass) > 0:
+            _mass = float(theta_mass)
+            _cprint(f"[readout]   theta top-m by MASS target {_mass:g} (CLI OVERRIDE)",
+                  flush=True)
+        elif theta_topm is None and not int(manifest.get("readout_theta_topm", 0) or 0) \
+                and float(manifest.get("readout_theta_mass", 0) or 0) > 0:
+            # A fit-only manifest: the fit recorded the mass target but died before
+            # the transform resolved it. Re-resolve, as the fit would have.
+            _mass = float(manifest["readout_theta_mass"])
+            _cprint(f"[readout]   theta top-m by MASS target {_mass:g} (from the "
+                  "manifest; width not yet resolved there)", flush=True)
+        if _mass is not None:
+            import distributed_readout as _drm
+            _K = int(manifest.get("K") or 0) or None
+            theta_topm, _cov = _drm.resolve_theta_topm_by_mass(
+                train_scored, _K, _mass)
+            _cprint("[readout]   theta top-m by mass: "
+                  + " ".join(f"m={m}:{mean:.3f}/{p10:.3f}"
+                             for m, (mean, p10) in sorted(_cov.items()))
+                  + f" (mean/p10) -> " + (f"m={theta_topm}" if theta_topm else
+                                          f"FULL K={_K}"), flush=True)
+        elif theta_topm is None:
             theta_topm = int(manifest.get("readout_theta_topm", 0) or 0)
             if theta_topm:
                 _cprint(f"[readout]   theta top-m={theta_topm} (from manifest)",
@@ -1193,6 +1222,11 @@ def main(argv=None) -> int:
                 # tag its outputs so they never overwrite results_readout.json
                 # (or a mask run at the manifest's top-m).
                 _mtag = f"topm{int(args.readout_theta_topm)}"
+            if args.readout_theta_mass is not None and float(args.readout_theta_mass) > 0:
+                if args.readout_theta_topm is not None:
+                    raise SystemExit("[readout] --readout-theta-mass and "
+                                     "--readout-theta-topm are mutually exclusive")
+                _mtag = f"mass{int(round(float(args.readout_theta_mass) * 100))}"
             if args.readout_feature_mask != "all":
                 _fmask = build_readout_feature_mask(
                     args.readout_feature_mask, C, int(manifest["K"]),
@@ -1224,7 +1258,8 @@ def main(argv=None) -> int:
                         elig_col=_elig_col, eval_path=args.eval_path,
                         readout_l2=args.readout_l2, feature_mask=_fmask,
                         mask_tag=_mtag, stacked=bool(args.readout_stacked),
-                        parent_int=getattr(bundle, "parent_int", None))
+                        parent_int=getattr(bundle, "parent_int", None),
+                        theta_mass=args.readout_theta_mass)
             _cprint(f"[readout]   arm results written to {run_dir / _rname}",
                   flush=True)
             train_scored.unpersist(); test_scored.unpersist()

@@ -1611,6 +1611,62 @@ def theta_topm_coverage(scored_df, K, *, ms=(64, 128, 256, 512),
     return coverage_from_accum(sums, hist, n, ms, q=q)
 
 
+def mass_grid(K, *, start=16):
+    """The candidate truncation widths a mass target is resolved over: powers of
+    two from `start` up to (and excluding) K, then K itself — so the answer can be
+    "no truncation" when the mass target is not met below full width."""
+    K = int(K)
+    ms = []
+    m = int(start)
+    while m < K:
+        ms.append(m)
+        m *= 2
+    ms.append(K)
+    return tuple(ms)
+
+
+def choose_topm_for_mass(coverage, q, *, K=None):
+    """The smallest m whose p10 θ-mass coverage reaches `q`; `0` (= full K, no
+    truncation) when none does or when the only such m is K itself.
+
+    `coverage` is `theta_topm_coverage`'s `{m: (mean, p10)}`. The p10 is the
+    criterion, not the mean: a truncation is judged on the WORST decile of
+    documents — the tail the rare nodes are fit on — exactly as the coverage
+    pass's own docstring argues. Pure, so the rule is unit-tested against made-up
+    coverage tables; the Spark pass that produces the table is
+    `resolve_theta_topm_by_mass`."""
+    q = float(q)
+    ok = sorted(int(m) for m, (_mean, p10) in coverage.items() if float(p10) >= q)
+    if not ok:
+        return 0
+    m = ok[0]
+    if K is not None and m >= int(K):
+        return 0
+    return m
+
+
+def resolve_theta_topm_by_mass(scored_df, K, q, *, topic_col="topicDistribution",
+                               depth=2, grid=None):
+    """Resolve a MASS target to a top-m width on the train frame (spec
+    2026-10-07 §D4: truncate by mass, not by count).
+
+    `--readout-theta-topm 256` kept 84% of the topics at K=306 and 17% at K=1498;
+    at a ribbon-scale K it would keep ~5%, and whether that is a cheap
+    reparameterization or a lobotomy depends on the data, so a fixed count is the
+    wrong knob. This measures coverage over `mass_grid(K)` in ONE distributed pass
+    (`theta_topm_coverage`) and picks the smallest width whose p10 coverage meets
+    `q` (`choose_topm_for_mass`). The chosen m then flows through every existing
+    `theta_topm=` seam unchanged — the kernels stay rectangular (every doc keeps the
+    same m), which is what makes them exact.
+
+    Returns `(m, coverage)`; `m == 0` means no width below K met the target and the
+    readout runs dense."""
+    K = int(K)
+    ms = tuple(grid) if grid is not None else mass_grid(K)
+    cov = theta_topm_coverage(scored_df, K, ms=ms, topic_col=topic_col, depth=depth)
+    return choose_topm_for_mass(cov, q, K=K), cov
+
+
 def masked_moments(scored_df, C, K, *, topic_col="topicDistribution",
                    label_col="label", mask_col="labelMask", eps=1e-12, depth=2,
                    topm=0):

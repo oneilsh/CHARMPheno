@@ -4406,6 +4406,15 @@ def parse_args(argv=None):
                         "over K standardized features: exp 0120's re-readout went "
                         "0.7555 -> 0.7927 macro AUC at 100 (insight 0089). Recorded "
                         "in the manifest so a re-readout reproduces the fit's own.")
+    p.add_argument("--readout-theta-mass", type=float, default=0.0,
+                   help="resolve the readout's top-m width from a theta-MASS target "
+                        "instead of a count (spec 2026-10-07 §D4): the smallest m in "
+                        "{16,32,64,...,K} whose p10 per-document coverage >= this "
+                        "fraction (e.g. 0.99), measured on the train frame in one "
+                        "pass before the head solve, logged, and recorded in the "
+                        "manifest as the resolved readout_theta_topm. 0 (default) = "
+                        "off. Mutually exclusive with --readout-theta-topm > 0; "
+                        "distributed readout only.")
     p.add_argument("--readout-theta-topm", type=int, default=0,
                    help="fit and score the distributed readout on each doc's top-M "
                         "theta entries (truncated, NOT renormalized), 0 (default) = "
@@ -4719,6 +4728,22 @@ def main() -> int:
         # top-m readout is a DIFFERENT (narrower, exactly-fit) model, so it belongs
         # in the run's log next to the mode, not buried in a fit banner.
         theta_topm = int(getattr(args, "readout_theta_topm", 0) or 0)
+        theta_mass = float(getattr(args, "readout_theta_mass", 0.0) or 0.0)
+        if theta_mass > 0 and theta_topm > 0:
+            raise ValueError(
+                f"--readout-theta-mass {theta_mass} and --readout-theta-topm "
+                f"{theta_topm} are mutually exclusive: one resolves the width, the "
+                "other fixes it.")
+        if theta_mass > 0 and readout_mode != "distributed":
+            _cprint(f"[driver]   readout_theta_mass={theta_mass} IGNORED under "
+                  "readout_mode=driver (the truncation lives in the distributed "
+                  "path)", flush=True)
+            theta_mass = 0.0
+        elif theta_mass > 0:
+            _cprint(f"[driver]   readout_theta_mass={theta_mass}: the top-m width is "
+                  "resolved on the train frame (smallest m with p10 coverage >= "
+                  "target) once the transform lands; see 'theta top-m by mass'",
+                  flush=True)
         if theta_topm > 0 and readout_mode != "distributed":
             _cprint(f"[driver]   readout_theta_topm={theta_topm} IGNORED under "
                   "readout_mode=driver (the truncation lives in the distributed "
@@ -4736,14 +4761,15 @@ def main() -> int:
         # otherwise. Default driver until the parity gate is green.
         eval_path = resolve_eval_path(getattr(args, "eval_path", "driver"),
                                       readout_mode)
-        if eval_path == "distributed" and theta_topm > 0:
+        if eval_path == "distributed" and (theta_topm > 0 or theta_mass > 0):
             # score_cells_arms_df is dense-θ only (spec R5.4 defers top-m + doc-key +
             # arms); scoring a top-m fit on full θ would evaluate a model on features
             # it was never fit on. Keep the truncation and fall back to the driver
             # collect for the eval rather than silently mixing feature maps.
             _cprint(f"[driver]   eval_path=distributed IGNORED because "
-                  f"readout_theta_topm={theta_topm}>0 (the cell explode is dense-θ "
-                  "only); using the driver collect for the eval.", flush=True)
+                  f"readout_theta_topm={theta_topm}>0 / readout_theta_mass="
+                  f"{theta_mass}>0 (the cell explode is dense-θ only); using the "
+                  "driver collect for the eval.", flush=True)
             eval_path = "driver"
         if getattr(args, "eval_path", "driver") == "distributed":
             if eval_path == "distributed":
@@ -4920,6 +4946,12 @@ def main() -> int:
             # manifest next to the mode: a top-m readout is a narrower model, and
             # a calibration-skipped run has no ECE record at all.
             "readout_theta_topm": theta_topm,
+            # Spec 2026-10-07 §D4: when the width was resolved from a MASS target,
+            # the target is recorded here and `readout_theta_topm` above is
+            # overwritten with the RESOLVED m once the train transform exists (the
+            # fit-only manifest therefore carries 0 + the target; gated_pc_readout
+            # re-resolves from the target in that case).
+            "readout_theta_mass": theta_mass,
             "readout_calibration": "on" if run_calibration else "off",
             # The solver iteration cap the fit ACTUALLY used — i.e. post-CHARM_DEV
             # capping, since the dev profile rewrites args before we get here. A
@@ -5115,6 +5147,22 @@ def main() -> int:
             # the supervised transform appends BOTH topicDistribution and probability.
             train_scored = pc_model.transform(bundle.train_df).cache()
             test_scored = pc_model.transform(bundle.test_df).cache()
+            if theta_mass > 0:
+                # Spec 2026-10-07 §D4: resolve the width from the mass target on
+                # the TRAIN frame, once, and let the resolved m flow through every
+                # theta_topm= seam below unchanged. Recorded in the manifest so a
+                # re-readout reproduces this design matrix without re-measuring.
+                import distributed_readout as _drm
+                theta_topm, _cov = _drm.resolve_theta_topm_by_mass(
+                    train_scored, lay.K, theta_mass)
+                _cprint("[driver]   theta top-m by mass: "
+                      + " ".join(f"m={m}:{mean:.3f}/{p10:.3f}"
+                                 for m, (mean, p10) in sorted(_cov.items()))
+                      + f" (mean/p10) -> target p10>={theta_mass:g} resolves to "
+                      + (f"m={theta_topm}" if theta_topm else
+                         f"FULL K={lay.K} (no width below K meets the target)"),
+                      flush=True)
+                manifest_fields["readout_theta_topm"] = int(theta_topm)
             _sf = args.readout_sample_frac
             _sd = args.seed if args.seed is not None else 0
             if readout_mode == "distributed" and eval_path == "distributed":

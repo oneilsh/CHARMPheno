@@ -190,9 +190,13 @@ the ceiling → raise it before the record. Per-node rows stay in the workspace.
   **θ truncation by mass, not count** (decided 2026-10-07): the top-256 rule kept 84% of
   topics at K=306 and 17% at K=1498 (0134's open −0.018), and would keep ~5% at the
   ribbon's K. 0135 reads untruncated (`--readout-theta-topm 0`) as the reference; before
-  0137 the readout gains `--readout-theta-mass q` (smallest per-document m keeping a
-  fraction q of θ mass, q ≈ 0.99), which floats with K and is what the record runs use.
-  Topics are spiky, so m should land in the tens; the "top-m mass" log line is the check. Closures come
+  0137 the readout gains `--readout-theta-mass q` — BUILT 2026-10-07: one coverage pass
+  over the grid {16, 32, …, K} on the train frame, the smallest m whose **p10**
+  per-document coverage ≥ q (q ≈ 0.99), resolved once and recorded in the manifest as
+  the resolved `readout_theta_topm`, so re-readouts reproduce the design matrix; 0 (dense)
+  when nothing below K meets the target. One m for every document keeps the sparse
+  kernels rectangular and exact. Topics are spiky, so m should land in the tens; the
+  "theta top-m by mass" log line is the check. `readout_theta_mass:` in front matter. Closures come
   from the readout DAG of §D1, so the stacked read multiplies disorder × ancestors (and
   subtype × disorder × ancestors where a subtype head exists).
 - **Conditional diagnosis.** For a candidate set S ⊆ readout nodes, P(d | θ, S) ∝
