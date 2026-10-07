@@ -888,6 +888,9 @@ def build_gated_pc_args(
     # byte-identical. The value is a path to the profile-eta TSV.
     if str(effective.get("spectral_marginal_floor", "none")) != "none":
         args.extend(["--spectral-marginal-floor", str(effective["spectral_marginal_floor"])])
+    if int(effective.get("spectral_bg_anchors", 0) or 0) > 0:
+        # exp 0134: anchor only the first N background topics (0 = all, omitted).
+        args.extend(["--spectral-bg-anchors", str(int(effective["spectral_bg_anchors"]))])
     if effective.get("spectral_anchor_profile"):
         args.extend(["--spectral-anchor-profile",
                      str(effective["spectral_anchor_profile"])])

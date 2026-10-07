@@ -69,6 +69,24 @@ ANCHOR_SCOPES = ("closure", "frontier")
 SPECTRAL_LAMBDA_SCALE = 200.0
 
 
+def resolve_bg_anchors(lay, n_bg_anchors) -> int:
+    """How many of the layout's ``n_bg`` background topics the seed ANCHORS.
+
+    ``None``/0 = all of them (every run before exp 0134). A positive value caps
+    it: the first ``n`` background rows get spectral anchors and recovered
+    topics, the rest are left UNSEEDED (zero here; the engine fills them with
+    its random Gamma init, see ``GatedOnlineLDA.initialize_global``'s
+    ``random_rows``). Why: a 1,200-topic shared background (0134) cannot be
+    anchored — the hull-vertex greedy and the per-word recovery both scale with
+    the anchor count, and 0132 showed a flat background forms its ~1,250 live
+    strata from a random start on its own. The anchored few are the deflation
+    seeds every node's search spans away from (0133's eight), unchanged."""
+    n_bg = int(lay.n_bg)
+    if n_bg_anchors is None or int(n_bg_anchors) <= 0:
+        return n_bg
+    return min(int(n_bg_anchors), n_bg)
+
+
 def _validate_anchor_scope(anchor_scope):
     if anchor_scope not in ANCHOR_SCOPES:
         raise ValueError(
@@ -229,7 +247,8 @@ def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = SPECTR
                                   anchor_scope: str = "closure",
                                   topo_order: str = "forward",
                                   domain_bounds=None,
-                                 anchor_candidates=None, anchor_stats=None) -> np.ndarray:
+                                  anchor_candidates=None, anchor_stats=None,
+                                  n_bg_anchors=None) -> np.ndarray:
     """Block-aligned spectral lambda seed (topological, direction set by `topo_order`).
 
     data_summary carries {"train_docs": [token-id arrays], "train_labels": [node id or
@@ -310,9 +329,10 @@ def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = SPECTR
         bg_anchors = []
     else:
         Q_all = word_cooccurrence(bg_docs, V)
-        bg_anchors = find_anchors(Q_all, lay.n_bg, domain_bounds=domain_bounds)
+        n_anc = resolve_bg_anchors(lay, n_bg_anchors)
+        bg_anchors = find_anchors(Q_all, n_anc, domain_bounds=domain_bounds)
         bg_beta = recover_beta(Q_all, bg_anchors)
-        for i in range(min(lay.n_bg, bg_beta.shape[0])):
+        for i in range(min(n_anc, bg_beta.shape[0])):
             beta[i] = bg_beta[i]
 
     node_anchors: dict[int, list] = {}
@@ -353,7 +373,8 @@ def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = SPECTR
 def multidomain_spectral_lambda(data_summary, lay, domains, *, scale: float = SPECTRAL_LAMBDA_SCALE,
                                 anchor_scope: str = "closure",
                                 topo_order: str = "forward",
-                                anchor_candidates=None, anchor_stats=None) -> dict:
+                                anchor_candidates=None, anchor_stats=None,
+                                n_bg_anchors=None) -> dict:
     """Per-domain dict-lambda spectral seed for the multi-domain gated model.
 
     Runs the block-aligned anchor recipe (spectral_block_aligned_lambda) on the
@@ -380,7 +401,8 @@ def multidomain_spectral_lambda(data_summary, lay, domains, *, scale: float = SP
     beta_joint = spectral_block_aligned_lambda(
         data_summary, lay, V, scale=1.0, anchor_scope=anchor_scope,
         topo_order=topo_order, domain_bounds=bounds,
-        anchor_candidates=anchor_candidates, anchor_stats=anchor_stats)          # (K, V), rows joint distributions
+        anchor_candidates=anchor_candidates, anchor_stats=anchor_stats,
+        n_bg_anchors=n_bg_anchors)          # (K, V), rows joint distributions
     per_domain = split_domains(beta_joint, bounds)            # each row-normalized within its domain
     return {m: per_domain[m] * float(scale) + 1e-9 for m in range(len(domains))}
 
@@ -522,7 +544,8 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                                   batch_size: int = 0,
                                   anchor_candidates=None,
                                   anchor_stats=None,
-                                  marginal_floor: str = "none") -> np.ndarray:
+                                  marginal_floor: str = "none",
+                                  n_bg_anchors=None) -> np.ndarray:
     """Distributed random-projection analogue of `spectral_block_aligned_lambda`.
 
     `rdd` is an RDD of GatedBOWDocument. Never forms a driver V×V matrix (ADR
@@ -635,11 +658,14 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
         bg_rdd = (group_rdd if anchor_scope == "closure"
                   else group_rdd.filter(lambda gd: len(gd.groups) == 0))
         pooled = projected_cooccurrence_rdd(bg_rdd, no_groups, V, d, seed)
+        # Anchor only the first `n_anc` background rows (resolve_bg_anchors):
+        # the rest stay zero here and get the engine's random init.
+        n_anc = resolve_bg_anchors(lay, n_bg_anchors)
         bg_anchors = find_anchors_projected(
-            pooled.pooled_QR, pooled.p_w, pooled.df_w, lay.n_bg,
+            pooled.pooled_QR, pooled.p_w, pooled.df_w, n_anc,
             min_doc_freq=min_doc_freq)
         bg_beta = recover_beta_projected(pooled.pooled_QR, pooled.p_w, bg_anchors)
-        for i in range(min(lay.n_bg, bg_beta.shape[0])):
+        for i in range(min(n_anc, bg_beta.shape[0])):
             beta[i] = bg_beta[i]
 
         # Opt-in diagnostics (no effect on lambda): dump per-node K estimates off

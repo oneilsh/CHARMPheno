@@ -18,11 +18,14 @@ disease: rare_priority
 # 1,250 live flat strata gave it 0.798. This run adds the strata back WITHOUT touching the
 # per-node unit. HSLDA's shared profiles + the gate's one signature per node.
 #
-# SEED. The background anchors are found by the projected greedy on a spectral_d-dim
-# sketch; with n_bg > spectral_d the greedy past d anchors is degenerate (the residual
-# span is full). spectral_d 768 -> 2048 (> 1200 + the deepest closure's anchors). The seed
-# is slower than 0133's (sketch and projections scale with d) but there is no tpn=5
-# anchor hunt; expect it between 0133's and 0123's.
+# SEED. A 1,200-topic background is NOT anchorable: the hull-vertex greedy and the per-word
+# NNLS recovery both scale with the anchor count (the first two launches died in each in
+# turn — see the run log). And it should not be: 0132 showed a flat background forms its
+# ~1,250 live strata from a random start on its own. So spectral_bg_anchors: 8 anchors
+# the first eight background rows exactly as 0133 did (same deflation seeds for every
+# node), and the other 1,192 background rows take the engine's random Gamma init — the
+# one 0132's flat fit started from. The only difference from 0133 is +1,192 free
+# background topics. spectral_d stays at 0133's 768 (8 + depth anchors per node).
 #
 # READ (ridge 100, both readouts; ABs vs 0133, 0123, 0132; named digest):
 #   - root head and de-novo AP: back to ~0.80 / ~0.24 (0123's) or not.
@@ -51,7 +54,7 @@ diag_only: true
 # --- the ONLY change from 0113: spectral block-aligned seed for the gated engine ---
 init: spectral
 spectral_method: scalable   # concatenated V ~11.6k >= 8000 threshold; dense = driver wall
-spectral_d: 2048            # must exceed n_bg + the deepest closure's anchors (see SEED)
+spectral_d: 768             # 0133's; only 8 + depth anchors per node (see SEED)
 anchor_scope: closure       # node trained from its whole closure; ancestors deflated by topo order
 spectral_topo_order: forward  # ancestors-first: each node's seed = its increment over ancestors
 count_transform: none       # THE ONLY CHANGE vs 0115: raw per-visit counts (0114's representation)
@@ -85,7 +88,8 @@ window_mode: lookback
 lookback_days: 1825
 label_window_days: 365
 strip_mode: both
-n_bg: 1200                  # THE ONLY CHANGE vs 0133: K = 1200 + 298 = 1498
+n_bg: 1200                  # THE CHANGE vs 0133: K = 1200 + 298 = 1498
+spectral_bg_anchors: 8      # anchor 0133's eight; the other 1,192 bg rows start random (see SEED)
 # LANDMINE (2026-09-11): 0113-0120 all say `optimize_doc_concentration: true` but the flag
 # was INERT on the PC path until 0121 wired it (pc.py `set_alpha_policy`); their alpha was
 # FIXED at 0.5. Copying that line now turns the empirical-Bayes alpha ON, and learned alpha
@@ -178,6 +182,15 @@ every step — O(n² · V · d) in Python-level dots — fine for 8 background a
 residual norms, seeds spanned in one SVD batch); same anchors up to floating-point ties,
 pinned against the old loop by `spark-vi/tests/test_anchor_greedy_residual_form.py`.
 Relaunched on the fixed code.
+
+**2026-10-07 — second launch killed in the seed, one step later.** The greedy took seconds;
+the cluster then sat idle for 25+ minutes after the pooled-sketch stages: the background
+β RECOVERY (`recover_beta_projected`) is one NNLS per vocabulary word against the anchor
+rows, and 1,200 anchors makes each solve seconds — hours for the vocabulary, and the same
+again per node. The honest conclusion is that a wide background is not anchorable and
+should not be: the design changes to `spectral_bg_anchors: 8` (0133's eight anchored
+background rows, identical deflation seeds) + 1,192 random-init background rows (0132's
+start), `spectral_d` back to 768. Third launch on that.
 
 ## Results
 
