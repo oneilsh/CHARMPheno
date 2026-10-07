@@ -1,7 +1,7 @@
 ---
 id: 133
 slug: mondo-cardiovascular-tpn1-spectral-stacked
-status: planned
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -159,8 +159,55 @@ grep -E "^=== |corpus: V=|starved|gated_pc(_stacked)? \(pc_topics_lr\): (macro|d
 
 ## Run log
 
-(none yet)
+**2026-10-06/07 — fit + both readouts + both ABs + named digest, first try.** The cluster was
+restarted after the chain finished; the run dir held everything. Digest named with
+`RESOLVE_NAMES=1`.
 
 ## Results
 
-(pending)
+**Four fits under the same two decoders (ridge 100):**
+
+| read | 0123 tpn=5 | 0132 flat K=1498 | **0133 tpn=1 (K=306)** |
+|---|--:|--:|--:|
+| flat head, within-cohort macro AUC / AP (193) | 0.7946 / 0.533 | 0.7612 / 0.476 | **0.8006 / 0.517** |
+| paired vs 0123 (193) | — | −0.028 (33/160) | **+0.008 (114/79)**: d2 −0.019, d3 0.000, d4 +0.005, d5 +0.016, d6 +0.008, d7 +0.019 |
+| paired vs 0132 (193) | — | — | +0.038 (162/31), every depth |
+| root head alone (= stacked detection) | 0.8065 / AP 0.886 | 0.7983 / 0.881 | **0.7807 / 0.866** |
+| stacked de-novo macro AUC / AP (224) | 0.8497 / 0.236 | 0.8362 / 0.185 | **0.8546 / 0.198** |
+| stacked within-cohort paired (stacked − flat) | −0.041 | −0.032 | −0.063 (14/179) |
+| starved topics (digest) | 1% | — | **0%** |
+
+**Decoding.** One topic per node holds the gate's gap on ranking and gains at depth:
+within-cohort +0.008 over tpn=5 (deeper nodes up to +0.019), +0.038 over flat; de-novo
+AUC the highest of the series (0.855). What it loses is the root head (0.781 vs 0.807 /
+0.798) and with it the de-novo AP (0.198 vs 0.236) and the within-cohort stacked read
+(−0.063): a product of a weaker root is a weaker product. The root head is a strata
+reader, and K=306 — 298 node signatures plus 8 background — gives it few strata to read.
+That is a WIDTH effect, not a tpn effect; 0132's 1,250 live strata gave the root 0.798.
+
+**Legibility (named digest, the cardiomyopathy / AF / HF neighbourhood).** The best of the
+series where a node's vocabulary is its own: atrial fibrillation (AF, paroxysmal, chronic,
+persistent, flutter // metoprolol, warfarin), paroxysmal AF (// apixaban), cardiomyopathy
+d3 (cardiomyopathy, primary CM, HF, DCM, LBBB, chronic systolic HF), systolic HF
+(// carvedilol, spironolactone, valsartan), hypertrophic CM (HCM, HOCM, cardiomegaly,
+systolic anterior motion of the mitral valve, murmur), extrinsic CM (amyloidosis,
+sarcoidosis, multiple myeloma), alcoholic CM (alcohol dependence, withdrawal // thiamine),
+diastolic HF, congestive HF (// furosemide), rheumatic CHF (rheumatic heart disease,
+mitral valve), Takotsubo (Takotsubo CM, NSTEMI; older women). Zero starved; 80 parents
+with ≥2 fed children, none collapsed, worst sibling cosine 0.51.
+
+Where it fails, it fails one way: **a node whose vocabulary is its parent's gets a cohort
+stratum.** Dilated CM (unplanned pregnancy, pharyngitis, UTI, myopia, dental caries: the
+young-women primary-care stratum — DCM's own words are in cardiomyopathy d3's topic);
+intrinsic CM (PCOS, irregular periods — the same cohort); persistent AF (a diabetes
+stratum — its words are in AF's topic); non-familial restrictive CM (asthma); heart
+failure d3 (a COPD/OSA/CKD comorbidity stratum — its words are in its children's
+topics); toxemia of pregnancy (generic ED symptoms). Forward deflation gives shared
+vocabulary to the first node in the closure to claim it, and the residual at the
+child is whoever its seed documents are — the peripartum cohort inside DCM again
+(exps 0127–0131), now with one topic instead of five. Insight 0094.
+
+**Outcome among the three in the front matter:** the first, with one hole. tpn=1 holds
+the gap and is the most legible topic side yet; the hole is the root head's missing
+strata, which is exactly what the blend adds. Next: **0134** = 0133 + a flat background
+of 1,200 topics (K back to 1,498, matched to 0123/0132), the same two readouts.
