@@ -496,7 +496,18 @@ class GatedOnlineLDA(OnlineLDA):
                         data_summary, self.lay, self.domains,
                         anchor_scope=scope, topo_order=topo,
                         anchor_candidates=(data_summary or {}).get("anchor_candidates"),
-                        anchor_stats=(data_summary or {}).get("anchor_stats"))
+                        anchor_stats=(data_summary or {}).get("anchor_stats"),
+                        n_bg_anchors=(data_summary or {}).get("n_bg_anchors"))
+            _rows = (data_summary or {}).get("random_rows")
+            if _rows:
+                # Unanchored background rows (gated_init.resolve_bg_anchors): the
+                # random path's own Gamma draw, row for row, so a 1,200-topic
+                # background seeds exactly as 0132's flat fit did while the
+                # anchored rows and every node block keep their spectral seed.
+                rnd = self._random_domain_lambda()
+                idx = np.asarray(sorted(int(r) for r in _rows), dtype=np.int64)
+                for m in lam:
+                    lam[m][idx] = rnd[int(m)][idx]
             return {
                 "lambda": lam,
                 "alpha": self.alpha.copy(),         # defensive copy — runner mutates
@@ -511,6 +522,7 @@ class GatedOnlineLDA(OnlineLDA):
                 f"known: {['random'] + sorted(INIT_STRATEGIES)}"
             )
         gp = super().initialize_global(data_summary)
+        rnd = np.array(gp["lambda"], dtype=np.float64, copy=True)   # the random draw
         # Scalable path: the shim precomputed the (K,V) lambda on the RDD and
         # handed it over via data_summary (mirrors the STM shim's spectral_beta);
         # use it directly. Dense path: run the collect-to-driver strategy.
@@ -525,7 +537,14 @@ class GatedOnlineLDA(OnlineLDA):
             gp["lambda"] = INIT_STRATEGIES[self.init](
                 data_summary, self.lay, self.V, anchor_scope=scope, topo_order=topo,
                 anchor_candidates=(data_summary or {}).get("anchor_candidates"),
-                anchor_stats=(data_summary or {}).get("anchor_stats"))
+                anchor_stats=(data_summary or {}).get("anchor_stats"),
+                n_bg_anchors=(data_summary or {}).get("n_bg_anchors"))
+        _rows = (data_summary or {}).get("random_rows")
+        if _rows:
+            # Unanchored background rows get the random path's Gamma draw (see
+            # the multi-domain branch above); `rnd` is that draw for this seed.
+            idx = np.asarray(sorted(int(r) for r in _rows), dtype=np.int64)
+            gp["lambda"][idx] = rnd[idx]
         return gp
 
     def _random_domain_lambda(self) -> dict[int, np.ndarray]:
