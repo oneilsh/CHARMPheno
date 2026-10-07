@@ -55,8 +55,13 @@ uniform by depth; the root head is indifferent (0.806 vs 0.798); stacking gains 
 every topic side. Gate stays, job sized. 0133 (tpn=1, K=306) has RUN (insight 0094): holds the gap
 on ranking (+0.008 vs tpn=5, +0.038 vs flat), de-novo AUC 0.855, 0% starved, the most
 legible topic side yet; loses the root head (0.781) and de-novo AP (0.198) — a width
-effect. NEXT: exp 0134 = 0133 + 1,200 background topics (K=1498 matched, spectral_d
-2048) — the blend: shared strata for the root, one signature per node for the rest.**
+effect. 0134 (0133 + 1,200 random-init background topics, K=1498; the background is
+NOT anchored — see the 0134 run log for the two seed blow-ups and `spectral_bg_anchors`)
+has RUN: the digest is recorded (per-node blocks are 0133's, intact and sharper next to
+the strata; the same-vocabulary children are NOT rescued by the background — DCM is still
+the young-women cohort). Its READOUT NUMBERS ARE NOT YET IN THE DOC: pull them with the
+grep in the 0134 Results and read root head / de-novo AP / paired-vs-0133 against the
+front matter's outcomes. That read decides whether the blend is the unit.**
 
 - **Part A — `--readout-stacked`** on `gated_pc_readout.py`: P_stack(c) = Π over
   closure(c) (root included) of σ(z_a). The finding that shaped it: under the closure
