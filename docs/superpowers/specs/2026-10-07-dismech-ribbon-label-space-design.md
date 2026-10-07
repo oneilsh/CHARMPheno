@@ -1,6 +1,6 @@
 # DisMech ribbon as the label space — design
 
-**Status:** DRAFT 2026-10-07, for review. Branch `claude/dismech-ribbon` (forked from
+**Status:** REVIEWED 2026-10-07 (decisions recorded at the end); WP-A next. Branch `claude/dismech-ribbon` (forked from
 the tip of `claude/gated-conditional-voi`; voi is frozen until the exp 0134 readout is
 in). Nothing here is built yet. Follows the 2026-10-07 arc review (this session) and the
 2026-10-06 handoff
@@ -32,10 +32,24 @@ infrastructure. All of it is label-space-agnostic and all of it is kept.
 ## Definitions
 
 - **Ribbon.** The set R of Mondo ids of DisMech *disorders* (`kb/disorders/*.yaml`,
-  ~1,300 at the time of writing; the 2,051 *subtypes* are NOT in R). DisMech's selection
-  is already a cross-cut of Mondo at roughly one depth; R is treated as flat even where
-  Mondo nests two members (that is a DisMech curation question, surfaced as a receipt,
-  not a modeling rule).
+  one `disease_term` MONDO id each). **Pinned to DisMech commit `71cd0452`
+  (2026-10-07):** 3,312 disorder files, 3,273 with a MONDO `disease_term`, 3,218
+  distinct MONDO ids (a few disorders share a term; they collapse to one label node).
+  Subtypes (`has_subtypes`, present on 1,095 disorders) are NOT in R. DisMech's
+  selection is already a cross-cut of Mondo at roughly one depth; R is treated as flat
+  even where Mondo nests two members (that is a DisMech curation question, surfaced as a
+  receipt, not a modeling rule). The pin is recorded per experiment like `mondo_version`.
+- **DisMech classifications (what they can and cannot carry).** Of 21 classification
+  systems, two have real coverage: a coarse free-text `category` on nearly every
+  disorder (Mendelian 1,925 / Complex 363 / Genetic 291 / Infectious 168 / ...) and
+  `harrisons_chapter` on 1,159 (35%: GENETICS_ENVIRONMENT 252, NEUROLOGIC 246,
+  ONCOLOGY_HEMATOLOGY 184, IMMUNE_RHEUMATOLOGIC 101, CARDIOVASCULAR 87, ...). The rest
+  are niche nosologies (ICIMD 171, ISDS skeletal 259, IUIS 168, ICD-O 162, mechanistic
+  122, channelopathy 35). None is a hierarchy over R, and none covers R. So DisMech
+  classifications are **candidate sets S for conditional diagnosis** (§D4) where
+  present — Harrison's chapters and the specialist nosologies are exactly the "we know
+  it's a connective-tissue / immune / skeletal disorder" framing — and NOT the source of
+  readout heads. Readout heads come from Mondo (below).
 - **Label node.** A member of R with closure support ≥ `min_positives` (same rule as
   exp 0110's native path: distinct persons whose frontier attestation rolls to the node
   through Mondo's is-a closure). Everything a patient's codes resolve to that is *under*
@@ -46,9 +60,10 @@ infrastructure. All of it is label-space-agnostic and all of it is kept.
 - **Readout node.** A label node, OR a Mondo ancestor of label nodes that the stacked
   read uses as a head. Ancestor labels are derived (union of descendant label-node
   attestations); they exist only in the readout, never in the fit.
-- **Subtype head.** A DisMech subtype that is powered may be a *child readout node* of
-  its disorder (hierarchy in the read, P(subtype) = P(subtype | disorder) · P(disorder)).
-  Not a topic block.
+- **Subtype head** (DEFERRED, decided 2026-10-07). A powered DisMech subtype could be a
+  *child readout node* of its disorder (P(subtype) = P(subtype | disorder) · P(disorder)).
+  Not a topic block, not in 0135–0137; an easy later add because the readout DAG is
+  built from the full Mondo parent map anyway.
 - **Profile.** One topic of a label node's block, exported as a per-domain weighted code
   list (`docs/proposals/dismech-profiles/profiles.yaml`, salvaged from the orphaned
   `linkml-phenotype-profiles` branch). A disease has `n_profiles(d)` ∈ [0, tpn_max].
@@ -66,12 +81,23 @@ infrastructure. All of it is label-space-agnostic and all of it is kept.
   (`tpn_max`), and `n_profiles(d)` is read post-fit (§D3). The export carries only
   signatures. (Rare6/EDS at 20 topics per block is the precedent; 0133/0134's tpn=1 is a
   CV-branch result under nesting, not a law.)
-- **R3 — DisMech is a consumer.** A `ProfileSet` per fit validates against the LinkML
-  schema; profiles exist only for diseases with cohort ≥ 20 and codes with count ≥ 20.
+- **R3 — DisMech is the eventual consumer, not the first deliverable.** The
+  `ProfileSet` export and the frequency-band comparison (§D5.1, D5.3) are *designed
+  for* here so nothing in the fit or census forecloses them, but they are NOT on the
+  0135–0137 critical path (decided 2026-10-07). When built, profiles exist only for
+  diseases with cohort ≥ 20 and codes with count ≥ 20.
+- **R3b — multi-domain infrastructure is kept and exercised.** The per-domain λ
+  engine, `multi_domain.py`, `measurement_tokens.py`, `--extra-domains` and the
+  per-domain `CodeDistribution` factoring of the export contract all stay. Condition
+  only in 0135 (one variable at a time against 0133/0134); drug + measurement enter at
+  0137 or a 0137b, with the orphaned-branch findings (measurement rescues labs-dependent
+  diseases but degrades condition in a joint fit; no fixed combination rule beats
+  condition alone) salvaged into a report at that point.
 - **R4 — HPO is incorporated three ways** (§D5): as an *alignment score* on each
-  profile; as *observed-vs-literature frequency bands* per (disease, HP term); and
-  optionally as the word-side `profile-eta` prior (0116/0117: buys alignment, not AUC —
-  which for characterization is the deliverable).
+  profile (now, in the census); as *observed-vs-literature frequency bands* per
+  (disease, HP term) (later, with the export); and optionally as the word-side
+  `profile-eta` prior (0116/0117: buys alignment, not AUC — which for characterization
+  is the deliverable).
 - **R5 — conditional diagnosis is a readout, not a fit property** (§D4): P(d | θ, d ∈ S)
   for a candidate set S (a Mondo ancestor's ribbon descendants, or a DisMech
   classification tag), and the code-level VOI from the per-disease β contrast.
@@ -84,11 +110,15 @@ infrastructure. All of it is label-space-agnostic and all of it is kept.
 `mondo_native_dag.build_mondo_native_fit_inputs` gains a `kept_filter: set[str] | None`
 (Mondo curies). With it set, step 3 (powering) thresholds closure support over
 `kept_filter` only, and step 4 builds the label DAG over the powered subset of
-`kept_filter`. The ribbon file is a TSV of Mondo ids derived from DisMech's
-`kb/disorders/` (a small `dismech_ribbon.py` reader, public data, no CDR) and passed by
-the driver as `--label-set ribbon:<path>` (`--dag-source mondo_native` stays). Receipts:
-|R|, powered count, members of R that Mondo nests under another member (surfaced, not
-acted on), frontier terms that roll to no label node (background-only mass).
+`kept_filter`. The ribbon file is a TSV of `(mondo_id, disorder_name, category,
+harrisons_chapter)` derived from DisMech's `kb/disorders/` at the pinned commit (a small
+`dismech_ribbon.py` reader over a shallow sparse clone; public data, no CDR; the TSV is
+committed under `analysis/cloud/anchor_selection_data/` with the commit sha in its
+header) and passed by the driver as `--label-set ribbon:<path>` (`--dag-source
+mondo_native` stays). The classification columns ride along so §D4's candidate sets
+need no second lookup. Receipts: |R|, powered count, members of R that Mondo nests under
+another member (surfaced, not acted on), frontier terms that roll to no label node
+(background-only mass).
 
 This edits a **source-hashed module** (AGENTS.md "cache-key landmine"): one deliberate
 commit that re-pins the tripwire hashes
@@ -100,9 +130,11 @@ a byte-identical key) does not arise, because the key moves.
 The readout DAG (closure matrix for the stacked head) is built separately from the
 *full* Mondo parent map over readout nodes = label nodes ∪ chosen ancestors
 (`induced_hasse_parents`), so the fit sees a flat forest and the read sees the hierarchy.
-Which ancestors are heads: start with every Mondo ancestor of a label node with ≥ 2
-label-node descendants (that is where the stacked product has something to multiply);
-a later ablation can prune.
+Which ancestors are heads (decided 2026-10-07, after sizing DisMech's classifications):
+every Mondo ancestor of a label node with ≥ 2 label-node descendants (that is where the
+stacked product has something to multiply), from Mondo's own graph, up to and including
+the root. DisMech classifications do not serve here (35% coverage, no hierarchy); they
+serve as candidate sets in §D4. A later ablation can prune the ancestor set.
 
 ### D2 — The fit
 
@@ -144,7 +176,10 @@ almost everywhere, `tpn_max` drops; if a tail sits at the ceiling, it rises.
   from the readout DAG of §D1, so the stacked read multiplies disorder × ancestors (and
   subtype × disorder × ancestors where a subtype head exists).
 - **Conditional diagnosis.** For a candidate set S ⊆ readout nodes, P(d | θ, S) ∝
-  σ(z_d(θ)) over d ∈ S (or the stacked score, when S spans depths). Report
+  σ(z_d(θ)) over d ∈ S (or the stacked score, when S spans depths). S comes from
+  three sources, all available without a refit: the label-node descendants of a Mondo
+  ancestor; a DisMech `harrisons_chapter` (1,159 disorders) or specialist nosology
+  (ICIMD, ISDS, IUIS, ...); or a hand list. Report
   `cond_AUC` as the sober column (the 2026-08-14 VOI metrics report explains why
   `cond_AP`'s lift is mostly base-rate).
 - **Value of information.** For a code w and candidate set S: expected posterior entropy
@@ -197,8 +232,9 @@ the DisMech devs.
 - **0136 — profile census.** `--profile-census` on 0135: the `n_profiles` distribution,
   stratum rate, HPO alignment; decides `tpn_max` for the record run.
 - **0137 — ribbon record.** Whole population, `tpn_max` from 0136, both readouts, the
-  conditional-diagnosis and VOI tables for two candidate sets, the ProfileSet export,
-  the frequency-band table.
+  conditional-diagnosis and VOI tables for two candidate sets (one Mondo-ancestor set,
+  one Harrison's chapter). Export and frequency bands follow as their own experiments
+  once the record is read; multi-domain (drug + measurement) as 0137b against 0137.
 
 ## Work packages and what each reuses
 
@@ -212,8 +248,8 @@ the DisMech devs.
 | F | frequency-band counting driver | `mondo_usage_core` HPO axis, usage export |
 | G | dashboard profiles panel | `mondo-usage-dashboard/` |
 
-A → 0135 → B/C → 0136 → D/E/F → 0137 → G. A, B, C are the critical path; D–F are
-independent of each other.
+A → 0135 → B/C → 0136 → D → 0137. A, B, C, D are the critical path. E, F, G are
+designed for but deferred (decided 2026-10-07); they depend on nothing but a read 0137.
 
 ## Branching, salvage, and cruft (to become an ADR with WP-A)
 
@@ -237,13 +273,20 @@ Co-fitting any head; changing the label mask or document unit; PC; per-node scop
 re-litigating α or the count transform; the whole-Mondo nested fit as a mainline
 (remains runnable for comparison).
 
-## Open questions (for review)
+## Decisions taken at review (2026-10-07)
 
-1. Is `tpn_max` = 3 the right first ceiling, or should 0135 run 1 and 3 side by side?
-2. Which ancestors become readout heads — the "≥ 2 label-node descendants" rule, every
-   ancestor up to the body-system level, or DisMech's own classification tags?
-3. Subtype heads in 0135, or only from 0137?
-4. The ribbon is a moving target (DisMech is pre-alpha): pin a DisMech commit per
-   experiment the way `mondo_version` is pinned.
-5. Does any current DisMech slot take a weighted code list, or is `ProfileSet` a new
-   class to propose upstream (the proposal's README asks the same).
+1. `tpn_max` = 3 for 0135; no side-by-side with 1.
+2. Readout heads from Mondo ancestors ("≥ 2 label-node descendants" rule). DisMech
+   classifications sized: `harrisons_chapter` covers 35%, the rest are niche; they are
+   candidate sets, not heads.
+3. Subtype heads deferred.
+4. DisMech pinned at `71cd0452` (2026-10-07, "Regenerate pages, app data, dashboard, and
+   schema docs (#13662)"); re-pin per experiment.
+5. ProfileSet export and the frequency-band comparison deferred past 0137. Multi-domain
+   infrastructure is kept (R3b) and re-enters at 0137b.
+
+## Still open
+
+- Whether a DisMech slot can take a weighted code list today, or `ProfileSet` is a new
+  class proposed upstream — a question for the DisMech devs when E is picked up.
+- The ancestor-head ablation (how far up the stacked product should reach).
