@@ -449,6 +449,11 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
     spectralMinDocFreq = Param(Params._dummy(), "spectralMinDocFreq",
                                "min within-group document frequency for a scalable "
                                "anchor candidate")
+    spectralBgAnchors = Param(Params._dummy(), "spectralBgAnchors",
+                              "how many of the gateNBg background topics the spectral "
+                              "seed ANCHORS (0 = all, the historical behaviour); the "
+                              "rest are seeded with the random Gamma init — a wide "
+                              "shared background (exp 0134) is not anchorable")
     anchorScope = Param(Params._dummy(), "anchorScope",
                         "which docs feed each spectral anchor set: 'closure' "
                         "(default; node u from every doc with u in its closure, "
@@ -851,6 +856,7 @@ _ONLINE_PCLDA_DEFAULTS = dict(
     frontierCol="frontier",
     init="random", spectralMaxVocab=8000, spectralMethod="auto", spectralD=0,
     spectralMinDocFreq=5, anchorScope="closure", spectralTopoOrder="forward",
+    spectralBgAnchors=0,
     countTransform="none",
     alphaInit="uniform",
     spectralAnchorCandidates="",
@@ -860,6 +866,18 @@ _ONLINE_PCLDA_DEFAULTS = dict(
     featuresCols=[],   # domainBounds intentionally omitted: it uses isSet (no default)
 )
 
+
+
+def _random_bg_rows(lay, spectral_bg_anchors) -> dict:
+    """`{"random_rows": [...]}` for the UNANCHORED background topics when
+    spectralBgAnchors caps the anchored ones below gateNBg (exp 0134), else {}.
+    Read by `GatedOnlineLDA.initialize_global`, which fills those rows from its
+    random Gamma draw after the spectral seed lands."""
+    from spark_vi.models.topic.gated_init import resolve_bg_anchors
+    n_anc = resolve_bg_anchors(lay, spectral_bg_anchors)
+    if n_anc >= int(lay.n_bg):
+        return {}
+    return {"random_rows": list(range(n_anc, int(lay.n_bg)))}
 
 class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
     """MLlib-shaped Estimator wrapping ``spark_vi.models.topic.pc.OnlinePCLDA``.
@@ -920,6 +938,7 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         spectralMethod: str = "auto",
         spectralD: int = 0,
         spectralMinDocFreq: int = 5,
+        spectralBgAnchors: int = 0,
         anchorScope: str = "closure",
         spectralTopoOrder: str = "forward",
         countTransform: str = "none",
@@ -1179,7 +1198,8 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
                     topo_order=self.getOrDefault("spectralTopoOrder"),
                     anchor_candidates=(_anchor_cands or None),
                     anchor_stats=_anchor_stats,
-                    marginal_floor=str(self.getOrDefault("spectralMarginalFloor")))
+                    marginal_floor=str(self.getOrDefault("spectralMarginalFloor")),
+                    n_bg_anchors=int(self.getOrDefault("spectralBgAnchors")))
                 # Always keep the per-node anchors (guided or not): the driver
                 # writes them to the run dir so "which word anchored this block"
                 # is read directly, not inferred from the recovered topic.
@@ -1209,6 +1229,7 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
                     lam0 = {m: blocks[m] * SPECTRAL_LAMBDA_SCALE + 1e-9
                             for m in range(len(domain_sizes))}
                 data_summary = {"spectral_lambda": lam0}
+                data_summary.update(_random_bg_rows(lay, self.getOrDefault("spectralBgAnchors")))
             else:  # dense — collect the corpus to the driver (small-V path only)
                 # Build train docs straight off pc_rdd: GatedPCDocument.indices are
                 # already the concatenated global ids the fit consumes, so the seed
@@ -1222,7 +1243,9 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
                     "anchor_scope": self.getOrDefault("anchorScope"),
                     "topo_order": self.getOrDefault("spectralTopoOrder"),
                     "anchor_candidates": (_anchor_cands or None),
+                    "n_bg_anchors": int(self.getOrDefault("spectralBgAnchors")),
                 }
+                data_summary.update(_random_bg_rows(lay, self.getOrDefault("spectralBgAnchors")))
 
         # Alpha policy for the GATED engine (exp 0121; insight 0090 correction).
         # The estimator's optimizeDocConcentration never reached an INJECTED topic
