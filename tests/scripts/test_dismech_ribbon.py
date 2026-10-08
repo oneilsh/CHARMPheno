@@ -273,8 +273,8 @@ def test_run_experiment_passes_label_set_through_repo_relative(monkeypatch):
 def test_the_committed_ribbon_loads_and_matches_the_spec_pin():
     rb = dr.load_ribbon(REPO_ROOT / "analysis/cloud/anchor_selection_data/dismech_ribbon.tsv")
     assert rb.commit == "71cd0452358b01ef7d0b3cc213297f9837be7e54"
-    assert len(rb.mondo_ids) == 3238 and len(rb.rows) == 3259
-    assert dr.label_set_identity(rb) == "dismech:71cd0452358b:3238:d24b828f88a4"
+    assert len(rb.mondo_ids) == 3226 and len(rb.rows) == 3245
+    assert dr.label_set_identity(rb) == "dismech:71cd0452358b:3226:f27a6b36ca62"
     assert all(i.startswith("MONDO:") for i in rb.mondo_ids)
     assert "MONDO:0000001" not in rb.mondo_ids
 

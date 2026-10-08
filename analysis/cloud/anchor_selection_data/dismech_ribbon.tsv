@@ -110,7 +110,6 @@ MONDO:0001612	Carotid Stenosis	Complex									Carotid_Stenosis.yaml
 MONDO:0001631	Vertebral Artery Insufficiency	Complex									Vertebral_Artery_Insufficiency.yaml
 MONDO:0001633	Central Retinal Artery Occlusion	Complex									Central_Retinal_Artery_Occlusion.yaml
 MONDO:0001665	Oculoglandular Tularemia	Infectious Disease	INFECTIOUS_DISEASES								Oculoglandular_Tularemia.yaml
-MONDO:0001673	Traveler's Diarrhea	Infectious Disease									Travelers_Diarrhea.yaml
 MONDO:0001676	Erythropoietic Protoporphyria	Mendelian									Erythropoietic_Protoporphyria.yaml
 MONDO:0001707	Cardiac Sarcoidosis	Immune									Cardiac_Sarcoidosis.yaml
 MONDO:0001713	Inherited Aplastic Anemia	Genetic									Inherited_Aplastic_Anemia.yaml
@@ -129,10 +128,8 @@ MONDO:0002012	Methylmalonic Acidemia	Mendelian			organic_acidurias						Methylma
 MONDO:0002056	Breast Fibroadenoma	Benign Tumor									Breast_Fibroadenoma.yaml
 MONDO:0002070	Ventricular Septal Defect	Congenital									Ventricular_Septal_Defect.yaml
 MONDO:0002158	Fallopian Tube Cancer	Complex									Fallopian_Tube_Cancer.yaml
-MONDO:0002243	Bleeding Disorder of Unknown Cause	Hematologic Disease									Bleeding_Disorder_of_Unknown_Cause.yaml
 MONDO:0002271	Colon Adenocarcinoma	Cancer									Colon_Adenocarcinoma.yaml
 MONDO:0002305	Thrombophilia	Complex									Thrombophilia.yaml
-MONDO:0002320	Mediator Complex Neurodevelopmental Disorder	Genetic									Mediator_Complex_Neurodevelopmental_Disorder.yaml
 MONDO:0002378	Dermoid Cyst	Complex									Dermoid_Cyst.yaml
 MONDO:0002413	Glycogen Storage Disease Type I	Mendelian	ENDOCRINOLOGY_METABOLISM|GENETICS_ENVIRONMENT_DISEASE			phagocyte defect					Glycogen_Storage_Disease_Type_I.yaml
 MONDO:0002418	Ethmoid Sinus Adenocarcinoma										Ethmoid_Sinus_Adenocarcinoma.yaml
@@ -180,7 +177,6 @@ MONDO:0004629	Subacute Delirium	Neurologic	NEUROLOGIC								Subacute_Delirium.y
 MONDO:0004635	Postcricoid Region Cancer	Cancer									Postcricoid_Region_Cancer.yaml
 MONDO:0004649	Anaerobic Pneumonia	Infectious Disease	INFECTIOUS_DISEASES								Anaerobic_Pneumonia.yaml
 MONDO:0004656	Rubella	Infectious Disease	INFECTIOUS_DISEASES								Rubella.yaml
-MONDO:0004664	Soil-transmitted helminthiases	Infectious Disease									Soil_Transmitted_Helminthiases.yaml
 MONDO:0004691	Autosomal Dominant Polycystic Kidney Disease	Mendelian									Autosomal_Dominant_Polycystic_Kidney_Disease.yaml
 MONDO:0004699	Gastrointestinal Lymphoma		ONCOLOGY_HEMATOLOGY				Lymphoma				Gastrointestinal_Lymphoma.yaml
 MONDO:0004737	Homocystinuria	Mendelian									Homocystinuria.yaml
@@ -211,7 +207,6 @@ MONDO:0005002	Chronic_Obstructive_Pulmonary_Disease	Complex	RESPIRATORY								C
 MONDO:0005003	Chronic Pancreatitis	Complex	GASTROINTESTINAL								Chronic_Pancreatitis.yaml
 MONDO:0005005	Clear Cell Renal Cell Carcinoma		ONCOLOGY_HEMATOLOGY				Carcinoma				Clear_Cell_Renal_Cell_Carcinoma.yaml
 MONDO:0005011	Crohn Disease	Complex	GASTROINTESTINAL|IMMUNE_RHEUMATOLOGIC								Crohn_Disease.yaml
-MONDO:0005012	BRAF V600 Mutant Melanoma		ONCOLOGY_HEMATOLOGY				Melanoma				BRAF_V600_Mutant_Melanoma.yaml
 MONDO:0005012	Cutaneous Melanoma		ONCOLOGY_HEMATOLOGY				Melanoma				Cutaneous_Melanoma.yaml
 MONDO:0005012	NRAS Mutant Melanoma		ONCOLOGY_HEMATOLOGY				Melanoma				NRAS_Mutant_Melanoma.yaml
 MONDO:0005015	Diabetes mellitus	Complex	ENDOCRINOLOGY_METABOLISM								Diabetes_Mellitus.yaml
@@ -247,7 +242,6 @@ MONDO:0005082	Prostate Adenocarcinoma		ONCOLOGY_HEMATOLOGY				Adenocarcinoma				
 MONDO:0005083	Psoriasis	Complex	DERMATOLOGY|IMMUNE_RHEUMATOLOGIC								Psoriasis.yaml
 MONDO:0005086	Renal Cell Carcinoma	Cancer	ONCOLOGY_HEMATOLOGY				Carcinoma				Renal_Cell_Carcinoma.yaml
 MONDO:0005090	Schizophrenia	Psychiatric	NEUROLOGIC								Schizophrenia.yaml
-MONDO:0005096	Arsenic-Related Cancers		ONCOLOGY_HEMATOLOGY				Carcinoma				Arsenic_Related_Cancers.yaml
 MONDO:0005100	Systemic Sclerosis	Autoimmune	IMMUNE_RHEUMATOLOGIC								Systemic_Sclerosis.yaml
 MONDO:0005101	Ulcerative Colitis	Complex	GASTROINTESTINAL|IMMUNE_RHEUMATOLOGIC								Ulcerative_Colitis.yaml
 MONDO:0005114	Pneumococcal Pneumonia	Infectious Disease									Pneumococcal_Pneumonia.yaml
@@ -312,7 +306,6 @@ MONDO:0005376	Membranous nephropathy	Complex	KIDNEY_URINARY_TRACT|IMMUNE_RHEUMAT
 MONDO:0005380	Osteonecrosis	Complex									Osteonecrosis.yaml
 MONDO:0005382	Paget Disease of Bone	Complex									Paget_Disease_of_Bone.yaml
 MONDO:0005383	Panic Disorder	Psychiatric									Panic_Disorder.yaml
-MONDO:0005384	DEPDC5-Related Epilepsy	Mendelian									DEPDC5-Related_Epilepsy.yaml
 MONDO:0005386	Peripheral Artery Disease	Complex	CARDIOVASCULAR								Peripheral_Artery_Disease.yaml
 MONDO:0005388	Primary Biliary Cholangitis	Autoimmune	GASTROINTESTINAL|IMMUNE_RHEUMATOLOGIC								Primary_Biliary_Cholangitis.yaml
 MONDO:0005391	Restless Legs Syndrome	Neurological Disorder	NEUROLOGIC								Restless_Legs_Syndrome.yaml
@@ -343,7 +336,6 @@ MONDO:0005526	Tetanus	Infectious Disease									Tetanus.yaml
 MONDO:0005530	Opioid Use Disorder	Psychiatric									Opioid_Use_Disorder.yaml
 MONDO:0005546	Fibromyalgia	Complex									Fibromyalgia.yaml
 MONDO:0005556	Lupus Nephritis	Complex	KIDNEY_URINARY_TRACT|IMMUNE_RHEUMATOLOGIC								Lupus_Nephritis.yaml
-MONDO:0005575	BRAF V600E-Mutant Colorectal Cancer		ONCOLOGY_HEMATOLOGY				Adenocarcinoma				BRAF_V600E_Mutant_Colorectal_Cancer.yaml
 MONDO:0005575	HER2-Positive Colorectal Cancer		ONCOLOGY_HEMATOLOGY				Adenocarcinoma				HER2_Positive_Colorectal_Cancer.yaml
 MONDO:0005575	MSI-High Colorectal Cancer		ONCOLOGY_HEMATOLOGY				Adenocarcinoma				MSI_High_Colorectal_Cancer.yaml
 MONDO:0005580	Esophageal Squamous Cell Carcinoma		ONCOLOGY_HEMATOLOGY				Squamous Cell Carcinoma				Esophageal_Squamous_Cell_Carcinoma.yaml
@@ -1081,7 +1073,6 @@ MONDO:0010130	Dihydropyrimidine Dehydrogenase Deficiency	Mendelian									Dihyd
 MONDO:0010134	Pendred Syndrome	Mendelian									Pendred_Syndrome.yaml
 MONDO:0010137	Thyroid dyshormonogenesis 5	Mendelian	ENDOCRINOLOGY_METABOLISM|GENETICS_ENVIRONMENT_DISEASE								Thyroid_Dyshormonogenesis_5.yaml
 MONDO:0010139	Isolated Thyroid-stimulating Hormone Deficiency	Mendelian									Isolated_Thyroid-stimulating_Hormone_Deficiency.yaml
-MONDO:0010150	HPV-Negative Head and Neck Cancer		ONCOLOGY_HEMATOLOGY				Squamous Cell Carcinoma				HPV_Negative_Head_and_Neck_Cancer.yaml
 MONDO:0010155	Dorfman-Chanarin Disease	Mendelian	ENDOCRINOLOGY_METABOLISM|DERMATOLOGY		glycerolipid_metabolism						Dorfman_Chanarin_Disease.yaml
 MONDO:0010160	Tyrosinemia Type II	Mendelian									Tyrosinemia_Type_II.yaml
 MONDO:0010161	Tyrosinemia Type I	Mendelian									Tyrosinemia_Type_I.yaml
@@ -2217,7 +2208,6 @@ MONDO:0017827	Malignant Peripheral Nerve Sheath Tumor	Cancer	ONCOLOGY_HEMATOLOGY
 MONDO:0017838	Sclerosteosis	Mendelian		osteosclerotic_disorders							Sclerosteosis.yaml
 MONDO:0017842	Senior-Loken Syndrome	Mendelian	KIDNEY_URINARY_TRACT|GENETICS_ENVIRONMENT_DISEASE					ciliopathy			Senior-Loken_Syndrome.yaml
 MONDO:0017844	Sezary Syndrome	Cancer	ONCOLOGY_HEMATOLOGY				Lymphoma				Sezary_Syndrome.yaml
-MONDO:0017845	Spastic Ataxia	Neurological Disorder									Spasticity-Ataxia-Gait_Anomalies_Syndrome.yaml
 MONDO:0017851	Erythrokeratodermia Variabilis	Mendelian									Erythrokeratodermia_Variabilis.yaml
 MONDO:0017853	Hypersensitivity pneumonitis	Respiratory Disease									Hypersensitivity_Pneumonitis.yaml
 MONDO:0017858	Acute Erythroid Leukemia		ONCOLOGY_HEMATOLOGY				Leukemia				Acute_Erythroid_Leukemia.yaml
@@ -2353,7 +2343,6 @@ MONDO:0018866	Aicardi-Goutieres Syndrome	Mendelian	NEUROLOGIC|IMMUNE_RHEUMATOLOG
 MONDO:0018868	Metachromatic Leukodystrophy	Genetic									Metachromatic_Leukodystrophy.yaml
 MONDO:0018870	Arterial Calcification of Infancy	Mendelian									Arterial_Calcification_of_Infancy.yaml
 MONDO:0018872	Acute Megakaryoblastic Leukemia		ONCOLOGY_HEMATOLOGY				Leukemia				Acute_Megakaryoblastic_Leukemia.yaml
-MONDO:0018874	Acute Myeloid Leukemia, IDH-Mutated		ONCOLOGY_HEMATOLOGY				Leukemia				IDH_Mutant_AML.yaml
 MONDO:0018875	Li-Fraumeni Syndrome										Li-Fraumeni_Syndrome.yaml
 MONDO:0018876	Mantle Cell Lymphoma		ONCOLOGY_HEMATOLOGY				Lymphoma				Mantle_Cell_Lymphoma.yaml
 MONDO:0018881	Myelodysplastic Syndrome						Myelodysplastic Syndrome				Myelodysplastic_Syndrome.yaml
@@ -2496,7 +2485,6 @@ MONDO:0019485	Hemiconvulsion-Hemiplegia-Epilepsy Syndrome	Acquired	NEUROLOGIC			
 MONDO:0019487	Epilepsy with Myoclonic Absences	Complex	NEUROLOGIC								Epilepsy_with_Myoclonic_Absences.yaml
 MONDO:0019490	Progressive Cardiac Conduction Disease	Genetic	CARDIOVASCULAR|GENETICS_ENVIRONMENT_DISEASE								Progressive_Cardiac_Conduction_Disease.yaml
 MONDO:0019490	Progressive Familial Heart Block	Genetic							cardiac channelopathy		Progressive_Familial_Heart_Block.yaml
-MONDO:0019497	MYO6_Hearing_Loss	Mendelian									MYO6_Hearing_Loss.yaml
 MONDO:0019499	Turner Syndrome	Genetic									Turner_Syndrome.yaml
 MONDO:0019502	Autosomal Recessive Non-Syndromic Intellectual Disability	Genetic									Autosomal_Recessive_Non-Syndromic_Intellectual_Disability.yaml
 MONDO:0019503	FOXE3-Related Anterior Segment Dysgenesis	Mendelian									FOXE3_Anterior_Segment_Dysgenesis.yaml
@@ -2628,7 +2616,6 @@ MONDO:0024771	Distal Myopathy 7, Adult-Onset, X-Linked	Mendelian	NEUROLOGIC|GENE
 MONDO:0024777	Immunodeficiency 98 With Autoinflammation	Mendelian									Immunodeficiency_98_With_Autoinflammation.yaml
 MONDO:0024781	Immunodeficiency 102	Mendelian	IMMUNE_RHEUMATOLOGIC			combined immunodeficiency					Immunodeficiency_102.yaml
 MONDO:0025193	Oculopharyngodistal Myopathy	Mendelian									Oculopharyngodistal_Myopathy.yaml
-MONDO:0025294	Southern Tick-Associated Rash Illness	Infectious Disease									Southern_Tick-Associated_Rash_Illness.yaml
 MONDO:0025445	Wieacker-Wolff Syndrome Spectrum	Mendelian									Wieacker_Wolff_Syndrome.yaml
 MONDO:0025514	Livedoid vasculopathy	Complex									Livedoid_Vasculopathy.yaml
 MONDO:0025708	Megacystis-Microcolon-Intestinal Hypoperistalsis Syndrome 2	Mendelian									Megacystis-Microcolon-Intestinal_Hypoperistalsis_Syndrome_2.yaml
@@ -3041,7 +3028,6 @@ MONDO:0400000	Small Intestinal Bacterial Overgrowth	Complex									Small_Intest
 MONDO:0400003	Skeletal Fluorosis	Environmental Osteopathy									Skeletal_Fluorosis.yaml
 MONDO:0400005	Refeeding Syndrome	Nutritional									Refeeding_Syndrome.yaml
 MONDO:0700055	KIF1A-Related Neurological Disorder	Mendelian									KIF1A_Related_Neurological_Disorder.yaml
-MONDO:0700092	PGM2L1 Deficiency	Mendelian									PGM2L1_Deficiency.yaml
 MONDO:0700115	Proliferative Vitreoretinopathy	Acquired									Proliferative_Vitreoretinopathy.yaml
 MONDO:0700215	NTRK Fusion-Positive Cancer		ONCOLOGY_HEMATOLOGY				Carcinoma				NTRK_Fusion_Positive_Cancer.yaml
 MONDO:0700224	PDE6A-Related Retinopathy	Mendelian	GENETICS_ENVIRONMENT_DISEASE|NEUROLOGIC								PDE6A-Related_Retinopathy.yaml
