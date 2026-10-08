@@ -326,6 +326,11 @@ def _meta_dict(bundle) -> dict:
     witness = getattr(bundle, "preindex_closure", None)
     if witness:
         meta["preindex_closure"] = dict(witness)
+    # WP-C' (exp 0136): the native `(std_cid, node_cid)` attestation map, same
+    # attribute precedent, written only when the assembler attached one.
+    code_map = getattr(bundle, "native_code_map", None)
+    if code_map:
+        meta["native_code_map"] = [[int(a), int(b)] for a, b in code_map]
     return meta
 
 
@@ -348,6 +353,8 @@ def _restore_meta(meta: dict) -> dict:
     # the correct reading, not a compatibility hole.
     if "preindex_closure" in meta:
         out["preindex_closure"] = dict(meta["preindex_closure"])
+    if "native_code_map" in meta:
+        out["native_code_map"] = [(int(a), int(b)) for a, b in meta["native_code_map"]]
     return out
 
 
@@ -400,6 +407,8 @@ def try_load(spark, cache_uri, key) -> Optional["CaseFindingBundle"]:
     # bundle from before this existed answers "no column", correctly.
     if "preindex_closure" in meta:
         bundle.preindex_closure = meta["preindex_closure"]
+    if "native_code_map" in meta:
+        bundle.native_code_map = meta["native_code_map"]
     return bundle
 
 

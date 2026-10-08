@@ -65,7 +65,7 @@ mondo_to_omop_mapping,condition_dag,preindex_closure}.py`. The **authoritative
 check** is that tripwire suite passing byte-identical.
 
 - **Driver-owned files are free to edit:** `analysis/cloud/{gated_pc_cloud,
-  gated_pc_readout,distributed_readout,conversion_*,diag_*,episode_index}.py`,
+  gated_pc_readout,distributed_readout,readout_dag,conversion_*,diag_*,episode_index}.py`,
   `scripts/run_experiment.py`, the `Makefile`, tests. Prefer solving at a driver
   **seam** (the `attested_provider` / injection-parameter pattern) over editing
   a hashed module.
@@ -98,17 +98,17 @@ Cluster runs happen on the user's Dataproc cluster, checked out at
    fresh clone and fast-forwards an existing one):
 
    ```bash
-   cd ~/repos/CHARMPheno && git fetch origin claude/gated-conditional-voi && git checkout claude/gated-conditional-voi && git pull --ff-only
+   cd ~/repos/CHARMPheno && git fetch origin claude/dismech-ribbon && git checkout claude/dismech-ribbon && git pull --ff-only
    ```
 
    Then the real command on the next line(s), e.g.:
 
    ```bash
-   cd ~/repos/CHARMPheno && git fetch origin claude/gated-conditional-voi && git checkout claude/gated-conditional-voi && git pull --ff-only
+   cd ~/repos/CHARMPheno && git fetch origin claude/dismech-ribbon && git checkout claude/dismech-ribbon && git pull --ff-only
    make -C analysis/cloud diag-episode-probe ID=110 GPR_ARGS="--gap-days 90"
    ```
 
-   - The active development branch is currently **`claude/gated-conditional-voi`**.
+   - The active development branch is currently **`claude/dismech-ribbon`**.
      Update the name here when it changes.
    - `git pull --ff-only` fast-forwards or refuses — never merges or destroys
      local state. The cluster is a pure runner; a refusal means something

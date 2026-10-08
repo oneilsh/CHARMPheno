@@ -1704,6 +1704,30 @@ _READOUT_MAX_ITER = 200
 _COVERAGE_MIN_FIT_BYTES = 64 * 1024 * 1024
 
 
+def write_code_map(run_dir, pairs, name="code_map.tsv"):
+    """`<run>/code_map.tsv`: `std_cid\tnode_cid` rows of the native attestation
+    map (WP-C'). Ids only — no patient data."""
+    p = Path(run_dir) / name
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "w") as fh:
+        fh.write("std_cid\tnode_cid\n")
+        for a, b in pairs:
+            fh.write(f"{int(a)}\t{int(b)}\n")
+    return p
+
+
+def _readout_hierarchy_on(args, corpus_spec) -> bool:
+    """`--readout-hierarchy` resolved against the corpus spec (WP-B): on for
+    'mondo', off for 'flat', and under 'auto' on exactly when the corpus is a
+    label-set (flat ribbon) build — the one case whose closure mask is a full
+    mask. Only Mondo-native corpora carry a label set, so this is never true on
+    a SNOMED or nested-Mondo run."""
+    from readout_dag import resolve_readout_hierarchy
+    return resolve_readout_hierarchy(
+        getattr(args, "readout_hierarchy", "auto"),
+        {"corpus_manifest": dict(corpus_spec or {})})
+
+
 def resolve_readout_mode(mode, C, max_driver_c=_DRIVER_READOUT_MAX_C):
     """Resolve `--readout-mode {driver,distributed,auto}` against this run's C.
 
@@ -3972,6 +3996,16 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
             bundle = _with_gate_frontier(
                 spark, bundle, first_attestation=first_att,
                 before_dag=before_dag, assembly_params=assembly_params)
+        # WP-C' (exp 0136): the `(std_cid, node_cid)` attestation map rides the
+        # bundle as an ATTRIBUTE (the E1-witness precedent — neither bundle
+        # dataclass may grow a field), is persisted in the cache meta, and is
+        # written to the run dir by the driver so the profile census can ask
+        # whether a block topic carries its node's OWN codes. Ontology ids and
+        # standard concept ids only; small (one row per attesting code).
+        _collect = getattr(code_map_sdf, "collect", None)   # a test stub has none
+        if _collect is not None:
+            bundle.native_code_map = sorted(
+                (int(r["std_cid"]), int(r["node_cid"])) for r in _collect())
         return bundle
 
     def _assemble_mondo(spark, **assembly_params):
@@ -4416,6 +4450,19 @@ def parse_args(argv=None):
                         "manifest as the resolved readout_theta_topm. 0 (default) = "
                         "off. Mutually exclusive with --readout-theta-topm > 0; "
                         "distributed readout only.")
+    p.add_argument("--readout-hierarchy", choices=["auto", "mondo", "flat"],
+                   default="auto",
+                   help="WP-B (spec 2026-10-07 §D1/§D4, insight 0096): read a FLAT "
+                        "label-set fit through the Mondo hierarchy — the readout DAG "
+                        "over the label nodes + every Mondo ancestor grouping >= 2 "
+                        "of them (readout_dag.py), applied to the scored frames so a "
+                        "node is observed only where it or a sibling is positive and "
+                        "the ancestor heads are fit beside the label heads. 'auto' "
+                        "(default) = 'mondo' for --label-set fits, 'flat' otherwise "
+                        "(nested runs unchanged). The fit, bundle, cache key and the "
+                        "manifest's C are untouched; the co-fit head, dag_head and "
+                        "incident arms are skipped under it. See gated_pc_readout "
+                        "--readout-hierarchy for the standalone re-readout.")
     p.add_argument("--readout-theta-topm", type=int, default=0,
                    help="fit and score the distributed readout on each doc's top-M "
                         "theta entries (truncated, NOT renormalized), 0 (default) = "
@@ -4580,6 +4627,15 @@ def main() -> int:
                 args._domain_cols = [f"features_{i}" for i in range(len(vocab_maps))]
                 args._domain_names = ["condition", *extra_domains]
             _cprint(f"[driver]   ledger: {json.dumps(bundle.ledger)}", flush=True)
+            _ncm = getattr(bundle, "native_code_map", None)
+            if _ncm:
+                # WP-C': <run>/code_map.tsv (std concept id -> Mondo node cid), the
+                # census's own-code identity criterion. Present on every native
+                # bundle built or reloaded from here on; older cache entries lack it.
+                _cmp = write_code_map(out, _ncm)
+                _cprint(f"[driver]   wrote native code map: {len(_ncm)} (code, node) "
+                      f"pairs over {len({n for _, n in _ncm})} nodes -> {_cmp}",
+                      flush=True)
         else:
             with _phase("assemble corpus (cached, emit_labels)"):
                 bundle = load_or_build_case_finding_bundle(
@@ -5148,6 +5204,47 @@ def main() -> int:
             # the supervised transform appends BOTH topicDistribution and probability.
             train_scored = pc_model.transform(bundle.train_df).cache()
             test_scored = pc_model.transform(bundle.test_df).cache()
+            # WP-B (spec 2026-10-07 §D1/§D4, insight 0096): a label-set fit is a
+            # FLAT forest and its closure mask a full mask. The READ gets the
+            # Mondo hierarchy: the readout DAG over label nodes + grouping
+            # ancestors, applied to the scored frames as column arithmetic.
+            # From here to the final save, `C`/`bundle` name the READOUT node
+            # space (the fit's C is `C_fit`, written to the manifest); the
+            # fit, the bundle on disk and every hashed module are untouched.
+            C_fit = C
+            _rdag = None
+            if _readout_hierarchy_on(args, corpus_spec):
+                from readout_dag import (
+                    build_readout_dag, format_readout_dag_report,
+                    load_mondo_parent_adj, widen_labels_to_readout,
+                    widened_bundle_view, write_readout_dag)
+                with _phase("readout DAG (Mondo hierarchy over the flat fit)"):
+                    _padj, _mnames = load_mondo_parent_adj(
+                        corpus_spec["mondo_version"],
+                        corpus_spec.get("mondo_cache_dir") or "data/mondo")
+                    _rdag = build_readout_dag(bundle.int2cid, _padj, names=_mnames)
+                    _cprint(format_readout_dag_report(_rdag), flush=True)
+                    _rp = write_readout_dag(out, _rdag)
+                    _cprint(f"[driver]   wrote {_rp}", flush=True)
+                    manifest_fields["readout_hierarchy"] = {
+                        "mode": "mondo", "readout_dag": _rp.name, **_rdag.stats}
+                    _tr_w = widen_labels_to_readout(
+                        train_scored, _rdag, mask_mode=args.label_mask_mode).cache()
+                    _te_w = widen_labels_to_readout(
+                        test_scored, _rdag, mask_mode=args.label_mask_mode).cache()
+                    _n_tr, _n_te = _tr_w.count(), _te_w.count()
+                    train_scored.unpersist(); test_scored.unpersist()
+                    train_scored, test_scored = _tr_w, _te_w
+                    C = int(_rdag.C)
+                    bundle = widened_bundle_view(bundle, _rdag)
+                    _cprint(f"[driver]   frames widened to the readout node space: "
+                          f"C={C} (fit C={C_fit}), mask mode={args.label_mask_mode}, "
+                          f"train docs={_n_tr} test docs={_n_te}", flush=True)
+                    if elig_col is not None:
+                        _cprint("[driver]   INCIDENT arm (E2) SKIPPED under "
+                              "--readout-hierarchy mondo: the pre-index closure "
+                              "column is in the FIT's node space.", flush=True)
+                        elig_col = None
             if theta_mass > 0:
                 # Spec 2026-10-07 §D4: resolve the width from the mass target on
                 # the TRAIN frame, once, and let the resolved m flow through every
@@ -5279,7 +5376,11 @@ def main() -> int:
             # express (it fits one shared full-K design). It is a co-fit-head
             # diagnostic, not part of the headline readout, so it stays on the driver
             # and is skipped when the θ collect it needs is the thing we are avoiding.
-            if getattr(args, "localize_head", False) and readout_mode != "driver":
+            if getattr(args, "localize_head", False) and _rdag is not None:
+                _cprint("[driver]   oracle-localized readout + head-formulation ladder "
+                      "SKIPPED under --readout-hierarchy mondo (per-node topic "
+                      "support is the FIT layout's)", flush=True)
+            elif getattr(args, "localize_head", False) and readout_mode != "driver":
                 _cprint("[driver]   oracle-localized readout + head-formulation ladder "
                       "SKIPPED under readout_mode=distributed (they fit per-node "
                       "SUPPORT-restricted LRs on a driver-side θ collect; re-run with "
@@ -5435,7 +5536,11 @@ def main() -> int:
             # a7f724d while this one kept the unconditional call.
             _head_wy = float(getattr(args, "weight_y", 0.0) or 0.0)
             _head_col = "probability" in test_scored.columns
-            if _head_wy == 0.0 or not _head_col:
+            if _rdag is not None and _head_wy != 0.0 and _head_col:
+                _cprint("[driver]   co-fit head readout + conditional SKIPPED under "
+                      "--readout-hierarchy mondo: the co-fit head is C_fit wide "
+                      "(the fit's flat node space).", flush=True)
+            elif _head_wy == 0.0 or not _head_col:
                 _cprint(f"[driver]   co-fit head readout + conditional SKIPPED "
                       f"(weight_y={_head_wy:g}, probability column "
                       f"{'present' if _head_col else 'absent'}): an unsupervised fit "
@@ -5535,6 +5640,14 @@ def main() -> int:
                 us_model = us_est.fit(bundle.train_df)
                 us_train_scored = us_model.transform(bundle.train_df)
                 us_test_scored = us_model.transform(bundle.test_df)
+                if _rdag is not None:
+                    # Same readout node space as the PC arm, or the headline
+                    # delta would compare two label spaces.
+                    from readout_dag import widen_labels_to_readout as _widen
+                    us_train_scored = _widen(us_train_scored, _rdag,
+                                             mask_mode=args.label_mask_mode)
+                    us_test_scored = _widen(us_test_scored, _rdag,
+                                            mask_mode=args.label_mask_mode)
                 if readout_mode == "distributed":
                     # The unsup twin is the CONTROLLED incumbent, so its readout must
                     # come off the same path as the PC arm's or the headline delta
@@ -5592,7 +5705,10 @@ def main() -> int:
                             "[per-node domain λ-mass]",
                             "[per-node domain λ-mass: unsup_gated]"), flush=True)
 
-        if args.with_dag_head:
+        if args.with_dag_head and _rdag is not None:
+            _cprint("[driver]   dag_head arm SKIPPED under --readout-hierarchy mondo "
+                  "(its closure head is fit over the FIT's DAG)", flush=True)
+        elif args.with_dag_head:
             with _phase(f"dag_head fit (ungated + DAG-closure head, K={args.k})"):
                 cp = dag_closure_parents(bundle.parent_int, C)
                 dh_est = _build_pc_estimator(
@@ -5639,7 +5755,7 @@ def main() -> int:
             # The authoritative write: the SAME two paths the fit-only save
             # already landed, now carrying every arm's readout (and the per-node
             # domain mass, which needed no readout but is reported next to it).
-            _save_fit(out, gp, C, manifest_fields, results=results,
+            _save_fit(out, gp, C_fit, manifest_fields, results=results,
                       domain_mass=domain_mass)
             _cprint(f"[driver]   saved gated_pc result to {out}", flush=True)
     return 0
