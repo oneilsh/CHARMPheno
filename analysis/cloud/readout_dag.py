@@ -321,37 +321,35 @@ def widen_labels_to_readout(df, rdag: ReadoutDag, *, label_col="label",
     max over `n`'s readout parents' `label_r` (root: its own) — see the module
     docstring for why that is the closure mask on the readout DAG. Under
     `mask_mode="full"` the mask is all ones (a full-mask fit stays full)."""
+    import json as _json
     from pyspark.sql import functions as F
 
     C = int(rdag.C)
+    # Two constant index tables, each ONE string literal parsed by `from_json`
+    # (constant-folded by the optimizer): `src[n]` = pos_sources[n], `par[n]` =
+    # n's readout parents (the root lists itself). Every per-row computation is
+    # then a single higher-order `transform` — a compact plan whatever C is. The
+    # first version spelled out C `arrays_overlap` / `greatest` expressions; at
+    # C=702 its generated Java blew the 64 KB method limit (0135 launch 3:
+    # janino InternalCompilerException, interpreted fallback, ~2 min lost).
+    src = [[int(x) for x in rdag.pos_sources[n]] for n in range(C)]
+    par = [([int(p) for p in rdag.parent_int.get(n, [])] if n != ROOT else [ROOT])
+           or [ROOT] for n in range(C)]
+    src_lit = F.from_json(F.lit(_json.dumps(src)), "array<array<int>>")
+    par_lit = F.from_json(F.lit(_json.dumps(par)), "array<array<int>>")
+
     lab = F.col(label_col)
-    active = F.filter(
-        F.transform(lab, lambda v, i: F.when(v > 0, i).otherwise(F.lit(-1))),
-        lambda x: x >= 0)
-
-    def _pos(n):
-        srcs = [int(s) for s in rdag.pos_sources[n]]
-        if len(srcs) == 1:
-            return lab[srcs[0]]
-        lit = F.array(*[F.lit(s) for s in srcs])
-        return F.arrays_overlap(active, lit).cast("double")
-
     tmp = f"__{label_col}_r"
-    out = df.withColumn(tmp, F.array(*[_pos(n) for n in range(C)]))
+    out = df.withColumn(tmp, F.transform(
+        src_lit,
+        lambda ss: F.exists(ss, lambda i: lab[i] > 0).cast("double")))
     yr = F.col(tmp)
-
-    def _obs(n):
-        ps = [int(p) for p in rdag.parent_int.get(n, [])]
-        if n == ROOT or not ps:
-            return yr[ROOT]
-        if len(ps) == 1:
-            return yr[ps[0]]
-        return F.greatest(*[yr[p] for p in ps])
-
     if str(mask_mode) == "full":
-        mask_expr = F.array(*[F.lit(1.0) for _ in range(C)])
+        mask_expr = F.array_repeat(F.lit(1.0), C)
     else:
-        mask_expr = F.array(*[_obs(n) for n in range(C)])
+        mask_expr = F.transform(
+            par_lit,
+            lambda ps: F.exists(ps, lambda q: yr[q] > 0).cast("double"))
     return (out.withColumn(mask_col, mask_expr)
                .drop(label_col)
                .withColumnRenamed(tmp, label_col))
