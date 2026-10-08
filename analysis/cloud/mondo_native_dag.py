@@ -284,6 +284,16 @@ def roll_terms_to_kept(terms, kept, parent_adj) -> dict:
             for t in terms}
 
 
+def flat_label_parents(kept_ids, parent_adj) -> dict:
+    """The FLAT label forest (spec 2026-10-07 R1): `{kept term: []}` for every
+    kept term, so each attaches directly to the synthetic root. `parent_adj` is
+    accepted for signature parity with `induced_hasse_parents` and is not read:
+    the whole point is that Mondo's nesting of two members does not enter the
+    fit. The count of such nestings is still reported (`apply_label_set_filter`'s
+    `n_nested_pairs`) so a reader knows how flat the ribbon is under Mondo."""
+    return {str(k): [] for k in kept_ids}
+
+
 def induced_hasse_parents(kept_ids, parent_adj) -> dict:
     """The TRANSITIVE REDUCTION of Mondo's is-a order restricted to `kept_ids`.
 
@@ -373,7 +383,7 @@ def resolve_code_terms(standard_pairs, climb_pairs, parent_adj) -> dict:
 
 
 def build_native_label_dag(kept_ids, parent_adj, coded_ids, *, names=None,
-                           root=MONDO_NATIVE_ROOT_CID):
+                           root=MONDO_NATIVE_ROOT_CID, flat=False):
     """The label DAG over a POWERED Mondo term set: induced Hasse, then splice.
 
     `kept_ids` are the Mondo curies clearing `min_positives` on closure support;
@@ -399,6 +409,17 @@ def build_native_label_dag(kept_ids, parent_adj, coded_ids, *, names=None,
          further up (`roll_terms_to_kept` is computed against the POST-splice node
          set, so nothing is stranded).
 
+    `flat=True` (spec 2026-10-07 R1, the DisMech ribbon) REPLACES step 1 with
+    `flat_label_parents`: every kept member attaches directly to the root, however
+    Mondo nests them. Exp 0135's first launch ran WITHOUT this — the ribbon's
+    nested members (peripartum cardiomyopathy under dilated cardiomyopathy;
+    hundreds of members under three generic "disease" members) came through the
+    induced Hasse as a depth-4 DAG, so the gate, the closure mask and the
+    closure-scope anchors all saw a hierarchy the design said the fit must not.
+    Attestation is unaffected either way (`roll_terms_to_kept` already stops at
+    the first kept member on each upward branch, so a patient is labelled with the
+    most specific member only); the hierarchy is left to the stacked READ.
+
     Returns `(dag, stats)`; `stats` carries both stages' counts plus the splice's
     own `predicted_degenerate` (the number the readout banner then confirms or
     refutes)."""
@@ -409,7 +430,8 @@ def build_native_label_dag(kept_ids, parent_adj, coded_ids, *, names=None,
     kept = {str(k) for k in kept_ids}
     coded = {str(c) for c in coded_ids}
 
-    hasse = induced_hasse_parents(kept, parent_adj)
+    hasse = (flat_label_parents(kept, parent_adj) if flat
+             else induced_hasse_parents(kept, parent_adj))
     edges, node_ids = set(), set()
     for child, parents in hasse.items():
         ci = mondo_cid(child)
@@ -502,7 +524,8 @@ def format_label_set_report(stats) -> str:
         f"member(s) -> {ls['n_kept']} kept; {ls['n_unknown']} not in this Mondo "
         f"release, {ls['n_unpowered']} unpowered; {ls['n_nested_pairs']} nested "
         f"(ancestor, descendant) pair(s) within the kept set over "
-        f"{ls['n_nested_members']} ancestor member(s) — treated as flat")
+        f"{ls['n_nested_members']} ancestor member(s) — label DAG built FLAT "
+        f"(every member under the root)")
 
 
 def format_native_build_report(stats) -> str:
@@ -711,7 +734,8 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
 
     # --- 4. the label DAG, and 5. the code map against its FINAL node set ------
     before_dag, stats = build_native_label_dag(
-        kept_terms, parent_adj, coded_terms, names=label_of)
+        kept_terms, parent_adj, coded_terms, names=label_of,
+        flat=(label_set is not None))
     final_terms = {mondo_curie(c) for c in before_dag.nodes()
                    if c != MONDO_NATIVE_ROOT_CID}
     landing = roll_terms_to_kept(coded_terms, final_terms, parent_adj)
@@ -733,7 +757,8 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
                                        for t in kept_terms), default=0),
                  n_codes_attesting=len({c for c, _ in rows}),
                  branch=str(branch_root or ""),
-                 label_set=label_set_stats)
+                 label_set=label_set_stats,
+                 flat=bool(label_set is not None))
     kept_cids = {c for c in before_dag.nodes() if c != MONDO_NATIVE_ROOT_CID}
     return before_dag, code_map_sdf, kept_cids, support_of, stats
 
