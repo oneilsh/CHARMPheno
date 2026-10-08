@@ -828,3 +828,60 @@ def test_census_cli_flag_dispatches(tmp_path, monkeypatch, capsys):
     it.main()
     out = capsys.readouterr().out
     assert "profile census" in out and "verdict:" in out
+
+
+# --------------------------------------------------------------------------- #
+# WP-C' (exp 0136): own-code identity in the census                            #
+# --------------------------------------------------------------------------- #
+def test_census_own_code_rule_overrides_the_cosine_classes(tmp_path):
+    _make_census_run(tmp_path)
+    npz, manifest = it.load_run(tmp_path)
+    lams = it.domain_lambdas(npz)
+    sh = it.topic_sharpness(lams)
+    # (V=12 here, so the top-m window is narrowed to 2; the real vocab is 5,000)
+    # node1 owns idx 0: its signature keeps; the stratum/starved are unchanged
+    k1 = {t: k for t, k, _, _ in it.classify_block_topics([1, 2, 3], lams, sh, 1,
+                                                           own_idx={0}, top_m=2)}
+    assert k1 == {1: "signature", 2: "stratum", 3: "starved"}
+    # node2 owns idx 3 only: the idx-2 profiles carry no own code -> strata,
+    # whatever their background cosine; the idx-3 profile is its one signature
+    k2 = {t: k for t, k, _, _ in it.classify_block_topics([4, 5, 6], lams, sh, 1,
+                                                           own_idx={3}, top_m=2)}
+    assert k2 == {4: "stratum", 5: "signature", 6: "stratum"}
+    # an empty own set (no own code in the vocab) makes every fed topic a stratum
+    k2e = {t: k for t, k, _, _ in it.classify_block_topics([4, 5, 6], lams, sh, 1,
+                                                            own_idx=set(), top_m=2)}
+    assert set(k2e.values()) == {"stratum"}
+
+
+def test_census_report_with_own_codes_marks_words_and_recounts(tmp_path):
+    _make_census_run(tmp_path)
+    V = 12
+    # condition vocab: concept 500+i at index i; node1 (cid 1001) owns concept 500,
+    # node2 (cid 1002) owns concept 503
+    (tmp_path / "vocab.json").write_text(json.dumps([{str(500 + i): i for i in range(V)}]))
+    (tmp_path / "code_map.tsv").write_text("std_cid\tnode_cid\n500\t1001\n503\t1002\n")
+    assert it.load_code_map(tmp_path / "code_map.tsv") == {1001: {500}, 1002: {503}}
+    rep = it.build_profile_census(tmp_path, vocab_path=str(tmp_path / "vocab.json"),
+                                  own_codes_path=str(tmp_path / "code_map.tsv"), top_m=2,
+                                  grep_pattern="node")
+    assert "own-code rule ON" in rep and "2/3 nodes have an own code" in rep
+    # node2's idx-2 signature and its duplicate are now strata: 2 signatures, 3 strata
+    assert "signature 2 (22%)" in rep and "stratum 3 (33%)" in rep
+    assert "duplicate 0 (0%)" in rep
+    assert "cid:500†" in rep and "cid:503†" in rep       # own-code words marked
+    assert "n_profiles per node: 0: 1 (33%) · 1: 2 (67%)" in rep
+
+
+def test_census_cli_own_codes_auto_resolves_the_run_dir_file(tmp_path, monkeypatch, capsys):
+    _make_census_run(tmp_path)
+    (tmp_path / "vocab.json").write_text(json.dumps([{str(500 + i): i for i in range(12)}]))
+    monkeypatch.setattr(sys, "argv", ["inspect_topics", str(tmp_path), "--profile-census",
+                                      "--own-codes", "--vocab-map",
+                                      str(tmp_path / "vocab.json")])
+    with pytest.raises(SystemExit) as e:          # no code_map.tsv yet -> named
+        it.main()
+    assert "code_map.tsv not found" in str(e.value)
+    (tmp_path / "code_map.tsv").write_text("std_cid\tnode_cid\n500\t1001\n")
+    it.main()
+    assert "own-code rule ON" in (tmp_path / "profile_census.md").read_text()

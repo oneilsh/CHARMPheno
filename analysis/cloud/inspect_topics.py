@@ -858,7 +858,7 @@ def _trunc(s, n):
 
 
 def _digest_words(t, lams, sh, inv_maps, names, name_by_id, dom_names, *,
-                  k=6, maxlen=40, profile_idx=None):
+                  k=6, maxlen=40, profile_idx=None, own_idx=None):
     """One compact line summarising a topic as a PHENOTYPE SIGNATURE: the
     condition-domain top-k names, then the top-3 drug names after `//`. Leads
     with conditions (the disease identity) rather than the dominant domain,
@@ -879,8 +879,10 @@ def _digest_words(t, lams, sh, inv_maps, names, name_by_id, dom_names, *,
         tw = top_words(np.asarray(lams[d][t]), inv, names, name_by_id, kk)
         # `*` marks a token in the node's own HPO profile (condition domain
         # only) — so profile tokens vs EMERGENT co-riders are one glance apart.
-        return [_trunc(nm, maxlen) + ("*" if mark and profile_idx is not None
-                                      and i in profile_idx else "")
+        # `†` marks one of the node's OWN attesting codes (WP-C').
+        return [_trunc(nm, maxlen)
+                + ("*" if mark and profile_idx is not None and i in profile_idx else "")
+                + ("†" if mark and own_idx is not None and i in own_idx else "")
                 for nm, _, i in tw]
 
     lead = cond_d if cond_d is not None else int(np.argmax(sh["dom_mass"][t]))
@@ -1045,8 +1047,44 @@ def build_digest(run_dir, *, exemplars=8, t_words=6, bundle_meta_path=None,
 # --------------------------------------------------------------------------- #
 # --profile-census: how many coherent profiles does each node actually carry?  #
 # --------------------------------------------------------------------------- #
+def _top_idx(lam_row, m):
+    """Vocab indices of the top-m entries of one topic's domain row."""
+    row = np.asarray(lam_row, dtype=np.float64)
+    return [int(i) for i in np.argsort(row)[::-1][:int(m)]]
+
+
+def load_code_map(path):
+    """`code_map.tsv` (`std_cid\tnode_cid`, the fit driver's WP-C' write) ->
+    `{node_cid: {std_cid, ...}}`."""
+    own = {}
+    with open(path) as fh:
+        header = fh.readline()
+        if not header.lower().startswith("std_cid"):
+            a, b = header.split()
+            own.setdefault(int(b), set()).add(int(a))
+        for line in fh:
+            if not line.strip():
+                continue
+            a, b = line.split()
+            own.setdefault(int(b), set()).add(int(a))
+    return own
+
+
+def own_code_vocab_idx(own_by_node, int2cid, vocab_map0):
+    """Per ENGINE node, the condition-vocab indices of its own attesting codes
+    (codes outside the vocab are simply absent)."""
+    out = {}
+    for e, cid in int2cid.items():
+        if int(e) == 0:
+            continue
+        out[int(e)] = {int(vocab_map0[c]) for c in own_by_node.get(int(cid), ())
+                       if c in vocab_map0}
+    return out
+
+
 def classify_block_topics(block_topics, lams, sh, n_bg, *, starved_frac=0.5,
-                          stratum_cos=0.8, dup_cos=0.8, bg_vecs=None):
+                          stratum_cos=0.8, dup_cos=0.8, bg_vecs=None,
+                          own_idx=None, top_m=15):
     """Classify the topics of ONE node's block (spec 2026-10-07 §D3).
 
     `tpn` is a CEILING, not the number of profiles a disease has; this reads the
@@ -1073,7 +1111,17 @@ def classify_block_topics(block_topics, lams, sh, n_bg, *, starved_frac=0.5,
 
     Returns `[(topic, kind, best_bg_cos, best_sig_cos)]` in block order.
     `bg_vecs` (precomputed `{bg topic: unit vec}`) avoids recomputing the
-    background for every node."""
+    background for every node.
+
+    `own_idx` (WP-C', exp 0136) is the node's OWN-CODE identity criterion: the
+    condition-vocab indices of the codes that attest THIS node (the native code
+    map). When given, a fed topic whose top-`top_m` condition tokens include
+    none of them is a `stratum` whatever its background cosine — a generic
+    symptom profile a common disease merely shares (insomnia's nausea·SOB·pain
+    topic, bg cos 0.63) is not a signature of that disease, and a common
+    disease's true signature (hyperlipidemia, bg cos 0.71) is not a stratum.
+    The cosine rule stays as the secondary flag."""
+    own = None if own_idx is None else {int(i) for i in own_idx}
     if bg_vecs is None:
         bg_vecs = {b: _topic_unit_vec(b, lams) for b in range(n_bg)}
     bg_mat = (np.stack([bg_vecs[b] for b in range(n_bg)])
@@ -1091,6 +1139,9 @@ def classify_block_topics(block_topics, lams, sh, n_bg, *, starved_frac=0.5,
         vecs[t] = v
         c_bg = float(np.max(bg_mat @ v)) if n_bg else 0.0
         bgc[t] = c_bg
+        if own is not None and not (set(_top_idx(lams[0][t], top_m)) & own):
+            kinds[t] = "stratum"; sigc[t] = float("nan")
+            continue
         if c_bg >= stratum_cos:
             kinds[t] = "stratum"; sigc[t] = float("nan")
             continue
@@ -1107,7 +1158,8 @@ def classify_block_topics(block_topics, lams, sh, n_bg, *, starved_frac=0.5,
 def build_profile_census(run_dir, *, bundle_meta_path=None, vocab_path=None,
                          names_path=None, profile_file=None, grep_pattern=None,
                          exemplars=8, t_words=6, starved_frac=0.5,
-                         stratum_cos=0.8, dup_cos=0.8, top_m=15):
+                         stratum_cos=0.8, dup_cos=0.8, top_m=15,
+                         own_codes_path=None):
     """The PROFILE CENSUS (spec 2026-10-07 §D3; exp 0136): per node, how many of
     its `tpn` block topics are signatures, strata, duplicates, or starved — and
     therefore what `n_profiles(d)` is and what `tpn_max` should be.
@@ -1123,7 +1175,12 @@ def build_profile_census(run_dir, *, bundle_meta_path=None, vocab_path=None,
 
     Decision rule printed at the end: if the 90th percentile of n_profiles is
     below tpn the ceiling is not binding and tpn_max can drop to that value; if a
-    tail sits AT tpn the ceiling is binding and 0137 should raise it."""
+    tail sits AT tpn the ceiling is binding and 0137 should raise it.
+
+    `own_codes_path` (WP-C') is the fit's `<run>/code_map.tsv`; with it, and a
+    condition vocab map (bundle meta or --vocab-map), a fed topic carrying none
+    of its node's own attesting codes in its top-`top_m` is a stratum regardless
+    of cosine, and own-code words are marked `†` in the exemplars."""
     run_dir = Path(run_dir)
     npz, manifest = load_run(run_dir)
     lams = domain_lambdas(npz)
@@ -1156,12 +1213,35 @@ def build_profile_census(run_dir, *, bundle_meta_path=None, vocab_path=None,
     if names_path:
         names = load_concept_names(names_path)
 
+    own_idx = None
+    own_note = ""
+    if own_codes_path:
+        vm0 = None
+        if meta and "vocab_maps" in meta:
+            vm0 = {int(kk): int(v) for kk, v in meta["vocab_maps"][0].items()}
+        elif inv_maps:
+            vm0 = {int(c): int(i) for i, c in inv_maps[0].items()}
+        if vm0 is None:
+            raise SystemExit("[inspect_topics] --own-codes needs the condition vocab "
+                             "map (the bundle meta, or --vocab-map)")
+        _, int2cid = node_order(manifest)
+        own_by_node = load_code_map(own_codes_path)
+        own_idx = own_code_vocab_idx(own_by_node, int2cid, vm0)
+        n_no_vocab = sum(1 for e in nodes if not own_idx.get(e))
+        own_note = (f" · own-code rule ON ({Path(own_codes_path).name}: "
+                    f"{sum(len(v) for v in own_by_node.values())} (code, node) pairs; "
+                    f"{len(nodes) - n_no_vocab}/{len(nodes)} nodes have an own code in "
+                    f"the condition vocab; a fed topic with no own code in its "
+                    f"top-{top_m} is a stratum)")
+
     bg_vecs = {b: _topic_unit_vec(b, lams) for b in range(n_bg)}
     rows = {}
     for e, blk in block.items():
         rows[e] = classify_block_topics(
             blk, lams, sh, n_bg, starved_frac=starved_frac,
-            stratum_cos=stratum_cos, dup_cos=dup_cos, bg_vecs=bg_vecs)
+            stratum_cos=stratum_cos, dup_cos=dup_cos, bg_vecs=bg_vecs,
+            own_idx=(own_idx.get(e, set()) if own_idx is not None else None),
+            top_m=top_m)
 
     kinds_all = [k for r in rows.values() for _, k, _, _ in r]
     n_topics = len(kinds_all)
@@ -1179,7 +1259,7 @@ def build_profile_census(run_dir, *, bundle_meta_path=None, vocab_path=None,
     w(f"K={K} ({n_bg} bg + {K - n_bg} node, tpn={tpn}) · {len(rows)} node(s) · "
       f"starved = frac>{starved_frac}, stratum = cos>={stratum_cos} to a background "
       f"topic, duplicate = cos>={dup_cos} to a higher-evidence signature of the "
-      f"same block")
+      f"same block{own_note}")
     w(f"block topics: {n_topics} · signature {cnt['signature']} "
       f"({100 * cnt['signature'] / max(n_topics, 1):.0f}%) · stratum {cnt['stratum']} "
       f"({100 * cnt['stratum'] / max(n_topics, 1):.0f}%) · duplicate "
@@ -1224,8 +1304,9 @@ def build_profile_census(run_dir, *, bundle_meta_path=None, vocab_path=None,
         if not inv_maps:
             return ""
         pidx = prof.get(e) if (prof and e is not None) else None
+        oidx = own_idx.get(e) if (own_idx is not None and e is not None) else None
         wl = _digest_words(t, lams, sh, inv_maps, names, name_by_id, dom_names,
-                           k=t_words, profile_idx=pidx)
+                           k=t_words, profile_idx=pidx, own_idx=oidx)
         return (" | " + wl) if wl else ""
 
     def node_lines(e):
@@ -2229,6 +2310,13 @@ def main():
                          "exemplars, --grep, and the tpn_max verdict. Honours "
                          "--bundle-meta, --top-words, --digest-exemplars. "
                          "Suppresses other reports.")
+    ap.add_argument("--own-codes", nargs="?", const="auto", default=None,
+                    metavar="TSV",
+                    help="(--profile-census) WP-C' own-code identity: the fit's "
+                         "code_map.tsv (default: <run>/code_map.tsv). A fed block "
+                         "topic with none of its node's own attesting codes in its "
+                         "top-15 condition tokens is classed stratum regardless of "
+                         "background cosine; own-code words are marked †.")
     ap.add_argument("--profile-align", action="store_true",
                     help="Emit the ~10-line profile-ALIGNMENT scorecard "
                          "(insight 0084's legibility read, quantified): each "
@@ -2262,11 +2350,18 @@ def main():
             readout_label=args.readout_label)
         default_out = "collinearity.md"
     elif args.profile_census:
+        own_path = args.own_codes
+        if own_path == "auto":
+            own_path = str(run_dir / "code_map.tsv")
+            if not Path(own_path).exists():
+                raise SystemExit(f"[inspect_topics] --own-codes: {own_path} not found "
+                                 "(written by the fit driver on native-Mondo runs "
+                                 "from WP-C' on; pass the path explicitly)")
         report = build_profile_census(
             run_dir, bundle_meta_path=args.bundle_meta, vocab_path=args.vocab_map,
             names_path=args.concept_names, profile_file=args.credited_file,
             grep_pattern=args.grep, exemplars=args.digest_exemplars,
-            t_words=args.top_words)
+            t_words=args.top_words, own_codes_path=own_path)
         default_out = "profile_census.md"
     elif args.profile_align:
         if not args.credited_file:

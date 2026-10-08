@@ -55,6 +55,21 @@ make -C analysis/cloud inspect-topics ID=135 CREDITED=1 INSPECT_ARGS="--profile-
 
 The report is also written to `<run>/profile_census.md`.
 
+**WP-C′ (built 2026-10-08) — the honest census.** Once `<run>/code_map.tsv` exists
+(written by the fit driver on every native-Mondo run from now on, and by the first
+re-readout of an older run — 0135 launch 3 provides it):
+
+```bash
+cd ~/repos/CHARMPheno && git fetch origin claude/dismech-ribbon && git checkout claude/dismech-ribbon && git pull --ff-only
+RUN=/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs/0135-dismech-ribbon-smoke-tpn3-bg1200
+make -C analysis/cloud inspect-topics ID=135 RESOLVE_NAMES=1 INSPECT_ARGS="--profile-census --own-codes --digest-exemplars 12 --grep 'Ehlers|cardiomyopathy|Marfan|Gaucher|immunodeficiency|insomnia|hyperlipid'" | tee "$RUN"/profile_census_own_log.md
+```
+
+A fed topic with none of its node's own attesting codes in its top-15 condition
+tokens is a `stratum` whatever its background cosine; own-code words are marked `†`.
+The verdict line then decides `tpn_max` for 0137 honestly (the 2026-10-08 read below
+was eyeballed under this rule).
+
 ## Results (2026-10-08, on 0135 launch 2)
 
 `block topics 1173 · signature 1125 (96%) · stratum 7 (1%) · duplicate 4 · starved 37

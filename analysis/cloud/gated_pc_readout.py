@@ -402,6 +402,21 @@ def build_parser() -> argparse.ArgumentParser:
                         "untouched); the block carries the flat, root-only and "
                         "stacked detection side by side. Distributed readout + "
                         "driver eval path only.")
+    p.add_argument("--readout-hierarchy", choices=["auto", "mondo", "flat"],
+                   default="auto",
+                   help="WP-B (spec 2026-10-07 §D1/§D4, insight 0096): read a FLAT "
+                        "label-set fit through the Mondo hierarchy. 'mondo' builds "
+                        "the readout DAG over the fit's label nodes + every Mondo "
+                        "ancestor grouping >= 2 of them (root aliases folded, rungs "
+                        "dropped), widens label/labelMask on the scored frames so a "
+                        "node is observed only where it or a sibling is positive "
+                        "(negatives = siblings under the nearest grouping ancestor), "
+                        "appends the ancestor heads, and feeds that DAG to the "
+                        "stacked product. 'auto' (default) = 'mondo' for label-set "
+                        "fits, 'flat' otherwise (every nested run is byte-identical). "
+                        "'flat' on a label-set fit tags its outputs _flat. Writes "
+                        "<run>/readout_dag.json. Incompatible with "
+                        "--readout-feature-mask; the incident arm is skipped.")
     return p
 
 
@@ -762,7 +777,8 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
                 min_count, readout_mode="auto", ab_check=False, out_dir=None,
                 theta_topm=None, readout_max_iter=None, elig_col=None,
                 eval_path="driver", readout_l2=None, feature_mask=None,
-                mask_tag=None, stacked=False, parent_int=None, theta_mass=None):
+                mask_tag=None, stacked=False, parent_int=None, theta_mass=None,
+                C=None):
     """Score both gated_pc arms off two already-TRANSFORMED splits. No argparse.
 
     The whole body of this tool that is worth testing: given the frames a finished
@@ -805,8 +821,12 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
     `parent_int` (the bundle's engine-id parent map) and the distributed readout
     on the driver eval path (the product is formed on the collected (D,C) proba).
     The caller tags the outputs (`mask_tag="stacked"`) so the record's
-    `results_readout.json` / `readout_heads_gated_pc.npz` are never touched."""
-    C = int(manifest["C"])
+    `results_readout.json` / `readout_heads_gated_pc.npz` are never touched.
+
+    `C` (WP-B) overrides the manifest's label width when the frames have been
+    widened to the READOUT node space (`readout_dag.widen_labels_to_readout`);
+    `parent_int` is then the readout DAG. None = the fit's own C."""
+    C = int(manifest["C"] if C is None else C)
     mode = resolve_readout_mode(readout_mode, C)
     K = int(manifest.get("K") or 0)
     if mode == "distributed" and not K:
@@ -1179,6 +1199,15 @@ def main(argv=None) -> int:
             else:
                 _cprint(f"[readout]   bundle loaded ({cache_uri}/{key}); C={C}",
                       flush=True)
+            _ncm = getattr(bundle, "native_code_map", None)
+            if _ncm and not (run_dir / "code_map.tsv").exists():
+                # WP-C': a fit from before the code map rode the bundle gets it
+                # on its first re-readout, so `--profile-census --own-codes`
+                # works on 0135 without a refit.
+                from gated_pc_cloud import write_code_map
+                _cmp = write_code_map(run_dir, _ncm)
+                _cprint(f"[readout]   wrote native code map ({len(_ncm)} pairs) -> "
+                      f"{_cmp}", flush=True)
 
         with _phase("reconstruct model + transform"):
             # The theta collect (driver mode) now happens inside run_readout, so the
@@ -1200,6 +1229,53 @@ def main(argv=None) -> int:
             train_scored = model.transform(bundle.train_df).cache()
             test_scored = model.transform(bundle.test_df).cache()
 
+        # WP-B (spec 2026-10-07 §D1/§D4): a label-set fit is FLAT, and the
+        # bundle's closure mask on a flat forest is a full mask (insight 0096:
+        # 70.7M cells). The read gets the hierarchy the fit was denied: the
+        # Mondo readout DAG over the label nodes + grouping ancestors, applied to
+        # the SCORED frames as column arithmetic. Nothing in the bundle, the
+        # cache or a hashed module moves; the manifest's C stays the fit's.
+        _rdag = None
+        _C_ro = C
+        _parent_ro = getattr(bundle, "parent_int", None)
+        _cm = manifest.get("corpus_manifest") or {}
+        from readout_dag import resolve_readout_hierarchy
+        if resolve_readout_hierarchy(args.readout_hierarchy, manifest):
+            with _phase("readout DAG (Mondo hierarchy over the flat fit)"):
+                from readout_dag import (
+                    build_readout_dag, format_readout_dag_report,
+                    load_mondo_parent_adj, widen_labels_to_readout,
+                    write_readout_dag)
+                if args.readout_feature_mask != "all":
+                    raise SystemExit("[readout] --readout-feature-mask ablations "
+                                     "are defined on the FIT's blocks; not "
+                                     "available with --readout-hierarchy mondo")
+                _mv = args.mondo_version or _cm.get("mondo_version")
+                _mcd = args.mondo_cache_dir or _cm.get("mondo_cache_dir") or "data/mondo"
+                if not _mv:
+                    raise SystemExit("[readout] --readout-hierarchy mondo needs the "
+                                     "Mondo version (manifest corpus_manifest."
+                                     "mondo_version or --mondo-version)")
+                _padj, _mnames = load_mondo_parent_adj(_mv, _mcd)
+                _rdag = build_readout_dag(bundle.int2cid, _padj, names=_mnames)
+                _cprint(format_readout_dag_report(_rdag), flush=True)
+                _rp = write_readout_dag(run_dir, _rdag)
+                _cprint(f"[readout]   wrote {_rp}", flush=True)
+                _mm = str(_cm.get("label_mask_mode") or
+                          manifest.get("label_mask_mode") or "full")
+                _tr_w = widen_labels_to_readout(train_scored, _rdag, mask_mode=_mm).cache()
+                _te_w = widen_labels_to_readout(test_scored, _rdag, mask_mode=_mm).cache()
+                # Materialize the widened frames off the cached transforms, then
+                # drop the fit-width copies: the solver's repeated passes read
+                # the widened train frame, never these.
+                _n_tr, _n_te = _tr_w.count(), _te_w.count()
+                train_scored.unpersist(); test_scored.unpersist()
+                train_scored, test_scored = _tr_w, _te_w
+                _C_ro, _parent_ro = int(_rdag.C), _rdag.parent_int
+                _cprint(f"[readout]   frames widened to the readout node space: "
+                      f"C={_C_ro} (fit C={C}), mask mode={_mm}, train docs={_n_tr} "
+                      f"test docs={_n_te}", flush=True)
+
         with _phase("score"):
             # E2/WP4: the incident arm's eligibility comes from the BUNDLE (spec
             # R2.3 — a corpus property; nothing this run computes may enter it),
@@ -1213,6 +1289,12 @@ def main(argv=None) -> int:
             from preindex_closure import bundle_preindex_witness
             _pw = bundle_preindex_witness(bundle)
             _elig_col = str(_pw.get("col_name")) if _pw else None
+            if _elig_col and _rdag is not None:
+                _cprint("[readout]   INCIDENT arm (E2) SKIPPED under "
+                      "--readout-hierarchy mondo: the pre-index closure column is "
+                      "in the FIT's node space (widening it is a WP-B follow-up).",
+                      flush=True)
+                _elig_col = None
             if _elig_col:
                 _cprint(f"[readout]   incident eligibility column: {_elig_col!r} "
                       f"({_pw.get('version')})", flush=True)
@@ -1238,6 +1320,12 @@ def main(argv=None) -> int:
                       f"results -> results_readout_{_mtag}.json, heads -> "
                       f"readout_heads_gated_pc_{_mtag}.npz (record untouched)",
                       flush=True)
+            if args.readout_hierarchy == "flat" and _cm.get("label_set"):
+                # The hierarchical read IS a label-set fit's record; an explicit
+                # flat read of one is the ablation and must not overwrite it.
+                _mtag = "flat" + (f"_{_mtag}" if _mtag else "")
+                _cprint(f"[readout]   FLAT read of a label-set fit: results -> "
+                      f"results_readout_{_mtag}.json (record untouched)", flush=True)
             if args.readout_stacked:
                 # Its own tag: the arm re-solves the SAME heads plus a changed
                 # root head, and the record's results/heads files stay the
@@ -1258,8 +1346,8 @@ def main(argv=None) -> int:
                         elig_col=_elig_col, eval_path=args.eval_path,
                         readout_l2=args.readout_l2, feature_mask=_fmask,
                         mask_tag=_mtag, stacked=bool(args.readout_stacked),
-                        parent_int=getattr(bundle, "parent_int", None),
-                        theta_mass=args.readout_theta_mass)
+                        parent_int=_parent_ro,
+                        theta_mass=args.readout_theta_mass, C=_C_ro)
             _cprint(f"[readout]   arm results written to {run_dir / _rname}",
                   flush=True)
             train_scored.unpersist(); test_scored.unpersist()

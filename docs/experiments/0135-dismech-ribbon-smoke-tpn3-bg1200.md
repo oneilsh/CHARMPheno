@@ -258,6 +258,40 @@ comparison column stays 0133/0134, and launch 1's digest is the nested-ribbon co
 for the DCM line (under nesting DCM's block was its 49 subtypes' and peripartum's
 patients; flat, DCM's block is generic-DCM-coded patients only).
 
+**2026-10-08 — launch 3 (planned): hierarchical re-readout of the SAVED launch-2 fit
+(WP-B, ADR 0048; no refit).** The readout tool now reads a label-set fit through the
+Mondo readout DAG by default (`--readout-hierarchy auto`): sibling negatives under the
+nearest grouping ancestor instead of the full mask, ancestor heads for the stacked
+product. On a fresh cluster the bundle rebuilds (MISS, ~20 min) and the run dir gains
+`code_map.tsv` for 0136's `--own-codes` census.
+
+```bash
+cd ~/repos/CHARMPheno && git fetch origin claude/dismech-ribbon && git checkout claude/dismech-ribbon && git pull --ff-only
+RUN=/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs/0135-dismech-ribbon-smoke-tpn3-bg1200
+nohup bash -c '
+  echo "=== hierarchical readout START $(date)"
+  make -C analysis/cloud gated-pc-readout ID=135 GPR_ARGS="--readout-mode distributed --readout-l2 100 --readout-theta-mass 0.99"
+  echo "=== hierarchical stacked START $(date)"
+  make -C analysis/cloud gated-pc-readout ID=135 GPR_ARGS="--readout-mode distributed --readout-l2 100 --readout-theta-mass 0.99 --readout-stacked"
+  echo "=== DONE $(date)"
+' > "$RUN"/sweep3_log.md 2>&1 &
+```
+
+Receipts to pull: the `[readout dag]` lines (label nodes, ancestor heads, root aliases,
+rungs dropped, depth histogram, sibling-group sizes), `frames widened ... C=`, the
+solver's `observed train cells` (the number to compare with launch 2's 70.7M), the
+`theta top-m by mass` resolved m, and then the usual macro/detection/stacked lines:
+
+```bash
+grep -E "^=== |readout dag|frames widened|observed train cells|converged|theta top-m by mass|gated_pc(_stacked)? \(pc_topics_lr\): (macro|detection)|root head alone|stacked: max|ranking \(within|paired per-node|paired delta|depth [0-9]+:|^all: n=|^by depth" "$RUN"/sweep3_log.md
+```
+
+Pre-registered reads for launch 3: (i) observed cells drop by an order of magnitude or
+more and the solve converges for ≥ 95% of nodes; (ii) the within-cohort macro AUC is now
+a sibling contrast — read it beside 0134's with that in mind, and read the stacked
+marginal (de-novo) AUC as the comparable number; (iii) the ancestor heads' own AUCs by
+depth (ids ≥ C_fit in `readout_dag.json`).
+
 ## Results (launch 2, flat DAG, re-cut ribbon; digest + census 2026-10-08)
 
 **The fit: flat, healthy.** `K=2373 (1200 bg + 1173 node, tpn=3) · C=392` — **391 powered

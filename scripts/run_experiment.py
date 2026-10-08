@@ -979,6 +979,10 @@ def build_gated_pc_args(
     if effective.get("readout_theta_mass"):
         # spec 2026-10-07 §D4: truncate theta by MASS, not count (absent = omitted).
         args.extend(["--readout-theta-mass", str(effective["readout_theta_mass"])])
+    if effective.get("readout_hierarchy"):
+        # WP-B (spec 2026-10-07 §D1/§D4): read a flat label-set fit through the
+        # Mondo hierarchy. Absent = the driver's 'auto' (on for label-set fits).
+        args.extend(["--readout-hierarchy", str(effective["readout_hierarchy"])])
     if effective.get("readout_l2") is not None:
         args.extend(["--readout-l2", str(effective["readout_l2"])])
     if effective.get("readout_calibration"):

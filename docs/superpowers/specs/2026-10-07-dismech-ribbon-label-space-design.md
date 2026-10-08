@@ -292,7 +292,7 @@ the DisMech devs.
 | WP | Builds | Reuses |
 |---|---|---|
 | A | `dismech_ribbon.py` reader + `--label-set` plumbing + `kept_filter` (hashed-module commit, tripwires re-pinned) | `mondo_native_dag`, `anchor_selection.py`'s DisMech seed parser |
-| B | readout DAG from full Mondo over readout nodes; subtype heads | `induced_hasse_parents`, `closure_matrix`, `--readout-stacked` |
+| B | readout DAG from full Mondo over readout nodes (BUILT 2026-10-08: `readout_dag.py`, `--readout-hierarchy`, ADR 0048); subtype heads deferred | `induced_hasse_parents`, `closure_matrix`, `--readout-stacked` |
 | C | `--profile-census` | `inspect_topics --profile-support`, NPMI eval, `hpoa_profile_survey` |
 | D | conditional-diagnosis + VOI readout | `solve_batched_lr`, block β from `VIResult` |
 | E | `export_dismech_profiles.py` + LinkML validation test | `docs/proposals/dismech-profiles/`, beta writer |
@@ -310,6 +310,22 @@ readout DAG must supply the negatives (siblings under the nearest Mondo ancestor
 map to the run dir and the census classes by own-code identity (cosine-to-background
 over-counts signatures). Record settings so far: flat ribbon, R1a, `tpn_max` 5,
 `readout_theta_mass` 0.99.
+
+**2026-10-08 (later) — WP-B and WP-C′ built.** `analysis/cloud/readout_dag.py` builds the
+readout DAG over label nodes ∪ Mondo ancestors grouping ≥ 2 of them (root aliases folded,
+rungs with an identical label-descendant set collapsed to the most specific), then
+widens `label`/`labelMask` on the scored frames by column arithmetic: `y_r[n]` is the
+closure-max over `n`'s label descendants (R1a's family read lives here), `mask_r[n]` is
+"a readout parent of `n` is active" — the closure policy on the readout DAG, so a node
+is observed exactly where it or a sibling is positive. `--readout-hierarchy auto` (fit
+driver and `gated_pc_readout`) turns it on for label-set fits only; the fit, bundle,
+cache key and manifest `C` are untouched (ADR 0048); `<run>/readout_dag.json` records
+the node space. WP-C′: the native `(std_cid, node_cid)` map rides the bundle (cache
+meta) and is written to `<run>/code_map.tsv` by the fit and by the first re-readout;
+`inspect_topics --profile-census --own-codes` classes a fed topic with none of its
+node's own codes in its top-15 as a stratum and marks own-code words `†`. Next: the
+hierarchical re-readout of 0135's saved fit (0135 launch 3) and the honest census
+(0136), then 0137.
 
 ## Branching, salvage, and cruft (to become an ADR with WP-A)
 
