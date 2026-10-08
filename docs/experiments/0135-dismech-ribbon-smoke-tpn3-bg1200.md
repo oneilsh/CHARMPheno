@@ -197,7 +197,28 @@ ribbon members inside that branch — a few hundred nodes, enough for the (a)/(b
 
 ## Run log
 
-(none yet)
+**2026-10-07 — launch 1 ran to the digest on a NESTED label DAG (a WP-A bug).** The
+ribbon filter intersected the powered set correctly, but `build_native_label_dag` still
+built the induced Hasse over the kept members, so Mondo's nesting of ribbon members
+(peripartum cardiomyopathy under dilated cardiomyopathy; hundreds of members under three
+generic "disease" members) came through as a depth-4 fit DAG: digest depth table d1 3 ·
+d2 327 · d3 65 · d4 8 nodes, K=2403 (1200 bg + 401 nodes × 3), C=402. The gate, the
+closure mask and the closure-scope anchors all saw a hierarchy. What the digest still
+says (recorded because it is informative on its own): 2% starved; 0 collapsed parents;
+textbook blocks for AF (2 distinct profiles + a CM/VT one), heart failure (systolic /
+diastolic-ischemic / acute valvular-effusion — three real profiles), HCM, Marfan,
+Takotsubo, CVID (IgG-replacement / sinus-asthma / IgG-subclass), EDS (POTS-autonomic /
+MCAS-immune / migraine-musculoskeletal — the insight 0035 sub-phenotypes, back); DCM is
+STILL the pregnancy stratum in all three topics (peripartum patients rode into DCM's
+closure under the nested DAG, exactly 0134's mechanism) and its cardiomyopathy words
+sit in the sibling heart-failure block; "insomnia" and "ectopic pregnancy" carry
+generic-ED-symptom strata inside their blocks despite 1,200 background topics. C=402
+is far below the expected 1,200–1,800 powered members — the `[mondo-native] label set`
+receipt (unknown-to-release vs unpowered) decides whether that is rarity or a Mondo
+version mismatch. Fixed in `mondo_native_dag.build_native_label_dag(flat=True)` on a
+ribbon run (every member under the root; attestation unchanged). **Launch 2 = the
+flat DAG**, same front matter; the comparison column stays 0133/0134 and launch 1's
+digest is the nested-ribbon control for the DCM line.
 
 ## Results
 

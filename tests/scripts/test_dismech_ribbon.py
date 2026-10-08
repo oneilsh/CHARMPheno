@@ -265,3 +265,23 @@ def test_the_committed_ribbon_loads_and_matches_the_spec_pin():
     assert len(rb.mondo_ids) == 3239 and len(rb.rows) == 3260
     assert dr.label_set_identity(rb) == "dismech:71cd0452358b:3239:5c2dce2aa002"
     assert all(i.startswith("MONDO:") for i in rb.mondo_ids)
+
+
+def test_flat_label_dag_puts_every_member_under_the_root():
+    """Exp 0135's first launch: the induced Hasse nested peripartum CM under DCM
+    (depth 4 overall). With flat=True every kept member is a root child, whatever
+    Mondo says, and the attestation roll-up is unchanged (most specific member)."""
+    A, B, C, D, R = ("MONDO:0000001", "MONDO:0000002", "MONDO:0000003",
+                     "MONDO:0000004", "MONDO:0000000")
+    #  R -> A -> B -> C ;  A, C kept (B unpowered); D kept, separate branch
+    parent = {A: [R], B: [A], C: [B], D: [R], R: []}
+    kept = {A, C, D}
+    nested, _ = mnd.build_native_label_dag(kept, parent, coded_ids=kept, flat=False)
+    flat, st = mnd.build_native_label_dag(kept, parent, coded_ids=kept, flat=True)
+    root = mnd.MONDO_NATIVE_ROOT_CID
+    assert all(ps == [root] for ps in flat.parents.values()), flat.parents
+    assert nested.parents[mnd.mondo_cid(C)] == [mnd.mondo_cid(A)]
+    assert st["n_hasse_multi_parent"] == 0
+    assert mnd.flat_label_parents({"X", "Y"}, {}) == {"X": [], "Y": []}
+    # roll-up is the same under both: a term under C lands on C only, never on A
+    assert mnd.roll_terms_to_kept([C], kept, parent) == {C: [C]}
