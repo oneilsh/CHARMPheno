@@ -47,6 +47,11 @@ CLASSIFICATION_KEYS = (
 COLUMNS = ("mondo_id", "disorder_name", "category", *CLASSIFICATION_KEYS,
            "dismech_file")
 _HEADER_PREFIX = "# dismech_commit: "
+# Members a ribbon can never contain, whatever DisMech says. MONDO:0000001 is the
+# ONTOLOGY ROOT ("disease"); DisMech's Dorsalgia.yaml carries it as its disease_term
+# (a curation error, reported upstream), and as a label node it is an ancestor of
+# every other member — exp 0135 launch 1 nested the whole ribbon under it.
+EXCLUDED_MONDO_IDS = frozenset({"MONDO:0000001"})
 
 
 @dataclass(frozen=True)
@@ -109,7 +114,7 @@ def row_from_disorder(doc: dict, *, dismech_file: str = "") -> RibbonRow | None:
     skipped, counted by the caller)."""
     term = ((doc.get("disease_term") or {}).get("term") or {})
     mondo_id = str(term.get("id") or "")
-    if not mondo_id.startswith("MONDO:"):
+    if not mondo_id.startswith("MONDO:") or mondo_id in EXCLUDED_MONDO_IDS:
         return None
     cls = doc.get("classifications") or {}
     classifications = {
@@ -126,7 +131,8 @@ def read_disorders(kb_dir) -> tuple:
     """Parse every `*.yaml` under a DisMech `kb/disorders/` dir.
 
     Returns `(rows, skipped)`: rows sorted by Mondo id then file name, and the
-    files skipped for having no MONDO disease_term. Two disorders may share a Mondo
+    files skipped for having no MONDO disease_term (or an excluded one, see
+    `EXCLUDED_MONDO_IDS`). Two disorders may share a Mondo
     term (DisMech keeps a few near-duplicates); both rows are kept here and the
     label set deduplicates on `mondo_ids`, so the receipt can report the
     collision."""
