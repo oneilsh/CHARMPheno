@@ -292,6 +292,24 @@ a sibling contrast — read it beside 0134's with that in mind, and read the sta
 marginal (de-novo) AUC as the comparable number; (iii) the ancestor heads' own AUCs by
 depth (ids ≥ C_fit in `readout_dag.json`).
 
+**2026-10-08 — launch 3 running; early receipts.** Readout DAG: 391 label nodes + 310
+ancestor heads = 702 (2 root aliases folded, 73 rungs dropped), depth 0–7, 356 sibling
+groups (mean 3.4, max 40), root children 4. Solver: 687 fittable, 15 degenerate,
+**observed train cells 25.5M (launch 2: 70.7M; 2.8× fewer)**, ~30–35 s/iter (launch 2:
+~70 s), max|grad| 8.3e4 → 1.2e4 by iter 10. The reduction is smaller than the hoped
+10×: multimorbid foreground documents activate many grouping ancestors, so a typical
+document observes ~20% of the 702 heads.
+
+**θ is not spiky in mass, and that is α's floor, not the topics.** The mass resolver
+read p10 coverage 0.117 at m=256 and 0.866 at m=2048, and fell back to full K. With
+α=0.5 per topic over a 1,200-topic background, every allowed topic carries a floor of
+α/(Σα+N) — about 600 prior pseudo-counts against documents of tens to hundreds of tokens
+— so the floor is most of θ's mass whatever the token assignments do. Truncation drops
+only the floor on the dropped topics (a function of document length and allowed set),
+so the resolver now measures coverage of the EXCESS over the per-document floor
+(`excess=True`, commit after `76e9212e`); the top-m set is unchanged. Launch 3 was
+already running and stays dense; the excess rule applies from the next readout on.
+
 ## Results (launch 2, flat DAG, re-cut ribbon; digest + census 2026-10-08)
 
 **The fit: flat, healthy.** `K=2373 (1200 bg + 1173 node, tpn=3) · C=392` — **391 powered

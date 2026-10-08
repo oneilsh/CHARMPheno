@@ -63,3 +63,25 @@ def test_readout_parses_the_mass_override():
                                        "--readout-theta-mass", "0.99"])
     assert a.readout_theta_mass == pytest.approx(0.99)
     assert gpr.build_parser().parse_args(["--run-dir", "/tmp/run"]).readout_theta_mass is None
+
+
+def test_excess_coverage_discounts_the_prior_floor():
+    """0135 launch 3: α=0.5 over ~1,200 allowed topics puts most of θ's mass on a
+    flat floor. Raw coverage calls a doc whose 30 tokens sit in 2 topics
+    'diffuse'; coverage of the excess over the floor calls it concentrated."""
+    import numpy as np
+    K, allowed, alpha = 2048, 1200, 0.5
+    n = np.zeros(K)
+    n[[3, 7]] = [20.0, 10.0]
+    gamma = np.zeros(K)
+    gamma[:allowed] = alpha + n[:allowed]          # gated-out topics are exactly 0
+    theta = gamma / gamma.sum()
+    ms = (2, 16, 1024)
+    raw = dr.coverage_from_accum(*dr._topm_coverage_kernel(iter([theta]), ms), ms)
+    exc = dr.coverage_from_accum(*dr._topm_coverage_kernel(iter([theta]), ms, excess=True), ms)
+    assert raw[16][0] < 0.1                         # the floor dominates raw mass
+    assert exc[2][0] == pytest.approx(1.0)          # all of the doc's own signal
+    # a doc with no excess at all (pure prior) counts as fully covered
+    flat = np.r_[np.full(allowed, 1.0 / allowed), np.zeros(K - allowed)]
+    assert dr.coverage_from_accum(
+        *dr._topm_coverage_kernel(iter([flat]), ms, excess=True), ms)[2][0] == 1.0
