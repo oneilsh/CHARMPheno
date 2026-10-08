@@ -180,7 +180,7 @@ nohup bash -c '
 ' > "$RUN"/sweep_log.md 2>&1 &
 ```
 
-Early checks: the `[mondo-native] label set dismech:71cd0452358b:3238:d24b828f88a4` receipt line (…`label DAG built FLAT`),
+Early checks: the `[mondo-native] label set dismech:71cd0452358b:3226:f27a6b36ca62` receipt line (…`label DAG built FLAT`),
 then the corpus line `K=<1200 + 3*kept> gated topics (1200 bg + <kept> nodes x 3 tpn)`.
 
 Pull the numbers with:
@@ -240,7 +240,7 @@ arithmetic, `apply_label_set_filter` on the committed TSV):
   attests the most specific member only (a generic-DCM code → DCM; a subtype code → the
   subtype, not DCM). The receipt line prints the pair count so the choice is visible.
 - The cutter now EXCLUDES the root (`dismech_ribbon.EXCLUDED_MONDO_IDS`); the TSV is
-  re-cut at the same DisMech commit with 3,238 ids (new identity → new bundle key).
+  re-cut at the same DisMech commit (3,238 ids; then 3,226 after the 2026-10-08 mis-mapping exclusions — the launch-2 identity).
 
 **2026-10-08 — two more changes before launch 2, both from the launch-1 digest.**
 (i) R1a: a patient coded with both members of a nested pair (EDS + hEDS; the digest had

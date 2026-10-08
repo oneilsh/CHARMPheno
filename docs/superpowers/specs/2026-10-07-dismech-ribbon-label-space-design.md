@@ -35,12 +35,13 @@ infrastructure. All of it is label-space-agnostic and all of it is kept.
 
 - **Ribbon.** The set R of Mondo ids of DisMech *disorders* (`kb/disorders/*.yaml`,
   one `disease_term` MONDO id each). **Pinned to DisMech commit `71cd0452`
-  (2026-10-07):** 3,312 disorder files, 3,259 with a usable MONDO `disease_term` (52
-  skipped: poisonings, a few infections, ageing; 1 excluded: `Dorsalgia.yaml` carries
-  the ontology root MONDO:0000001, a DisMech curation error), **3,238 distinct MONDO
-  ids** (21 shared terms collapse to one label node each). Cut by `dismech_ribbon.py`
-  into `analysis/cloud/anchor_selection_data/dismech_ribbon.tsv`, identity
-  `dismech:71cd0452358b:3238:d24b828f88a4`. Against Mondo 2026-06-02: 4 ids unknown;
+  (2026-10-07):** 3,312 disorder files, 3,245 with a usable MONDO `disease_term` (52
+  skipped: poisonings, a few infections, ageing; 15 excluded as curated mis-mappings,
+  `dismech_ribbon.EXCLUDED_DISMECH_FILES`: `Dorsalgia.yaml` → the ontology root, and 14
+  specific disorders attached to broad Mondo terms), **3,226 distinct MONDO ids** (19
+  shared terms collapse to one label node each). Cut by `dismech_ribbon.py` into
+  `analysis/cloud/anchor_selection_data/dismech_ribbon.tsv`, identity
+  `dismech:71cd0452358b:3226:f27a6b36ca62`. Against Mondo 2026-06-02: 4 ids unknown;
   312 members are Mondo ancestors of other members (4,855 pairs — DisMech lists a disease
   and its subtypes as separate disorders), so "flat" is a modelling choice the build
   enforces (`build_native_label_dag(flat=True)`), not a property of the list. At
