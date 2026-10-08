@@ -1,7 +1,7 @@
 ---
 id: 136
 slug: dismech-ribbon-profile-census
-status: planned
+status: done
 model_class: gated_pc
 # NOT A FIT. A readout of exp 0135's saved fit (spec 2026-10-07 §D3, WP-C):
 # `inspect_topics.py --profile-census`, off-YARN, pure numpy over gated_pc_result.npz
@@ -55,6 +55,26 @@ make -C analysis/cloud inspect-topics ID=135 CREDITED=1 INSPECT_ARGS="--profile-
 
 The report is also written to `<run>/profile_census.md`.
 
-## Results
+## Results (2026-10-08, on 0135 launch 2)
 
-(pending 0135)
+`block topics 1173 · signature 1125 (96%) · stratum 7 (1%) · duplicate 4 · starved 37
+(3%)`; `n_profiles`: 0: 6 · 1: 2 · 2: 26 · 3: 357 (91%); verdict "ceiling binding".
+
+**Read with 0135's digest, the census over-counts signatures.** The 0.8
+cosine-to-background threshold passes generic-symptom strata (insomnia / OSA / aortic
+stenosis / obesity: nausea · SOB · pain // saline · ondansetron; bg cos 0.3–0.77) and
+would, at a looser threshold, fail true signatures of common diseases that are
+themselves population strata (hyperlipidemia 0.71, DCM 0.50). Cosine to the background
+is not the discriminator; **identity is** — whether the topic's top words include the
+node's own attesting codes. Multi-signature exemplars that ARE real under that rule:
+EDS (POTS-dysautonomia-GI / MCAS-immune / musculoskeletal-migraine), T2D (foot-ulcer-
+retinopathy-insulin / uncomplicated-metformin / vitamin-D-anaemia), heart failure
+(systolic / acute / CKD-comorbid), CVID (3), Marfan (3), DCM (signature + acute
+decompensation), HCM (2). So the ceiling IS binding where the disease is well coded,
+and `tpn_max` 5 is the record setting — once the census counts honestly.
+
+**WP-C′ (next):** the fit driver writes the native code map `(std_cid, node_cid)` to
+the run dir (small; it is already in hand at build time); `--profile-census` gains
+`--own-codes` marking own-code tokens (`†`) in the words and classing a fed topic with
+no own-code token in its top-m as `stratum` regardless of background cosine. The
+0.8-cosine classes stay as secondary flags.
