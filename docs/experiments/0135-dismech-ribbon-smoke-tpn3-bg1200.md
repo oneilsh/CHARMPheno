@@ -1,7 +1,7 @@
 ---
 id: 135
 slug: dismech-ribbon-smoke-tpn3-bg1200
-status: planned
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -258,6 +258,64 @@ comparison column stays 0133/0134, and launch 1's digest is the nested-ribbon co
 for the DCM line (under nesting DCM's block was its 49 subtypes' and peripartum's
 patients; flat, DCM's block is generic-DCM-coded patients only).
 
-## Results
+## Results (launch 2, flat DAG, re-cut ribbon; digest + census 2026-10-08)
 
-(pending)
+**The fit: flat, healthy.** `K=2373 (1200 bg + 1173 node, tpn=3) · C=392` — **391 powered
+members of 3,226** at `min_positives` 100; digest depth table has ONE row (d1 · 1173
+topics); 3% starved; evidence min 7.6 / med 634 / p90 2.0e4 / max 4.6e5; redundancy
+has nothing to score (one parent = the root).
+
+**DCM is rescued — nesting WAS the mechanism (insight 0096).** Under every nested topic
+side 0127–0134 dilated cardiomyopathy's block was its parent's young-women / pregnancy
+stratum. Flat, with no parent to deflate it and peripartum patients attesting peripartum
+CM only (R1a), DCM's block is textbook: `Dilated cardiomyopathy · Cardiomyopathy ·
+Chronic systolic HF · … · LBBB · VT // carvedilol · furosemide · spironolactone`
+(ev 1.4e4), plus an acute-decompensation profile (cardiogenic shock, effusions,
+pulmonary oedema, AV regurgitation) and one small transplant/muscular-dystrophy topic.
+The pregnancy vocabulary now lives entirely in peripartum cardiomyopathy's block.
+
+**Legible blocks across the grep:** AF (2 profiles + a CM/VT one), heart failure
+(systolic / acute-decompensation / CKD-anaemia comorbidity), HCM, Takotsubo, Marfan
+(aortic / ocular-valvular / skeletal), CVID (IgG-replacement / subclass / sinus-asthma),
+EDS (POTS-dysautonomia-GI / MCAS-immune / musculoskeletal-migraine — insight 0035's
+sub-phenotypes), hEDS (pain-hypermobility / MCAS-immune / thyroid-tremor).
+
+**R1a caveat (membership vs words).** hEDS's top word is still "Ehlers-Danlos syndrome"
+and EDS's block carries "EDS, type 3" at rank 12. The first is expected: hEDS patients
+CARRY the generic code as a token; R1a decides which block a patient feeds, not which
+codes they have. The second needs the receipt: either the hEDS SNOMED code resolves to
+the EDS term in the ladder (then R1a never sees a pair), or EDS-NOS patients carry it.
+The `label set` receipt line (pair count among final nodes) and the attestation counts
+decide; not pulled before the thread moved.
+
+**Oddity to chase:** peripartum cardiomyopathy has evidence 6.0e4 — four times DCM's —
+and all three topics are generic pregnancy; some common pregnancy code is climbing to
+it through `source_climb`. Check the code map for MONDO peripartum CM.
+
+**The readout did not land, and the reason is a design finding.** Flat, the `closure`
+mask's "siblings as negatives" is EVERY other member: `observed train cells =
+70,730,912` (every foreground doc × every node), each head a 180k-row logistic. At
+`topm 0` 81/389 heads converged in 150 iterations (ill-conditioned near-constant
+standardized columns, max|grad| ~300 flat); at `--readout-theta-mass 0.99` the solve
+converged (max|grad| 8.8e4 → 2.1e3 in 30 iterations) but at ~70 s/iteration toward the
+200 cap, ~4 h per pass; killed. The flat forest turned the within-cohort read into
+"this disease vs every other ribbon disease" — pre-registered outcome (b). The
+hierarchy has to supply the NEGATIVES as well as the stacked product: a readout-side
+Mondo mask (siblings under the nearest Mondo ancestor with ≥ 2 members) — WP-B, now on
+the critical path. No AUC column for this run; the comparison with 0133/0134 moves to
+0137 under WP-B.
+
+**Census (0136):** 96% of block topics classed signature, 91% of nodes at the tpn=3
+ceiling — but the digest shows the census OVER-counts: generic-symptom strata (insomnia,
+OSA, aortic stenosis, obesity: nausea · SOB · pain · vomiting // saline · ondansetron)
+have background cosine 0.3–0.77 and pass the 0.8 threshold, and common diseases'
+TRUE signatures (hyperlipidemia 0.71, DCM 0.50) resemble a background topic just as
+much. Cosine-to-background cannot separate "a stratum" from "a common disease whose
+profile is also a population stratum". The honest criterion is identity: does the topic
+carry the node's OWN codes (the code-map concepts that attest it) in its top words?
+Insomnia's stratum has none; its 4.5e4 topic (Insomnia · zolpidem · trazodone) does.
+WP-C′: the fit writes the (std_cid, node_cid) code map to the run dir; the census marks
+own-code tokens and classes a topic with none as `stratum`. Eyeballed under that rule:
+EDS 3, DCM 2, HCM 2, CVID 3, Marfan 3, T2D 3, asthma 2, insomnia 2 — the ceiling is
+binding for the common and the well-coded rare diseases, so **`tpn_max` 5 for the
+record**, with the honest census deciding per node.

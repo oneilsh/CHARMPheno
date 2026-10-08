@@ -302,6 +302,15 @@ the DisMech devs.
 A → 0135 → B/C → 0136 → D → 0137. A, B, C, D are the critical path. E, F, G are
 designed for but deferred (decided 2026-10-07); they depend on nothing but a read 0137.
 
+**2026-10-08 status.** A, C built; 0135 and 0136 done (insight 0096). **WP-B is now
+required before any ribbon AUC**: on a flat forest the closure mask is a full mask
+(every foreground doc observes every node; 70.7M cells; 4 h per readout pass), so the
+readout DAG must supply the negatives (siblings under the nearest Mondo ancestor with
+≥ 2 members) as well as the ancestor heads. **WP-C′**: the fit writes the native code
+map to the run dir and the census classes by own-code identity (cosine-to-background
+over-counts signatures). Record settings so far: flat ribbon, R1a, `tpn_max` 5,
+`readout_theta_mass` 0.99.
+
 ## Branching, salvage, and cruft (to become an ADR with WP-A)
 
 - Branch from the tip of `claude/gated-conditional-voi`: all infrastructure lives
