@@ -87,6 +87,22 @@ infrastructure. All of it is label-space-agnostic and all of it is kept.
 
 - **R1 — flat fit, hierarchical read.** No label-node block is nested under another on
   the topic side. The stacked read uses Mondo closures over readout nodes.
+  **R1a (decided 2026-10-08) — one patient, one member of a nested pair.** DisMech lists
+  umbrellas and subtypes as separate disorders (311 members are Mondo ancestors of
+  others; EDS + hEDS, DCM + its genetic subtypes, epilepsy + Dravet …) and patients
+  carry both codes. Flattening the DAG alone leaves that patient in both blocks — the
+  nesting re-entering through the coding (0135 launch 1: "Ehlers-Danlos syndrome" in
+  hEDS's block, "EDS type 3" in EDS's). So the attestation is reduced PER DOCUMENT to
+  the most specific members: a document attesting both members of a nested pair keeps
+  the descendant only (`member_ancestor_pairs` + the provider's anti-join). An umbrella
+  node is then "the umbrella, not otherwise specified": its block holds the patients
+  coded only at that level, plus roll-ups from unpowered subtypes. The family-level
+  read (P(EDS) ⊇ hEDS) belongs to the ancestor heads of §D4, never to the fit. The
+  umbrellas are KEPT for that reason: they are most of what All of Us can see at
+  `min_positives` 100 (dropping all 311 would remove DCM, epilepsy, lymphoma, EDS,
+  Parkinson's …), while curated mis-mappings (a specific disorder attached to a broad
+  Mondo term, e.g. `PGM2L1_Deficiency.yaml` → neurodevelopmental disorder) are excluded
+  by the cutter's list and reported upstream.
 - **R2 — multiple profiles per disease are allowed and *estimated*.** tpn is a ceiling
   (`tpn_max`), and `n_profiles(d)` is read post-fit (§D3). The export carries only
   signatures. (Rare6/EDS at 20 topics per block is the precedent; 0133/0134's tpn=1 is a

@@ -297,3 +297,35 @@ def test_flat_label_dag_puts_every_member_under_the_root():
     assert mnd.flat_label_parents({"X", "Y"}, {}) == {"X": [], "Y": []}
     # roll-up is the same under both: a term under C lands on C only, never on A
     assert mnd.roll_terms_to_kept([C], kept, parent) == {C: [C]}
+
+
+def test_member_ancestor_pairs_among_final_nodes():
+    E, H, C, R = "MONDO:0020066", "MONDO:0007523", "MONDO:0005021", "MONDO:0000000"
+    parent = {E: [R], H: [E], C: [R], R: []}
+    pairs = mnd.member_ancestor_pairs({E, H, C}, parent)
+    assert pairs == [(mnd.mondo_cid(E), mnd.mondo_cid(H))]
+    assert mnd.member_ancestor_pairs({H, C}, parent) == []
+
+
+@pytest.mark.slow
+def test_provider_keeps_the_descendant_only_when_a_doc_attests_both(spark):
+    """A patient coded with both 'EDS' and 'hypermobile EDS' attests hEDS only;
+    one coded with EDS alone attests EDS; a doc with no mapped code attests
+    nothing; without `ancestor_pairs` the provider is unchanged (both)."""
+    from charmpheno.omop.doc_spec import PatientCohortDocSpec
+    E, H = mnd.mondo_cid("MONDO:0020066"), mnd.mondo_cid("MONDO:0007523")
+    code_map = spark.createDataFrame([(101, E), (102, H), (103, E)],
+                                     ["std_cid", "node_cid"])
+    ev = spark.createDataFrame(
+        [(1, "fg", 101), (1, "fg", 102),        # both codes -> hEDS only
+         (2, "fg", 103),                        # EDS alone -> EDS
+         (3, "fg", 999)],                       # unmapped -> []
+        ["person_id", "source_cohort", "concept_id"])
+    spec = PatientCohortDocSpec()
+    reduced = mnd.make_mondo_native_attested_provider(
+        code_map, doc_spec=spec, ancestor_pairs=[(E, H)])(ev)
+    got = {r["person_id"]: sorted(r["attested_cids"]) for r in reduced.collect()}
+    assert got == {1: [H], 2: [E], 3: []}
+    plain = mnd.make_mondo_native_attested_provider(code_map, doc_spec=spec)(ev)
+    got0 = {r["person_id"]: sorted(r["attested_cids"]) for r in plain.collect()}
+    assert got0[1] == sorted([E, H]) and got0[2] == [E] and got0[3] == []
