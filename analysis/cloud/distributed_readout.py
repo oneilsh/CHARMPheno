@@ -234,7 +234,7 @@ def episode_of(doc_key):
 # --------------------------------------------------------------------------- #
 # Pure numpy partition kernels (unit-tested; no SparkSession).                 #
 # --------------------------------------------------------------------------- #
-def _topm_coverage_kernel(thetas, ms, n_bins=_COVERAGE_BINS):
+def _topm_coverage_kernel(thetas, ms, n_bins=_COVERAGE_BINS, excess=False):
     """Accumulate per-doc top-m θ MASS COVERAGE into (sums, histogram, n).
 
     `thetas` is an iterable of (K,) arrays. For each doc and each `m`, coverage is
@@ -257,6 +257,22 @@ def _topm_coverage_kernel(thetas, ms, n_bins=_COVERAGE_BINS):
     A doc with no mass at all (sum <= 0; θ is a posterior mean on the simplex, so
     this does not occur in practice) counts as coverage 1.0 — vacuously all of
     nothing is kept.
+
+    `excess=True` measures coverage of the mass ABOVE THE PRIOR FLOOR instead:
+    `e_k = max(θ_k - floor, 0)` with `floor` = the doc's smallest POSITIVE θ
+    entry. Why: θ_k = (α + n_k) / (Σ_allowed α + N), so every allowed topic
+    carries a floor of α/(Σα + N) whether or not a single token went to it. On a
+    wide gated layout (0135: α=0.5 over a 1,200-topic background, ~600 prior
+    pseudo-counts against docs of tens to hundreds of tokens) that floor IS most
+    of θ's mass, and raw coverage reads "diffuse" (p10 0.117 at m=256, launch 3)
+    for documents whose token assignments n_k are concentrated in a handful of
+    topics. The top-m SET is the same either way (θ and e rank identically); what
+    truncation discards is the floor on the dropped topics, a function of the
+    doc's length and allowed set only, which carries no topic information. So the
+    excess is the right denominator for "how much of the doc's own signal does a
+    width-m truncation keep". Gated-out topics are exactly 0 and never set the
+    floor; a doc whose positive entries are all equal has zero excess and counts
+    as fully covered.
     """
     ms = [int(m) for m in ms]
     M = len(ms)
@@ -268,6 +284,10 @@ def _topm_coverage_kernel(thetas, ms, n_bins=_COVERAGE_BINS):
         t = np.asarray(theta, dtype=np.float64)
         K = int(t.shape[0])
         n += 1
+        if excess:
+            pos = t[t > 0.0]
+            if pos.size:
+                t = np.maximum(t - float(pos.min()), 0.0)
         total = float(t.sum())
         if total <= 0.0:
             sums += 1.0
@@ -1575,8 +1595,10 @@ def _retry_spark_action(fn, *, attempts=4, base_sleep_s=60, label=""):
 # --------------------------------------------------------------------------- #
 def theta_topm_coverage(scored_df, K, *, ms=(64, 128, 256, 512),
                         topic_col="topicDistribution", n_bins=_COVERAGE_BINS,
-                        depth=2, q=0.10):
+                        depth=2, q=0.10, excess=False):
     """One distributed pass measuring how much θ mass a top-m truncation keeps.
+    `excess=True` measures the mass above the per-doc prior floor
+    (`_topm_coverage_kernel`).
 
     Returns `{m: (mean_coverage, p10_coverage)}`. This is the MEASUREMENT that has
     to precede any use of the sparse-θ path: the lever's entire premise is that a
@@ -1592,8 +1614,9 @@ def theta_topm_coverage(scored_df, K, *, ms=(64, 128, 256, 512),
     """
     ms = tuple(int(m) for m in ms)
 
-    def _local(rows, _col=topic_col, _ms=ms, _nb=int(n_bins)):
-        return [_topm_coverage_kernel((_to_array(r[_col]) for r in rows), _ms, _nb)]
+    def _local(rows, _col=topic_col, _ms=ms, _nb=int(n_bins), _ex=bool(excess)):
+        return [_topm_coverage_kernel((_to_array(r[_col]) for r in rows), _ms, _nb,
+                                      excess=_ex)]
 
     def _combine(a, b):
         return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
@@ -1646,7 +1669,7 @@ def choose_topm_for_mass(coverage, q, *, K=None):
 
 
 def resolve_theta_topm_by_mass(scored_df, K, q, *, topic_col="topicDistribution",
-                               depth=2, grid=None):
+                               depth=2, grid=None, excess=True):
     """Resolve a MASS target to a top-m width on the train frame (spec
     2026-10-07 §D4: truncate by mass, not by count).
 
@@ -1660,10 +1683,17 @@ def resolve_theta_topm_by_mass(scored_df, K, q, *, topic_col="topicDistribution"
     same m), which is what makes them exact.
 
     Returns `(m, coverage)`; `m == 0` means no width below K met the target and the
-    readout runs dense."""
+    readout runs dense.
+
+    The coverage is of the mass ABOVE THE PRIOR FLOOR (`excess=True`, the
+    default since 0135 launch 3): raw θ coverage on a wide gated layout is
+    dominated by α's floor over the allowed topics and resolved q=0.99 to full K
+    (p10 0.117 at m=256) although the token assignments are concentrated. See
+    `_topm_coverage_kernel`."""
     K = int(K)
     ms = tuple(grid) if grid is not None else mass_grid(K)
-    cov = theta_topm_coverage(scored_df, K, ms=ms, topic_col=topic_col, depth=depth)
+    cov = theta_topm_coverage(scored_df, K, ms=ms, topic_col=topic_col, depth=depth,
+                              excess=excess)
     return choose_topm_for_mass(cov, q, K=K), cov
 
 
