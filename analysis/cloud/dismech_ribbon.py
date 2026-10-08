@@ -52,6 +52,30 @@ _HEADER_PREFIX = "# dismech_commit: "
 # (a curation error, reported upstream), and as a label node it is an ancestor of
 # every other member — exp 0135 launch 1 nested the whole ribbon under it.
 EXCLUDED_MONDO_IDS = frozenset({"MONDO:0000001"})
+# Curated mis-mappings (decided 2026-10-08): a SPECIFIC disorder file attached to a
+# BROAD Mondo term because its exact term does not exist — the file's disease is not
+# the Mondo term, and as a label node the term would be a generic umbrella owned by
+# the wrong page. Keyed by DisMech file so a future re-curation upstream lifts the
+# exclusion by itself. Legit umbrella+subtype entries (Epilepsy, Dilated
+# Cardiomyopathy, Ehlers-Danlos …) are NOT here: they stay, and spec R1a keeps a
+# patient in one member of a nested pair.
+EXCLUDED_DISMECH_FILES = {
+    "Dorsalgia.yaml": "MONDO:0000001 (ontology root)",
+    "PGM2L1_Deficiency.yaml": "mapped up to 'neurodevelopmental disorder' (197 ribbon descendants)",
+    "Mediator_Complex_Neurodevelopmental_Disorder.yaml": "mapped up to 'congenital nervous system disorder' (104)",
+    "MYO6_Hearing_Loss.yaml": "mapped up to 'nonsyndromic genetic hearing loss' (55)",
+    "Bleeding_Disorder_of_Unknown_Cause.yaml": "mapped up to 'hemorrhagic disease' (28)",
+    "DEPDC5-Related_Epilepsy.yaml": "mapped up to 'focal epilepsy' (9)",
+    "Arsenic_Related_Cancers.yaml": "mapped up to 'squamous cell carcinoma' (8)",
+    "IDH_Mutant_AML.yaml": "mapped up to 'acute myeloid leukemia' (8)",
+    "Soil_Transmitted_Helminthiases.yaml": "mapped up to 'helminthiasis' (7)",
+    "Travelers_Diarrhea.yaml": "mapped up to 'diarrheal disease' (6)",
+    "Southern_Tick-Associated_Rash_Illness.yaml": "mapped up to 'tick-borne infectious disease' (6)",
+    "BRAF_V600E_Mutant_Colorectal_Cancer.yaml": "mapped up to 'colorectal cancer' (5)",
+    "HPV_Negative_Head_and_Neck_Cancer.yaml": "mapped up to 'head and neck squamous cell carcinoma' (3)",
+    "BRAF_V600_Mutant_Melanoma.yaml": "mapped up to 'cutaneous melanoma' (2)",
+    "Spasticity-Ataxia-Gait_Anomalies_Syndrome.yaml": "mapped up to 'spastic ataxia' (2)",
+}
 
 
 @dataclass(frozen=True)
@@ -142,7 +166,8 @@ def read_disorders(kb_dir) -> tuple:
     for p in sorted(Path(kb_dir).glob("*.yaml")):
         with open(p, "r", encoding="utf-8") as fh:
             doc = yaml.load(fh, Loader=loader) or {}
-        r = row_from_disorder(doc, dismech_file=p.name)
+        r = (None if p.name in EXCLUDED_DISMECH_FILES
+             else row_from_disorder(doc, dismech_file=p.name))
         if r is None:
             skipped.append(p.name)
         else:

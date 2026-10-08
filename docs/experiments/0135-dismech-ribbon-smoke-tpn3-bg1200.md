@@ -242,6 +242,17 @@ arithmetic, `apply_label_set_filter` on the committed TSV):
 - The cutter now EXCLUDES the root (`dismech_ribbon.EXCLUDED_MONDO_IDS`); the TSV is
   re-cut at the same DisMech commit with 3,238 ids (new identity → new bundle key).
 
+**2026-10-08 — two more changes before launch 2, both from the launch-1 digest.**
+(i) R1a: a patient coded with both members of a nested pair (EDS + hEDS; the digest had
+"Ehlers-Danlos syndrome" in hEDS's block and "EDS type 3" in EDS's) now attests the
+DESCENDANT only — `member_ancestor_pairs` on the final nodes + an anti-join in the
+provider; umbrellas become "not otherwise specified" nodes. (ii) The cutter excludes 15
+curated mis-mappings (a specific disorder file attached to a broad Mondo term:
+PGM2L1 deficiency → neurodevelopmental disorder, Mediator-complex NDD → congenital
+nervous system disorder, MYO6 hearing loss → nonsyndromic hearing loss, …;
+`dismech_ribbon.EXCLUDED_DISMECH_FILES`), re-cut at the same DisMech commit (new
+identity). The 296 legitimate umbrella+subtype pairs stay.
+
 **Launch 2 = the flat DAG on the re-cut ribbon**, same front matter otherwise; the
 comparison column stays 0133/0134, and launch 1's digest is the nested-ribbon control
 for the DCM line (under nesting DCM's block was its 49 subtypes' and peripartum's

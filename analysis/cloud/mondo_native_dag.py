@@ -284,6 +284,24 @@ def roll_terms_to_kept(terms, kept, parent_adj) -> dict:
             for t in terms}
 
 
+def member_ancestor_pairs(terms, parent_adj) -> list:
+    """`[(ancestor_cid, descendant_cid)]` for every pair of `terms` where one is a
+    Mondo ancestor of the other — the pairs a FLAT label forest hides from the fit
+    DAG but the per-document attestation must still respect (spec 2026-10-07 R1,
+    decided 2026-10-08): a patient coded with BOTH "Ehlers-Danlos syndrome" and
+    "hypermobile EDS" attests hEDS only, never both. Exp 0135 launch 1's digest
+    had "Ehlers-Danlos syndrome" among hEDS's top words and "EDS type 3" among
+    EDS's: the same patients, in both blocks, by coding rather than by ontology —
+    which is the nesting the ribbon exists to remove. Sorted, cid space."""
+    terms = {str(t) for t in terms}
+    pairs = set()
+    for t in terms:
+        for a in ancestor_closure(t, parent_adj):
+            if a != t and a in terms:
+                pairs.add((mondo_cid(a), mondo_cid(t)))
+    return sorted(pairs)
+
+
 def flat_label_parents(kept_ids, parent_adj) -> dict:
     """The FLAT label forest (spec 2026-10-07 R1): `{kept term: []}` for every
     kept term, so each attaches directly to the synthetic root. `parent_adj` is
@@ -525,7 +543,10 @@ def format_label_set_report(stats) -> str:
         f"release, {ls['n_unpowered']} unpowered; {ls['n_nested_pairs']} nested "
         f"(ancestor, descendant) pair(s) within the kept set over "
         f"{ls['n_nested_members']} ancestor member(s) — label DAG built FLAT "
-        f"(every member under the root)")
+        f"(every member under the root); a document attesting both members of a "
+        f"nested pair keeps the DESCENDANT only "
+        f"({len(stats.get('flat_ancestor_pairs') or [])} pair(s) among the final "
+        f"nodes)")
 
 
 def format_native_build_report(stats) -> str:
@@ -760,6 +781,10 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
                  label_set=label_set_stats,
                  flat=bool(label_set is not None))
     kept_cids = {c for c in before_dag.nodes() if c != MONDO_NATIVE_ROOT_CID}
+    if label_set is not None:
+        # The nesting the flat DAG does not carry, for the provider's per-document
+        # most-specific reduction (`make_mondo_native_attested_provider`).
+        stats["flat_ancestor_pairs"] = member_ancestor_pairs(final_terms, parent_adj)
     return before_dag, code_map_sdf, kept_cids, support_of, stats
 
 
@@ -773,7 +798,8 @@ def branch_mondo_id_set(branch_root, *, edges_df, nodes_df) -> set:
             | {str(x) for x in _descendants(child_adj, str(branch_root))})
 
 
-def make_mondo_native_attested_provider(code_map_sdf, *, doc_spec):
+def make_mondo_native_attested_provider(code_map_sdf, *, doc_spec,
+                                        ancestor_pairs=None):
     """A `provider(events_df) -> attested_df` for the `attested_provider` seam —
     the native analogue of `mondo_dag.make_mondo_attested_provider`.
 
@@ -789,10 +815,22 @@ def make_mondo_native_attested_provider(code_map_sdf, *, doc_spec):
     code) survive with an empty `attested_cids` and a `[]` frontier, exactly like
     the SNOMED and legacy-Mondo providers.
 
+    `ancestor_pairs` (`[(ancestor_cid, descendant_cid)]`, the FLAT ribbon's
+    `member_ancestor_pairs`) switches on the per-document MOST-SPECIFIC reduction:
+    a node is dropped from a document's attested set when the same document also
+    attests one of its Mondo descendants. On a flat DAG `frontier_from_coded`
+    cannot do this (the two are siblings there), and without it a patient coded
+    with both "EDS" and "hypermobile EDS" would sit in both blocks — the nesting
+    the ribbon removes from the DAG, re-entering through the coding. `None` (the
+    default, every non-ribbon run) leaves the provider byte-identical.
+
     Returns `[doc_id, person_id, source_cohort, attested_cids: array<bigint>]`.
-    A join, not a UDF: nothing array-shaped rides the task closure (ADR 0047)."""
+    Joins, not UDFs: nothing array-shaped rides the task closure (ADR 0047); the
+    reduction is an explode-free anti-join on the (doc, node) pair frame."""
     from pyspark.sql import functions as F
     from pyspark.sql.functions import broadcast
+
+    pairs = [(int(a), int(d)) for a, d in (ancestor_pairs or ())]
 
     def provider(events_df):
         ev = doc_spec.derive_docs(events_df)
@@ -800,13 +838,27 @@ def make_mondo_native_attested_provider(code_map_sdf, *, doc_spec):
             F.first("person_id").alias("person_id"),
             F.first("source_cohort").alias("source_cohort"),
         )
-        attested = (
-            ev.join(broadcast(code_map_sdf),
-                    ev["concept_id"] == code_map_sdf["std_cid"], "inner")
-              .groupBy("doc_id")
-              .agg(F.collect_set(F.col("node_cid").cast("long"))
-                   .alias("attested_cids"))
-        )
+        pair_df = (ev.join(broadcast(code_map_sdf),
+                           ev["concept_id"] == code_map_sdf["std_cid"], "inner")
+                     .select("doc_id", F.col("node_cid").cast("long").alias("node_cid"))
+                     .distinct())
+        if pairs:
+            spark = events_df.sparkSession
+            anc_sdf = broadcast(spark.createDataFrame(pairs, ["anc_cid", "desc_cid"]))
+            # (doc, ancestor) rows that have a (doc, descendant) row in the same
+            # document — the ones the most-specific rule removes.
+            dominated = (pair_df.alias("a")
+                         .join(anc_sdf, F.col("a.node_cid") == F.col("anc_cid"))
+                         .join(pair_df.alias("d"),
+                               (F.col("d.doc_id") == F.col("a.doc_id"))
+                               & (F.col("d.node_cid") == F.col("desc_cid")))
+                         .select(F.col("a.doc_id").alias("doc_id"),
+                                 F.col("a.node_cid").alias("node_cid"))
+                         .distinct())
+            pair_df = pair_df.join(dominated, on=["doc_id", "node_cid"],
+                                   how="left_anti")
+        attested = (pair_df.groupBy("doc_id")
+                    .agg(F.collect_set("node_cid").alias("attested_cids")))
         return (
             roster.join(attested, on="doc_id", how="left")
             .withColumn("attested_cids",

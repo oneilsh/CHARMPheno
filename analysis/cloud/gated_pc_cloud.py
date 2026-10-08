@@ -3944,7 +3944,8 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
                                    f"{len(kept_cids)}"),
                                dag_source="mondo_native"))
             provider = make_mondo_native_attested_provider(
-                code_map_sdf, doc_spec=provider_doc_spec)
+                code_map_sdf, doc_spec=provider_doc_spec,
+                ancestor_pairs=stats.get("flat_ancestor_pairs"))
             # BOTH lines before any fit: C and K are expected to GROW here
             # (closure support >= direct support), and the plan says measure,
             # do not guess.
