@@ -216,9 +216,36 @@ generic-ED-symptom strata inside their blocks despite 1,200 background topics. C
 is far below the expected 1,200–1,800 powered members — the `[mondo-native] label set`
 receipt (unknown-to-release vs unpowered) decides whether that is rarity or a Mondo
 version mismatch. Fixed in `mondo_native_dag.build_native_label_dag(flat=True)` on a
-ribbon run (every member under the root; attestation unchanged). **Launch 2 = the
-flat DAG**, same front matter; the comparison column stays 0133/0134 and launch 1's
-digest is the nested-ribbon control for the DCM line.
+ribbon run (every member under the root; attestation unchanged).
+
+**2026-10-08 — the receipt, computed offline against Mondo 2026-06-02** (the cluster's
+`[mondo-native] label set` line was not pulled before the thread moved; this is the same
+arithmetic, `apply_label_set_filter` on the committed TSV):
+- 3,239 members; **4 unknown** to the 2026-06-02 release (MONDO:1060229–32, newer than
+  the pin) — so the pin is NOT the cause of C=402. **Only ~401 members clear
+  `min_positives` 100** in the whole population: the ribbon is rare-disease-heavy
+  (1,925 Mendelian), and the 400 are the diseases All of Us can see at that floor. This
+  is the scale truth of the ribbon; `min_positives` 50 (or 20, the egress floor itself)
+  is the lever if the record run wants more of the tail, at the cost of thinner heads.
+- **The ribbon is not flat under Mondo: 312 members are ancestors of other members,
+  4,855 (ancestor, descendant) pairs.** Top: MONDO:0000001 "disease" (3,223 descendants
+  — the ONTOLOGY ROOT, carried by DisMech's `Dorsalgia.yaml` as its disease_term, a
+  curation error; the three d1 lines of the digest are that one node's three topics),
+  then neurodevelopmental disorder (197), epilepsy (109), congenital nervous system
+  disorder (104), nonsyndromic hearing loss (55), DEE (55), inherited retinal dystrophy
+  (50), **dilated cardiomyopathy (49)**, hypertrophic CM (39), lymphoma (32), …,
+  Ehlers-Danlos (13). DisMech lists a disease AND its subtypes as separate disorders,
+  so "flat" has to be a modelling choice, not a property of the list — which is what
+  spec R1 says and what `flat=True` now enforces: every member a root child; a patient
+  attests the most specific member only (a generic-DCM code → DCM; a subtype code → the
+  subtype, not DCM). The receipt line prints the pair count so the choice is visible.
+- The cutter now EXCLUDES the root (`dismech_ribbon.EXCLUDED_MONDO_IDS`); the TSV is
+  re-cut at the same DisMech commit with 3,238 ids (new identity → new bundle key).
+
+**Launch 2 = the flat DAG on the re-cut ribbon**, same front matter otherwise; the
+comparison column stays 0133/0134, and launch 1's digest is the nested-ribbon control
+for the DCM line (under nesting DCM's block was its 49 subtypes' and peripartum's
+patients; flat, DCM's block is generic-DCM-coded patients only).
 
 ## Results
 

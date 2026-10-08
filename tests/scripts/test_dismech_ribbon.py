@@ -70,6 +70,14 @@ _YAML_NO_TERM = """
 name: Aconitine Poisoning
 category: Environmental
 """
+_YAML_ROOT = """
+name: Dorsalgia
+category: Complex
+disease_term:
+  term:
+    id: MONDO:0000001
+    label: disease
+"""
 _YAML_DUP = """
 name: EDS (duplicate curation)
 category: Mendelian
@@ -87,6 +95,7 @@ def kb(tmp_path):
     (d / "Dilated_Cardiomyopathy.yaml").write_text(_YAML_DCM)
     (d / "Aconitine_Poisoning.yaml").write_text(_YAML_NO_TERM)
     (d / "EDS_dup.yaml").write_text(_YAML_DUP)
+    (d / "Dorsalgia.yaml").write_text(_YAML_ROOT)
     return d
 
 
@@ -95,7 +104,9 @@ def kb(tmp_path):
 # --------------------------------------------------------------------------- #
 def test_reader_keeps_mondo_terms_and_counts_the_rest(kb):
     rows, skipped = dr.read_disorders(kb)
-    assert skipped == ["Aconitine_Poisoning.yaml"]
+    # no MONDO term, and the Mondo ROOT (DisMech's Dorsalgia curation error): both out
+    assert skipped == ["Aconitine_Poisoning.yaml", "Dorsalgia.yaml"]
+    assert "MONDO:0000001" in dr.EXCLUDED_MONDO_IDS
     assert [r.mondo_id for r in rows] == [
         "MONDO:0005021", "MONDO:0020066", "MONDO:0020066"]
     eds = next(r for r in rows if r.dismech_file == "Ehlers-Danlos_Syndrome.yaml")
