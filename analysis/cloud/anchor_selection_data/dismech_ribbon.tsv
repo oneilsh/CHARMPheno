@@ -1,6 +1,5 @@
 # dismech_commit: 71cd0452358b01ef7d0b3cc213297f9837be7e54
 mondo_id	disorder_name	category	harrisons_chapter	isds_skeletal_category	icimd_category	iuis_category	icdo_morphology	mechanistic_category	channelopathy_category	lysosomal_storage_category	dismech_file
-MONDO:0000001	Dorsalgia	Complex									Dorsalgia.yaml
 MONDO:0000030	Familial Sleep-Related Hypermotor Epilepsy	Mendelian									Familial_Sleep_Related_Hypermotor_Epilepsy.yaml
 MONDO:0000050	Isolated Growth Hormone Deficiency	Endocrine									Isolated_Growth_Hormone_Deficiency.yaml
 MONDO:0000082	Pelvic Organ Prolapse	Complex									Pelvic_Organ_Prolapse.yaml

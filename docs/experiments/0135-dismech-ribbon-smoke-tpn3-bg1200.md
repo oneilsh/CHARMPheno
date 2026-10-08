@@ -180,7 +180,7 @@ nohup bash -c '
 ' > "$RUN"/sweep_log.md 2>&1 &
 ```
 
-Early checks: the `[mondo-native] label set dismech:71cd0452358b:3239:...` receipt line,
+Early checks: the `[mondo-native] label set dismech:71cd0452358b:3238:d24b828f88a4` receipt line (…`label DAG built FLAT`),
 then the corpus line `K=<1200 + 3*kept> gated topics (1200 bg + <kept> nodes x 3 tpn)`.
 
 Pull the numbers with:
