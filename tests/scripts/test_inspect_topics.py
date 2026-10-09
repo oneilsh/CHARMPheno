@@ -925,3 +925,32 @@ def test_auc_slice_pairs_runs_by_node_cid_and_reads_nested_blocks(tmp_path):
     with pytest.raises(SystemExit):
         it.build_auc_slice(rib, arm="gated_pc_stacked.nope",
                            results_name="results_readout_stacked_mass99.json")
+
+
+def test_own_code_topic_is_a_signature_even_near_the_background(tmp_path):
+    """An own-code topic that a background topic resembles (AF at bg cos 0.81)
+    stays the node's signature; the cosine is a flag only under the rule."""
+    _make_census_run(tmp_path)
+    npz, manifest = it.load_run(tmp_path)
+    lams = it.domain_lambdas(npz)
+    sh = it.topic_sharpness(lams)
+    # node1's topic 2 is a copy of BG0 (sharp on idx 11): owning idx 11 makes it a
+    # signature under the rule, a stratum under the cosine rule
+    k = {t: kk for t, kk, _, _ in it.classify_block_topics([1, 2, 3], lams, sh, 1,
+                                                            own_idx={0, 11}, top_m=2)}
+    assert k[2] == "signature"
+    k0 = {t: kk for t, kk, _, _ in it.classify_block_topics([1, 2, 3], lams, sh, 1)}
+    assert k0[2] == "stratum"
+
+
+def test_census_reports_undecidable_nodes_apart(tmp_path):
+    _make_census_run(tmp_path)
+    (tmp_path / "vocab.json").write_text(json.dumps([{str(500 + i): i for i in range(12)}]))
+    # node3 (cid 1003) owns a code outside the vocab -> undecidable, cosine fallback
+    (tmp_path / "code_map.tsv").write_text(
+        "std_cid\tnode_cid\n500\t1001\n503\t1002\n999\t1003\n")
+    rep = it.build_profile_census(tmp_path, vocab_path=str(tmp_path / "vocab.json"),
+                                  own_codes_path=str(tmp_path / "code_map.tsv"), top_m=2)
+    assert "own-code-decidable nodes (2)" in rep
+    assert "1 node(s) with no own code in the vocab fall back to the cosine rule" in rep
+    assert "own-code-decidable p90" in rep

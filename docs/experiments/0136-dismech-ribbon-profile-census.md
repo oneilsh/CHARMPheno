@@ -96,3 +96,38 @@ the run dir (small; it is already in hand at build time); `--profile-census` gai
 `--own-codes` marking own-code tokens (`†`) in the words and classing a fed topic with
 no own-code token in its top-m as `stratum` regardless of background cosine. The
 0.8-cosine classes stay as secondary flags.
+
+## Results, own-code rule (2026-10-09, on 0135 launch 2)
+
+`5881 (code, node) pairs; 283/391 nodes have an own code in the condition vocab` ·
+`signature 578 (49%) · stratum 554 (47%) · duplicate 4 · starved 37 (3%)` ·
+n_profiles over all nodes 0: 113 · 1: 75 · 2: 106 · 3: 97 (25% at the ceiling).
+
+- **The rule sorts the cases cosine could not.** Insomnia's nausea·SOB·pain topic,
+  hyperlipidemia's skin topic, asthma's and osteoarthritis's ED-symptom topics, COPD's
+  chronic-back-pain topic and GERD's hypothyroid topic are strata; every disease's
+  coded profile (DCM's carvedilol·furosemide·spironolactone, asthma's step-therapy,
+  CKD by stage, T2D complicated vs uncomplicated) is a signature.
+- **Two artefacts of the first rule, fixed in the tool the same day.** (i) The 108
+  nodes with no own code in the vocab (their attesting codes fall under min_df or the
+  5,000 cap) were classed all-stratum and inflated the 0-profile bin (113); they are
+  now reported apart and fall back to the cosine rule, and the verdict reads the
+  decidable nodes. (ii) The cosine still overrode identity: atrial fibrillation's
+  best own-code topic (bg cos 0.81 — the background duplicated AF, not the reverse)
+  was called a stratum; own codes now decide and the cosine is a flag.
+- **Verdict holds: the ceiling is binding.** On the 283 decidable nodes roughly a third
+  sit at 3; `tpn_max` 5 for 0137.
+- **Common diseases split by comorbidity context, rare ones by phenotype.** Hypertension
+  (diabetic-CAD / metabolic / musculoskeletal), T2D (complicated / uncomplicated /
+  vitamin-anaemia), CKD (by stage / ESRD-dialysis / transplant). Marfan (aortic /
+  ocular-valvular / skeletal), CVID (3), HCM (obstructive / arrhythmic), DCM (chronic /
+  decompensated). EDS proper carries one signature next to hEDS's two (R1a working:
+  the "EDS type 3" code is hEDS's own code, not EDS's).
+- **Peripartum cardiomyopathy's own codes are pregnancy codes.** All three topics are
+  pregnancy (Finding related to pregnancy†, High risk pregnancy†, trimester codes†,
+  Gestation period 8 weeks†): generic pregnancy concepts are in its code map, which is
+  why its evidence (6e4) is four times DCM's. A code-map defect (a Mondo xref or a
+  climb landing), not a topic-model one; to trace before 0137 — see the 0135 run log.
+- Restrictive CM 0 profiles (unfed, ev ≤ 533) and Tako-tsubo 1 match their weak
+  de-novo AUCs (0.738 / 0.755).
+
