@@ -145,7 +145,7 @@ MONDO_NATIVE_ROOT_CID = -1
 # the bundle cache key alongside this module's source hash: the hash is the
 # automatic guard (nobody has to remember), the version string is the citable
 # record of WHICH construction a cached bundle was built under.
-MONDO_NATIVE_VERSION = "native-mondo-v3"   # v2: multi-map guard; v3: SNOMED anchor test (exp 0137)
+MONDO_NATIVE_VERSION = "native-mondo-v4"   # v2: multi-map guard; v4: hierarchy-consistency test (exp 0137; v3 anchor test withdrawn)
 
 _MONDO_PREFIX = "MONDO:"
 
@@ -369,47 +369,44 @@ def induced_hasse_parents(kept_ids, parent_adj) -> dict:
     return out
 
 
-def anchor_corroborated_rows(rows, anchor_desc_pairs):
-    """Main's ANCHOR TEST (its insight 0076): keep a non-SNOMED-derived exact
-    target only when the term's own SNOMED `same_as` corroborates it. Pure.
+def overbroad_exact_rows(rows, subsumed_terms, parent_adj, *, min_unrelated=3):
+    """HIERARCHY-CONSISTENCY test on exact-map rows (exp 0137, native-mondo-v4). Pure.
 
     `rows` are `(mondo_id, source_vocabulary_id, source_concept_id,
-    standard_concept_id)` exact-map rows. A term's ANCHORS are the standard
-    concepts its SNOMED `same_as` rows reach. For a term WITH anchors, a row from
-    another vocabulary (ICD10CM, MeSH) is kept iff its target is an anchor, a
-    descendant of an anchor (`anchor_desc_pairs`: `(anchor, descendant)` strict
-    concept_ancestor pairs), or is reached by >= 2 distinct source codes of the
-    term. A term with no SNOMED anchor keeps all its rows (nothing to corroborate
-    against; the multi-map guard still applies). Returns `(kept_rows, dropped_rows)`.
+    standard_concept_id)`. `subsumed_terms` is `{standard_concept_id t: {mondo_id}}`
+    — the Mondo terms whose OWN exact concepts are strict SNOMED descendants of t.
+    A non-SNOMED row (ICD10CM, MeSH) of term m with target t is dropped when t
+    subsumes the exact concepts of at least `min_unrelated` Mondo terms that are
+    NOT m's Mondo descendants: SNOMED says t is above them, Mondo says m is not,
+    so the mapping put m too high. Rows from Mondo's own SNOMED `same_as` are never
+    dropped (they are Mondo's declared equivalent). Returns `(kept, dropped)`.
 
-    Why (exp 0137 audit, 2026-10-09): a term's ICD code can map, alone, to a
-    concept far broader than the disease, and the climb then fills that concept
-    with unrelated codes. Tularemia's attesting codes were "Disorder of
-    gastrointestinal tract" and its subtree (GI bleeding, Crohn's fistulas, anal
-    abscess); thrombophilia's were every deep-vein-thrombosis code; osteochondrosis's
-    were spine fractures and scoliosis. None of those is a multi-map, so the
-    multi-map guard could not see them; each is an ICD-derived target that the
-    term's own SNOMED concept does not cover."""
+    Why this and not the anchor test it replaces: 0137 launch 2 (v3) required every
+    ICD target to sit at or under the term's SNOMED concept, and dropped dilated
+    cardiomyopathy, Down syndrome, Lyme disease, giardiasis and seven more ribbon
+    members whose main ICD code maps to a concept that is a sibling or a synonym of
+    their SNOMED xref, while leaving tularemia (GI-tract disorders) and
+    thrombophilia (every DVT code) untouched. The consistency test asks the
+    question those captures actually answer wrongly — is this concept broader than
+    the disease, by the disease hierarchy's own account? — and leaves a target
+    alone when everything it subsumes is Mondo-below the term (DCM's concept
+    subsumes peripartum and familial DCM, which Mondo places under DCM)."""
     rows = [(str(m), str(v), int(sc), int(tc)) for m, v, sc, tc in rows]
-    anchors: dict = {}
-    for m, v, _sc, tc in rows:
-        if v == "SNOMED":
-            anchors.setdefault(m, set()).add(tc)
-    below: dict = {}
-    for a, d in anchor_desc_pairs:
-        below.setdefault(int(d), set()).add(int(a))
-    n_src: dict = {}
-    for m, _v, sc, tc in rows:
-        n_src.setdefault((m, tc), set()).add(sc)
+    memo: dict = {}
+
+    def _is_desc(child, anc):
+        if child not in memo:
+            memo[child] = ancestor_closure(child, parent_adj)
+        return anc in memo[child]
+
     kept, dropped = [], []
     for r in rows:
-        m, v, sc, tc = r
-        an = anchors.get(m)
-        if (v == "SNOMED" or not an or tc in an or (below.get(tc, set()) & an)
-                or len(n_src[(m, tc)]) >= 2):
+        m, v, _sc, tc = r
+        if v == "SNOMED":
             kept.append(r)
-        else:
-            dropped.append(r)
+            continue
+        unrelated = [u for u in subsumed_terms.get(tc, ()) if u != m and not _is_desc(u, m)]
+        (dropped if len(unrelated) >= int(min_unrelated) else kept).append(r)
     return kept, dropped
 
 
@@ -738,12 +735,12 @@ def format_native_powering_report(stats) -> str:
                                 stats.get("multimap_dropped_examples") or [])
               if stats.get("multimap_dropped_examples") else "")
            if "n_multimap_sources" in stats else "")
-        + (f"; anchor test: {stats['n_anchor_dropped']} uncorroborated non-SNOMED "
-           f"target(s) dropped over {stats['n_anchor_terms']} term(s)"
+        + (f"; hierarchy test: {stats['n_overbroad_dropped']} over-broad non-SNOMED "
+           f"target(s) dropped over {stats['n_overbroad_terms']} term(s)"
            + (": " + " · ".join(f"{nm} x{k}" for nm, k in
-                                stats.get("anchor_dropped_examples") or [])
-              if stats.get("anchor_dropped_examples") else "")
-           if "n_anchor_dropped" in stats else "")
+                                stats.get("overbroad_dropped_examples") or [])
+              if stats.get("overbroad_dropped_examples") else "")
+           if "n_overbroad_dropped" in stats else "")
         + ("\n" + format_code_map_audit(stats["code_map_audit"])
            if stats.get("code_map_audit") else ""))
 
@@ -839,27 +836,35 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
     parent_adj = parent_adjacency(child_adj)
     label_of = {str(i): str(n) for i, n in zip(nodes_df["id"], nodes_df["name"])}
 
-    # --- 1a. anchor test (v3): non-SNOMED exact targets must be corroborated by
-    # the term's own SNOMED same_as (`anchor_corroborated_rows`).
-    _snomed = mapping["vocabulary_id"] == "SNOMED"
-    anchor_ids = sorted({int(x) for x in mapping.loc[_snomed, "standard_concept_id"]})
-    cand_ids = sorted({int(x) for x in mapping.loc[~_snomed, "standard_concept_id"]})
-    anchor_dropped: list = []
-    if anchor_ids and cand_ids:
-        a_sdf = broadcast(spark.createDataFrame(pd.DataFrame({"anc": anchor_ids})))
-        c_sdf = broadcast(spark.createDataFrame(pd.DataFrame({"cand": cand_ids})))
-        ad_pd = (_read_bq(spark, cdr, billing, "concept_ancestor")
-                 .where(F.col("min_levels_of_separation") >= 1)
-                 .join(a_sdf, F.col("ancestor_concept_id") == F.col("anc"), "inner")
-                 .join(c_sdf, F.col("descendant_concept_id") == F.col("cand"), "inner")
-                 .select("ancestor_concept_id", "descendant_concept_id")
-                 .distinct().toPandas())
+    # --- 1a. hierarchy-consistency test (v4; `overbroad_exact_rows`): drop a
+    # non-SNOMED exact target that SNOMED places above the exact concepts of >= 3
+    # Mondo terms that Mondo does not place under the term.
+    all_tg = sorted({int(x) for x in mapping["standard_concept_id"]})
+    cand_tg = sorted({int(x) for x in
+                      mapping.loc[mapping["vocabulary_id"] != "SNOMED",
+                                  "standard_concept_id"]})
+    overbroad_dropped: list = []
+    if cand_tg:
+        t2m = spark.createDataFrame(pd.DataFrame(
+            {"d_cid": [int(x) for x in mapping["standard_concept_id"]],
+             "d_term": [str(x) for x in mapping["mondo_id"]]}).drop_duplicates())
+        c_sdf = broadcast(spark.createDataFrame(pd.DataFrame({"a_cid": cand_tg})))
+        t_sdf = broadcast(spark.createDataFrame(pd.DataFrame({"t_cid": all_tg})))
+        sub_pd = (_read_bq(spark, cdr, billing, "concept_ancestor")
+                  .where(F.col("min_levels_of_separation") >= 1)
+                  .join(c_sdf, F.col("ancestor_concept_id") == F.col("a_cid"), "inner")
+                  .join(t_sdf, F.col("descendant_concept_id") == F.col("t_cid"), "inner")
+                  .join(broadcast(t2m), F.col("descendant_concept_id") == F.col("d_cid"),
+                        "inner")
+                  .groupBy("a_cid").agg(F.collect_set("d_term").alias("terms"))
+                  .where(F.size("terms") >= 3)
+                  .toPandas())
+        subsumed = {int(a): set(ts) for a, ts in zip(sub_pd["a_cid"], sub_pd["terms"])}
         _rows = list(zip(mapping["mondo_id"], mapping["vocabulary_id"],
                          mapping["concept_id"], mapping["standard_concept_id"]))
-        _kept, anchor_dropped = anchor_corroborated_rows(
-            _rows, zip(ad_pd["ancestor_concept_id"], ad_pd["descendant_concept_id"]))
-        if anchor_dropped:
-            _bad = {(m, int(sc), int(tc)) for m, _v, sc, tc in anchor_dropped}
+        _kept, overbroad_dropped = overbroad_exact_rows(_rows, subsumed, parent_adj)
+        if overbroad_dropped:
+            _bad = {(m, int(sc), int(tc)) for m, _v, sc, tc in overbroad_dropped}
             mapping = mapping[[(str(m), int(sc), int(tc)) not in _bad for m, sc, tc in
                                zip(mapping["mondo_id"], mapping["concept_id"],
                                    mapping["standard_concept_id"])]]
@@ -1003,10 +1008,11 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
                  n_multimap_dropped=len(multimap_dropped),
                  multimap_dropped_targets=sorted({t for _, t in multimap_dropped}),
                  multimap_dropped_examples=_dropped_examples(multimap_dropped, concept_pd),
-                 n_anchor_dropped=len(anchor_dropped),
-                 n_anchor_terms=len({m for m, *_ in anchor_dropped}),
-                 anchor_dropped_examples=_dropped_examples(
-                     [(sc, tc) for _m, _v, sc, tc in anchor_dropped], concept_pd),
+                 n_overbroad_dropped=len(overbroad_dropped),
+                 n_overbroad_terms=len({m for m, *_ in overbroad_dropped}),
+                 overbroad_dropped_examples=_dropped_examples(
+                     [(sc, tc) for _m, _v, sc, tc in overbroad_dropped], concept_pd,
+                     top=15),
                  code_map_audit=code_map_audit(
                      rows, {c for c, _ in std_pairs},
                      names={mondo_cid(t): label_of.get(t, t) for t in final_terms}))

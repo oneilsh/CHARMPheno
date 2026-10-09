@@ -79,6 +79,19 @@ anchor test (`anchor_corroborated_rows`): for a term with a SNOMED `same_as`, a 
 from another vocabulary is kept only if it is that concept, its descendant, or agreed
 by >= 2 of the term's source codes. 0137 launch 1 was stopped for it.
 
+**v3 was withdrawn on its own receipts (0137 launch 2).** The anchor test dropped 151
+targets over 147 terms and with them dilated cardiomyopathy, Down syndrome, Lyme disease,
+giardiasis, coccidioidomycosis, atrial septal defect, IPAH and MALT lymphoma from the
+label set (their main ICD code maps to a sibling or synonym of their SNOMED xref, not a
+descendant), while tularemia (93) and thrombophilia (165) were untouched — those captures
+arrive through Mondo DESCENDANTS of the ribbon member that have no SNOMED xref, whose
+broad ICD target rolls up. **v4 replaces it with a hierarchy-consistency test**
+(`overbroad_exact_rows`): a non-SNOMED target is dropped when SNOMED places it above the
+exact concepts of >= 3 Mondo terms that Mondo does not place under the term. It asks the
+question the captures get wrong (is this concept broader than the disease, by the disease
+hierarchy's own account?) and spares DCM (its concept subsumes Mondo's own DCM
+children). SNOMED `same_as` rows are never dropped.
+
 ## Reproduce
 
 ```bash
