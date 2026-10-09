@@ -385,20 +385,21 @@ def test_code_map_audit_counts_shared_codes_by_mechanism():
     assert "2 code(s) attest >= 2 nodes (1 exact-shared, 1 climb-tie)" in format_code_map_audit(a)
 
 
-def test_anchor_test_drops_uncorroborated_icd_targets():
-    """Main's anchor test (its insight 0076), as the 0137 audit needed it: tularemia's
-    ICD code mapping to 'Disorder of gastrointestinal tract' is not covered by
-    tularemia's own SNOMED concept and is dropped; a descendant of the anchor, a
-    target two source codes agree on, and every row of an anchor-less term are kept."""
-    from mondo_native_dag import anchor_corroborated_rows
-    TUL, NOSN = "MONDO:0007000", "MONDO:0009999"
-    TUL_SCT, GI, TUL_GI, SHARED, OTHER = 100, 200, 101, 300, 400
-    rows = [(TUL, "SNOMED", 9, TUL_SCT),          # the anchor
-            (TUL, "ICD10CM", 1, GI),              # broad, uncorroborated -> drop
-            (TUL, "ICD10CM", 2, TUL_GI),          # descendant of the anchor -> keep
-            (TUL, "ICD10CM", 3, SHARED),          # two source codes agree -> keep
-            (TUL, "MeSH", 4, SHARED),
-            (NOSN, "ICD10CM", 5, OTHER)]          # no SNOMED anchor -> keep
-    kept, dropped = anchor_corroborated_rows(rows, [(TUL_SCT, TUL_GI), (999, GI)])
+def test_hierarchy_test_drops_overbroad_targets_and_spares_consistent_ones():
+    """v4 (0137 launch 2 withdrew the anchor test): an ICD target that SNOMED puts
+    above >= 3 Mondo terms Mondo does not put under the disease is over-broad
+    (tularemia <- 'Disorder of gastrointestinal tract'); a target whose subsumed
+    terms are all Mondo descendants is kept (DCM's concept over peripartum and
+    familial DCM); SNOMED same_as rows are never dropped."""
+    from mondo_native_dag import overbroad_exact_rows
+    TUL, CROHN, DIVERT, GERD = "MONDO:1", "MONDO:2", "MONDO:3", "MONDO:4"
+    DCM, PPCM, FDCM, ALC = "MONDO:10", "MONDO:11", "MONDO:12", "MONDO:13"
+    GI, DCM_C = 500, 600
+    padj = {PPCM: [DCM], FDCM: [DCM]}
+    rows = [(TUL, "ICD10CM", 1, GI),          # over-broad -> drop
+            (TUL, "SNOMED", 2, GI),           # same target, SNOMED-declared -> keep
+            (DCM, "ICD10CM", 3, DCM_C)]       # subsumes only DCM's own children (+1)
+    subsumed = {GI: {CROHN, DIVERT, GERD}, DCM_C: {PPCM, FDCM, ALC}}
+    kept, dropped = overbroad_exact_rows(rows, subsumed, padj)
     assert dropped == [(TUL, "ICD10CM", 1, GI)]
-    assert len(kept) == 5
+    assert (DCM, "ICD10CM", 3, DCM_C) in kept          # 1 unrelated (ALC) < 3

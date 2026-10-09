@@ -122,7 +122,7 @@ nohup bash -c '
 Audit, as soon as `code_map.tsv` appears in the run dir (right after the bundle is built):
 
 ```bash
-grep -E "multi-map guard|anchor test|attestation audit|label set|powering:" "$RUN"/sweep_log.md
+grep -E "multi-map guard|hierarchy test|attestation audit|label set|powering:" "$RUN"/sweep_log.md
 python3 - "$RUN" <<'PY'
 import csv, json, sys, collections
 run = sys.argv[1]
@@ -142,5 +142,15 @@ single-target captures the guard cannot see: tularemia (GI-tract disorders), thr
 (every DVT code), osteochondrosis (spine fractures, scoliosis). Relaunched on
 native-mondo-v3 (anchor test; insight 0097 addendum); the audit line gains `anchor test:
 N uncorroborated non-SNOMED target(s) dropped over M term(s): <names>`.
+
+**2026-10-09 — launch 2 (native-mondo-v3) stopped at the audit.** The anchor test
+dropped 151 targets over 147 terms, and the label set lost 15 members vs 0135 (dilated
+cardiomyopathy, Down syndrome, Lyme disease, giardiasis, coccidioidomycosis, atrial
+septal defect, IPAH, MALT lymphoma, …; 378 nodes), while tularemia (93) and thrombophilia
+(165) were unchanged and HELLP rose to 97. Relaunched on native-mondo-v4 (hierarchy-
+consistency test; insight 0097). Audit line: `hierarchy test: N over-broad non-SNOMED
+target(s) dropped over M term(s): <names>`. Acceptance before the fit is read: DCM, Down
+syndrome and Lyme back in the label set; tularemia and thrombophilia down to modest code
+counts.
 
 ## Results
