@@ -25,6 +25,16 @@
    documents off DCM onto the mislabelled peripartum node. Flattening did not fix the
    defect; it relocated it.
 
+4. **This was already known on `main`.** Main's insight 0076 (2026-08-24, a different
+   numbering line from this branch's 0076) found exactly this case in the whole-Mondo
+   usage export: peripartum cardiomyopathy at 24,629 patients, 444094 shared with
+   preeclampsia and severe pre-eclampsia, "ICD `Maps to` decomposition inflates
+   standard-space exact counts". It recommended source-space counting for the usage
+   report and kept standard space "for the ontology-gated modeling" — which is the path
+   that never got a guard. The dashboard's `source_climb` default credits a
+   source-exact `condition_source_concept_id` first, but its standard-exact and climb
+   rungs still reach 444094, so the usage dashboard shows the same inflation.
+
 ## Why it matters
 
 - **Scope of the contamination, honestly.** The native-Mondo code map (exp 0110 on) is
@@ -46,6 +56,10 @@
   of the same source code. It removes 444094 from O90.3 and keeps the disorder; it is
   general (every ICD-10-CM "disorder + context finding" multi-map), and the powering
   receipt now prints how many source codes multi-map and how many targets were dropped.
+  A second test from main's 0076 (FAN-IN): a multi-map target that is the exact
+  concept of two Mondo terms unrelated by is-a (444094 <- peripartum CM, preeclampsia)
+  is dropped from that source code too, so the guard does not depend on SNOMED placing
+  the context finding above the disorder.
   It does not catch a broad concept that is a source code's ONLY target; the
   attesting-code count per node (0136's audit list) is the check for that.
 - **Process lesson.** The census's own-code mark (†) is what exposed this: a topic whose
