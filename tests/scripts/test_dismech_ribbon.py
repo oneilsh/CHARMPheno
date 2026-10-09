@@ -372,3 +372,14 @@ def test_multimap_guard_fan_in_drops_a_context_concept_shared_by_unrelated_terms
         {O14: {PREE, PREG}}, [], terms_of_target={PREG: {PRE, HYP}, PREE: {PRE}},
         parent_adj=padj)
     assert kept2[O14] == {PREE, PREG}
+
+
+def test_code_map_audit_counts_shared_codes_by_mechanism():
+    from mondo_native_dag import code_map_audit, format_code_map_audit
+    rows = [(1, 10), (2, 10), (3, 10), (3, 20), (4, 20), (4, 30), (5, 30)]
+    a = code_map_audit(rows, exact_codes={1, 3}, names={10: "PPCM", 20: "DCM"}, top=2)
+    assert a["n_codes"] == 5 and a["n_nodes"] == 3
+    assert a["n_shared_codes"] == 2 and a["n_shared_exact"] == 1 and a["n_shared_climb"] == 1
+    assert a["n_nodes_sharing"] == 3
+    assert a["top_nodes"] == [("PPCM", 3), ("DCM", 2)]
+    assert "2 code(s) attest >= 2 nodes (1 exact-shared, 1 climb-tie)" in format_code_map_audit(a)
