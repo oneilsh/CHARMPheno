@@ -153,4 +153,16 @@ target(s) dropped over M term(s): <names>`. Acceptance before the fit is read: D
 syndrome and Lyme back in the label set; tularemia and thrombophilia down to modest code
 counts.
 
+**2026-10-09 — launch 3 (native-mondo-v4, threshold 3) stopped at the audit.** Right on
+the captures: 168 targets over 163 terms (pregnancy, vertebral column, …); DCM, Lyme,
+giardiasis and peripartum CM back; tularemia leaves the label set (its real support is
+under 100 once the GI capture is gone); osteochondrosis's spine capture gone. Wrong on a
+few real diseases SNOMED subdivides more finely than Mondo: Down syndrome, acute kidney
+injury, autoimmune thrombocytopenic purpura and acne left the label set. Thrombophilia
+(162, every DVT code) unchanged: its Mondo subtree has no vein-thrombosis term (it holds
+DIC, TTP, purpura fulminans), so the DVT codes arrive through one of its protected SNOMED
+xrefs — traced with a vocabulary query. Relaunched on v5 (threshold 10; the receipt lists
+dropped targets with their unrelated-term counts and the kept borderline band 3–9, so the
+threshold is calibrated on data).
+
 ## Results
