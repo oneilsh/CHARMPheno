@@ -145,7 +145,7 @@ MONDO_NATIVE_ROOT_CID = -1
 # the bundle cache key alongside this module's source hash: the hash is the
 # automatic guard (nobody has to remember), the version string is the citable
 # record of WHICH construction a cached bundle was built under.
-MONDO_NATIVE_VERSION = "native-mondo-v1"
+MONDO_NATIVE_VERSION = "native-mondo-v2"   # v2: multi-map ancestor targets dropped (exp 0136)
 
 _MONDO_PREFIX = "MONDO:"
 
@@ -369,6 +369,39 @@ def induced_hasse_parents(kept_ids, parent_adj) -> dict:
     return out
 
 
+def drop_ancestor_multimap_targets(source_targets, ancestor_pairs):
+    """Drop, per SOURCE code, every 'Maps to' target that is an is-a ancestor of
+    another target of the same source code. Pure.
+
+    `source_targets` is `{source_concept_id: {standard_concept_id, ...}}`;
+    `ancestor_pairs` the strict `(ancestor, descendant)` concept_ancestor pairs
+    among those targets. Returns `(kept {source: set}, dropped [(source, target)])`.
+
+    Why (exp 0136, 2026-10-09): OMOP maps many ICD-10-CM codes to TWO standard
+    concepts, the disorder and a broad context finding — `O90.3` "Peripartum
+    cardiomyopathy" -> {Dilated peripartum cardiomyopathy, Finding related to
+    pregnancy (444094)}. Mondo's `same_as O90.3` then made 444094 an EXACT standard
+    concept of peripartum cardiomyopathy, and the climb rung sent every pregnancy
+    code without a term of its own (gestation weeks, trimesters, primigravida,
+    high-risk pregnancy: 106 codes) up to 444094 and so to the disorder. Every
+    pregnant woman in All of Us was labelled peripartum cardiomyopathy — the
+    "young-women stratum" of exps 0127-0134's DCM block. The broad target is the
+    one an is-a ancestor of its sibling target; the specific one is the
+    disorder the source code names, so keeping only the most specific targets of
+    each source code removes the context finding and keeps the disorder. A source
+    code whose targets are incomparable keeps them all."""
+    anc = {}
+    for a, d in ancestor_pairs:
+        anc.setdefault(int(d), set()).add(int(a))
+    kept, dropped = {}, []
+    for src, tg in source_targets.items():
+        tg = {int(t) for t in tg}
+        broad = {t for t in tg if any(t in anc.get(u, ()) for u in tg if u != t)}
+        kept[int(src)] = tg - broad
+        dropped.extend((int(src), t) for t in sorted(broad))
+    return kept, dropped
+
+
 def resolve_code_terms(standard_pairs, climb_pairs, parent_adj) -> dict:
     """The `source_climb` ladder as a pure `{standard_concept_id: [mondo_id]}` map.
 
@@ -578,7 +611,11 @@ def format_native_powering_report(stats) -> str:
         f"{stats['n_powered']} clear min_positives={stats['min_positives']} "
         f"(smallest kept support {stats['min_support_kept']}); "
         f"{stats['n_codes_attesting']} code(s) attest the final DAG"
-        + (f"; branch={stats['branch']}" if stats.get("branch") else ""))
+        + (f"; branch={stats['branch']}" if stats.get("branch") else "")
+        + (f"; multi-map guard: {stats['n_multimap_sources']} source code(s) map to "
+           f">1 standard concept, {stats['n_multimap_dropped']} ancestor target(s) "
+           f"dropped ({len(stats.get('multimap_dropped_targets') or [])} distinct)"
+           if "n_multimap_sources" in stats else ""))
 
 
 # --------------------------------------------------------------------------- #
@@ -672,6 +709,29 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
     parent_adj = parent_adjacency(child_adj)
     label_of = {str(i): str(n) for i, n in zip(nodes_df["id"], nodes_df["name"])}
 
+    # --- 1b. multi-map guard (v2): per source code, drop 'Maps to' targets that
+    # are is-a ancestors of another target (`drop_ancestor_multimap_targets`).
+    src_tg: dict = {}
+    for sc, tc in zip(mapping["concept_id"], mapping["standard_concept_id"]):
+        src_tg.setdefault(int(sc), set()).add(int(tc))
+    multi_std = sorted({t for tg in src_tg.values() if len(tg) > 1 for t in tg})
+    multimap_dropped: list = []
+    if multi_std:
+        ms_sdf = broadcast(spark.createDataFrame(pd.DataFrame({"t": multi_std})))
+        ms2 = ms_sdf.withColumnRenamed("t", "t2")
+        anc_pd = (_read_bq(spark, cdr, billing, "concept_ancestor")
+                  .where(F.col("min_levels_of_separation") >= 1)
+                  .join(ms_sdf, F.col("ancestor_concept_id") == F.col("t"), "inner")
+                  .join(ms2, F.col("descendant_concept_id") == F.col("t2"), "inner")
+                  .select("ancestor_concept_id", "descendant_concept_id")
+                  .distinct().toPandas())
+        kept_tg, multimap_dropped = drop_ancestor_multimap_targets(
+            src_tg, zip(anc_pd["ancestor_concept_id"], anc_pd["descendant_concept_id"]))
+        if multimap_dropped:
+            bad = set(multimap_dropped)
+            keep_row = [(int(sc), int(tc)) not in bad for sc, tc in
+                        zip(mapping["concept_id"], mapping["standard_concept_id"])]
+            mapping = mapping[keep_row]
     std_pairs = [(int(c), str(m)) for c, m in
                  zip(mapping["standard_concept_id"], mapping["mondo_id"])]
     mapped_std_ids = sorted({c for c, _ in std_pairs})
@@ -779,7 +839,10 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
                  n_codes_attesting=len({c for c, _ in rows}),
                  branch=str(branch_root or ""),
                  label_set=label_set_stats,
-                 flat=bool(label_set is not None))
+                 flat=bool(label_set is not None),
+                 n_multimap_sources=sum(1 for tg in src_tg.values() if len(tg) > 1),
+                 n_multimap_dropped=len(multimap_dropped),
+                 multimap_dropped_targets=sorted({t for _, t in multimap_dropped}))
     kept_cids = {c for c in before_dag.nodes() if c != MONDO_NATIVE_ROOT_CID}
     if label_set is not None:
         # The nesting the flat DAG does not carry, for the provider's per-document
