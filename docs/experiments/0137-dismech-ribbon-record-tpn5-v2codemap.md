@@ -173,4 +173,16 @@ from the hierarchy test because it is a SNOMED xref. v6 adds a curated exclusion
 xref that fails the hierarchy test, as `SUSPECT Mondo SNOMED xrefs ...`, for review into
 the list. To report upstream to Mondo with the DisMech curation list.
 
+**2026-10-09/10 — launch 5 (native-mondo-v6) is the record.** 389 label nodes (0135: 390);
+K = 3,145; fit 5,309 s (50 iterations, diag_only). Readout DAG 389 + 308 ancestor heads
+= 698; 683 fittable; observed train cells 23.9M (0135: 25.5M).
+**θ is diffuse even above the prior floor.** Excess-mass coverage (mean / p10): m=16
+0.356 / 0.146, m=256 0.593 / 0.388, m=1024 0.810 / 0.713, m=2048 0.985 / 0.972 → q=0.99
+resolves to FULL K. The floor was not the whole story: with 1,200 overlapping background
+topics, the variational responsibilities spread each token's mass across many near-tied
+topics, so a document's own signal occupies hundreds to thousands of θ entries, not tens.
+Top-m truncation is not a readout lever at this configuration; the cost levers are the
+mask (cells) and the head count. Bears directly on "are patients spiky?": not in this
+model's θ at α = 0.5 and n_bg = 1,200 — the fixed-α ladder (α 0.1, 0.02) is the test.
+
 ## Results
