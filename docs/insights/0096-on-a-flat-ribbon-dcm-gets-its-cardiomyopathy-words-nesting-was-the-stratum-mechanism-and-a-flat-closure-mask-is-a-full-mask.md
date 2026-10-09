@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-08
 **Topic:** dismech-ribbon, flat-label-space, gated-pc, same-vocabulary-child, closure-mask, readout, exp 0135
-**Status:** Confirmed on exp 0135 launch 2 (digest + census; the readout did not land — see finding 3).
+**Status:** Confirmed on exp 0135 launch 2 (digest + census; the readout did not land — see finding 3). **Finding 1's mechanism is REVISED by insight 0097**: the DCM stratum was pregnancy documents mislabelled peripartum cardiomyopathy by a code-map defect, which nesting delivered into DCM's closure; flattening relocated it rather than fixing it. Finding 3 (the full mask) stands.
 
 ## Observation
 

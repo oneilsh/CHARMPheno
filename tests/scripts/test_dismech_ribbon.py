@@ -329,3 +329,24 @@ def test_provider_keeps_the_descendant_only_when_a_doc_attests_both(spark):
     plain = mnd.make_mondo_native_attested_provider(code_map, doc_spec=spec)(ev)
     got0 = {r["person_id"]: sorted(r["attested_cids"]) for r in plain.collect()}
     assert got0[1] == sorted([E, H]) and got0[2] == [E] and got0[3] == []
+
+
+# --------------------------------------------------------------------------- #
+# exp 0136: the multi-map guard (peripartum CM <- "Finding related to pregnancy") #
+# --------------------------------------------------------------------------- #
+def test_multimap_guard_drops_the_broad_target_and_keeps_the_disorder():
+    from mondo_native_dag import (drop_ancestor_multimap_targets,
+                                  format_native_powering_report)
+    O903, PPCM, PREG = 45576878, 4037495, 444094
+    J45, ASTHMA = 1, 317009
+    X, A, B = 2, 10, 20                       # incomparable targets: both kept
+    src = {O903: {PPCM, PREG}, J45: {ASTHMA}, X: {A, B}}
+    # PREG is an ancestor of PPCM; A and B unrelated
+    kept, dropped = drop_ancestor_multimap_targets(src, [(PREG, PPCM), (99, A)])
+    assert kept == {O903: {PPCM}, J45: {ASTHMA}, X: {A, B}}
+    assert dropped == [(O903, PREG)]
+    rep = format_native_powering_report(dict(
+        n_codes_resolved=1, n_coded_terms=1, n_terms_with_any_support=1, n_powered=1,
+        min_positives=100, min_support_kept=100, n_codes_attesting=1,
+        n_multimap_sources=2, n_multimap_dropped=1, multimap_dropped_targets=[PREG]))
+    assert "multi-map guard: 2 source code(s)" in rep and "1 ancestor target(s)" in rep
