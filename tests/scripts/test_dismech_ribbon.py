@@ -400,6 +400,10 @@ def test_hierarchy_test_drops_overbroad_targets_and_spares_consistent_ones():
             (TUL, "SNOMED", 2, GI),           # same target, SNOMED-declared -> keep
             (DCM, "ICD10CM", 3, DCM_C)]       # subsumes only DCM's own children (+1)
     subsumed = {GI: {CROHN, DIVERT, GERD}, DCM_C: {PPCM, FDCM, ALC}}
-    kept, dropped = overbroad_exact_rows(rows, subsumed, padj)
+    kept, dropped, counts = overbroad_exact_rows(rows, subsumed, padj, min_unrelated=3)
     assert dropped == [(TUL, "ICD10CM", 1, GI)]
     assert (DCM, "ICD10CM", 3, DCM_C) in kept          # 1 unrelated (ALC) < 3
+    assert counts == {(TUL, GI): 3}
+    # the v5 default (10) keeps a concept SNOMED merely subdivides more finely
+    k10, d10, c10 = overbroad_exact_rows(rows, subsumed, padj)
+    assert d10 == [] and c10 == {(TUL, GI): 3}

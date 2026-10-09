@@ -241,7 +241,7 @@ def test_native_build_report_names_the_predicted_degenerate_count():
     _, stats = mn.build_native_label_dag({_A, _B, _C, _D}, pa,
                                          coded_ids={_D}, names={})
     line = mn.format_native_build_report(stats)
-    assert "native-mondo-v4" in line
+    assert "native-mondo-v5" in line
     assert "predicted residual degenerate" in line
 
 

@@ -145,7 +145,7 @@ MONDO_NATIVE_ROOT_CID = -1
 # the bundle cache key alongside this module's source hash: the hash is the
 # automatic guard (nobody has to remember), the version string is the citable
 # record of WHICH construction a cached bundle was built under.
-MONDO_NATIVE_VERSION = "native-mondo-v4"   # v2: multi-map guard; v4: hierarchy-consistency test (exp 0137; v3 anchor test withdrawn)
+MONDO_NATIVE_VERSION = "native-mondo-v5"   # v2: multi-map guard; v4/v5: hierarchy-consistency test, threshold 3 -> 10 (exp 0137; v3 anchor test withdrawn)
 
 _MONDO_PREFIX = "MONDO:"
 
@@ -369,7 +369,8 @@ def induced_hasse_parents(kept_ids, parent_adj) -> dict:
     return out
 
 
-def overbroad_exact_rows(rows, subsumed_terms, parent_adj, *, min_unrelated=3):
+def overbroad_exact_rows(rows, subsumed_terms, parent_adj, *, min_unrelated=10,
+                         near_floor=3):
     """HIERARCHY-CONSISTENCY test on exact-map rows (exp 0137, native-mondo-v4). Pure.
 
     `rows` are `(mondo_id, source_vocabulary_id, source_concept_id,
@@ -390,7 +391,16 @@ def overbroad_exact_rows(rows, subsumed_terms, parent_adj, *, min_unrelated=3):
     question those captures actually answer wrongly — is this concept broader than
     the disease, by the disease hierarchy's own account? — and leaves a target
     alone when everything it subsumes is Mondo-below the term (DCM's concept
-    subsumes peripartum and familial DCM, which Mondo places under DCM)."""
+    subsumes peripartum and familial DCM, which Mondo places under DCM).
+
+    THRESHOLD (launch 3, v4 at 3): the true captures subsume the concepts of tens to
+    hundreds of unrelated terms (pregnancy findings, GI-tract disorders, vertebral-
+    column disorders), but a disease concept that SNOMED subdivides more finely than
+    Mondo also clears 3 — Down syndrome, acute kidney injury, autoimmune
+    thrombocytopenic purpura and acne left the label set. Default 10 (v5). Returns
+    `(kept, dropped, unrelated_count)`, where `unrelated_count[(m, t)]` is reported
+    for every row at or above `near_floor`, so the receipt shows the borderline band
+    and the threshold is calibrated on data, not guessed."""
     rows = [(str(m), str(v), int(sc), int(tc)) for m, v, sc, tc in rows]
     memo: dict = {}
 
@@ -399,15 +409,17 @@ def overbroad_exact_rows(rows, subsumed_terms, parent_adj, *, min_unrelated=3):
             memo[child] = ancestor_closure(child, parent_adj)
         return anc in memo[child]
 
-    kept, dropped = [], []
+    kept, dropped, counts = [], [], {}
     for r in rows:
         m, v, _sc, tc = r
         if v == "SNOMED":
             kept.append(r)
             continue
-        unrelated = [u for u in subsumed_terms.get(tc, ()) if u != m and not _is_desc(u, m)]
-        (dropped if len(unrelated) >= int(min_unrelated) else kept).append(r)
-    return kept, dropped
+        n_un = sum(1 for u in subsumed_terms.get(tc, ()) if u != m and not _is_desc(u, m))
+        if n_un >= int(near_floor):
+            counts[(m, tc)] = n_un
+        (dropped if n_un >= int(min_unrelated) else kept).append(r)
+    return kept, dropped, counts
 
 
 def drop_ancestor_multimap_targets(source_targets, ancestor_pairs, *,
@@ -737,9 +749,12 @@ def format_native_powering_report(stats) -> str:
            if "n_multimap_sources" in stats else "")
         + (f"; hierarchy test: {stats['n_overbroad_dropped']} over-broad non-SNOMED "
            f"target(s) dropped over {stats['n_overbroad_terms']} term(s)"
-           + (": " + " · ".join(f"{nm} x{k}" for nm, k in
+           + (": " + " · ".join(f"{nm} (unrelated {k})" for nm, k in
                                 stats.get("overbroad_dropped_examples") or [])
               if stats.get("overbroad_dropped_examples") else "")
+           + ("; KEPT below threshold: " + " · ".join(
+                f"{nm} ({k})" for nm, k in stats.get("overbroad_near_kept") or [])
+              if stats.get("overbroad_near_kept") else "")
            if "n_overbroad_dropped" in stats else "")
         + ("\n" + format_code_map_audit(stats["code_map_audit"])
            if stats.get("code_map_audit") else ""))
@@ -844,6 +859,8 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
                       mapping.loc[mapping["vocabulary_id"] != "SNOMED",
                                   "standard_concept_id"]})
     overbroad_dropped: list = []
+    overbroad_top: list = []
+    overbroad_near: list = []
     if cand_tg:
         t2m = spark.createDataFrame(pd.DataFrame(
             {"d_cid": [int(x) for x in mapping["standard_concept_id"]],
@@ -862,7 +879,16 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
         subsumed = {int(a): set(ts) for a, ts in zip(sub_pd["a_cid"], sub_pd["terms"])}
         _rows = list(zip(mapping["mondo_id"], mapping["vocabulary_id"],
                          mapping["concept_id"], mapping["standard_concept_id"]))
-        _kept, overbroad_dropped = overbroad_exact_rows(_rows, subsumed, parent_adj)
+        _kept, overbroad_dropped, _ob_counts = overbroad_exact_rows(
+            _rows, subsumed, parent_adj)
+        _cname = dict(zip(concept_pd["concept_id"].astype(int), concept_pd["concept_name"]))
+        _by_t: dict = {}
+        for (m, t), n in _ob_counts.items():
+            _by_t[t] = max(n, _by_t.get(t, 0))
+        overbroad_top = [(str(_cname.get(t, t)), n) for t, n in
+                         sorted(_by_t.items(), key=lambda kv: -kv[1]) if n >= 10][:15]
+        overbroad_near = [(str(_cname.get(t, t)), n) for t, n in
+                          sorted(_by_t.items(), key=lambda kv: -kv[1]) if n < 10][:20]
         if overbroad_dropped:
             _bad = {(m, int(sc), int(tc)) for m, _v, sc, tc in overbroad_dropped}
             mapping = mapping[[(str(m), int(sc), int(tc)) not in _bad for m, sc, tc in
@@ -1010,9 +1036,8 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
                  multimap_dropped_examples=_dropped_examples(multimap_dropped, concept_pd),
                  n_overbroad_dropped=len(overbroad_dropped),
                  n_overbroad_terms=len({m for m, *_ in overbroad_dropped}),
-                 overbroad_dropped_examples=_dropped_examples(
-                     [(sc, tc) for _m, _v, sc, tc in overbroad_dropped], concept_pd,
-                     top=15),
+                 overbroad_dropped_examples=overbroad_top,
+                 overbroad_near_kept=overbroad_near,
                  code_map_audit=code_map_audit(
                      rows, {c for c, _ in std_pairs},
                      names={mondo_cid(t): label_of.get(t, t) for t in final_terms}))
