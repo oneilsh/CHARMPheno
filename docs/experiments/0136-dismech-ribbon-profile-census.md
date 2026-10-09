@@ -62,6 +62,9 @@ re-readout of an older run — 0135 launch 3 provides it):
 ```bash
 cd ~/repos/CHARMPheno && git fetch origin claude/dismech-ribbon && git checkout claude/dismech-ribbon && git pull --ff-only
 RUN=/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs/0135-dismech-ribbon-smoke-tpn3-bg1200
+# a fresh cluster has no HDFS bundle: write the meta + code map into the run dir first
+# (rebuilds the bundle, ~20 min; no transform, no solve). Later fits write both themselves.
+make -C analysis/cloud gated-pc-readout ID=135 GPR_ARGS="--bundle-only"
 make -C analysis/cloud inspect-topics ID=135 RESOLVE_NAMES=1 INSPECT_ARGS="--profile-census --own-codes --digest-exemplars 12 --grep 'Ehlers|cardiomyopathy|Marfan|Gaucher|immunodeficiency|insomnia|hyperlipid'" | tee "$RUN"/profile_census_own_log.md
 ```
 

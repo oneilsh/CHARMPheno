@@ -569,12 +569,17 @@ INSPECT_RUN_DIR    ?= $(RUNS_DIR)/$(shell printf '%04d' $(ID))-*
 inspect-topics: $(WORKSPACE_ENV)
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	@META="$(INSPECT_META)"; KEY="$(INSPECT_KEY)"; \
+	if [ -z "$$META" ] && [ -z "$$KEY" ] && [ -z "$(NO_META)" ]; then \
+	  for f in $(INSPECT_RUN_DIR)/bundle_meta.json; do \
+	    if [ -f "$$f" ]; then META="$$f"; echo "[inspect-topics] using the run dir's bundle meta $$f (survives cluster restarts)"; fi; \
+	  done; \
+	fi; \
 	if [ -z "$$META" ] && [ -z "$$KEY" ] && [ -z "$(NO_META)" ] && command -v hdfs >/dev/null 2>&1; then \
 	  KEY=$$(hdfs dfs -ls -t "$(INSPECT_CACHE_URI)" 2>/dev/null | awk '$$1 ~ /^d/ {print $$NF; exit}' | sed 's|.*/||'); \
 	  if [ -n "$$KEY" ]; then \
 	    echo "[inspect-topics] auto-selected bundle key $$KEY (newest in $(INSPECT_CACHE_URI); wrong-bundle shape mismatches are flagged in the report — override with INSPECT_KEY=<hash> or NO_META=1)"; \
 	  else \
-	    echo "[inspect-topics] no bundle dir found in $(INSPECT_CACHE_URI); continuing without meta (no depth/words)"; \
+	    echo "[inspect-topics] no bundle dir found in $(INSPECT_CACHE_URI); continuing without meta (no depth/words). Fresh cluster? Run: make gated-pc-readout ID=$(ID) GPR_ARGS=\"--bundle-only\" (writes <run>/bundle_meta.json)"; \
 	  fi; \
 	fi; \
 	if [ -z "$$META" ] && [ -n "$$KEY" ]; then \

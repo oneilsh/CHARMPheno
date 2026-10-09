@@ -181,3 +181,19 @@ def test_code_map_rides_the_cache_meta_and_the_run_dir(tmp_path):
     assert cfc._restore_meta(meta)["native_code_map"] == [(101, 5021), (102, 5021)]
     p = gpc.write_code_map(tmp_path, b.native_code_map)
     assert p.read_text() == "std_cid\tnode_cid\n101\t5021\n102\t5021\n"
+
+
+def test_bundle_meta_lands_in_the_run_dir_and_the_readout_has_bundle_only(tmp_path):
+    import _case_finding_cache as cfc
+    import gated_pc_cloud as gpc
+    import gated_pc_readout as gpr
+
+    class B:
+        parent_int = {0: [], 1: [0]}; int2cid = {0: -1, 1: 5021}; cid2int = {-1: 0, 5021: 1}
+        name_by_id = {5021: "DCM"}; ledger = {"k": 1}; vocab_maps = [{101: 0}, {202: 0}]
+    p = gpc.write_bundle_meta(tmp_path, B())
+    meta = json.loads(p.read_text())
+    assert meta == json.loads(json.dumps(cfc._meta_dict(B())))
+    assert meta["vocab_maps"][0] == {"101": 0}
+    a = gpr.build_parser().parse_args(["--run-dir", "/tmp/run", "--bundle-only"])
+    assert a.bundle_only
