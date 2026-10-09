@@ -407,3 +407,22 @@ def test_hierarchy_test_drops_overbroad_targets_and_spares_consistent_ones():
     # the v5 default (10) keeps a concept SNOMED merely subdivides more finely
     k10, d10, c10 = overbroad_exact_rows(rows, subsumed, padj)
     assert d10 == [] and c10 == {(TUL, GI): 3}
+
+
+def test_curated_xref_exclusion_and_snomed_suspects():
+    """v6: Mondo's 'thrombophilia due to thrombin defect' -> SCTID 111293003 'Venous
+    thrombosis' is excluded by name; a SNOMED row that fails the hierarchy test is
+    reported as a suspect and never dropped."""
+    import pandas as pd
+    from mondo_native_dag import (EXCLUDED_MONDO_XREFS, drop_excluded_xrefs,
+                                  overbroad_exact_rows)
+    assert ("MONDO:0008559", "SNOMED", "111293003") in EXCLUDED_MONDO_XREFS
+    df = pd.DataFrame({"mondo_id": ["MONDO:0008559", "MONDO:0008559", "MONDO:0002305"],
+                       "vocabulary_id": ["SNOMED", "ICD10CM", "SNOMED"],
+                       "concept_code": ["111293003", "D68.59", "234467004"]})
+    kept, n = drop_excluded_xrefs(df)
+    assert n == 1 and list(kept["concept_code"]) == ["D68.59", "234467004"]
+    rows = [("MONDO:9", "SNOMED", 1, 777)]
+    k, d, _c = overbroad_exact_rows(rows, {777: {f"MONDO:{i}" for i in range(20, 32)}}, {})
+    assert d == [] and k == rows
+    assert overbroad_exact_rows.snomed_suspects == {("MONDO:9", 777): 12}

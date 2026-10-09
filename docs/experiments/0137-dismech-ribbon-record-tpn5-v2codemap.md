@@ -165,4 +165,12 @@ xrefs — traced with a vocabulary query. Relaunched on v5 (threshold 10; the re
 dropped targets with their unrelated-term counts and the kept borderline band 3–9, so the
 threshold is calibrated on data).
 
+**Thrombophilia traced (vocabulary query, 2026-10-09):** the 106 DVT codes descend from
+SCTID 111293003 *Venous thrombosis*, which Mondo lists as the SNOMED `same_as` of
+*thrombophilia due to thrombin defect* (MONDO:0008559) — a Mondo curation error, protected
+from the hierarchy test because it is a SNOMED xref. v6 adds a curated exclusion list
+(`EXCLUDED_MONDO_XREFS`, this one entry) and REPORTS (never drops) any other Mondo SNOMED
+xref that fails the hierarchy test, as `SUSPECT Mondo SNOMED xrefs ...`, for review into
+the list. To report upstream to Mondo with the DisMech curation list.
+
 ## Results

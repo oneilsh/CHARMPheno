@@ -92,6 +92,16 @@ question the captures get wrong (is this concept broader than the disease, by th
 hierarchy's own account?) and spares DCM (its concept subsumes Mondo's own DCM
 children). SNOMED `same_as` rows are never dropped.
 
+**v4-v6 (0137 launches 3-4).** The hierarchy test at threshold 3 also removed real
+diseases that SNOMED subdivides more finely than Mondo (Down syndrome, AKI, ITP, acne);
+v5 raised it to 10 and prints both sides of the line. Thrombophilia's DVT capture was a
+third kind: Mondo's own SNOMED xref of *thrombophilia due to thrombin defect* is SCTID
+111293003 *Venous thrombosis*. SNOMED xrefs are protected by design, so v6 excludes this
+one by name (`EXCLUDED_MONDO_XREFS`) and reports any other SNOMED xref that fails the
+test for review. Three mechanisms, one symptom: a disease attested by a concept broader
+than itself — (1) an ICD multi-map's context target, (2) an ICD xref's only target being
+broad, (3) a wrong Mondo SNOMED xref.
+
 ## Reproduce
 
 ```bash

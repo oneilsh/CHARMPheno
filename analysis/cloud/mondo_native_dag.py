@@ -145,7 +145,7 @@ MONDO_NATIVE_ROOT_CID = -1
 # the bundle cache key alongside this module's source hash: the hash is the
 # automatic guard (nobody has to remember), the version string is the citable
 # record of WHICH construction a cached bundle was built under.
-MONDO_NATIVE_VERSION = "native-mondo-v5"   # v2: multi-map guard; v4/v5: hierarchy-consistency test, threshold 3 -> 10 (exp 0137; v3 anchor test withdrawn)
+MONDO_NATIVE_VERSION = "native-mondo-v6"   # v2: multi-map guard; v4/v5: hierarchy-consistency test, threshold 3 -> 10; v6: curated xref exclusions (exp 0137; v3 anchor test withdrawn)
 
 _MONDO_PREFIX = "MONDO:"
 
@@ -369,6 +369,28 @@ def induced_hasse_parents(kept_ids, parent_adj) -> dict:
     return out
 
 
+# Mondo `same_as` cross-references found WRONG on inspection (exp 0137 audit), as
+# (mondo_id, vocabulary_id, concept_code). Dropped before mapping; each one is a
+# Mondo curation issue to report upstream. Kept short and explicit on purpose: the
+# hierarchy test REPORTS suspect SNOMED xrefs (`snomed_suspects`) but never drops
+# them, so an entry here is a reviewed decision, not an automatic one.
+EXCLUDED_MONDO_XREFS = frozenset({
+    # 'thrombophilia due to thrombin defect' -> SCTID 111293003 'Venous thrombosis':
+    # every DVT code climbed to it and rolled up to thrombophilia (162 codes, 106 DVT).
+    ("MONDO:0008559", "SNOMED", "111293003"),
+})
+
+
+def drop_excluded_xrefs(same_as_df, excluded=EXCLUDED_MONDO_XREFS):
+    """`same_as_df` (`id`/`mondo_id`, `concept_code`, `vocabulary_id`) minus the
+    curated wrong cross-references. Returns `(kept_df, n_dropped)`. Pure pandas."""
+    idc = "mondo_id" if "mondo_id" in same_as_df.columns else "id"
+    bad = [(str(m), str(v), str(c)) in excluded for m, v, c in
+           zip(same_as_df[idc], same_as_df["vocabulary_id"], same_as_df["concept_code"])]
+    n = sum(bad)
+    return same_as_df[[not b for b in bad]], n
+
+
 def overbroad_exact_rows(rows, subsumed_terms, parent_adj, *, min_unrelated=10,
                          near_floor=3):
     """HIERARCHY-CONSISTENCY test on exact-map rows (exp 0137, native-mondo-v4). Pure.
@@ -410,15 +432,22 @@ def overbroad_exact_rows(rows, subsumed_terms, parent_adj, *, min_unrelated=10,
         return anc in memo[child]
 
     kept, dropped, counts = [], [], {}
+    snomed_suspects = {}
     for r in rows:
         m, v, _sc, tc = r
+        n_un = sum(1 for u in subsumed_terms.get(tc, ()) if u != m and not _is_desc(u, m))
         if v == "SNOMED":
+            # Mondo's declared equivalent: never dropped, but a failing one is
+            # REPORTED (thrombophilia due to thrombin defect -> Venous thrombosis was
+            # exactly this) for review into EXCLUDED_MONDO_XREFS.
+            if n_un >= int(min_unrelated):
+                snomed_suspects[(m, tc)] = n_un
             kept.append(r)
             continue
-        n_un = sum(1 for u in subsumed_terms.get(tc, ()) if u != m and not _is_desc(u, m))
         if n_un >= int(near_floor):
             counts[(m, tc)] = n_un
         (dropped if n_un >= int(min_unrelated) else kept).append(r)
+    overbroad_exact_rows.snomed_suspects = snomed_suspects
     return kept, dropped, counts
 
 
@@ -756,6 +785,12 @@ def format_native_powering_report(stats) -> str:
                 f"{nm} ({k})" for nm, k in stats.get("overbroad_near_kept") or [])
               if stats.get("overbroad_near_kept") else "")
            if "n_overbroad_dropped" in stats else "")
+        + (f"; curated xref exclusions applied: {stats['n_xref_excluded']} row(s)"
+           if "n_xref_excluded" in stats else "")
+        + ("\n[mondo-native] SUSPECT Mondo SNOMED xrefs (kept; review for "
+           "EXCLUDED_MONDO_XREFS): " + " · ".join(
+               f"{m} -> {c} (unrelated {n})" for m, c, n in stats["snomed_xref_suspects"])
+           if stats.get("snomed_xref_suspects") else "")
         + ("\n" + format_code_map_audit(stats["code_map_audit"])
            if stats.get("code_map_audit") else ""))
 
@@ -836,6 +871,7 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
                   .toPandas())
     same_as = seed_source_xrefs(mondo_edges_df=edges_df, mondo_nodes_df=nodes_df,
                                 restrict_mondo_ids=all_ids)
+    same_as, n_xref_excluded = drop_excluded_xrefs(same_as)
     src = same_as.merge(concept_pd, on=["concept_code", "vocabulary_id"], how="inner")
     source_ids = sorted({int(x) for x in src["concept_id"]})
     src_sdf = spark.createDataFrame(pd.DataFrame({"concept_id_1": source_ids}))
@@ -846,6 +882,9 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
     mapping = build_mondo_to_omop(
         mondo_edges_df=edges_df, mondo_nodes_df=nodes_df,
         concept_df=concept_pd, concept_relationship_df=cr_pd, restrict_mondo_ids=None)
+    # `build_mondo_to_omop` re-derives same_as from the nodes, so the curated
+    # exclusions are applied to its output rows too (source vocabulary + code).
+    mapping, n_map_excluded = drop_excluded_xrefs(mapping)
 
     child_adj = _disease_child_adjacency(edges_df, nodes_df)
     parent_adj = parent_adjacency(child_adj)
@@ -861,6 +900,7 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
     overbroad_dropped: list = []
     overbroad_top: list = []
     overbroad_near: list = []
+    snomed_suspects: list = []
     if cand_tg:
         t2m = spark.createDataFrame(pd.DataFrame(
             {"d_cid": [int(x) for x in mapping["standard_concept_id"]],
@@ -881,6 +921,11 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
                          mapping["concept_id"], mapping["standard_concept_id"]))
         _kept, overbroad_dropped, _ob_counts = overbroad_exact_rows(
             _rows, subsumed, parent_adj)
+        _sus = getattr(overbroad_exact_rows, "snomed_suspects", {}) or {}
+        snomed_suspects = sorted(
+            ((label_of.get(m, m), str(dict(zip(concept_pd["concept_id"].astype(int),
+                                               concept_pd["concept_name"])).get(t, t)), n)
+             for (m, t), n in _sus.items()), key=lambda x: -x[2])[:12]
         _cname = dict(zip(concept_pd["concept_id"].astype(int), concept_pd["concept_name"]))
         _by_t: dict = {}
         for (m, t), n in _ob_counts.items():
@@ -1038,6 +1083,8 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
                  n_overbroad_terms=len({m for m, *_ in overbroad_dropped}),
                  overbroad_dropped_examples=overbroad_top,
                  overbroad_near_kept=overbroad_near,
+                 n_xref_excluded=int(n_map_excluded),
+                 snomed_xref_suspects=snomed_suspects,
                  code_map_audit=code_map_audit(
                      rows, {c for c, _ in std_pairs},
                      names={mondo_cid(t): label_of.get(t, t) for t in final_terms}))
