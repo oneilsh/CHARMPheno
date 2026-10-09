@@ -122,7 +122,7 @@ nohup bash -c '
 Audit, as soon as `code_map.tsv` appears in the run dir (right after the bundle is built):
 
 ```bash
-grep -E "multi-map guard|attestation audit|label set|powering:" "$RUN"/sweep_log.md
+grep -E "multi-map guard|anchor test|attestation audit|label set|powering:" "$RUN"/sweep_log.md
 python3 - "$RUN" <<'PY'
 import csv, json, sys, collections
 run = sys.argv[1]
@@ -134,5 +134,13 @@ PY
 ```
 
 ## Run log
+
+**2026-10-09 — launch 1 (native-mondo-v2) stopped at the audit.** The multi-map guard
+dropped 8 links over 2 concepts (Disorder of pregnancy ×5, Finding related to pregnancy
+×3); peripartum CM and preeclampsia left the most-attested list. But the audit showed
+single-target captures the guard cannot see: tularemia (GI-tract disorders), thrombophilia
+(every DVT code), osteochondrosis (spine fractures, scoliosis). Relaunched on
+native-mondo-v3 (anchor test; insight 0097 addendum); the audit line gains `anchor test:
+N uncorroborated non-SNOMED target(s) dropped over M term(s): <names>`.
 
 ## Results

@@ -67,6 +67,18 @@
   label-space change should be followed by the per-node attesting-code audit before
   any topic is read.
 
+## Addendum (2026-10-09, 0137 launch-1 audit): single broad targets, and the anchor test
+
+The v2 guard fired narrowly (8 links, 2 concepts: Disorder of pregnancy, Finding related
+to pregnancy) and the pregnancy captures were gone, but the audit's most-attested list
+exposed the same defect WITHOUT a multi-map: tularemia's 93 codes were "Disorder of
+gastrointestinal tract" and its subtree, thrombophilia's 162 were every deep-vein-
+thrombosis code, osteochondrosis's 211 were spine fractures and scoliosis — an ICD xref
+whose ONLY `Maps to` target is a broad concept, filled by the climb. v3 adds main's
+anchor test (`anchor_corroborated_rows`): for a term with a SNOMED `same_as`, a target
+from another vocabulary is kept only if it is that concept, its descendant, or agreed
+by >= 2 of the term's source codes. 0137 launch 1 was stopped for it.
+
 ## Reproduce
 
 ```bash
