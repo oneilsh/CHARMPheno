@@ -145,7 +145,7 @@ MONDO_NATIVE_ROOT_CID = -1
 # the bundle cache key alongside this module's source hash: the hash is the
 # automatic guard (nobody has to remember), the version string is the citable
 # record of WHICH construction a cached bundle was built under.
-MONDO_NATIVE_VERSION = "native-mondo-v2"   # v2: multi-map ancestor targets dropped (exp 0136)
+MONDO_NATIVE_VERSION = "native-mondo-v3"   # v2: multi-map guard; v3: SNOMED anchor test (exp 0137)
 
 _MONDO_PREFIX = "MONDO:"
 
@@ -367,6 +367,50 @@ def induced_hasse_parents(kept_ids, parent_adj) -> dict:
             p for p in parents
             if not any(p in strict_ancestors(q) for q in parents if q != p))
     return out
+
+
+def anchor_corroborated_rows(rows, anchor_desc_pairs):
+    """Main's ANCHOR TEST (its insight 0076): keep a non-SNOMED-derived exact
+    target only when the term's own SNOMED `same_as` corroborates it. Pure.
+
+    `rows` are `(mondo_id, source_vocabulary_id, source_concept_id,
+    standard_concept_id)` exact-map rows. A term's ANCHORS are the standard
+    concepts its SNOMED `same_as` rows reach. For a term WITH anchors, a row from
+    another vocabulary (ICD10CM, MeSH) is kept iff its target is an anchor, a
+    descendant of an anchor (`anchor_desc_pairs`: `(anchor, descendant)` strict
+    concept_ancestor pairs), or is reached by >= 2 distinct source codes of the
+    term. A term with no SNOMED anchor keeps all its rows (nothing to corroborate
+    against; the multi-map guard still applies). Returns `(kept_rows, dropped_rows)`.
+
+    Why (exp 0137 audit, 2026-10-09): a term's ICD code can map, alone, to a
+    concept far broader than the disease, and the climb then fills that concept
+    with unrelated codes. Tularemia's attesting codes were "Disorder of
+    gastrointestinal tract" and its subtree (GI bleeding, Crohn's fistulas, anal
+    abscess); thrombophilia's were every deep-vein-thrombosis code; osteochondrosis's
+    were spine fractures and scoliosis. None of those is a multi-map, so the
+    multi-map guard could not see them; each is an ICD-derived target that the
+    term's own SNOMED concept does not cover."""
+    rows = [(str(m), str(v), int(sc), int(tc)) for m, v, sc, tc in rows]
+    anchors: dict = {}
+    for m, v, _sc, tc in rows:
+        if v == "SNOMED":
+            anchors.setdefault(m, set()).add(tc)
+    below: dict = {}
+    for a, d in anchor_desc_pairs:
+        below.setdefault(int(d), set()).add(int(a))
+    n_src: dict = {}
+    for m, _v, sc, tc in rows:
+        n_src.setdefault((m, tc), set()).add(sc)
+    kept, dropped = [], []
+    for r in rows:
+        m, v, sc, tc = r
+        an = anchors.get(m)
+        if (v == "SNOMED" or not an or tc in an or (below.get(tc, set()) & an)
+                or len(n_src[(m, tc)]) >= 2):
+            kept.append(r)
+        else:
+            dropped.append(r)
+    return kept, dropped
 
 
 def drop_ancestor_multimap_targets(source_targets, ancestor_pairs, *,
@@ -694,6 +738,12 @@ def format_native_powering_report(stats) -> str:
                                 stats.get("multimap_dropped_examples") or [])
               if stats.get("multimap_dropped_examples") else "")
            if "n_multimap_sources" in stats else "")
+        + (f"; anchor test: {stats['n_anchor_dropped']} uncorroborated non-SNOMED "
+           f"target(s) dropped over {stats['n_anchor_terms']} term(s)"
+           + (": " + " · ".join(f"{nm} x{k}" for nm, k in
+                                stats.get("anchor_dropped_examples") or [])
+              if stats.get("anchor_dropped_examples") else "")
+           if "n_anchor_dropped" in stats else "")
         + ("\n" + format_code_map_audit(stats["code_map_audit"])
            if stats.get("code_map_audit") else ""))
 
@@ -788,6 +838,31 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
     child_adj = _disease_child_adjacency(edges_df, nodes_df)
     parent_adj = parent_adjacency(child_adj)
     label_of = {str(i): str(n) for i, n in zip(nodes_df["id"], nodes_df["name"])}
+
+    # --- 1a. anchor test (v3): non-SNOMED exact targets must be corroborated by
+    # the term's own SNOMED same_as (`anchor_corroborated_rows`).
+    _snomed = mapping["vocabulary_id"] == "SNOMED"
+    anchor_ids = sorted({int(x) for x in mapping.loc[_snomed, "standard_concept_id"]})
+    cand_ids = sorted({int(x) for x in mapping.loc[~_snomed, "standard_concept_id"]})
+    anchor_dropped: list = []
+    if anchor_ids and cand_ids:
+        a_sdf = broadcast(spark.createDataFrame(pd.DataFrame({"anc": anchor_ids})))
+        c_sdf = broadcast(spark.createDataFrame(pd.DataFrame({"cand": cand_ids})))
+        ad_pd = (_read_bq(spark, cdr, billing, "concept_ancestor")
+                 .where(F.col("min_levels_of_separation") >= 1)
+                 .join(a_sdf, F.col("ancestor_concept_id") == F.col("anc"), "inner")
+                 .join(c_sdf, F.col("descendant_concept_id") == F.col("cand"), "inner")
+                 .select("ancestor_concept_id", "descendant_concept_id")
+                 .distinct().toPandas())
+        _rows = list(zip(mapping["mondo_id"], mapping["vocabulary_id"],
+                         mapping["concept_id"], mapping["standard_concept_id"]))
+        _kept, anchor_dropped = anchor_corroborated_rows(
+            _rows, zip(ad_pd["ancestor_concept_id"], ad_pd["descendant_concept_id"]))
+        if anchor_dropped:
+            _bad = {(m, int(sc), int(tc)) for m, _v, sc, tc in anchor_dropped}
+            mapping = mapping[[(str(m), int(sc), int(tc)) not in _bad for m, sc, tc in
+                               zip(mapping["mondo_id"], mapping["concept_id"],
+                                   mapping["standard_concept_id"])]]
 
     # --- 1b. multi-map guard (v2): per source code, drop 'Maps to' targets that
     # are is-a ancestors of another target (`drop_ancestor_multimap_targets`).
@@ -928,6 +1003,10 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
                  n_multimap_dropped=len(multimap_dropped),
                  multimap_dropped_targets=sorted({t for _, t in multimap_dropped}),
                  multimap_dropped_examples=_dropped_examples(multimap_dropped, concept_pd),
+                 n_anchor_dropped=len(anchor_dropped),
+                 n_anchor_terms=len({m for m, *_ in anchor_dropped}),
+                 anchor_dropped_examples=_dropped_examples(
+                     [(sc, tc) for _m, _v, sc, tc in anchor_dropped], concept_pd),
                  code_map_audit=code_map_audit(
                      rows, {c for c, _ in std_pairs},
                      names={mondo_cid(t): label_of.get(t, t) for t in final_terms}))
