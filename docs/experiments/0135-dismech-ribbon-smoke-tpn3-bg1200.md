@@ -310,6 +310,55 @@ so the resolver now measures coverage of the EXCESS over the per-document floor
 (`excess=True`, commit after `76e9212e`); the top-m set is unchanged. Launch 3 was
 already running and stays dense; the excess rule applies from the next readout on.
 
+## Results (launch 3, hierarchical readout of the launch-2 fit; 2026-10-09)
+
+Readout DAG 702 heads (391 label + 310 ancestor; one pass, then the stacked pass);
+ridge 100, dense θ (the mass rule fell back to full K before the excess fix); 25.5M
+observed cells; stacked solve 372/688 converged at the 200-iteration cap (256 gtol, 117
+stalled, max|grad| 106). 54,753 test persons, foreground prevalence 0.819 (the ribbon
+covers most of the population, so detection AP is not comparable with the CV branch's).
+
+| read | 0135 ribbon, hierarchical | 0134 CV blend (reference) |
+|---|--:|--:|
+| flat head, within-cohort macro AUC / AP | 0.8012 / 0.517 (559 heads) | 0.7823 / 0.512 (193) |
+| root head alone (= stacked detection) | **0.8206** / 0.954 | 0.8113 / 0.890 |
+| flat detection, max over heads | 0.7038 | — |
+| stacked within-cohort, paired vs flat | −0.042 (95/464) | −0.036 |
+| stacked de-novo, paired vs flat | **+0.074 (572/14)**, d1 +0.009 → d7 +0.150 | +0.117 |
+| marginal ECE, stacked / flat, by depth | 0.002–0.010 / 0.010–0.474 | 0.003–0.016 (stacked) |
+
+**Read.**
+
+- **The ribbon decodes at least as well as the best nested branch.** Within-cohort
+  0.801 over 559 heads (now a sibling contrast under the nearest grouping ancestor, so
+  not the same question as 0134's nested cohorts) and the best root head of the series,
+  0.821. Nothing was lost by taking the hierarchy out of the fit (pre-registered read
+  (a)/(c), pending the shared-node de-novo pairing below).
+- **The stacked product behaves exactly as on the CV branch**: it pays a within-cohort
+  tax that grows with depth (−0.013 at d2 to −0.15 at d7: the ancestor factors are
+  near-constant inside a cohort and only add noise) and wins de novo by a margin that
+  grows with depth (+0.074 overall, 572 of 587 heads up), with marginal calibration two
+  orders of magnitude better than the flat heads at depth ≥ 4. The flat heads answer
+  "which sibling?", the product answers "does this patient have it?"; both are kept.
+- **The de-novo gain is smaller than 0134's (+0.074 vs +0.117).** Expected: under the
+  Mondo readout DAG a flat head's cohort is already a fair fraction of the foreground
+  (multimorbidity; ~20% of heads observed per document), so the flat head is closer to
+  a marginal than a nested CV head was.
+- **Detection is the root head.** Max-over-heads (0.704) is not a detector; the stacked
+  max equals the root head alone (0.8210 vs 0.8206), as on every run since 0131.
+
+**Still to pull** (from `results_readout_stacked_mass99.json`): the de-novo macro
+AUC/AP lines, and the shared-node pairing against 0134 by Mondo id (the `--readout-auc`
+compare paired by ENGINE id until 2026-10-09, which is wrong across label spaces; it
+now pairs by node concept id and reads nested blocks):
+
+```bash
+cd ~/repos/CHARMPheno && git fetch origin claude/dismech-ribbon && git checkout claude/dismech-ribbon && git pull --ff-only
+RUN=/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs/0135-dismech-ribbon-smoke-tpn3-bg1200
+grep -hE "flat sigma|stacked P_stack" "$RUN"/readout_log.md | tail -2
+make -C analysis/cloud inspect-topics ID=135 COMPARE=134 INSPECT_ARGS="--readout-auc --results-file results_readout_stacked_mass99.json --compare-results-file results_readout_stacked.json --readout-label gated_pc_stacked.marginal_ranking.stacked --grep 'cardiomyopathy|Ehlers|Marfan|heart failure'"
+```
+
 ## Results (launch 2, flat DAG, re-cut ribbon; digest + census 2026-10-08)
 
 **The fit: flat, healthy.** `K=2373 (1200 bg + 1173 node, tpn=3) · C=392` — **391 powered

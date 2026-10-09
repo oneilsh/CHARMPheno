@@ -885,3 +885,43 @@ def test_census_cli_own_codes_auto_resolves_the_run_dir_file(tmp_path, monkeypat
     (tmp_path / "code_map.tsv").write_text("std_cid\tnode_cid\n500\t1001\n")
     it.main()
     assert "own-code rule ON" in (tmp_path / "profile_census.md").read_text()
+
+
+# --------------------------------------------------------------------------- #
+# cross-label-space compare (0135 ribbon vs 0134 CV branch): pair by node cid   #
+# --------------------------------------------------------------------------- #
+def _cid_run(d, int2cid, results_name, payload):
+    d.mkdir()
+    (d / "manifest.json").write_text(json.dumps({
+        "C": len(int2cid), "corpus_manifest": {
+            "int2cid": {str(e): c for e, c in int2cid.items()},
+            "name_by_id": {str(c): f"n{c}" for c in int2cid.values()}}}))
+    (d / results_name).write_text(json.dumps(payload))
+    return d
+
+
+def test_auc_slice_pairs_runs_by_node_cid_and_reads_nested_blocks(tmp_path):
+    # ribbon: engine 1 -> DCM (5021), 2 -> EDS (20066); ancestor head 3 -> CM (4994)
+    rib = _cid_run(tmp_path / "rib", {0: -1, 1: 5021, 2: 20066},
+                   "results_readout_stacked_mass99.json",
+                   {"gated_pc_stacked": {"marginal_ranking": {"stacked": {"per_node": {
+                       "1": {"auc": 0.90}, "2": {"auc": 0.80}, "3": {"auc": 0.70}}}}}})
+    (rib / "readout_dag.json").write_text(json.dumps({"int2cid": {"3": 4994}}))
+    # CV branch: DIFFERENT engine ids for the same diseases; no EDS
+    cv = _cid_run(tmp_path / "cv", {0: -1, 1: 4994, 2: 99, 3: 5021},
+                  "results_readout_stacked.json",
+                  {"gated_pc_stacked": {"marginal_ranking": {"stacked": {"per_node": {
+                      "1": {"auc": 0.60}, "2": {"auc": 0.99}, "3": {"auc": 0.85}}}}}})
+    path = "gated_pc_stacked.marginal_ranking.stacked"
+    rep = it.build_auc_slice(rib, arm=path,
+                             results_name="results_readout_stacked_mass99.json",
+                             compare_dir=str(cv),
+                             compare_results_name="results_readout_stacked.json")
+    # DCM pairs with CV engine 3 (+0.05), CM with CV engine 1 (+0.10); EDS unpaired
+    assert "2 shared scored node(s) by node concept id" in rep
+    assert "median dAUC=+0.1000" in rep or "median dAUC=+0.0500" in rep
+    assert "mean=+0.0750" in rep
+    assert "label nodes: 2 scored" in rep and "ancestor heads: 1 scored" in rep
+    with pytest.raises(SystemExit):
+        it.build_auc_slice(rib, arm="gated_pc_stacked.nope",
+                           results_name="results_readout_stacked_mass99.json")
