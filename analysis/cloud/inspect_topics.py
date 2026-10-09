@@ -1139,10 +1139,16 @@ def classify_block_topics(block_topics, lams, sh, n_bg, *, starved_frac=0.5,
         vecs[t] = v
         c_bg = float(np.max(bg_mat @ v)) if n_bg else 0.0
         bgc[t] = c_bg
-        if own is not None and not (set(_top_idx(lams[0][t], top_m)) & own):
-            kinds[t] = "stratum"; sigc[t] = float("nan")
-            continue
-        if c_bg >= stratum_cos:
+        if own is not None:
+            # Own-code identity DECIDES (0136 2026-10-09): a topic carrying the
+            # node's own codes is the node's, even when a background topic looks
+            # like it (atrial fibrillation's own-code topic sits at bg cos 0.81 —
+            # the background duplicated the disease, not the reverse). The cosine
+            # is then only the reported flag.
+            if not (set(_top_idx(lams[0][t], top_m)) & own):
+                kinds[t] = "stratum"; sigc[t] = float("nan")
+                continue
+        elif c_bg >= stratum_cos:
             kinds[t] = "stratum"; sigc[t] = float("nan")
             continue
         c_sig = max((float(np.dot(vecs[s_], v)) for s_ in sigs), default=0.0)
@@ -1240,7 +1246,11 @@ def build_profile_census(run_dir, *, bundle_meta_path=None, vocab_path=None,
         rows[e] = classify_block_topics(
             blk, lams, sh, n_bg, starved_frac=starved_frac,
             stratum_cos=stratum_cos, dup_cos=dup_cos, bg_vecs=bg_vecs,
-            own_idx=(own_idx.get(e, set()) if own_idx is not None else None),
+            # A node with NO own code in the condition vocab cannot be judged by
+            # identity (its attesting codes fell under min_df / the vocab cap):
+            # it falls back to the cosine rule and is reported apart, so it does
+            # not read as "0 profiles".
+            own_idx=(own_idx.get(e) or None) if own_idx is not None else None,
             top_m=top_m)
 
     kinds_all = [k for r in rows.values() for _, k, _, _ in r]
@@ -1252,6 +1262,12 @@ def build_profile_census(run_dir, *, bundle_meta_path=None, vocab_path=None,
     hist = [sum(1 for v in n_prof.values() if v == i) for i in range(tpn + 1)]
     vals = sorted(n_prof.values())
     p90 = vals[min(len(vals) - 1, int(0.9 * len(vals)))] if vals else 0
+    # Under the own-code rule the verdict is read on the nodes the rule can judge.
+    decidable = ([e for e in rows if own_idx.get(e)] if own_idx is not None
+                 else list(rows))
+    hist_d = [sum(1 for e in decidable if n_prof[e] == i) for i in range(tpn + 1)]
+    vals_d = sorted(n_prof[e] for e in decidable)
+    p90_d = vals_d[min(len(vals_d) - 1, int(0.9 * len(vals_d)))] if vals_d else 0
 
     L = []
     w = L.append
@@ -1269,6 +1285,13 @@ def build_profile_census(run_dir, *, bundle_meta_path=None, vocab_path=None,
         f"{i}: {hist[i]} ({100 * hist[i] / max(len(rows), 1):.0f}%)"
         for i in range(tpn + 1))
       + f" · median {vals[len(vals) // 2] if vals else 0} · p90 {p90}")
+    if own_idx is not None:
+        w(f"own-code-decidable nodes ({len(decidable)}): n_profiles " + " · ".join(
+            f"{i}: {hist_d[i]} ({100 * hist_d[i] / max(len(decidable), 1):.0f}%)"
+            for i in range(tpn + 1))
+          + f" · median {vals_d[len(vals_d) // 2] if vals_d else 0} · p90 {p90_d}"
+          + f"; {len(rows) - len(decidable)} node(s) with no own code in the vocab "
+            "fall back to the cosine rule")
     if depths:
         by_d = {}
         for e, v in n_prof.items():
@@ -1337,13 +1360,15 @@ def build_profile_census(run_dir, *, bundle_meta_path=None, vocab_path=None,
         if not matched:
             w("  (no node label matched)")
         w("")
-    if p90 < tpn:
-        w(f"verdict: the ceiling tpn={tpn} is NOT binding (p90 n_profiles = {p90}); "
-          f"tpn_max can drop to {max(p90, 1)}.")
+    scope = "own-code-decidable " if own_idx is not None else ""
+    n_scope = len(decidable)
+    if p90_d < tpn:
+        w(f"verdict: the ceiling tpn={tpn} is NOT binding ({scope}p90 n_profiles = "
+          f"{p90_d}); tpn_max can drop to {max(p90_d, 1)}.")
     else:
-        w(f"verdict: the ceiling tpn={tpn} IS binding ({hist[tpn]} node(s) at the "
-          f"ceiling, {100 * hist[tpn] / max(len(rows), 1):.0f}%); raise tpn_max "
-          f"before the record run.")
+        w(f"verdict: the ceiling tpn={tpn} IS binding ({hist_d[tpn]} {scope}node(s) "
+          f"at the ceiling, {100 * hist_d[tpn] / max(n_scope, 1):.0f}%); raise "
+          f"tpn_max before the record run.")
     return "\n".join(L).rstrip() + "\n"
 
 
