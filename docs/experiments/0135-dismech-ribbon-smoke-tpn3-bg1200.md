@@ -347,17 +347,25 @@ covers most of the population, so detection AP is not comparable with the CV bra
 - **Detection is the root head.** Max-over-heads (0.704) is not a detector; the stacked
   max equals the root head alone (0.8210 vs 0.8206), as on every run since 0131.
 
-**Still to pull** (from `results_readout_stacked_mass99.json`): the de-novo macro
-AUC/AP lines, and the shared-node pairing against 0134 by Mondo id (the `--readout-auc`
-compare paired by ENGINE id until 2026-10-09, which is wrong across label spaces; it
-now pairs by node concept id and reads nested blocks):
+**De novo, and the pre-registered comparison with 0134 (2026-10-09).** Stacked de-novo
+macro AUC 0.831 / AP 0.291 over 587 heads (label nodes median 0.849 over 286; ancestor
+heads 0.834 over 301). Paired by Mondo id against 0134's stacked de novo on the **74
+shared nodes**: median −0.014, mean −0.017, 23 up / 51 down. Named nodes (de novo): heart
+failure 0.902, EDS 0.906, hEDS 0.948, peripartum CM 0.893, DCM 0.878, HCM 0.858,
+Tako-tsubo 0.755, restrictive CM 0.738.
 
-```bash
-cd ~/repos/CHARMPheno && git fetch origin claude/dismech-ribbon && git checkout claude/dismech-ribbon && git pull --ff-only
-RUN=/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs/0135-dismech-ribbon-smoke-tpn3-bg1200
-grep -hE "flat sigma|stacked P_stack" "$RUN"/readout_log.md | tail -2
-make -C analysis/cloud inspect-topics ID=135 COMPARE=134 INSPECT_ARGS="--readout-auc --results-file results_readout_stacked_mass99.json --compare-results-file results_readout_stacked.json --readout-label gated_pc_stacked.marginal_ranking.stacked --grep 'cardiomyopathy|Ehlers|Marfan|heart failure'"
-```
+**Verdict: read (b), mildly.** The flat ribbon decodes the shared cardiovascular nodes
+about 0.015 below the nested CV branch, just outside the ±0.01 band. Confounded in the
+ribbon's disfavour in three ways the comparison cannot separate: 0134 spent its whole
+node budget on ~300 CV nodes (the ribbon spreads 2,373 topics over 391 diseases from
+every system), 0134's closure product multiplies CV-specific ancestor heads, and this
+read is dense θ at `tpn` 3. Its size is that of every topic-side difference in
+0123–0134 (insight 0095: within ~0.02) and a fifth of the decoder-side gain the stacked
+product delivers on either run. Against it the ribbon buys the legibility the nested
+branches never delivered (DCM's own block; insight 0096) and whole-ribbon coverage in
+one fit. **Proceed to 0137 on the ribbon**; `tpn_max` 5 and the excess-mass top-m are
+the two changes there that could close part of the gap, and the shared-node pairing is
+re-read on 0137.
 
 ## Results (launch 2, flat DAG, re-cut ribbon; digest + census 2026-10-08)
 
