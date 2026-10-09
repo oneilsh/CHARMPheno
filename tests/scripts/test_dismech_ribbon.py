@@ -350,3 +350,25 @@ def test_multimap_guard_drops_the_broad_target_and_keeps_the_disorder():
         min_positives=100, min_support_kept=100, n_codes_attesting=1,
         n_multimap_sources=2, n_multimap_dropped=1, multimap_dropped_targets=[PREG]))
     assert "multi-map guard: 2 source code(s)" in rep and "1 ancestor target(s)" in rep
+
+
+def test_multimap_guard_fan_in_drops_a_context_concept_shared_by_unrelated_terms():
+    """Main's insight 0076: 444094 is the exact concept of peripartum CM AND
+    preeclampsia (unrelated in Mondo) — dropped even when SNOMED does not place it
+    above the disorder. A concept shared by NESTED terms is kept, and a 1:1 map is
+    never touched."""
+    from mondo_native_dag import drop_ancestor_multimap_targets
+    O903, PPCM, PREG, O14, PREE = 1, 4037495, 444094, 2, 439393
+    PCM, PRE, HYP = "MONDO:0018920", "MONDO:0005081", "MONDO:0001134"
+    padj = {PRE: [HYP], PCM: []}
+    src = {O903: {PPCM, PREG}, O14: {PREE, PREG}, 3: {PREG}}
+    terms = {PPCM: {PCM}, PREG: {PCM, PRE}, PREE: {PRE}}
+    kept, dropped = drop_ancestor_multimap_targets(
+        src, [], terms_of_target=terms, parent_adj=padj)       # no SNOMED ancestry
+    assert kept[O903] == {PPCM} and kept[O14] == {PREE}
+    assert kept[3] == {PREG}                                     # 1:1 map untouched
+    # shared only by nested terms (preeclampsia under hypertensive disorder): kept
+    kept2, _ = drop_ancestor_multimap_targets(
+        {O14: {PREE, PREG}}, [], terms_of_target={PREG: {PRE, HYP}, PREE: {PRE}},
+        parent_adj=padj)
+    assert kept2[O14] == {PREE, PREG}

@@ -369,7 +369,8 @@ def induced_hasse_parents(kept_ids, parent_adj) -> dict:
     return out
 
 
-def drop_ancestor_multimap_targets(source_targets, ancestor_pairs):
+def drop_ancestor_multimap_targets(source_targets, ancestor_pairs, *,
+                                   terms_of_target=None, parent_adj=None):
     """Drop, per SOURCE code, every 'Maps to' target that is an is-a ancestor of
     another target of the same source code. Pure.
 
@@ -389,14 +390,39 @@ def drop_ancestor_multimap_targets(source_targets, ancestor_pairs):
     one an is-a ancestor of its sibling target; the specific one is the
     disorder the source code names, so keeping only the most specific targets of
     each source code removes the context finding and keeps the disorder. A source
-    code whose targets are incomparable keeps them all."""
+    code whose targets are incomparable keeps them all.
+
+    FAN-IN (main's insight 0076, 2026-08-24, which found this same O90.3 case in the
+    usage export): `terms_of_target` (`{standard_concept_id: {mondo_id}}` over ALL
+    exact pairs) plus Mondo's `parent_adj` add a second test that does not depend on
+    SNOMED placing the context finding above the disorder. A multi-map target that is
+    the exact concept of two or more Mondo terms neither of which is an is-a ancestor
+    of the other (444094 <- peripartum CM, preeclampsia, severe pre-eclampsia) is a
+    shared context concept, not any one disease's, and is dropped from that source.
+    Applied ONLY to targets of multi-target source codes: a 1:1 map is never touched."""
     anc = {}
     for a, d in ancestor_pairs:
         anc.setdefault(int(d), set()).add(int(a))
+    shared = set()
+    if terms_of_target is not None and parent_adj is not None:
+        memo: dict = {}
+
+        def _anc(t):
+            if t not in memo:
+                memo[t] = ancestor_closure(t, parent_adj)
+            return memo[t]
+
+        for t, terms in terms_of_target.items():
+            ts = sorted(terms)
+            if any(b not in _anc(a) and a not in _anc(b)
+                   for i, a in enumerate(ts) for b in ts[i + 1:]):
+                shared.add(int(t))
     kept, dropped = {}, []
     for src, tg in source_targets.items():
         tg = {int(t) for t in tg}
         broad = {t for t in tg if any(t in anc.get(u, ()) for u in tg if u != t)}
+        if len(tg) > 1:
+            broad |= (tg & shared)
         kept[int(src)] = tg - broad
         dropped.extend((int(src), t) for t in sorted(broad))
     return kept, dropped
@@ -725,8 +751,12 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
                   .join(ms2, F.col("descendant_concept_id") == F.col("t2"), "inner")
                   .select("ancestor_concept_id", "descendant_concept_id")
                   .distinct().toPandas())
+        terms_of_tg: dict = {}
+        for tc, mid in zip(mapping["standard_concept_id"], mapping["mondo_id"]):
+            terms_of_tg.setdefault(int(tc), set()).add(str(mid))
         kept_tg, multimap_dropped = drop_ancestor_multimap_targets(
-            src_tg, zip(anc_pd["ancestor_concept_id"], anc_pd["descendant_concept_id"]))
+            src_tg, zip(anc_pd["ancestor_concept_id"], anc_pd["descendant_concept_id"]),
+            terms_of_target=terms_of_tg, parent_adj=parent_adj)
         if multimap_dropped:
             bad = set(multimap_dropped)
             keep_row = [(int(sc), int(tc)) not in bad for sc, tc in
