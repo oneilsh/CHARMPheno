@@ -1704,6 +1704,19 @@ _READOUT_MAX_ITER = 200
 _COVERAGE_MIN_FIT_BYTES = 64 * 1024 * 1024
 
 
+def write_bundle_meta(run_dir, bundle, name="bundle_meta.json"):
+    """`<run>/bundle_meta.json`: the bundle's cache meta (DAG bridge, names,
+    vocab maps, ledger — ids and ontology/concept names only, no patient data).
+    The HDFS cache dies with the cluster; the run dir does not, so
+    `inspect-topics` reads this first and never needs the bundle rebuilt to
+    render words, depths or own codes."""
+    from _case_finding_cache import _meta_dict
+    p = Path(run_dir) / name
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(_meta_dict(bundle)))
+    return p
+
+
 def write_code_map(run_dir, pairs, name="code_map.tsv"):
     """`<run>/code_map.tsv`: `std_cid\tnode_cid` rows of the native attestation
     map (WP-C'). Ids only — no patient data."""
@@ -4627,6 +4640,8 @@ def main() -> int:
                 args._domain_cols = [f"features_{i}" for i in range(len(vocab_maps))]
                 args._domain_names = ["condition", *extra_domains]
             _cprint(f"[driver]   ledger: {json.dumps(bundle.ledger)}", flush=True)
+            _bmp = write_bundle_meta(out, bundle)
+            _cprint(f"[driver]   wrote bundle meta -> {_bmp}", flush=True)
             _ncm = getattr(bundle, "native_code_map", None)
             if _ncm:
                 # WP-C': <run>/code_map.tsv (std concept id -> Mondo node cid), the

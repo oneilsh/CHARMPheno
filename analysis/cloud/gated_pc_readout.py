@@ -261,6 +261,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--doc-min-length", type=int, default=None,
                    help="Override doc_min_length for the cache key (older manifests "
                         "did not record it; the current driver does).")
+    p.add_argument("--bundle-only", action="store_true",
+                   help="Load (or rebuild) the bundle, write <run>/bundle_meta.json "
+                        "and <run>/code_map.tsv, and stop: no transform, no solve. "
+                        "What a fresh cluster runs before `inspect-topics` on an old "
+                        "run (~20 min on a MISS).")
     p.add_argument("--no-rebuild", action="store_true",
                    help="FAIL FAST on a cache miss instead of re-assembling the "
                         "corpus from the manifest's parameters. The old behaviour: "
@@ -1199,8 +1204,11 @@ def main(argv=None) -> int:
             else:
                 _cprint(f"[readout]   bundle loaded ({cache_uri}/{key}); C={C}",
                       flush=True)
+            from gated_pc_cloud import write_bundle_meta
+            _bmp = write_bundle_meta(run_dir, bundle)
+            _cprint(f"[readout]   wrote bundle meta -> {_bmp}", flush=True)
             _ncm = getattr(bundle, "native_code_map", None)
-            if _ncm and not (run_dir / "code_map.tsv").exists():
+            if _ncm and (args.bundle_only or not (run_dir / "code_map.tsv").exists()):
                 # WP-C': a fit from before the code map rode the bundle gets it
                 # on its first re-readout, so `--profile-census --own-codes`
                 # works on 0135 without a refit.
@@ -1208,6 +1216,11 @@ def main(argv=None) -> int:
                 _cmp = write_code_map(run_dir, _ncm)
                 _cprint(f"[readout]   wrote native code map ({len(_ncm)} pairs) -> "
                       f"{_cmp}", flush=True)
+
+        if args.bundle_only:
+            _cprint("[readout]   --bundle-only: bundle meta + code map written; "
+                  "stopping before the transform", flush=True)
+            return 0
 
         with _phase("reconstruct model + transform"):
             # The theta collect (driver mode) now happens inside run_readout, so the
