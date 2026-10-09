@@ -127,7 +127,7 @@ n_profiles over all nodes 0: 113 · 1: 75 · 2: 106 · 3: 97 (25% at the ceiling
   pregnancy (Finding related to pregnancy†, High risk pregnancy†, trimester codes†,
   Gestation period 8 weeks†): generic pregnancy concepts are in its code map, which is
   why its evidence (6e4) is four times DCM's. A code-map defect (a Mondo xref or a
-  climb landing), not a topic-model one; to trace before 0137 — see the 0135 run log.
+  climb landing), not a topic-model one; to trace before 0137 (list the node's own codes from `<run>/code_map.tsv` + `bundle_meta.json`).
 - Restrictive CM 0 profiles (unfed, ev ≤ 533) and Tako-tsubo 1 match their weak
   de-novo AUCs (0.738 / 0.755).
 
