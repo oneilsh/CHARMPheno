@@ -1509,8 +1509,39 @@ def build_profile_align(run_dir, profile_file, *, bundle_meta_path,
     return "\n".join(L) + "\n"
 
 
+def _results_per_node(res, arm, where):
+    """`arm` may be a dotted path into the results JSON, e.g.
+    `gated_pc_stacked.marginal_ranking.stacked` (the stacked block's DE-NOVO
+    per-node AUCs); the leaf must carry `per_node`."""
+    node = res
+    for part in str(arm).split("."):
+        if not isinstance(node, dict) or part not in node:
+            have = sorted(node) if isinstance(node, dict) else type(node).__name__
+            raise SystemExit(f"[inspect_topics] no {part!r} on the path {arm!r} in "
+                             f"{where} (has: {have}); run gated-pc-readout first")
+        node = node[part]
+    return node
+
+
+def _engine_to_cid(run_dir, manifest):
+    """Engine id -> node concept id for a run: the manifest's int2cid, plus the
+    readout DAG's ancestor heads (`readout_dag.json`, WP-B) when present.
+    Pairing two runs on this id instead of the engine id is what makes a
+    cross-label-space compare (ribbon vs a Mondo branch) correct: engine ids
+    are positions in each run's own sorted node list."""
+    _, int2cid = node_order(manifest)
+    out = {int(e): int(c) for e, c in int2cid.items()}
+    rp = Path(run_dir) / "readout_dag.json"
+    if rp.exists():
+        rd = json.loads(rp.read_text())
+        out.update({int(e): int(c) for e, c in rd.get("int2cid", {}).items()})
+    return out
+
+
 def build_auc_slice(run_dir, *, bundle_meta_path=None, grep_pattern=None,
-                    arm="gated_pc", credited_file=None, compare_dir=None):
+                    arm="gated_pc", credited_file=None, compare_dir=None,
+                    results_name="results_readout.json",
+                    compare_results_name=None, compare_arm=None):
     """Compact per-node readout-AUC slice from `results_readout.json`.
 
     Answers "which nodes does the readout rank WELL or BADLY?" off-cluster —
@@ -1530,14 +1561,14 @@ def build_auc_slice(run_dir, *, bundle_meta_path=None, grep_pattern=None,
     disclosed.
     """
     run_dir = Path(run_dir)
-    res = json.loads((run_dir / "results_readout.json").read_text())
-    if arm not in res:
-        raise SystemExit(f"[inspect_topics] no arm {arm!r} in results_readout.json "
-                         f"(has: {sorted(res)}); run gated-pc-readout first")
-    per_node = {int(k): v for k, v in (res[arm].get("per_node") or {}).items()}
+    res = json.loads((run_dir / results_name).read_text())
+    block = _results_per_node(res, arm, results_name)
+    per_node = {int(k): v for k, v in (block.get("per_node") or {}).items()
+                if v.get("auc") is not None}
     if not per_node:
         raise SystemExit(f"[inspect_topics] arm {arm!r} carries no per_node block")
     manifest = json.loads((run_dir / "manifest.json").read_text())
+    C_fit = int(manifest.get("C") or 0)
     nnames = node_names(manifest)
     depths = None
     meta = load_bundle_meta(bundle_meta_path) if bundle_meta_path else None
@@ -1554,13 +1585,20 @@ def build_auc_slice(run_dir, *, bundle_meta_path=None, grep_pattern=None,
         return " ".join(f"{k}={d[k]:.4f}" if isinstance(d.get(k), float)
                         else f"{k}={d.get(k)}" for k in keys if d.get(k) is not None)
 
-    L = [f"# readout AUC slice — {run_dir.name} · arm={arm} · "
+    L = [f"# readout AUC slice — {run_dir.name} · {results_name} · arm={arm} · "
          f"{len(vals)} scored node(s)"]
+    n_anc = sum(1 for c in aucs if C_fit and c >= C_fit)
+    if n_anc:
+        # WP-B: ids >= the fit's C are readout-DAG ANCESTOR heads, not label nodes.
+        lab = sorted(a for c, a in aucs.items() if c < C_fit)
+        anc = sorted(a for c, a in aucs.items() if c >= C_fit)
+        L.append(f"label nodes: {len(lab)} scored, median AUC={_q(lab, .5):.3f} · "
+                 f"ancestor heads: {len(anc)} scored, median AUC={_q(anc, .5):.3f}")
     # Recall the recorded macro lines too, so this one command recovers a
     # readout whose terminal output is gone (results_readout.json is durable
     # precisely for that — see run_readout's docstring).
-    rk = res[arm].get("ranking") or {}
-    det = res[arm].get("detection") or {}
+    rk = block.get("ranking") or block.get("macro") or {}
+    det = block.get("detection") or {}
     if rk:
         L.append(f"recorded macro ranking: {_fmt(rk, ('auc', 'ap', 'n_nodes'))}")
     if det:
@@ -1592,16 +1630,24 @@ def build_auc_slice(run_dir, *, bundle_meta_path=None, grep_pattern=None,
         # for a paired compare), so resolve leniently: a directory that
         # carries it is taken as-is; otherwise fall through to the normal
         # run-dir resolution (IDs / globs).
+        cname = compare_results_name or results_name
+        carm = compare_arm or arm
         cmp_dir = Path(compare_dir)
-        if not (cmp_dir.is_dir() and (cmp_dir / "results_readout.json").exists()):
+        if not (cmp_dir.is_dir() and (cmp_dir / cname).exists()):
             cmp_dir = Path(resolve_run_dir(str(compare_dir)))
-        res_b = json.loads((cmp_dir / "results_readout.json").read_text())
-        if arm not in res_b:
-            raise SystemExit(f"[inspect_topics] no arm {arm!r} in "
-                             f"{cmp_dir}/results_readout.json")
-        base = {int(k): float(v["auc"])
-                for k, v in (res_b[arm].get("per_node") or {}).items()}
-        shared = sorted(set(aucs) & set(base))
+        res_b = json.loads((cmp_dir / cname).read_text())
+        blk_b = _results_per_node(res_b, carm, f"{cmp_dir}/{cname}")
+        man_b = json.loads((cmp_dir / "manifest.json").read_text())
+        # Pair on the NODE CONCEPT ID, not the engine id (a position in each
+        # run's own node list): the two runs may have different label spaces.
+        e2c_a = _engine_to_cid(run_dir, manifest)
+        e2c_b = _engine_to_cid(cmp_dir, man_b)
+        base_c = {e2c_b[int(k)]: float(v["auc"])
+                  for k, v in (blk_b.get("per_node") or {}).items()
+                  if v.get("auc") is not None and int(k) in e2c_b and int(k) != 0}
+        base = {c: base_c[e2c_a[c]] for c in aucs
+                if c in e2c_a and c != 0 and e2c_a[c] in base_c}
+        shared = sorted(base)
         deltas = {c: aucs[c] - base[c] for c in shared}
 
         def _delta_line(tag, cs):
@@ -1615,8 +1661,8 @@ def build_auc_slice(run_dir, *, bundle_meta_path=None, grep_pattern=None,
                     f"(p25={_q(dv, .25):+.4f} p75={_q(dv, .75):+.4f}) "
                     f"up/down={up}/{dn}")
 
-        L.append(f"## paired vs {cmp_dir.name} — {len(shared)} shared "
-                 f"scored node(s) (this run minus baseline)")
+        L.append(f"## paired vs {cmp_dir.name} ({cname} · {carm}) — {len(shared)} "
+                 f"shared scored node(s) by node concept id (this run minus baseline)")
         L.append(_delta_line("all", shared))
         if credited is not None:
             L.append(_delta_line("credited", [c for c in shared
@@ -2270,6 +2316,16 @@ def main():
                          "probe's --emit-eta table): split the slice into "
                          "CREDITED vs UNCREDITED scored nodes — exp 0116's "
                          "internal-control read.")
+    ap.add_argument("--results-file", default="results_readout.json",
+                    help="(--readout-auc) the results JSON in the run dir, e.g. "
+                         "results_readout_stacked_mass99.json")
+    ap.add_argument("--compare-results-file", default=None,
+                    help="(--readout-auc) the baseline's results JSON (default: "
+                         "--results-file)")
+    ap.add_argument("--compare-arm", default=None,
+                    help="(--readout-auc) the baseline's arm path (default: the "
+                         "run's --readout-label). Dotted paths reach nested "
+                         "blocks, e.g. gated_pc_stacked.marginal_ranking.stacked")
     ap.add_argument("--compare-run", default=None, metavar="RUN_DIR",
                     help="(--readout-auc) baseline run dir (same arm in its "
                          "results_readout.json): add PAIRED per-node AUC "
@@ -2376,7 +2432,10 @@ def main():
         report = build_auc_slice(
             run_dir, bundle_meta_path=args.bundle_meta,
             grep_pattern=args.grep, arm=args.readout_label,
-            credited_file=args.credited_file, compare_dir=args.compare_run)
+            credited_file=args.credited_file, compare_dir=args.compare_run,
+            results_name=args.results_file,
+            compare_results_name=args.compare_results_file,
+            compare_arm=args.compare_arm)
         default_out = "readout_auc_slice.md"
     elif args.digest:
         report = build_digest(
