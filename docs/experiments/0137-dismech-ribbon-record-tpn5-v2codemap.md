@@ -13,8 +13,13 @@ disease: rare_priority
 # Mondo readout DAG (WP-B) and own-code census (WP-C') on by default.
 #
 # AUDIT FIRST (minutes into the run, before the fit is worth anything): the powering
-# line's "multi-map guard: N source code(s) ... M ancestor target(s) dropped", then the
-# per-node attesting-code count list from <run>/code_map.tsv (0136's audit snippet).
+# line's "multi-map guard: ... dropped: <named examples>" (Finding related to pregnancy
+# should lead it) and the "attestation audit" line (codes shared across label nodes,
+# exact-shared vs climb-tie, and the most-attested nodes by code count); the full
+# per-node list is in <run>/code_map.tsv (0136's audit snippet).
+# NOT in 0137, deliberately: a source-exact rung (condition_source_concept_id against
+# Mondo's own source codes, main's usage-dashboard rung 1). It changes attestation for
+# every node, so it is its own comparison after the record (0138).
 # Peripartum CM should drop from 106 codes to a handful; tularemia (93), thrombophilia
 # (162) and osteochondrosis (211) need a look. Kill and fix if another node's own codes
 # are generic.
@@ -117,7 +122,7 @@ nohup bash -c '
 Audit, as soon as `code_map.tsv` appears in the run dir (right after the bundle is built):
 
 ```bash
-grep -E "multi-map guard|label set|powering:" "$RUN"/sweep_log.md
+grep -E "multi-map guard|attestation audit|label set|powering:" "$RUN"/sweep_log.md
 python3 - "$RUN" <<'PY'
 import csv, json, sys, collections
 run = sys.argv[1]

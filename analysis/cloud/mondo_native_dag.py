@@ -428,6 +428,44 @@ def drop_ancestor_multimap_targets(source_targets, ancestor_pairs, *,
     return kept, dropped
 
 
+def code_map_audit(rows, exact_codes, *, names=None, top=12):
+    """The attestation audit printed at build time (exp 0136 / insight 0097): the
+    per-label-node attesting-code counts and the codes shared across label nodes,
+    split by mechanism as main's usage dashboard classifies collisions
+    (`classify_collision_kinds`): `exact` = the code is a Mondo term's own exact
+    standard concept, `climb` = it reached its nodes only through the climb. Counts
+    of codes and nodes only; no patient figure. Pure.
+
+    `rows` are the final `(std_cid, node_cid)` pairs; `exact_codes` the standard
+    concepts some term carries exactly; `names` `{node_cid: label}`."""
+    names = names or {}
+    nodes_of: dict = {}
+    codes_of: dict = {}
+    for c, n in rows:
+        nodes_of.setdefault(int(c), set()).add(int(n))
+        codes_of.setdefault(int(n), set()).add(int(c))
+    shared = {c for c, ns in nodes_of.items() if len(ns) > 1}
+    exact = {int(c) for c in exact_codes}
+    top_nodes = sorted(codes_of.items(), key=lambda kv: (-len(kv[1]), kv[0]))[:int(top)]
+    return {
+        "n_codes": len(nodes_of), "n_nodes": len(codes_of),
+        "n_shared_codes": len(shared),
+        "n_shared_exact": len(shared & exact),
+        "n_shared_climb": len(shared - exact),
+        "n_nodes_sharing": len({n for c in shared for n in nodes_of[c]}),
+        "top_nodes": [(names.get(n, str(n)), len(cs)) for n, cs in top_nodes],
+    }
+
+
+def format_code_map_audit(audit) -> str:
+    return (f"[mondo-native] attestation audit: {audit['n_codes']} code(s) -> "
+            f"{audit['n_nodes']} label node(s); {audit['n_shared_codes']} code(s) attest "
+            f">= 2 nodes ({audit['n_shared_exact']} exact-shared, "
+            f"{audit['n_shared_climb']} climb-tie) across {audit['n_nodes_sharing']} "
+            f"node(s); most-attested: "
+            + " · ".join(f"{nm} {k}" for nm, k in audit["top_nodes"]))
+
+
 def resolve_code_terms(standard_pairs, climb_pairs, parent_adj) -> dict:
     """The `source_climb` ladder as a pure `{standard_concept_id: [mondo_id]}` map.
 
@@ -624,6 +662,17 @@ def format_native_build_report(stats) -> str:
         f"predicted residual degenerate = {col['predicted_degenerate']}")
 
 
+def _dropped_examples(dropped, concept_pd, top=10):
+    """The most-dropped multi-map targets by number of source codes, named, for
+    the receipt: [(concept_name, n_source_codes)]."""
+    from collections import Counter
+    if not dropped:
+        return []
+    name = dict(zip(concept_pd["concept_id"].astype(int), concept_pd["concept_name"]))
+    cnt = Counter(t for _, t in dropped)
+    return [(str(name.get(t, t)), int(k)) for t, k in cnt.most_common(int(top))]
+
+
 def format_native_powering_report(stats) -> str:
     """The powering half of the build receipt: how many Mondo terms carry ANY
     closure support, how many clear `min_positives`, and the smallest kept
@@ -641,7 +690,12 @@ def format_native_powering_report(stats) -> str:
         + (f"; multi-map guard: {stats['n_multimap_sources']} source code(s) map to "
            f">1 standard concept, {stats['n_multimap_dropped']} ancestor target(s) "
            f"dropped ({len(stats.get('multimap_dropped_targets') or [])} distinct)"
-           if "n_multimap_sources" in stats else ""))
+           + (": " + " · ".join(f"{nm} x{k}" for nm, k in
+                                stats.get("multimap_dropped_examples") or [])
+              if stats.get("multimap_dropped_examples") else "")
+           if "n_multimap_sources" in stats else "")
+        + ("\n" + format_code_map_audit(stats["code_map_audit"])
+           if stats.get("code_map_audit") else ""))
 
 
 # --------------------------------------------------------------------------- #
@@ -872,7 +926,11 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
                  flat=bool(label_set is not None),
                  n_multimap_sources=sum(1 for tg in src_tg.values() if len(tg) > 1),
                  n_multimap_dropped=len(multimap_dropped),
-                 multimap_dropped_targets=sorted({t for _, t in multimap_dropped}))
+                 multimap_dropped_targets=sorted({t for _, t in multimap_dropped}),
+                 multimap_dropped_examples=_dropped_examples(multimap_dropped, concept_pd),
+                 code_map_audit=code_map_audit(
+                     rows, {c for c, _ in std_pairs},
+                     names={mondo_cid(t): label_of.get(t, t) for t in final_terms}))
     kept_cids = {c for c in before_dag.nodes() if c != MONDO_NATIVE_ROOT_CID}
     if label_set is not None:
         # The nesting the flat DAG does not carry, for the provider's per-document
