@@ -297,7 +297,7 @@ def run_conditional_from_heads(test_scored, run_dir, tag, *, C, parent_int, int2
 def collect_set_patients(test_df, members, n_domains, *, max_patients=5000, seed=0,
                          label_col="label", length="distinct"):
     """Test-split persons positive on any of `members` (fit-width label indices):
-    `[(truth positions into members, {d: set(vocab idx)}, {d: tokens})]`.
+    `[(truth positions into members, {d: {vocab idx: count}}, {d: length})]`.
 
     Filter and label slice are column arithmetic over a JSON literal (the
     `widen_labels_to_readout` pattern: nothing array-shaped rides a closure); the
@@ -330,7 +330,7 @@ def collect_set_patients(test_df, members, n_domains, *, max_patients=5000, seed
                 vals = arr[idx]
             else:
                 vals = vec.values
-            bags[d] = set(int(i) for i in idx)
+            bags[d] = {int(i): float(c) for i, c in zip(idx, vals)}
             lens[d] = (float(np.sum(vals)) if length == "tokens"
                        else float(len(idx)))
         out.append((truth, bags, lens))
@@ -342,15 +342,41 @@ def run_acquisition(test_df, run_dir, pattern, *, adhoc=False, prior="population
                     domains=("condition", "drug"), pool=150, steps=20,
                     max_patients=5000, include_strata=False, thin_frac=0.1,
                     own_top=5, rel_lambda=0.6, rho=0.3, seed=0, tag=None,
-                    length="distinct", tau="auto"):
+                    length="distinct", tau="auto", engine="presence",
+                    heads_tag="stacked_mass99"):
     """WP-D part 3: simulated acquisition on held-out patients (`voi_acquisition`).
     Profiles, pool and prior come from the run dir exactly as part 1's tables do
     (`voi_tables.load_voi_context`); Spark is used only to collect the test
     patients' code sets per candidate set. Writes `acquisition[_<tag>].md/.json`
-    (pooled numbers only)."""
+    (pooled numbers only).
+
+    `engine="model"` (part 3b, `model_acquisition`) keeps the pool and the question
+    orders and swaps the posterior for the record's own: θ re-inferred from the
+    revealed codes (the deployment fold-in over the saved λ and α) scored by the
+    saved readout heads `readout_heads_gated_pc_<heads_tag>.npz`."""
     import voi_acquisition as va
     import voi_tables as vt
     run_dir = Path(run_dir)
+    mfit = None
+    if engine == "model":
+        from gated_pc_cloud import closure_matrix
+        npz = np.load(run_dir / "gated_pc_result.npz")
+        lam_keys = sorted((k for k in npz.files if k.startswith("lambda_")),
+                          key=lambda k: int(k.split("_", 1)[1]))
+        lams_fit = [npz[k] for k in lam_keys] if lam_keys else [npz["lambda"]]
+        hp = run_dir / f"readout_heads_gated_pc_{heads_tag}.npz"
+        if not hp.exists():
+            raise SystemExit(f"[acquisition] --acq-engine model needs {hp}")
+        hz = np.load(hp)
+        rd = json.loads((run_dir / "readout_dag.json").read_text())
+        if int(hz["C"]) != int(rd["C"]):
+            raise SystemExit(f"[acquisition] heads are C={int(hz['C'])} but "
+                             f"readout_dag.json is C={rd['C']}")
+        M = closure_matrix({int(c): [int(x) for x in ps]
+                            for c, ps in rd["parent_int"].items()}, int(rd["C"]))
+        mfit = (lams_fit, npz["alpha"],
+                (hz["V"], hz["b_raw"], hz["degenerate"], hz["const"],
+                 int(hz["theta_topm"])), M)
     bm = run_dir / "bundle_meta.json"
     cm = run_dir / "code_map.tsv"
     ctx = vt.load_voi_context(
@@ -367,8 +393,9 @@ def run_acquisition(test_df, run_dir, pattern, *, adhoc=False, prior="population
     L_ = [f"# {run_dir.name} — simulated acquisition (WP-D part 3)",
           f"pattern {pattern!r}{' (ad hoc)' if adhoc else ''} · domains "
           f"{[ctx.dom_names[d] for d in doms]} · prior {prior} · rho {rho:g} · "
-          f"L = the patient's {length} codes per domain · temper "
-          f"{tau} · profiles: signatures"
+          + (f"ENGINE: θ fold-in + saved heads ({heads_tag}) · " if mfit else
+             f"L = the patient's {length} codes per domain · temper {tau} · ")
+          + f"profiles (pool only): signatures"
           f"{' + strata' if include_strata else ''} · pool {pool}/domain · "
           f"steps {steps}", ""]
     js = {}
@@ -396,10 +423,19 @@ def run_acquisition(test_df, run_dir, pattern, *, adhoc=False, prior="population
         pats = [p for p in pats if p[0]]
         _cprint(f"[acquisition]   {gname}: {len(pats)} patients (of {n_all} "
                 f"positive), pool {len(pool_items)}", flush=True)
-        res = va.simulate_set(pri, pool_items, mix, pats, steps=steps, seed=seed,
-                              tau=tau)
         named = [ctx.rd_names.get(m, str(m))[:28] for m in used]
-        L_.append(va.format_acquisition(gname, named, pri, res))
+        if mfit is not None:
+            import model_acquisition as ma
+            lams_fit, alpha_fit, heads, M = mfit
+            eng = ma.ModelEngine(
+                lams_fit, alpha_fit, heads,
+                {m: [int(a) for a in np.flatnonzero(M[m])] for m in used}, used)
+            res = ma.simulate_set_model(eng, pool_items, pats, steps=steps, seed=seed)
+            L_.append(ma.format_model_acquisition(gname, named, res))
+        else:
+            res = va.simulate_set(pri, pool_items, mix, pats, steps=steps, seed=seed,
+                                  tau=tau)
+            L_.append(va.format_acquisition(gname, named, pri, res))
         L_.append("")
         js[gname] = res if res["n"] >= va.EGRESS_FLOOR else {"suppressed": True}
     text = "\n".join(L_).rstrip() + "\n"
@@ -465,6 +501,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--acq-length", choices=("distinct", "tokens"), default="distinct",
                    help="(--acquisition) record length L_i: distinct codes (default) "
                         "or token count (0138's first run; overconfident)")
+    p.add_argument("--acq-engine", choices=("presence", "model"), default="presence",
+                   help="(--acquisition) posterior engine: the per-code presence model "
+                        "(part 3) or the record's own θ fold-in + saved readout heads "
+                        "(part 3b; --acq-heads names the heads)")
+    p.add_argument("--acq-heads", default="stacked_mass99",
+                   help="(--acq-engine model) readout_heads_gated_pc_<TAG>.npz")
     p.add_argument("--acq-tau", default="auto",
                    help="(--acquisition) likelihood temper: 'auto' (fit on half the "
                         "patients, scored on the other half) or a float (1 = none)")
@@ -1433,7 +1475,8 @@ def main(argv=None) -> int:
                     pool=args.acq_pool, steps=args.acq_steps,
                     max_patients=args.acq_max_patients,
                     include_strata=args.acq_include_strata, tag=args.acq_tag,
-                    length=args.acq_length,
+                    length=args.acq_length, engine=args.acq_engine,
+                    heads_tag=args.acq_heads,
                     tau=(args.acq_tau if args.acq_tau == "auto" else float(args.acq_tau)))
             return 0
 
