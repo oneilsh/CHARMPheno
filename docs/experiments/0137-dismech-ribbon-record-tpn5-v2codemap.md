@@ -219,3 +219,29 @@ Hierarchical readout, 698 heads (389 label + 308 ancestor + root), ridge 100, de
 - **Still to read:** the own-code census at tpn 5 (n_profiles; DCM, peripartum, preeclampsia
   blocks) and the de-novo pairing by Mondo id against 0135 and 0134.
 
+### Own-code census at tpn 5 (2026-10-12)
+
+`block topics 1945 · signature 1395 (72%) · stratum 472 (24%) · duplicate 8 · starved 70
+(4%)`. On the 280 own-code-decidable nodes: n_profiles 0: 3 · 1: 23 · 2: 58 · 3: 67 · 4: 85
+· 5: 44 (16% at the ceiling; median 3, p90 5); 109 nodes have no own code in the condition
+vocabulary and fall back to the cosine rule. At tpn 3 (0136) a third of decidable nodes sat
+at the ceiling; at 5 it is 16%.
+
+- **The code-map repair shows in the blocks.** Thrombophilia is now textbook (hereditary
+  thrombophilia, prothrombin G20210A, factor V Leiden, PE // warfarin), where it was every
+  DVT code. DCM stays textbook (DCM, chronic systolic HF, LBBB // carvedilol,
+  spironolactone; plus a decompensated-HF profile). Peripartum cardiomyopathy is now a
+  small block (evidence 10–261, was 6e4) whose best topics pair cardiomyopathy and heart
+  failure with pregnancy and pre-eclampsia — the right combination at the right size. Its
+  own codes are not in the vocabulary, so its "4 signatures" come from the cosine fallback
+  and are not to be trusted as a count.
+- **The ceiling binds for the common diseases, by comorbidity context.** Hypertension (4:
+  diabetic/coronary, metabolic, pain-clinic lumbar, …), T2D (4, incl. a foot/eye-care
+  profile), insomnia (4). For a very common disease the own code appears in almost every
+  topic about older adults, so the own-code rule is lenient there: these are care-context
+  profiles of a common condition, not distinct phenotypes. A stricter rule (own-code mass
+  share in the topic, or own code in the top 5) would separate them; not built.
+- **Verdict: keep `tpn_max` 5.** The tool's mechanical verdict says "binding" (16% at 5), but
+  the nodes at the ceiling are dominated by common diseases splitting by care context;
+  raising tpn would buy more of those at +K cost. Revisit with the stricter own-code rule.
+
