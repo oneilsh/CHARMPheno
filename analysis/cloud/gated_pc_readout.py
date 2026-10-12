@@ -294,6 +294,117 @@ def run_conditional_from_heads(test_scored, run_dir, tag, *, C, parent_int, int2
     return out
 
 
+def collect_set_patients(test_df, members, n_domains, *, max_patients=5000, seed=0,
+                         label_col="label"):
+    """Test-split persons positive on any of `members` (fit-width label indices):
+    `[(truth positions into members, {d: set(vocab idx)}, {d: tokens})]`.
+
+    Filter and label slice are column arithmetic over a JSON literal (the
+    `widen_labels_to_readout` pattern: nothing array-shaped rides a closure); the
+    collect carries only the members' label cells and the sparse feature vectors.
+    Capped at `max_patients` by a seeded Spark sample."""
+    import json as _json
+    from pyspark.sql import functions as F
+    lit = F.from_json(F.lit(_json.dumps([int(m) for m in members])), "array<int>")
+    lab = F.col(label_col)
+    fcols = ([f"features_{d}" for d in range(int(n_domains))]
+             if f"features_0" in test_df.columns else ["features"])
+    df = (test_df.where(F.exists(lit, lambda i: lab[i] > 0))
+                 .select(F.transform(lit, lambda i: lab[i]).alias("__y"), *fcols))
+    n = df.count()
+    if n > int(max_patients):
+        df = df.sample(False, min(1.0, 1.2 * int(max_patients) / n), seed=int(seed))
+    out = []
+    for row in df.collect()[:int(max_patients)]:
+        truth = [j for j, v in enumerate(row["__y"]) if v and v > 0]
+        bags, lens = {}, {}
+        for d, c in enumerate(fcols):
+            vec = row[c]
+            if vec is None:
+                continue
+            idx = getattr(vec, "indices", None)
+            if idx is None:
+                arr = np.asarray(vec.toArray() if hasattr(vec, "toArray") else vec)
+                idx = np.flatnonzero(arr)
+                vals = arr[idx]
+            else:
+                vals = vec.values
+            bags[d] = set(int(i) for i in idx)
+            lens[d] = float(np.sum(vals))
+        out.append((truth, bags, lens))
+    return out, n
+
+
+def run_acquisition(test_df, run_dir, pattern, *, adhoc=False, prior="population",
+                    results_name="results_readout_stacked_mass99.json",
+                    domains=("condition", "drug"), pool=150, steps=20,
+                    max_patients=5000, include_strata=False, thin_frac=0.1,
+                    own_top=5, rel_lambda=0.6, rho=0.3, seed=0, tag=None):
+    """WP-D part 3: simulated acquisition on held-out patients (`voi_acquisition`).
+    Profiles, pool and prior come from the run dir exactly as part 1's tables do
+    (`voi_tables.load_voi_context`); Spark is used only to collect the test
+    patients' code sets per candidate set. Writes `acquisition[_<tag>].md/.json`
+    (pooled numbers only)."""
+    import voi_acquisition as va
+    import voi_tables as vt
+    run_dir = Path(run_dir)
+    bm = run_dir / "bundle_meta.json"
+    cm = run_dir / "code_map.tsv"
+    ctx = vt.load_voi_context(
+        run_dir, bundle_meta_path=str(bm) if bm.exists() else None,
+        own_codes_path=str(cm) if cm.exists() else None, results_name=results_name,
+        thin_frac=thin_frac, own_top=own_top, rel_lambda=rel_lambda, prior=prior,
+        include_strata=include_strata)
+    doms = [i for i, nm in enumerate(ctx.dom_names) if nm in set(domains)]
+    if not doms:
+        raise SystemExit(f"[acquisition] none of {domains} in {ctx.dom_names}")
+    sets = vt.select_sets(ctx, pattern, adhoc=adhoc)
+    if not sets:
+        raise SystemExit(f"[acquisition] no candidate set matches {pattern!r}")
+    L_ = [f"# {run_dir.name} — simulated acquisition (WP-D part 3)",
+          f"pattern {pattern!r}{' (ad hoc)' if adhoc else ''} · domains "
+          f"{[ctx.dom_names[d] for d in doms]} · prior {prior} · rho {rho:g} · "
+          f"L = the patient's own domain token count · profiles: signatures"
+          f"{' + strata' if include_strata else ''} · pool {pool}/domain · "
+          f"steps {steps}", ""]
+    js = {}
+    for n, gname, members in sets:
+        profs = {}
+        used = None
+        for d in doms:
+            pr, bg = vt.set_profiles(ctx, members, d)
+            u = [m for m in members if pr.get(m) is not None]
+            used = u if used is None else [m for m in used if m in u]
+            profs[d] = (pr, bg)
+        if len(used) < 2:
+            L_.append(f"## {gname}\n(fewer than 2 members with a signature profile)")
+            continue
+        pc = ctx.prior_counts
+        pri = np.array([float(pc.get(m, 0) or 0) for m in used])
+        pri = pri / pri.sum() if pri.sum() > 0 else np.full(len(used), 1 / len(used))
+        excl = {0: vt.set_exclusions(ctx, n, members)} if 0 in doms else {}
+        pool_items, mix = va.build_pool(
+            pri, {d: np.stack([profs[d][0][m] for m in used]) for d in doms},
+            {d: profs[d][1] for d in doms}, excl, pool=pool, rho=rho)
+        pats, n_all = collect_set_patients(test_df, used, len(ctx.lams),
+                                           max_patients=max_patients, seed=seed)
+        pats = [p for p in pats if p[0]]
+        _cprint(f"[acquisition]   {gname}: {len(pats)} patients (of {n_all} "
+                f"positive), pool {len(pool_items)}", flush=True)
+        res = va.simulate_set(pri, pool_items, mix, pats, steps=steps, seed=seed)
+        named = [ctx.rd_names.get(m, str(m))[:28] for m in used]
+        L_.append(va.format_acquisition(gname, named, pri, res))
+        L_.append("")
+        js[gname] = res if res["n"] >= va.EGRESS_FLOOR else {"suppressed": True}
+    text = "\n".join(L_).rstrip() + "\n"
+    stem = "acquisition" + (f"_{tag}" if tag else "")
+    (run_dir / f"{stem}.md").write_text(text)
+    (run_dir / f"{stem}.json").write_text(json.dumps(js, indent=1, default=str))
+    print(text, flush=True)
+    _cprint(f"[acquisition]   wrote {run_dir / (stem + '.md')}", flush=True)
+    return js
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Post-hoc case-finding readout on a finished gated_pc run "
@@ -325,6 +436,26 @@ def build_parser() -> argparse.ArgumentParser:
                         "the within-parent-cohort cond AUC, top-1 vs majority and "
                         "ECE, for the flat heads and the stacked product. Writes "
                         "results_conditional_<TAG>.json.")
+    p.add_argument("--acquisition", default=None, metavar="REGEX",
+                   help="WP-D part 3: SIMULATED ACQUISITION on held-out patients for "
+                        "the candidate sets matching REGEX (as inspect_topics --voi): "
+                        "ask codes in greedy-EIG / static / random order, score the "
+                        "posterior on the true disease. Needs the run's "
+                        "readout_dag.json, code_map.tsv; no transform, no solve. "
+                        "Writes acquisition[_<tag>].md/.json.")
+    p.add_argument("--acq-adhoc", action="store_true",
+                   help="(--acquisition) REGEX picks label nodes as ONE set")
+    p.add_argument("--acq-prior", choices=("population", "uniform"),
+                   default="population")
+    p.add_argument("--acq-domains", default="condition,drug",
+                   help="(--acquisition) comma list of domains to ask about")
+    p.add_argument("--acq-pool", type=int, default=150)
+    p.add_argument("--acq-steps", type=int, default=20)
+    p.add_argument("--acq-max-patients", type=int, default=5000)
+    p.add_argument("--acq-include-strata", action="store_true",
+                   help="(--acquisition) census-rule sensitivity: strata join the "
+                        "signature profiles")
+    p.add_argument("--acq-tag", default=None)
     p.add_argument("--bundle-only", action="store_true",
                    help="Load (or rebuild) the bundle, write <run>/bundle_meta.json "
                         "and <run>/code_map.tsv, and stop: no transform, no solve. "
@@ -1280,6 +1411,17 @@ def main(argv=None) -> int:
                 _cmp = write_code_map(run_dir, _ncm)
                 _cprint(f"[readout]   wrote native code map ({len(_ncm)} pairs) -> "
                       f"{_cmp}", flush=True)
+
+        if args.acquisition:
+            with _phase("simulated acquisition (WP-D part 3)"):
+                run_acquisition(
+                    bundle.test_df, run_dir, args.acquisition, adhoc=args.acq_adhoc,
+                    prior=args.acq_prior,
+                    domains=tuple(x.strip() for x in args.acq_domains.split(",")),
+                    pool=args.acq_pool, steps=args.acq_steps,
+                    max_patients=args.acq_max_patients,
+                    include_strata=args.acq_include_strata, tag=args.acq_tag)
+            return 0
 
         if args.bundle_only:
             _cprint("[readout]   --bundle-only: bundle meta + code map written; "

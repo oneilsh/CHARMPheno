@@ -19,7 +19,7 @@ model_class: gated_pc
 #           or care-context codes? Own codes are excluded from the ranking by default.
 #   part 2: cond AUC by depth for flat vs stacked; top-1 above the majority baseline for
 #           how many parents; ECE (calibration is the prerequisite for VOI to mean bits).
-# NEXT (part 3, not built): simulated acquisition on held-out patients — hide codes,
+# part 3 (built 2026-10-12, voi_acquisition.py + gated_pc_readout --acquisition): simulated acquisition on held-out patients — hide codes,
 # reveal in EIG order vs random vs information-content order, measure posterior
 # concentration (the 2026-08-14 report's evaluation of VOI).
 fit_of: 137
@@ -54,6 +54,28 @@ RUN=/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-ti
 nohup make -C analysis/cloud gated-pc-readout ID=137 GPR_ARGS="--conditional-from-heads stacked_mass99" > "$RUN"/conditional_log.md 2>&1 &
 grep -A 40 "conditional diagnosis" "$RUN"/conditional_log.md | cut -c1-170
 ```
+
+Part 3 — simulated acquisition (`voi_acquisition.py`; bundle load + one small collect per
+set, no transform, no solve). Three readouts: the two Mondo groups under the population
+prior; Marfan vs EDS under the uniform prior; and the same with strata admitted to the
+profiles (the census-rule sensitivity, hEDS's POTS topic):
+
+```bash
+cd ~/repos/CHARMPheno && git fetch origin claude/dismech-ribbon && git checkout claude/dismech-ribbon && git pull --ff-only
+RUN=/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs/0137-dismech-ribbon-record-tpn5-v2codemap
+cat > "$RUN"/acquisition.sh <<'EOF'
+make -C analysis/cloud gated-pc-readout ID=137 GPR_ARGS="--acquisition '^cardiomyopathy\$\$|^connective tissue disorder\$\$' --acq-tag groups"
+make -C analysis/cloud gated-pc-readout ID=137 GPR_ARGS="--acquisition '^Marfan syndrome|^Ehlers-Danlos syndrome' --acq-adhoc --acq-prior uniform --acq-tag marfan_eds"
+make -C analysis/cloud gated-pc-readout ID=137 GPR_ARGS="--acquisition '^Marfan syndrome|^Ehlers-Danlos syndrome' --acq-adhoc --acq-prior uniform --acq-include-strata --acq-tag marfan_eds_strata"
+EOF
+nohup bash "$RUN"/acquisition.sh > "$RUN"/acquisition_log.md 2>&1 &
+cat "$RUN"/acquisition_groups.md "$RUN"/acquisition_marfan_eds.md "$RUN"/acquisition_marfan_eds_strata.md | cut -c1-170
+```
+
+PRE-REGISTERED READS (part 3): greedy reaches a given P(true) in fewer questions than
+static, static fewer than random; balanced top-1 is the column that shows whether rare
+members are ever recovered; ECE of the max posterior says how overconfident naive Bayes
+over the asked codes is (expected: clearly, at 20 questions).
 
 ## Run log
 
@@ -127,5 +149,15 @@ now with a visible consequence. Measurements all favour hEDS and are work-up pan
 (CBC differential, ferritin, B12, TSH, anion gap); contrast agents and mupirocin are care
 context. So: drug and condition tables are informative, measurement tables mostly
 measure care intensity — consistent across all three sets read.
+
+**2026-10-12 — the pre-registered Marfan vs EDS read** (`--voi-adhoc --voi-prior
+uniform`; members Marfan, generic EDS, hEDS). **Passes.** Marfan is favoured by aortic
+valve disorder, dissection of aorta, ectasia of thoracic aorta, mitral valve disorder,
+transplanted heart valve, atenolol and warfarin (valve replacement) — the textbook
+aortic-root picture; generic EDS by orthostatic hypotension, tachycardia, arrhythmia,
+gastroparesis, propranolol, tizanidine (dysautonomia); hEDS by multiple joint pain,
+naltrexone, cromolyn. Odd ones: amoxapine and phenylephrine on the Marfan side (a
+low-evidence drug and a peri-operative one). Measurements again read as work-up
+intensity, not disease.
 
 ## Results

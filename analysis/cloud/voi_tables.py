@@ -58,7 +58,8 @@ from pathlib import Path
 import numpy as np
 
 __all__ = ["disease_profile", "background_profile", "presence_prob", "eig_table",
-           "candidate_sets", "voi_for_set", "build_voi_report"]
+           "candidate_sets", "voi_for_set", "build_voi_report", "load_voi_context",
+           "select_sets", "set_profiles", "set_exclusions"]
 
 
 def _norm(row):
@@ -153,13 +154,19 @@ def voi_for_set(members, profiles, beta_bg, prior_counts, *, L=40.0, rho=0.3,
             "prior": [float(x) for x in prior], "h_prior": float(_entropy(prior))}
 
 
-def build_voi_report(run_dir, pattern, *, bundle_meta_path=None, vocab_path=None,
+def load_voi_context(run_dir, *, bundle_meta_path=None, vocab_path=None,
                      names_path=None, own_codes_path=None, results_name=None,
                      results_arm="gated_pc_stacked.marginal_ranking.stacked",
-                     L=40.0, rho=0.3, top=15, thin_frac=0.1, own_top=None,
-                     domains=None, include_own=False, rel_lambda=None,
-                     prior="population", adhoc=False):
-    """The VOI report for every candidate set matching `pattern` (markdown)."""
+                     thin_frac=0.1, own_top=None, rel_lambda=None,
+                     prior="population", include_strata=False):
+    """Everything the VOI tables and the acquisition simulation (`voi_acquisition`)
+    share, read once from a finished run dir: λ per domain, the census's per-node
+    signature topics, own-code vocab indices, readout-DAG names, the prior counts.
+
+    `include_strata=True` lets a node's STRATUM topics into its profile too (the
+    census-rule sensitivity: a stratum by the own-code rule may still be a real
+    profile of the disease, e.g. hEDS's hypermobility-POTS topic)."""
+    from types import SimpleNamespace
     import inspect_topics as it
 
     run_dir = Path(run_dir)
@@ -203,7 +210,8 @@ def build_voi_report(run_dir, pattern, *, bundle_meta_path=None, vocab_path=None
         kinds[e] = it.classify_block_topics(
             blk, lams, sh, n_bg, own_idx=(own_idx.get(e) or None) if own_idx else None,
             thin_frac=thin_frac, own_top=own_top, pw0=_pw0, rel_lambda=rel_lambda)
-    sig = {e: [t for t, k, _, _ in r if k == "signature"] for e, r in kinds.items()}
+    keep = {"signature", "stratum"} if include_strata else {"signature"}
+    sig = {e: [t for t, k, _, _ in r if k in keep] for e, r in kinds.items()}
 
     prior_counts = {}
     if prior == "population" and results_name and (run_dir / results_name).exists():
@@ -220,36 +228,75 @@ def build_voi_report(run_dir, pattern, *, bundle_meta_path=None, vocab_path=None
             name_by_id.get(cid) if cid is not None else None)
         return it._trunc(nm or (f"cid:{cid}" if cid is not None else f"idx:{v}"), 48)
 
-    doms = [i for i, n in enumerate(dom_names)
-            if domains is None or n in set(domains)]
+    return SimpleNamespace(run_dir=run_dir, lams=lams, sh=sh, n_bg=n_bg,
+                           dom_names=dom_names, rdag=rdag, rd_names=rd_names,
+                           own_idx=own_idx, sig=sig, prior_counts=prior_counts,
+                           code_name=code_name, results_name=results_name,
+                           C_fit=int(rdag["C_fit"]), inv_maps=inv_maps)
+
+
+def select_sets(ctx, pattern, *, adhoc=False):
+    """`[(readout node or -1, name, members)]`: readout-DAG groups matching the
+    pattern, or with `adhoc` ONE set of the label nodes whose names match."""
     if adhoc:
         import re
         rx = re.compile(pattern, re.I)
-        mem = [m for m in range(1, int(rdag["C_fit"])) if rx.search(rd_names.get(m, ""))]
-        sets = [(-1, f"ad hoc set /{pattern}/", mem)] if len(mem) >= 2 else []
-    else:
-        sets = candidate_sets(rdag, pattern, names=rd_names)
-    L_ = [f"# {run_dir.name} — code-level VOI over Mondo candidate sets",
+        mem = [m for m in range(1, ctx.C_fit) if rx.search(ctx.rd_names.get(m, ""))]
+        return [(-1, f"ad hoc set /{pattern}/", mem)] if len(mem) >= 2 else []
+    return candidate_sets(ctx.rdag, pattern, names=ctx.rd_names)
+
+
+def set_profiles(ctx, members, d):
+    """`({member: beta or None}, beta_bg)` for one domain."""
+    lam = ctx.lams[d]
+    prof = {m: (disease_profile(lam, ctx.sig.get(m, []), ctx.sh["evidence"])
+                if ctx.sig.get(m) else None) for m in members}
+    return prof, background_profile(lam, ctx.n_bg, ctx.sh["evidence"])
+
+
+def set_exclusions(ctx, n, members):
+    """Domain-0 vocab indices excluded as ATTESTATION, not finding: the members' own
+    codes and the set node's own (when it is a label node)."""
+    excl = set()
+    for m in list(members) + ([n] if 0 < n < ctx.C_fit else []):
+        excl |= set(ctx.own_idx.get(m, ()))
+    return excl
+
+
+def build_voi_report(run_dir, pattern, *, bundle_meta_path=None, vocab_path=None,
+                     names_path=None, own_codes_path=None, results_name=None,
+                     results_arm="gated_pc_stacked.marginal_ranking.stacked",
+                     L=40.0, rho=0.3, top=15, thin_frac=0.1, own_top=None,
+                     domains=None, include_own=False, rel_lambda=None,
+                     prior="population", adhoc=False):
+    """The VOI report for every candidate set matching `pattern` (markdown)."""
+    import inspect_topics as it
+
+    ctx = load_voi_context(run_dir, bundle_meta_path=bundle_meta_path,
+                           vocab_path=vocab_path, names_path=names_path,
+                           own_codes_path=own_codes_path, results_name=results_name,
+                           results_arm=results_arm, thin_frac=thin_frac,
+                           own_top=own_top, rel_lambda=rel_lambda, prior=prior)
+    rd_names, code_name = ctx.rd_names, ctx.code_name
+    doms = [i for i, n in enumerate(ctx.dom_names)
+            if domains is None or n in set(domains)]
+    sets = select_sets(ctx, pattern, adhoc=adhoc)
+    L_ = [f"# {ctx.run_dir.name} — code-level VOI over Mondo candidate sets",
           f"pattern {pattern!r} · {len(sets)} set(s) · presence model L={L:g}, "
           f"rho={rho:g} · signatures only (own-code rule, thin < {thin_frac:g}) · "
           f"prior = " + (f"scored test positives per member ({results_name})"
-                         if prior_counts else "uniform") + " · "
+                         if ctx.prior_counts else "uniform") + " · "
           f"own codes {'INCLUDED' if include_own else 'excluded (listed apart)'}", ""]
     for n, gname, members in sets:
         L_.append(f"## {gname} — {len(members)} member(s)")
         for d in doms:
-            lam = lams[d]
-            profiles = {m: (disease_profile(lam, sig.get(m, []), sh["evidence"])
-                            if sig.get(m) else None) for m in members}
-            bg = background_profile(lam, n_bg, sh["evidence"])
-            excl = set()
-            if d == 0 and not include_own:
-                for m in members + ([n] if 0 < n < int(rdag["C_fit"]) else []):
-                    excl |= set(own_idx.get(m, ()))
-            r = voi_for_set(members, profiles, bg, prior_counts, L=L, rho=rho,
+            profiles, bg = set_profiles(ctx, members, d)
+            excl = (set_exclusions(ctx, n, members)
+                    if d == 0 and not include_own else set())
+            r = voi_for_set(members, profiles, bg, ctx.prior_counts, L=L, rho=rho,
                             exclude=excl, top=top)
             if not r["rows"]:
-                L_.append(f"- {dom_names[d]}: fewer than 2 members with a signature "
+                L_.append(f"- {ctx.dom_names[d]}: fewer than 2 members with a signature "
                           f"profile; skipped")
                 continue
             if d == doms[0]:
@@ -263,7 +310,7 @@ def build_voi_report(run_dir, pattern, *, bundle_meta_path=None, vocab_path=None
                 if r["dropped"]:
                     L_.append("  no signature profile: " + ", ".join(
                         it._trunc(rd_names.get(m, str(m)), 32) for m in r["dropped"]))
-            L_.append(f"### {dom_names[d]}: top {len(r['rows'])} codes by EIG")
+            L_.append(f"### {ctx.dom_names[d]}: top {len(r['rows'])} codes by EIG")
             L_.append("| code | EIG (bits) | if present, favours | prior → posterior |")
             L_.append("|---|--:|---|--:|")
             for v, e_, m, p0, p1 in r["rows"]:
