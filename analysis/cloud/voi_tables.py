@@ -226,7 +226,13 @@ def load_voi_context(run_dir, *, bundle_meta_path=None, vocab_path=None,
         cid = inv_maps[d].get(int(v)) if inv_maps and d < len(inv_maps) else None
         nm = (names.get(cid) if cid is not None else None) or (
             name_by_id.get(cid) if cid is not None else None)
-        return it._trunc(nm or (f"cid:{cid}" if cid is not None else f"idx:{v}"), 48)
+        nm = nm or (f"cid:{cid}" if cid is not None else f"idx:{v}")
+        # Keep a measurement token's result suffix ("... [high]") when truncating:
+        # the state IS the evidence, and a cut that drops it reads as a bare order.
+        if nm.endswith("]") and " [" in nm and len(nm) > 48:
+            base, state = nm.rsplit(" [", 1)
+            return it._trunc(base, 47 - len(state) - 2) + " [" + state
+        return it._trunc(nm, 48)
 
     return SimpleNamespace(run_dir=run_dir, lams=lams, sh=sh, n_bg=n_bg,
                            dom_names=dom_names, rdag=rdag, rd_names=rd_names,

@@ -102,3 +102,21 @@ def test_voi_adhoc_set_is_built_from_matching_label_nodes(tmp_path):
                               top=3, thin_frac=0, prior="uniform", adhoc=True)
     assert "## ad hoc set /Marfan|Ehlers/ — 2 member(s)" in rep
     assert "asthma" not in rep
+
+
+def test_code_names_keep_the_measurement_result_suffix_when_truncated(tmp_path):
+    from test_inspect_topics import _make_census_run
+    _make_census_run(tmp_path)
+    (tmp_path / "vocab.json").write_text(json.dumps([{str(500 + i): i for i in range(12)}]))
+    (tmp_path / "readout_dag.json").write_text(json.dumps({
+        "C_fit": 4, "C": 5, "int2cid": {"4": 4994},
+        "name_by_id": {"4994": "cardiomyopathy"},
+        "pos_sources": [[0], [1], [2], [3], [1, 2]]}))
+    names = tmp_path / "names.csv"
+    names.write_text("concept_id,concept_name\n" + "\n".join(
+        f"{500 + i},Complement C3 [Mass/volume] in Serum or Plasma by immunoassay [low]"
+        for i in range(12)) + "\n")
+    ctx = vt.load_voi_context(tmp_path, vocab_path=str(tmp_path / "vocab.json"),
+                              names_path=str(names), thin_frac=0)
+    nm = ctx.code_name(0, 0)
+    assert nm.endswith(" [low]") and len(nm) <= 48
