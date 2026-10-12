@@ -1,7 +1,7 @@
 ---
 id: 138
 slug: wpd-conditional-diagnosis-voi-on-0137
-status: pending
+status: running
 model_class: gated_pc
 # NOT A FIT. WP-D (spec 2026-10-07 §D4) on the ribbon record 0137, no refit:
 #   part 1 — code-level VOI tables over Mondo candidate sets (off-cluster, numpy over the
@@ -72,5 +72,46 @@ diseases still carry 3–4 (hypertension: diabetic-neuropathy, metabolic, lumbar
 own code ranked by relevance still clears top 5 there); the ANCHOR flag marks the
 own-code-dominated topics. **`tpn_max` 5 confirmed with headroom**; a per-disease tpn
 from this census is the efficiency option for the next fit.
+
+**2026-10-12 — parts 1 and 2 run.**
+
+*Part 1 (VOI, population prior).* The tables read clinically. Connective tissue
+disorder: methotrexate, hydroxychloroquine, etanercept, adalimumab, CCP and rheumatoid
+factor → RA; complement C3/C4, mycophenolate, azathioprine → SLE; hydroxyurea and
+thrombocytosis → essential thrombocythemia; psoriasis → psoriatic arthritis;
+menorrhagia, ovarian cyst, pelvic pain → leiomyoma. Cardiomyopathy: carvedilol,
+sacubitril, spironolactone, chronic systolic HF, LBBB → DCM; verapamil and
+**disopyramide** → HCM; transplanted heart and amyloidosis → restrictive; the mRNA
+COVID vaccine → myocarditis. Weak spots: (a) measurements favouring myocarditis or
+restrictive CM are care-context labs (HDW, ALT, creatinine, LDL, bilirubin), i.e. "has
+an inpatient lab panel"; diazepam/petrolatum → restrictive is the same thing in drugs;
+(b) "Cardiomyopathy" (the group's own code) topped the table — the set node's own codes
+are now excluded too; (c) eosinophilic asthma is an own code of the hypereosinophilic
+node, so asthma/dander-IgE "favour" it — a code-map breadth question, not a VOI one;
+(d) Mondo's *connective tissue disorder* is a broad grouping (leiomyoma, ET, pituitary
+tumour are members); Marfan/EDS are in it but at ~0% prior, and under the population
+prior EIG cannot favour a near-zero member, so the pre-registered Marfan-vs-EDS read
+needs `--voi-prior uniform` (added). Posteriors of 95–100% from one code are the
+presence model's, not validated — part 3 is what tests them.
+
+*Part 2 (conditional diagnosis, test split).* The two printed rows are not rival
+models: under the closure mask each depth >= 1 head is fit on its parent's positives,
+so sigma(z_c) **is** P(c | parent); the P_stack(c) row ranks the marginal within the
+parent cohort, where the ancestor product is which-child noise (relabelled in the
+driver as the reference row). The answer row: cond AUC 0.81 / 0.80 / 0.81 / 0.79 /
+0.79 / 0.78 / 0.77 at depths 0–6 (869 edges) — flat with depth; pooled ECE 0.020 but
+per-node mean 0.086 (pooling flatters calibration). The marginal row falls from 0.79 to
+0.66 with depth, ECE 0.093 — the expected mismatch, not a defect of the stacked heads.
+Which-child top-1 beats the majority baseline on most parents, by a wide margin where
+siblings are balanced (reproductive 0.87 vs 0.49, developmental disorders 0.63 vs 0.27,
+digestive 0.83 vs 0.51, connective tissue 0.81 vs 0.64) and barely or not at all where
+one child dominates (cardiovascular, nervous system, musculoskeletal, integumentary,
+pregnancy, ENT); balanced accuracy 0.17–0.76, i.e. the heads mostly call the majority
+child. That is the population prior speaking, the same thing part 1 shows.
+
+**Read.** Conditional diagnosis works at about the level of the marginal readout (0.79
+within cohort) and holds with depth; calibration is good pooled, uneven per node.
+Part 3 (simulated acquisition) is justified. Re-read part 1 with `--voi-prior uniform`
+on a tighter set for the Marfan/EDS contrast first.
 
 ## Results

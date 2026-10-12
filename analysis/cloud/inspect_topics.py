@@ -2493,6 +2493,11 @@ def main():
                     help="(--voi) share of a case's tokens from the disease profile")
     ap.add_argument("--voi-top", type=int, default=15,
                     help="(--voi) codes per table")
+    ap.add_argument("--voi-prior", choices=("population", "uniform"),
+                    default="population",
+                    help="(--voi) prior over the candidate set: scored test positives "
+                         "(default; common members dominate EIG) or uniform (the "
+                         "rare-disease contrast, e.g. Marfan vs EDS)")
     ap.add_argument("--relevance-lambda", type=float, default=None,
                     help="(--profile-census) rank displayed words by LDAvis relevance "
                          "at this lambda (the usage dashboard uses ~0.6) instead of "
@@ -2558,7 +2563,7 @@ def main():
                           if args.results_file != "results_readout.json" else None),
             L=args.voi_L, rho=args.voi_rho, top=args.voi_top,
             thin_frac=args.thin_frac, own_top=args.own_top,
-            rel_lambda=args.relevance_lambda)
+            rel_lambda=args.relevance_lambda, prior=args.voi_prior)
         default_out = "voi_tables.md"
     elif args.profile_census:
         own_path = args.own_codes

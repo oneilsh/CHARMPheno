@@ -37,7 +37,14 @@ THE MODEL (why each piece has the shape it has)
 
 By default the members' OWN codes are excluded (`exclude_own`): the code that names
 the diagnosis is trivially the most informative "test" and says nothing a clinician
-does not already know. They are reported in their own short list.
+does not already know. They are reported in their own short list. The candidate
+set's OWN node is excluded the same way when it is itself a label node ("Cardiomyopathy"
+is the given, not a finding).
+
+`prior="uniform"` swaps the population prior for a flat one. Under the population prior
+EIG is dominated by the common members (a 0% member can never be "favoured" enough to
+move the expected entropy), so rare-disease contrasts (Marfan vs EDS inside a large
+group) only show under the flat prior: "if it were equally likely to be any of these".
 """
 from __future__ import annotations
 
@@ -146,7 +153,8 @@ def build_voi_report(run_dir, pattern, *, bundle_meta_path=None, vocab_path=None
                      names_path=None, own_codes_path=None, results_name=None,
                      results_arm="gated_pc_stacked.marginal_ranking.stacked",
                      L=40.0, rho=0.3, top=15, thin_frac=0.1, own_top=None,
-                     domains=None, include_own=False, rel_lambda=None):
+                     domains=None, include_own=False, rel_lambda=None,
+                     prior="population"):
     """The VOI report for every candidate set matching `pattern` (markdown)."""
     import inspect_topics as it
 
@@ -194,7 +202,7 @@ def build_voi_report(run_dir, pattern, *, bundle_meta_path=None, vocab_path=None
     sig = {e: [t for t, k, _, _ in r if k == "signature"] for e, r in kinds.items()}
 
     prior_counts = {}
-    if results_name and (run_dir / results_name).exists():
+    if prior == "population" and results_name and (run_dir / results_name).exists():
         res = json.loads((run_dir / results_name).read_text())
         node = res
         for part in results_arm.split("."):
@@ -214,7 +222,8 @@ def build_voi_report(run_dir, pattern, *, bundle_meta_path=None, vocab_path=None
     L_ = [f"# {run_dir.name} — code-level VOI over Mondo candidate sets",
           f"pattern {pattern!r} · {len(sets)} set(s) · presence model L={L:g}, "
           f"rho={rho:g} · signatures only (own-code rule, thin < {thin_frac:g}) · "
-          f"prior = scored test positives per member ({results_name or 'uniform'}) · "
+          f"prior = " + (f"scored test positives per member ({results_name})"
+                         if prior_counts else "uniform") + " · "
           f"own codes {'INCLUDED' if include_own else 'excluded (listed apart)'}", ""]
     for n, gname, members in sets:
         L_.append(f"## {gname} — {len(members)} member(s)")
@@ -225,7 +234,7 @@ def build_voi_report(run_dir, pattern, *, bundle_meta_path=None, vocab_path=None
             bg = background_profile(lam, n_bg, sh["evidence"])
             excl = set()
             if d == 0 and not include_own:
-                for m in members:
+                for m in members + ([n] if n < int(rdag["C_fit"]) else []):
                     excl |= set(own_idx.get(m, ()))
             r = voi_for_set(members, profiles, bg, prior_counts, L=L, rho=rho,
                             exclude=excl, top=top)
@@ -234,13 +243,16 @@ def build_voi_report(run_dir, pattern, *, bundle_meta_path=None, vocab_path=None
                           f"profile; skipped")
                 continue
             if d == doms[0]:
-                L_.append("members (prior): " + " · ".join(
-                    f"{it._trunc(rd_names.get(m, str(m)), 32)} {100 * p:.0f}%"
-                    for m, p in zip(r["used"], r["prior"]))
-                    + (f" · no signature: " + ", ".join(
-                        it._trunc(rd_names.get(m, str(m)), 32) for m in r["dropped"])
-                       if r["dropped"] else "")
-                    + f" · H(prior)={r['h_prior']:.2f} bits")
+                L_.append(f"H(prior)={r['h_prior']:.2f} bits · members (prior), "
+                          f"most likely first:")
+                mp = sorted(zip(r["used"], r["prior"]), key=lambda x: -x[1])
+                for i in range(0, len(mp), 4):
+                    L_.append("  " + " · ".join(
+                        f"{it._trunc(rd_names.get(m, str(m)), 32)} {100 * p:.0f}%"
+                        for m, p in mp[i:i + 4]))
+                if r["dropped"]:
+                    L_.append("  no signature profile: " + ", ".join(
+                        it._trunc(rd_names.get(m, str(m)), 32) for m in r["dropped"]))
             L_.append(f"### {dom_names[d]}: top {len(r['rows'])} codes by EIG")
             L_.append("| code | EIG (bits) | if present, favours | prior → posterior |")
             L_.append("|---|--:|---|--:|")

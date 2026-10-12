@@ -66,3 +66,24 @@ def test_voi_cli_dispatch_writes_voi_tables_md(tmp_path, monkeypatch):
                                       "--vocab-map", str(tmp_path / "vocab.json")])
     it.main()
     assert "code-level VOI" in (tmp_path / "voi_tables.md").read_text()
+
+
+def test_voi_uniform_prior_ignores_counts_and_members_list_one_per_chunk(tmp_path):
+    from test_inspect_topics import _make_census_run
+    _make_census_run(tmp_path)
+    (tmp_path / "vocab.json").write_text(json.dumps([{str(500 + i): i for i in range(12)}]))
+    (tmp_path / "readout_dag.json").write_text(json.dumps({
+        "C_fit": 4, "C": 5, "int2cid": {"4": 4994},
+        "name_by_id": {"4994": "cardiomyopathy"},
+        "pos_sources": [[0], [1], [2], [3], [1, 2]]}))
+    (tmp_path / "res.json").write_text(json.dumps({"gated_pc_stacked": {
+        "marginal_ranking": {"stacked": {"per_node": {
+            "1": {"n_pos": 90}, "2": {"n_pos": 10}}}}}}))
+    pop = vt.build_voi_report(tmp_path, "cardio", vocab_path=str(tmp_path / "vocab.json"),
+                              results_name="res.json", top=3, thin_frac=0)
+    uni = vt.build_voi_report(tmp_path, "cardio", vocab_path=str(tmp_path / "vocab.json"),
+                              results_name="res.json", top=3, thin_frac=0,
+                              prior="uniform")
+    assert "90%" in pop and "scored test positives" in pop
+    assert "50%" in uni and "prior = uniform" in uni and "90%" not in uni
+    assert "H(prior)=1.00 bits" in uni
