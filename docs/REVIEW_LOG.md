@@ -12,41 +12,6 @@ elsewhere.
 
 ---
 
-## 2026-10-07 → 10-12 — DisMech ribbon: label space, readout hierarchy, census, code-map repair
-
-**Shipped (branch `claude/dismech-ribbon`).** Ribbon label space (`dismech_ribbon.py`,
-`--label-set`, flat fit DAG, R1a most-specific attestation); readout-side Mondo hierarchy
-(`readout_dag.py`, `--readout-hierarchy`, ADR 0048); profile census with own-code identity
-(`inspect_topics --profile-census --own-codes`); θ truncation by excess-over-floor mass;
-`<run>/bundle_meta.json` + `code_map.tsv` persisted with the run (`gated_pc_readout
---bundle-only`); `--readout-auc` pairing by node concept id with dotted result paths; and
-the native code-map repair (native-mondo-v2→v6: multi-map guard, hierarchy-consistency
-test at 10 unrelated terms, curated Mondo xref exclusions, build-time attestation audit).
-
-**Pre-existing issues caught.** (1) The native code map attested diseases through concepts
-far broader than the disease — an ICD multi-map's context target (O90.3 → *Finding related
-to pregnancy*), an ICD xref whose only target is broad (tularemia ← GI-tract disorders),
-and a wrong Mondo SNOMED xref (thrombophilia due to thrombin defect → *Venous thrombosis*);
-the DCM "young-women stratum" of exps 0124–0134 was the first of these (insight 0097).
-Main had documented the O90.3 case for the usage report in August (its insight 0076); the
-modeling path never took the lesson. (2) `--readout-auc COMPARE=` paired nodes by engine id,
-wrong across label spaces. (3) `test_readout_integration.py::
-test_the_fit_only_save_precedes_every_readout_in_main` fails on the pre-ribbon tree too
-(not investigated). (4) A 702-wide per-node column projection overflowed Spark's 64 KB
-codegen limit; rewritten as two higher-order transforms.
-
-**Withdrawn on its own receipts.** The v3 anchor test (ICD targets must sit under the
-term's SNOMED xref) dropped DCM, Down syndrome, Lyme disease and 12 more ribbon members;
-v4's hierarchy test at threshold 3 dropped Down syndrome, AKI, ITP and acne. Both recorded
-in the 0137 run log.
-
-**Parked.** Source-code-first attestation (match `condition_source_concept_id` to Mondo's
-own source codes before any `Maps to`); census evidence floor + stricter own-code rule for
-common diseases; the curated-exclusion receipt counts only its second stage; Mondo issue for
-MONDO:0008559 → SCTID 111293003; fixed-α ladder ("are patients spiky?"); WP-D.
-
----
-
 ## 2026-08-27 — Mondo bundle-cache wiring + recovery-tool completion
 
 Attempt 6 of the 0104 smoke (fit rescued by the early save; readout killed by spot-VM
