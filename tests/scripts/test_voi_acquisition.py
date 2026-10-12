@@ -99,4 +99,36 @@ def test_collect_set_patients_filters_members_and_reads_sparse_bags(spark):
     pats, n = collect_set_patients(df, [1, 3], 2)
     assert n == 2
     got = sorted((t, sorted(b[0]), l[0], l[1]) for t, b, l in pats)
-    assert got == [([0], [0, 3], 3.0, 5.0), ([1], [4], 1.0, 0.0)]
+    assert got == [([0], [0, 3], 2.0, 1.0), ([1], [4], 1.0, 0.0)]       # distinct codes
+    pats, _ = collect_set_patients(df, [1, 3], 2, length="tokens")
+    got = sorted((t, l[0], l[1]) for t, b, l in pats)
+    assert got == [([0], 3.0, 5.0), ([1], 1.0, 0.0)]
+
+
+def test_auto_tau_fits_on_one_half_scores_the_other_and_tempers_overconfidence():
+    """Naive Bayes double-counts correlated codes: here codes 0-9 are ONE finding
+    copied ten times (all present or all absent together, and weakly informative),
+    so tau = 1 counts it ten times over and the fitted temper must come down. Codes
+    10-19 are the mirror profile, never observed (absent for both classes alike)."""
+    rng = np.random.default_rng(4)
+    bg = np.full(V, 1.0 / V)
+    a = np.full(V, 1.0 / V); a[:10] *= 1.6; a[10:20] *= 0.4
+    b = np.full(V, 1.0 / V); b[:10] *= 0.6; b[10:20] *= 1.4    # both sum to 1
+    prof = np.stack([a, b])
+    prior = np.array([0.5, 0.5])
+    pool, mix = va.build_pool(prior, {0: prof}, {0: bg}, {}, pool=V)
+    L = 40.0
+    pats = []
+    for i in range(400):
+        t = int(rng.random() < 0.5)
+        p0 = 1 - np.exp(-L * (0.3 * prof[t][0] + 0.7 * bg[0]))
+        hit = rng.random() < p0
+        bag = set(range(10)) if hit else set()
+        bag |= set(range(20, V))                    # shared codes: always present
+        pats.append(([t], {0: bag}, {0: L}))
+    raw = va.simulate_set(prior, pool, mix, pats, steps=3, tau=1.0)
+    auto = va.simulate_set(prior, pool, mix, pats, steps=3, tau="auto")
+    assert auto["n"] == 200 and auto["tau_fit"]["fit_n"] == 200
+    assert auto["tau"] <= 0.2
+    assert auto["full"]["ece"] < raw["full"]["ece"]
+    assert "tau fit on the other 200" in va.format_acquisition("x", ["a", "b"], prior, auto)

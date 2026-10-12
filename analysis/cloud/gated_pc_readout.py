@@ -295,14 +295,15 @@ def run_conditional_from_heads(test_scored, run_dir, tag, *, C, parent_int, int2
 
 
 def collect_set_patients(test_df, members, n_domains, *, max_patients=5000, seed=0,
-                         label_col="label"):
+                         label_col="label", length="distinct"):
     """Test-split persons positive on any of `members` (fit-width label indices):
     `[(truth positions into members, {d: set(vocab idx)}, {d: tokens})]`.
 
     Filter and label slice are column arithmetic over a JSON literal (the
     `widen_labels_to_readout` pattern: nothing array-shaped rides a closure); the
     collect carries only the members' label cells and the sparse feature vectors.
-    Capped at `max_patients` by a seeded Spark sample."""
+    Capped at `max_patients` by a seeded Spark sample. `length` is the record length
+    the presence model gets per domain: `distinct` codes (default) or `tokens`."""
     import json as _json
     from pyspark.sql import functions as F
     lit = F.from_json(F.lit(_json.dumps([int(m) for m in members])), "array<int>")
@@ -330,7 +331,8 @@ def collect_set_patients(test_df, members, n_domains, *, max_patients=5000, seed
             else:
                 vals = vec.values
             bags[d] = set(int(i) for i in idx)
-            lens[d] = float(np.sum(vals))
+            lens[d] = (float(np.sum(vals)) if length == "tokens"
+                       else float(len(idx)))
         out.append((truth, bags, lens))
     return out, n
 
@@ -339,7 +341,8 @@ def run_acquisition(test_df, run_dir, pattern, *, adhoc=False, prior="population
                     results_name="results_readout_stacked_mass99.json",
                     domains=("condition", "drug"), pool=150, steps=20,
                     max_patients=5000, include_strata=False, thin_frac=0.1,
-                    own_top=5, rel_lambda=0.6, rho=0.3, seed=0, tag=None):
+                    own_top=5, rel_lambda=0.6, rho=0.3, seed=0, tag=None,
+                    length="distinct", tau="auto"):
     """WP-D part 3: simulated acquisition on held-out patients (`voi_acquisition`).
     Profiles, pool and prior come from the run dir exactly as part 1's tables do
     (`voi_tables.load_voi_context`); Spark is used only to collect the test
@@ -364,7 +367,8 @@ def run_acquisition(test_df, run_dir, pattern, *, adhoc=False, prior="population
     L_ = [f"# {run_dir.name} — simulated acquisition (WP-D part 3)",
           f"pattern {pattern!r}{' (ad hoc)' if adhoc else ''} · domains "
           f"{[ctx.dom_names[d] for d in doms]} · prior {prior} · rho {rho:g} · "
-          f"L = the patient's own domain token count · profiles: signatures"
+          f"L = the patient's {length} codes per domain · temper "
+          f"{tau} · profiles: signatures"
           f"{' + strata' if include_strata else ''} · pool {pool}/domain · "
           f"steps {steps}", ""]
     js = {}
@@ -387,11 +391,13 @@ def run_acquisition(test_df, run_dir, pattern, *, adhoc=False, prior="population
             pri, {d: np.stack([profs[d][0][m] for m in used]) for d in doms},
             {d: profs[d][1] for d in doms}, excl, pool=pool, rho=rho)
         pats, n_all = collect_set_patients(test_df, used, len(ctx.lams),
-                                           max_patients=max_patients, seed=seed)
+                                           max_patients=max_patients, seed=seed,
+                                           length=length)
         pats = [p for p in pats if p[0]]
         _cprint(f"[acquisition]   {gname}: {len(pats)} patients (of {n_all} "
                 f"positive), pool {len(pool_items)}", flush=True)
-        res = va.simulate_set(pri, pool_items, mix, pats, steps=steps, seed=seed)
+        res = va.simulate_set(pri, pool_items, mix, pats, steps=steps, seed=seed,
+                              tau=tau)
         named = [ctx.rd_names.get(m, str(m))[:28] for m in used]
         L_.append(va.format_acquisition(gname, named, pri, res))
         L_.append("")
@@ -456,6 +462,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="(--acquisition) census-rule sensitivity: strata join the "
                         "signature profiles")
     p.add_argument("--acq-tag", default=None)
+    p.add_argument("--acq-length", choices=("distinct", "tokens"), default="distinct",
+                   help="(--acquisition) record length L_i: distinct codes (default) "
+                        "or token count (0138's first run; overconfident)")
+    p.add_argument("--acq-tau", default="auto",
+                   help="(--acquisition) likelihood temper: 'auto' (fit on half the "
+                        "patients, scored on the other half) or a float (1 = none)")
     p.add_argument("--bundle-only", action="store_true",
                    help="Load (or rebuild) the bundle, write <run>/bundle_meta.json "
                         "and <run>/code_map.tsv, and stop: no transform, no solve. "
@@ -1420,7 +1432,9 @@ def main(argv=None) -> int:
                     domains=tuple(x.strip() for x in args.acq_domains.split(",")),
                     pool=args.acq_pool, steps=args.acq_steps,
                     max_patients=args.acq_max_patients,
-                    include_strata=args.acq_include_strata, tag=args.acq_tag)
+                    include_strata=args.acq_include_strata, tag=args.acq_tag,
+                    length=args.acq_length,
+                    tau=(args.acq_tau if args.acq_tau == "auto" else float(args.acq_tau)))
             return 0
 
         if args.bundle_only:

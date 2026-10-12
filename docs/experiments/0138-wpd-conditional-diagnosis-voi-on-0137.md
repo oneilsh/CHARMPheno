@@ -72,6 +72,20 @@ nohup bash "$RUN"/acquisition.sh > "$RUN"/acquisition_log.md 2>&1 &
 cat "$RUN"/acquisition_groups.md "$RUN"/acquisition_marfan_eds.md "$RUN"/acquisition_marfan_eds_strata.md | cut -c1-170
 ```
 
+Part 3 re-run with the fixed likelihood (L = distinct codes, tau fit on half the patients
+and scored on the other half — the defaults now):
+
+```bash
+cd ~/repos/CHARMPheno && git fetch origin claude/dismech-ribbon && git checkout claude/dismech-ribbon && git pull --ff-only
+RUN=/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs/0137-dismech-ribbon-record-tpn5-v2codemap
+cat > "$RUN"/acquisition2.sh <<'EOF'
+make -C analysis/cloud gated-pc-readout ID=137 GPR_ARGS="--acquisition '^cardiomyopathy\$\$|^connective tissue disorder\$\$' --acq-tag groups_v2"
+make -C analysis/cloud gated-pc-readout ID=137 GPR_ARGS="--acquisition '^Marfan syndrome|^Ehlers-Danlos syndrome' --acq-adhoc --acq-prior uniform --acq-tag marfan_eds_v2"
+EOF
+nohup bash "$RUN"/acquisition2.sh > "$RUN"/acquisition2_log.md 2>&1 &
+cat "$RUN"/acquisition_groups_v2.md "$RUN"/acquisition_marfan_eds_v2.md | cut -c1-170
+```
+
 PRE-REGISTERED READS (part 3): greedy reaches a given P(true) in fewer questions than
 static, static fewer than random; balanced top-1 is the column that shows whether rare
 members are ever recovered; ECE of the max posterior says how overconfident naive Bayes
@@ -159,5 +173,26 @@ gastroparesis, propranolol, tizanidine (dysautonomia); hEDS by multiple joint pa
 naltrexone, cromolyn. Odd ones: amoxapine and phenylephrine on the Marfan side (a
 low-evidence drug and a peri-operative one). Measurements again read as work-up
 intensity, not disease.
+
+**2026-10-12 — part 3, first run** (L = token count, no temper; condition + drug, pool
+300). **The ordering holds; the posterior engine does not.** Balanced top-1 at 20
+questions, greedy / static / random: connective tissue (3,832 patients, 19 members)
+0.153 / 0.142 / 0.086; cardiomyopathy (475) 0.271 / 0.262 / 0.191; Marfan vs EDS (116,
+uniform prior) 0.530 / 0.470 / 0.348 — greedy ≥ static > random everywhere, as
+pre-registered, and P(true) the same way. But the ceiling is low and the posteriors are
+badly overconfident: answering the whole 300-code pool reaches top-1 0.41 (connective
+tissue; majority 0.31), 0.52 (cardiomyopathy; 0.42), 0.60 (Marfan/EDS; chance 0.33),
+with ECE 0.28–0.41 and residual entropy 0.24–0.83 bits. Top-1 even drops below the prior
+in the first questions (cardiomyopathy greedy step 2: 0.30 vs 0.42), and random has the
+best ECE because it moves least. Hits are 1–3 present codes in 20 questions, so the
+posterior is driven by ABSENCES — and with L_i the token count, a long record makes every
+profile code's p ~1, so one absent code all but rules a disease out. That is a design
+error in the likelihood (fixed: L_i = distinct codes by default), compounded by naive
+Bayes double-counting correlated codes (addressed by a temper tau fit on half the
+patients, scored on the other half). Strata admitted to the profiles (the hEDS POTS
+question) changed nothing material (full-pool top-1 0.59 vs 0.60; balanced 0.55 vs
+0.56): the census rule is not what limits this read. For scale, part 2's discriminative
+conditional heads do the 3-way connective-tissue call at top-1 0.81 vs majority 0.64 —
+the generative presence model is the weak link, not the ordering.
 
 ## Results

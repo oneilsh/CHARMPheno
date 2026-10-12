@@ -23,9 +23,16 @@ THE SIMULATION (why each piece has the shape it has)
   drug record has p = 0 for every drug and every drug answer is uninformative —
   the right behaviour, not a special case.
 * Posterior: the prior times the product of answered likelihoods (naive Bayes over
-  the asked codes). The independence assumption is the model's, so posteriors are
-  expected to be overconfident; that is why calibration is reported next to
-  accuracy rather than assumed.
+  the asked codes), each likelihood raised to a TEMPER tau <= 1. The independence
+  assumption is the model's, so untempered posteriors are overconfident (0138's
+  first run: ECE 0.28-0.41 on the full pool, entropy far below the error rate).
+  `tau="auto"` fits tau on half the patients (log loss of the full-pool posterior on
+  the truth, over a fixed grid) and scores the simulation on the OTHER half only —
+  a calibration fit, never evaluated on the patients it was fit on.
+* Record length L_i: `distinct` (default) is the patient's number of distinct codes
+  in the domain. The first run used the token count, which on a long record pushes
+  every profile code's p to ~1, so one absent code all but rules a disease out —
+  the overconfidence the tempering would otherwise have to absorb.
 * Strategies, all over the same pool: `greedy` asks, at each step, the code with the
   highest EIG under the CURRENT posterior (adaptive VOI); `static` asks in part 1's
   fixed population-EIG order (the table, read top-down); `random` asks in a random
@@ -46,7 +53,7 @@ import numpy as np
 import voi_tables as vt
 
 __all__ = ["build_pool", "simulate_patient", "simulate_set", "format_acquisition",
-           "STRATEGIES", "EGRESS_FLOOR"]
+           "fit_tau", "STRATEGIES", "EGRESS_FLOOR", "TAU_GRID"]
 
 STRATEGIES = ("greedy", "static", "random")
 EGRESS_FLOOR = 20
@@ -86,14 +93,14 @@ def _patient_matrix(pool_items, mix, bags, lengths):
     return P, x
 
 
-def _update(post, p_col, present):
+def _update(post, p_col, present, tau=1.0):
     lik = p_col if present else 1.0 - p_col
-    new = post * np.clip(lik, 1e-12, 1.0)
+    new = post * np.clip(lik, 1e-12, 1.0) ** float(tau)
     s = new.sum()
     return new / s if s > 0 else post
 
 
-def simulate_patient(prior, P, x, *, strategy, steps, rng=None):
+def simulate_patient(prior, P, x, *, strategy, steps, rng=None, tau=1.0):
     """Posterior trajectory `(steps + 1, M)` and the asked answers for one patient.
     `P` (M, Q) presence probabilities, `x` (Q,) answers; the pool's column order is
     the `static` order."""
@@ -115,16 +122,16 @@ def simulate_patient(prior, P, x, *, strategy, steps, rng=None):
         else:
             q = int(order[k])
         asked[q] = True
-        post = _update(post, P[:, q], bool(x[q]))
+        post = _update(post, P[:, q], bool(x[q]), tau)
         traj.append(post.copy())
         hits.append(bool(x[q]))
     return np.stack(traj), np.array(hits, dtype=bool)
 
 
-def _full_posterior(prior, P, x):
+def _full_posterior(prior, P, x, tau=1.0):
     logp = np.log(np.clip(np.asarray(prior, dtype=np.float64), 1e-300, 1.0))
     lik = np.where(x[None, :], P, 1.0 - P)
-    logp = logp + np.log(np.clip(lik, 1e-12, 1.0)).sum(axis=1)
+    logp = logp + float(tau) * np.log(np.clip(lik, 1e-12, 1.0)).sum(axis=1)
     logp -= logp.max()
     p = np.exp(logp)
     return p / p.sum()
@@ -155,21 +162,45 @@ def _score(posts, truths):
             "bal_top1": bal, "entropy": float(ent.mean())}
 
 
-def simulate_set(prior, pool_items, mix, patients, *, steps=20, seed=0,
+TAU_GRID = (1.0, 0.5, 0.3, 0.2, 0.1, 0.05, 0.02)
+
+
+def fit_tau(prior, mats, truths, grid=TAU_GRID):
+    """The temper minimizing the full-pool posterior's log loss on the truth."""
+    best, best_ll = 1.0, np.inf
+    for tau in grid:
+        ll = -np.mean([np.log(max(_full_posterior(prior, P, x, tau)[t].sum(), 1e-12))
+                       for (P, x), t in zip(mats, truths)])
+        if ll < best_ll:
+            best, best_ll = float(tau), float(ll)
+    return best, best_ll
+
+
+def simulate_set(prior, pool_items, mix, patients, *, steps=20, seed=0, tau=1.0,
                  report_steps=(0, 1, 2, 3, 5, 10, 20)):
     """Run every strategy over `patients` = `[(truth idx list, bags {d: set},
-    lengths {d: tokens})]`. Returns the pooled metrics dict (no per-patient data)."""
+    lengths {d: L})]`. `tau` a float or "auto" (fit on the even-indexed half,
+    scored on the odd half). Returns the pooled metrics dict (no per-patient data)."""
     rng = np.random.default_rng(int(seed))
     steps = int(steps)
     ks = sorted({k for k in report_steps if k <= steps} | {steps})
-    out = {"n": len(patients), "pool": len(pool_items), "steps": steps,
-           "report_steps": ks, "strategies": {}}
-    truths = [t for t, _, _ in patients]
-    mats = [_patient_matrix(pool_items, mix, b, l) for _, b, l in patients]
+    mats_all = [_patient_matrix(pool_items, mix, b, l) for _, b, l in patients]
+    truths_all = [t for t, _, _ in patients]
+    tau_fit = None
+    if tau == "auto":
+        tau, ll = fit_tau(prior, mats_all[0::2], truths_all[0::2])
+        tau_fit = {"tau": tau, "fit_n": len(mats_all[0::2]), "fit_logloss": ll}
+        mats, truths = mats_all[1::2], truths_all[1::2]
+    else:
+        tau = float(tau)
+        mats, truths = mats_all, truths_all
+    out = {"n": len(mats), "pool": len(pool_items), "steps": steps, "tau": tau,
+           "tau_fit": tau_fit, "report_steps": ks, "strategies": {}}
     for strat in STRATEGIES:
         trajs, hits = [], []
         for P, x in mats:
-            tr, h = simulate_patient(prior, P, x, strategy=strat, steps=steps, rng=rng)
+            tr, h = simulate_patient(prior, P, x, strategy=strat, steps=steps, rng=rng,
+                                     tau=tau)
             trajs.append(tr)
             hits.append(h)
         rows = {}
@@ -182,7 +213,7 @@ def simulate_set(prior, pool_items, mix, patients, *, steps=20, seed=0,
             "by_step": rows,
             "ece_last": _ece([p.max() for p in last],
                              [int(np.argmax(p)) in t for p, t in zip(last, truths)])}
-    full = [_full_posterior(prior, P, x) for P, x in mats]
+    full = [_full_posterior(prior, P, x, tau) for P, x in mats]
     out["full"] = _score(full, truths)
     out["full"]["ece"] = _ece([p.max() for p in full],
                               [int(np.argmax(p)) in t for p, t in zip(full, truths)])
@@ -195,7 +226,10 @@ def format_acquisition(name, members_named, prior, res):
     if res["n"] < EGRESS_FLOOR:
         L.append(f"(fewer than {EGRESS_FLOOR} held-out patients; suppressed)")
         return "\n".join(L)
-    L.append(f"{res['n']} held-out patients · pool {res['pool']} codes · prior: "
+    tf = res.get("tau_fit")
+    L.append(f"{res['n']} held-out patients" + (
+        f" (scored half; tau fit on the other {tf['fit_n']})" if tf else "")
+             + f" · temper tau={res.get('tau', 1.0):g} · pool {res['pool']} codes · prior: "
              + " · ".join(f"{nm} {100 * p:.0f}%" for nm, p in zip(members_named, prior)))
     L.append("")
     L.append("| strategy | step | P(true) | top-1 | bal top-1 | H (bits) | hits |")
