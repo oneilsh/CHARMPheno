@@ -327,6 +327,14 @@ node's own codes in its top-15 as a stratum and marks own-code words `†`. Next
 hierarchical re-readout of 0135's saved fit (0135 launch 3) and the honest census
 (0136), then 0137.
 
+**2026-10-12 status.** 0137 (the ribbon record) is done: built on the repaired code map
+(native-mondo-v6; insight 0097 — the DCM "stratum" of 0124–0134 was a code-map defect), it
+decodes within ~0.01 of 0135 with the best root head of the series and calibrated stacked
+marginals. WP-B and WP-C′ are built (ADR 0048). **WP-D is next**, in two parts: D-1, the
+code-level VOI tables (off-cluster, from the saved λ, the census signatures and the readout
+DAG's Mondo ancestor sets); D-2, conditional-diagnosis evaluation on held-out patients
+(re-scoring 0137 with its saved heads, no refit), then simulated acquisition.
+
 ## Branching, salvage, and cruft (to become an ADR with WP-A)
 
 - Branch from the tip of `claude/gated-conditional-voi`: all infrastructure lives

@@ -1,7 +1,7 @@
 ---
 id: 137
 slug: dismech-ribbon-record-tpn5-v2codemap
-status: running
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -244,4 +244,28 @@ at the ceiling; at 5 it is 16%.
 - **Verdict: keep `tpn_max` 5.** The tool's mechanical verdict says "binding" (16% at 5), but
   the nodes at the ceiling are dominated by common diseases splitting by care context;
   raising tpn would buy more of those at +K cost. Revisit with the stricter own-code rule.
+
+### De-novo pairing by Mondo id (2026-10-12) — and the verdict
+
+Stacked de-novo per-node AUC: 582 scored (283 label nodes median 0.837; 299 ancestor heads
+median 0.829).
+
+| paired against | shared nodes | median dAUC | mean | up / down |
+|---|--:|--:|--:|--:|
+| 0135 (v1 map, tpn 3) | 581 | −0.005 | −0.009 | 211 / 370 |
+| 0134 (CV branch, nested, v1 map) | 71 | −0.026 | −0.027 | 13 / 58 |
+
+Against 0134 the gap widened from 0135's −0.014 to −0.026, and it sits on the label nodes
+(−0.028; ancestor heads −0.002). Both baselines carry the v1 code map, so part of every
+"loss" here is the price of honest labels (a node whose label was a broad concept is easier
+to rank); the remaining confounds of the 0134 comparison (a CV-only topic budget, a nested
+CV closure product) are unchanged from 0135's verdict.
+
+**Verdict.** 0137 is the record for the ribbon: honest label space (insight 0097), decoding
+within ~0.01 of 0135, the best root head of the series (0.836), calibrated stacked marginals
+at every depth, legible blocks where the earlier runs were contaminated (thrombophilia,
+DCM, peripartum CM). `tpn_max` 5 stays; the census needs an evidence floor (rare diseases
+grow thin, noisy "signatures" at tpn 5: Marfan's evidence-36 carotid-dissection/goiter topic,
+hEDS's evidence-33 hearing-loss topic) and a stricter own-code rule for common diseases.
+Next is WP-D (conditional diagnosis + VOI) on this run.
 
