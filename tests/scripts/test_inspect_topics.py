@@ -970,3 +970,25 @@ def test_thin_topics_are_not_profiles(tmp_path):
     k0 = {t: kk for t, kk, _, _ in it.classify_block_topics([4, 5, 6], lams, sh, 1,
                                                              thin_frac=0)}
     assert k0 == {4: "signature", 5: "signature", 6: "duplicate"}
+
+
+def test_relevance_lifts_distinctive_codes_and_kl_ranks_catch_alls_low():
+    """Ported from the usage dashboard / labeling script: relevance at lambda<1
+    ranks a topic's distinctive code above a code common everywhere; KL from the
+    corpus marginal is ~0 for a topic that IS the marginal."""
+    pw = np.array([0.5, 0.25, 0.25])            # code 0 is everywhere
+    beta = np.array([0.50, 0.40, 0.10])         # topic: common code + a distinctive one
+    f = np.argsort(beta)[::-1][0]
+    r = np.argsort(it.relevance_scores(beta, pw, 0.6))[::-1][0]
+    assert f == 0 and r == 1
+    assert it.topic_kl(pw, pw) == pytest.approx(0.0)
+    assert it.topic_kl(np.array([0.0, 0.0, 1.0]), pw) > 1.0
+
+
+def test_census_prints_kl_and_anchor_flags_and_relevance_header(tmp_path):
+    _make_census_run(tmp_path)
+    (tmp_path / "vocab.json").write_text(json.dumps([{str(500 + i): i for i in range(12)}]))
+    rep = it.build_profile_census(tmp_path, vocab_path=str(tmp_path / "vocab.json"),
+                                  grep_pattern="node", rel_lambda=0.6)
+    assert "words ranked by relevance (lambda=0.6)" in rep
+    assert " kl" in rep and "ANCHOR" in rep            # the sharp synthetic topics dominate

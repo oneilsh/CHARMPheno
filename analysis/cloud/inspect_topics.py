@@ -467,16 +467,65 @@ def load_concept_names(path):
     return names
 
 
+def _topic_beta(lam_dom, t):
+    row = np.asarray(lam_dom[t], dtype=np.float64)
+    return row / row.sum() if row.sum() > 0 else row
+
+
+def model_word_marginal(lam_dom):
+    """p(w) for one domain: the model's own corpus word distribution, sum over
+    topics of lambda (expected word counts plus a uniform prior that is small
+    next to them), normalized. Stands in for the dashboard's `corpus_freq`, which
+    a gated run dir does not carry."""
+    m = np.asarray(lam_dom, dtype=np.float64).sum(axis=0)
+    return m / m.sum() if m.sum() > 0 else m
+
+
+def relevance_scores(beta, pw, lam=0.6):
+    """LDAvis relevance (Sievert & Shirley 2014), as the usage dashboard ranks
+    topic terms (`dashboard/src/lib/inference.ts::relevance`):
+    lam*log p(w|k) + (1-lam)*log(p(w|k)/p(w)). lam=1 is plain frequency; lower
+    lam lifts codes distinctive of the topic over codes common everywhere
+    (hypertension, hyperlipidemia), which is what frequency ranking floods a
+    common disease's topics with."""
+    beta = np.asarray(beta, dtype=np.float64)
+    pw = np.asarray(pw, dtype=np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        lb = np.log(np.where(beta > 0, beta, np.nan))
+        lp = np.log(np.where(pw > 0, pw, np.nan))
+        r = lam * lb + (1.0 - lam) * (lb - lp)
+    return np.nan_to_num(r, nan=-np.inf)
+
+
+def topic_kl(beta, pw):
+    """KL(beta_k || p(w)) in nats — the labeling script's distinctiveness score
+    (`scripts/label_phenotypes.py::_kl_div_topic_vs_corpus`): near 0 for a topic
+    that is the corpus average (a catch-all), large for a specific profile."""
+    beta = np.asarray(beta, dtype=np.float64)
+    pw = np.clip(np.asarray(pw, dtype=np.float64), 1e-12, None)
+    m = beta > 0
+    return float((beta[m] * np.log(beta[m] / pw[m])).sum())
+
+
 def top_words(lam_row, inv_map, names, name_by_id, t_words):
     """Top-t (concept, E[beta], vocab_idx) for one topic's domain row, named if
     possible. The vocab index rides along so callers can cross-reference the
     word against index sets (e.g. the HPO-profile marker in `_digest_words`)."""
+    return top_words_ranked(lam_row, inv_map, names, name_by_id, t_words)
+
+
+def top_words_ranked(lam_row, inv_map, names, name_by_id, t_words, *, pw=None,
+                     rel_lambda=None):
+    """`top_words` with an optional relevance ranking (`rel_lambda`, with the
+    domain's word marginal `pw`); frequency when either is None."""
     row = np.asarray(lam_row, dtype=np.float64)
     s = row.sum()
     if s <= 0:
         return []
     beta = row / s
-    idx = np.argsort(beta)[::-1][:t_words]
+    key = (relevance_scores(beta, pw, rel_lambda)
+           if (pw is not None and rel_lambda is not None) else beta)
+    idx = np.argsort(key)[::-1][:t_words]
     out = []
     for i in idx:
         cid = inv_map.get(int(i)) if inv_map else None
@@ -858,7 +907,8 @@ def _trunc(s, n):
 
 
 def _digest_words(t, lams, sh, inv_maps, names, name_by_id, dom_names, *,
-                  k=6, maxlen=40, profile_idx=None, own_idx=None):
+                  k=6, maxlen=40, profile_idx=None, own_idx=None, pws=None,
+                  rel_lambda=None):
     """One compact line summarising a topic as a PHENOTYPE SIGNATURE: the
     condition-domain top-k names, then the top-3 drug names after `//`. Leads
     with conditions (the disease identity) rather than the dominant domain,
@@ -876,7 +926,9 @@ def _digest_words(t, lams, sh, inv_maps, names, name_by_id, dom_names, *,
 
     def render(d, kk, mark=False):
         inv = inv_maps[d] if d < len(inv_maps) else None
-        tw = top_words(np.asarray(lams[d][t]), inv, names, name_by_id, kk)
+        tw = top_words_ranked(np.asarray(lams[d][t]), inv, names, name_by_id, kk,
+                              pw=(pws[d] if pws is not None else None),
+                              rel_lambda=rel_lambda)
         # `*` marks a token in the node's own HPO profile (condition domain
         # only) — so profile tokens vs EMERGENT co-riders are one glance apart.
         # `†` marks one of the node's OWN attesting codes (WP-C').
@@ -1084,7 +1136,8 @@ def own_code_vocab_idx(own_by_node, int2cid, vocab_map0):
 
 def classify_block_topics(block_topics, lams, sh, n_bg, *, starved_frac=0.5,
                           stratum_cos=0.8, dup_cos=0.8, bg_vecs=None,
-                          own_idx=None, top_m=15, thin_frac=0.1, own_top=None):
+                          own_idx=None, top_m=15, thin_frac=0.1, own_top=None,
+                          pw0=None, rel_lambda=None):
     """Classify the topics of ONE node's block (spec 2026-10-07 §D3).
 
     `tpn` is a CEILING, not the number of profiles a disease has; this reads the
@@ -1157,7 +1210,16 @@ def classify_block_topics(block_topics, lams, sh, n_bg, *, starved_frac=0.5,
             # the background duplicated the disease, not the reverse). The cosine
             # is then only the reported flag. `own_top` < `top_m` tightens the rule
             # for common diseases whose own code rides in almost every topic.
-            if not (set(_top_idx(lams[0][t], own_top)) & own):
+            # With `rel_lambda` the own code must rank in the top `own_top` by
+            # RELEVANCE, not frequency: a common disease's own code (hypertension)
+            # rides high by frequency in every older-adult topic but has low lift
+            # there, so relevance is the natural strict rule (0137 census).
+            if pw0 is not None and rel_lambda is not None:
+                _ix = list(np.argsort(relevance_scores(_topic_beta(lams[0], t), pw0,
+                                                       rel_lambda))[::-1][:own_top])
+            else:
+                _ix = _top_idx(lams[0][t], own_top)
+            if not (set(int(i) for i in _ix) & own):
                 kinds[t] = "stratum"; sigc[t] = float("nan")
                 continue
         elif c_bg >= stratum_cos:
@@ -1177,7 +1239,8 @@ def build_profile_census(run_dir, *, bundle_meta_path=None, vocab_path=None,
                          names_path=None, profile_file=None, grep_pattern=None,
                          exemplars=8, t_words=6, starved_frac=0.5,
                          stratum_cos=0.8, dup_cos=0.8, top_m=15,
-                         own_codes_path=None, thin_frac=0.1, own_top=None):
+                         own_codes_path=None, thin_frac=0.1, own_top=None,
+                         rel_lambda=None, anchor_share=0.5):
     """The PROFILE CENSUS (spec 2026-10-07 §D3; exp 0136): per node, how many of
     its `tpn` block topics are signatures, strata, duplicates, or starved — and
     therefore what `n_profiles(d)` is and what `tpn_max` should be.
@@ -1252,6 +1315,7 @@ def build_profile_census(run_dir, *, bundle_meta_path=None, vocab_path=None,
                     f"the condition vocab; a fed topic with no own code in its "
                     f"top-{top_m} is a stratum)")
 
+    _pw0 = model_word_marginal(lams[0])
     bg_vecs = {b: _topic_unit_vec(b, lams) for b in range(n_bg)}
     rows = {}
     for e, blk in block.items():
@@ -1263,7 +1327,8 @@ def build_profile_census(run_dir, *, bundle_meta_path=None, vocab_path=None,
             # it falls back to the cosine rule and is reported apart, so it does
             # not read as "0 profiles".
             own_idx=(own_idx.get(e) or None) if own_idx is not None else None,
-            top_m=top_m, thin_frac=thin_frac, own_top=own_top)
+            top_m=top_m, thin_frac=thin_frac, own_top=own_top,
+            pw0=_pw0, rel_lambda=rel_lambda)
 
     kinds_all = [k for r in rows.values() for _, k, _, _ in r]
     n_topics = len(kinds_all)
@@ -1287,7 +1352,9 @@ def build_profile_census(run_dir, *, bundle_meta_path=None, vocab_path=None,
     w(f"K={K} ({n_bg} bg + {K - n_bg} node, tpn={tpn}) · {len(rows)} node(s) · "
       f"starved = frac>{starved_frac}, stratum = cos>={stratum_cos} to a background "
       f"topic, duplicate = cos>={dup_cos} to a higher-evidence signature of the "
-      f"same block{own_note}")
+      f"same block{own_note} · words ranked by "
+      + (f"relevance (lambda={rel_lambda:g})" if rel_lambda is not None
+         else "frequency") + " · kl = KL(topic || model word marginal), nats")
     w(f"block topics: {n_topics} · signature {cnt['signature']} "
       f"({100 * cnt['signature'] / max(n_topics, 1):.0f}%) · stratum {cnt['stratum']} "
       f"({100 * cnt['stratum'] / max(n_topics, 1):.0f}%) · duplicate "
@@ -1337,22 +1404,30 @@ def build_profile_census(run_dir, *, bundle_meta_path=None, vocab_path=None,
               f"< 0.2: {sum(1 for b in ovs if b < 0.2)} (EHR-observed, unannotated)")
     w("")
 
+    pws = [model_word_marginal(l) for l in lams]
+
     def words(t, e):
         if not inv_maps:
             return ""
         pidx = prof.get(e) if (prof and e is not None) else None
         oidx = own_idx.get(e) if (own_idx is not None and e is not None) else None
         wl = _digest_words(t, lams, sh, inv_maps, names, name_by_id, dom_names,
-                           k=t_words, profile_idx=pidx, own_idx=oidx)
+                           k=t_words, profile_idx=pidx, own_idx=oidx, pws=pws,
+                           rel_lambda=rel_lambda)
         return (" | " + wl) if wl else ""
 
     def node_lines(e):
         dd = f" d{depths.get(e, -1)}" if depths else ""
         out = [f"- {_trunc(str(nnames.get(e, e)), 40)}{dd}: n_profiles={n_prof[e]}"]
         for t, k, cb, cs in rows[e]:
+            beta0 = _topic_beta(lams[0], t)
+            # The labeling script's two extra reads: KL from the corpus marginal
+            # (distinctiveness) and ANCHOR (one concept dominates the topic).
+            kl = topic_kl(beta0, pws[0])
+            anc = " ANCHOR" if beta0.size and beta0.max() >= anchor_share else ""
             extra = (f" bg{cb:.2f}" if cb == cb else "") + (
                 f" sig{cs:.2f}" if cs == cs and k in ("duplicate", "signature")
-                and cs > 0 else "")
+                and cs > 0 else "") + f" kl{kl:.1f}{anc}"
             out.append(f"    {k:<9} ev{sh['evidence'][t]:.3g}{extra}{words(t, e)}")
         return out
 
@@ -2417,6 +2492,11 @@ def main():
                     help="(--voi) share of a case's tokens from the disease profile")
     ap.add_argument("--voi-top", type=int, default=15,
                     help="(--voi) codes per table")
+    ap.add_argument("--relevance-lambda", type=float, default=None,
+                    help="(--profile-census) rank displayed words by LDAvis relevance "
+                         "at this lambda (the usage dashboard uses ~0.6) instead of "
+                         "frequency; lifts disease-specific codes over the "
+                         "hypertension/hyperlipidemia that ride in every topic")
     ap.add_argument("--thin-frac", type=float, default=0.1,
                     help="(--profile-census) a fed block topic with evidence below "
                          "this fraction of its block's best is 'thin', not a profile "
@@ -2476,7 +2556,8 @@ def main():
             results_name=(args.results_file
                           if args.results_file != "results_readout.json" else None),
             L=args.voi_L, rho=args.voi_rho, top=args.voi_top,
-            thin_frac=args.thin_frac, own_top=args.own_top)
+            thin_frac=args.thin_frac, own_top=args.own_top,
+            rel_lambda=args.relevance_lambda)
         default_out = "voi_tables.md"
     elif args.profile_census:
         own_path = args.own_codes
@@ -2491,7 +2572,8 @@ def main():
             names_path=args.concept_names, profile_file=args.credited_file,
             grep_pattern=args.grep, exemplars=args.digest_exemplars,
             t_words=args.top_words, own_codes_path=own_path,
-            thin_frac=args.thin_frac, own_top=args.own_top)
+            thin_frac=args.thin_frac, own_top=args.own_top,
+            rel_lambda=args.relevance_lambda)
         default_out = "profile_census.md"
     elif args.profile_align:
         if not args.credited_file:
