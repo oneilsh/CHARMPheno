@@ -1,7 +1,7 @@
 ---
 id: 137
 slug: dismech-ribbon-record-tpn5-v2codemap
-status: pending
+status: running
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -186,3 +186,36 @@ mask (cells) and the head count. Bears directly on "are patients spiky?": not in
 model's θ at α = 0.5 and n_bg = 1,200 — the fixed-α ladder (α 0.1, 0.02) is the test.
 
 ## Results
+
+### Readouts (launch 5; 2026-10-10, both passes complete)
+
+Hierarchical readout, 698 heads (389 label + 308 ancestor + root), ridge 100, dense θ
+(see the run log), 54,753 test persons. Stacked solve 371/684 converged at the
+200-iteration cap (295 gtol, 76 stalled; max|grad| 125).
+
+| read | 0137 (record, v6 map, tpn 5) | 0135 launch 3 (v1 map, tpn 3) |
+|---|--:|--:|
+| flat head, within-cohort macro AUC / AP | 0.7967 / 0.515 (554) | 0.8012 / 0.517 (559) |
+| root head alone (= stacked detection) | **0.8357** / 0.954 | 0.8206 / 0.954 |
+| foreground prevalence (test persons) | 0.802 | 0.819 |
+| flat detection, max over heads | 0.7242 | 0.7038 |
+| stacked de-novo macro AUC / AP | 0.8219 / 0.293 (582) | 0.8308 / 0.291 (587) |
+| flat de-novo macro AUC / AP | 0.7286 / 0.168 | — |
+| stacked − flat, de novo | +0.076 (552/29), d1 +0.010 → d5 +0.123 | +0.074 (572/14) |
+| stacked − flat, within-cohort | −0.042 (96/458) | −0.042 (95/464) |
+| marginal ECE stacked / flat, by depth | 0.002–0.009 / 0.017–0.473 | 0.002–0.010 / 0.010–0.474 |
+
+**Read (provisional, before the census and the shared-node pairing).**
+- **Decoding is unchanged within about 0.01 on every axis**, on a label space whose
+  captures were removed (insight 0097). That is the important null: the record's numbers
+  are not propped up by the pregnancy / GI / DVT captures. The de-novo macro AUC dipped
+  0.009 with AP flat; nodes whose label WAS a broad concept (thrombophilia = DVT codes) were
+  easy to predict, and an honest label is a harder one.
+- **The root head is the best of the series (0.836)**, with foreground prevalence down 1.7
+  points: pregnant women and DVT-only patients are no longer foreground for a disease they
+  do not have, so case-vs-background is a cleaner contrast.
+- The stacked product behaves exactly as on 0135 and 0134: a within-cohort tax growing with
+  depth, a de-novo gain growing with depth, and calibrated marginals.
+- **Still to read:** the own-code census at tpn 5 (n_profiles; DCM, peripartum, preeclampsia
+  blocks) and the de-novo pairing by Mondo id against 0135 and 0134.
+
