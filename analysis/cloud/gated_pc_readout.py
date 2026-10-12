@@ -239,6 +239,53 @@ def observe_root_everywhere(df, C, mask_col="labelMask"):
     return df.withColumn(mask_col, F.concat(F.array(F.lit(1.0)), tail))
 
 
+def run_conditional_from_heads(test_scored, run_dir, tag, *, C, parent_int, int2cid,
+                               name_by_id, min_count=20):
+    """CONDITIONAL DIAGNOSIS on held-out patients from a finished readout's saved
+    heads (spec 2026-10-07 §D4, WP-D part 2): "this patient is in Mondo group P;
+    which child?" scored per readout-DAG edge P -> c within P's test cohort
+    (`gated_pc_cloud.conditional_readout`, all-ones mask, cond AUC the sober column,
+    top-1 next to the majority baseline, ECE), for both the flat heads sigma(z_c)
+    and the stacked product P_stack(c). No solve: the heads are the record's own
+    (`readout_heads_gated_pc_<tag>.npz`), so this re-reads, never re-fits.
+
+    Returns the results dict; writes `results_conditional_<tag>.json`. Counts stay in
+    the run dir (egress floor); the printed tables are the existing pooled format."""
+    from gated_pc_cloud import (closure_matrix, conditional_readout,
+                                format_conditional_readout, stacked_proba)
+    run_dir = Path(run_dir)
+    hp = run_dir / f"readout_heads_gated_pc_{tag}.npz"
+    if not hp.exists():
+        raise SystemExit(f"[readout] no saved heads at {hp}")
+    z = np.load(hp)
+    if int(z["C"]) != int(C):
+        raise SystemExit(f"[readout] heads {hp.name} are C={int(z['C'])} but the "
+                         f"widened frames are C={int(C)}: different readout DAG")
+    topm = int(z["theta_topm"])
+    _cprint(f"[readout]   conditional diagnosis from {hp.name} (C={int(C)} "
+            f"K={int(z['K'])} topm={topm}); test split only", flush=True)
+    proba, y, _m, _keys, _e = _collect_lean_proba(
+        test_scored, int(C), z["V"], z["b_raw"], degenerate=z["degenerate"],
+        const=z["const"], theta_topm=topm)
+    ones = np.ones_like(y)
+    out = {"heads": hp.name, "min_count": int(min_count)}
+    out["flat"] = conditional_readout(proba, y, ones, parent_int, int(C),
+                                      min_count=int(min_count))
+    print(format_conditional_readout(out["flat"], int2cid, name_by_id).replace(
+        "[conditional sharpening]", "[conditional diagnosis: flat sigma(z_c)]"),
+        flush=True)
+    P = stacked_proba(proba, closure_matrix(parent_int, int(C)))
+    out["stacked"] = conditional_readout(P, y, ones, parent_int, int(C),
+                                         min_count=int(min_count))
+    print(format_conditional_readout(out["stacked"], int2cid, name_by_id).replace(
+        "[conditional sharpening]", "[conditional diagnosis: stacked P_stack(c)]"),
+        flush=True)
+    _dump_partial_results(run_dir, out, name=f"results_conditional_{tag}.json")
+    _cprint(f"[readout]   wrote {run_dir / f'results_conditional_{tag}.json'}",
+            flush=True)
+    return out
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Post-hoc case-finding readout on a finished gated_pc run "
@@ -261,6 +308,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--doc-min-length", type=int, default=None,
                    help="Override doc_min_length for the cache key (older manifests "
                         "did not record it; the current driver does).")
+    p.add_argument("--conditional-from-heads", default=None, metavar="TAG",
+                   help="WP-D part 2: CONDITIONAL DIAGNOSIS from a finished readout's "
+                        "saved heads (readout_heads_gated_pc_<TAG>.npz, e.g. "
+                        "stacked_mass99) — no solve. Transforms the TEST split only, "
+                        "widens it to the readout DAG, collects the per-doc proba and "
+                        "scores, per Mondo parent -> child edge of the readout DAG, "
+                        "the within-parent-cohort cond AUC, top-1 vs majority and "
+                        "ECE, for the flat heads and the stacked product. Writes "
+                        "results_conditional_<TAG>.json.")
     p.add_argument("--bundle-only", action="store_true",
                    help="Load (or rebuild) the bundle, write <run>/bundle_meta.json "
                         "and <run>/code_map.tsv, and stop: no transform, no solve. "
@@ -1281,13 +1337,31 @@ def main(argv=None) -> int:
                 # Materialize the widened frames off the cached transforms, then
                 # drop the fit-width copies: the solver's repeated passes read
                 # the widened train frame, never these.
-                _n_tr, _n_te = _tr_w.count(), _te_w.count()
+                # Conditional-from-heads scores the test split only: never
+                # materialize the (much larger) train transform for it.
+                _n_tr = ("not materialized" if args.conditional_from_heads
+                         else _tr_w.count())
+                _n_te = _te_w.count()
                 train_scored.unpersist(); test_scored.unpersist()
                 train_scored, test_scored = _tr_w, _te_w
                 _C_ro, _parent_ro = int(_rdag.C), _rdag.parent_int
                 _cprint(f"[readout]   frames widened to the readout node space: "
                       f"C={_C_ro} (fit C={C}), mask mode={_mm}, train docs={_n_tr} "
                       f"test docs={_n_te}", flush=True)
+
+        if args.conditional_from_heads:
+            if _rdag is None:
+                raise SystemExit("[readout] --conditional-from-heads needs the Mondo "
+                                 "readout DAG (a label-set fit, or "
+                                 "--readout-hierarchy mondo)")
+            with _phase("conditional diagnosis from saved heads"):
+                _nb = dict(getattr(bundle, "name_by_id", {}) or {})
+                _nb.update(_rdag.name_by_id)
+                run_conditional_from_heads(
+                    test_scored, run_dir, args.conditional_from_heads, C=_C_ro,
+                    parent_int=_parent_ro, int2cid=_rdag.int2cid, name_by_id=_nb,
+                    min_count=min_count)
+            return 0
 
         with _phase("score"):
             # E2/WP4: the incident arm's eligibility comes from the BUNDLE (spec
