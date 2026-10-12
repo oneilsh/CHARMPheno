@@ -57,4 +57,20 @@ grep -A 40 "conditional diagnosis" "$RUN"/conditional_log.md | cut -c1-170
 
 ## Run log
 
+**2026-10-12 — census re-read with relevance ranking and the strict own-code rule**
+(`--relevance-lambda 0.6 --own-top 5`, thin < 0.1). Block topics 1,945: signature 1,044
+(54%) · stratum 387 (20%) · thin 436 (22%) · duplicate 8 · starved 70 (4%). Decidable nodes
+(280): n_profiles 0: 5 · 1: 60 · 2: 96 · 3: 68 · 4: 42 · 5: 9 — median 2, p90 4, 3% at the
+ceiling (was 16% under the lenient rule). Rare diseases now read cleanly: Marfan = aortic
+(ectasia, atenolol, warfarin) + dissection/pseudoaneurysm + skeletal (pectus, scoliosis),
+the evidence-36 carotid/goiter topic thin; hEDS = EDS type 3 + mast cell + somatic
+dysfunction, and a musculoskeletal profile, the hearing-loss topic thin and the
+hypermobility-POTS topic a stratum (no hEDS own code in its top 5 — arguably a real hEDS
+profile coded as hypermobility; watch); DCM = DCM/LBBB/chronic systolic HF // sacubitril,
+carvedilol + a primary-CM/PVC profile, the decompensated-HF topic a stratum. Common
+diseases still carry 3–4 (hypertension: diabetic-neuropathy, metabolic, lumbar-pain —
+own code ranked by relevance still clears top 5 there); the ANCHOR flag marks the
+own-code-dominated topics. **`tpn_max` 5 confirmed with headroom**; a per-disease tpn
+from this census is the efficiency option for the next fit.
+
 ## Results
