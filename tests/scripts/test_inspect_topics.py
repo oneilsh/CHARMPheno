@@ -954,3 +954,19 @@ def test_census_reports_undecidable_nodes_apart(tmp_path):
     assert "own-code-decidable nodes (2)" in rep
     assert "1 node(s) with no own code in the vocab fall back to the cosine rule" in rep
     assert "own-code-decidable p90" in rep
+
+
+def test_thin_topics_are_not_profiles(tmp_path):
+    """0137: a fed topic far below its block's best evidence is 'thin', not a
+    profile (Marfan's evidence-36 topic next to an evidence-891 one)."""
+    _make_census_run(tmp_path)
+    npz, manifest = it.load_run(tmp_path)
+    lams = it.domain_lambdas(npz)
+    sh = it.topic_sharpness(lams)
+    # node2: sig A (idx 2, +80), sig B (idx 3, +50), dup of A (+40)
+    k = {t: kk for t, kk, _, _ in it.classify_block_topics([4, 5, 6], lams, sh, 1,
+                                                            thin_frac=0.75)}
+    assert k[4] == "signature" and k[5] == "thin" and k[6] == "thin"
+    k0 = {t: kk for t, kk, _, _ in it.classify_block_topics([4, 5, 6], lams, sh, 1,
+                                                             thin_frac=0)}
+    assert k0 == {4: "signature", 5: "signature", 6: "duplicate"}
