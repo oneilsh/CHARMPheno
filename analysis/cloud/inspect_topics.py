@@ -2483,7 +2483,8 @@ def main():
     ap.add_argument("--voi", default=None, metavar="REGEX",
                     help="Code-level VOI tables (WP-D part 1, voi_tables.py) for every "
                          "readout-DAG node whose name matches REGEX (Mondo groups, e.g. "
-                         "'^cardiomyopathy$|connective tissue'). Needs the run's "
+                         "'^cardiomyopathy$|connective tissue'; through make's INSPECT_ARGS write "
+                         "each $ as \\$\\$ or make eats it). Needs the run's "
                          "readout_dag.json; honours --own-codes, --thin-frac, "
                          "--own-top, --results-file (prior). Suppresses other reports.")
     ap.add_argument("--voi-L", type=float, default=40.0,
