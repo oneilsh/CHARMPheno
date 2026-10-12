@@ -27,6 +27,15 @@ for _p in (str(REPO_ROOT / "analysis" / "cloud"), str(REPO_ROOT / "charmpheno"),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+import os  # noqa: E402
+
+# PySpark workers inherit PYTHONPATH, not the driver's sys.path (same note as
+# test_conversion_analysis): the lean collect ships distributed_readout's kernels
+# by module reference.
+os.environ["PYTHONPATH"] = os.pathsep.join(
+    p for p in (str(REPO_ROOT), str(REPO_ROOT / "analysis" / "cloud"), str(REPO_ROOT / "charmpheno"),
+                str(REPO_ROOT / "spark-vi"), os.environ.get("PYTHONPATH", "")) if p)
+
 import readout_dag as rd  # noqa: E402
 
 R, H = "MONDO:0000001", "MONDO:0700096"
@@ -197,3 +206,35 @@ def test_bundle_meta_lands_in_the_run_dir_and_the_readout_has_bundle_only(tmp_pa
     assert meta["vocab_maps"][0] == {"101": 0}
     a = gpr.build_parser().parse_args(["--run-dir", "/tmp/run", "--bundle-only"])
     assert a.bundle_only
+
+
+@pytest.mark.slow
+def test_conditional_from_heads_scores_both_arms_without_a_solve(spark, tmp_path):
+    """WP-D part 2: saved heads -> per-edge conditional diagnosis, flat + stacked."""
+    import numpy as np
+    from pyspark.ml.linalg import Vectors
+    from pyspark.sql import Row
+    import gated_pc_readout as gpr
+    rng = np.random.default_rng(0)
+    C, K = 4, 3                       # root 0 -> group 1 -> {2, 3}
+    parent_int = {0: [], 1: [0], 2: [1], 3: [1]}
+    rows = []
+    for i in range(200):
+        child = 2 if i % 2 else 3
+        theta = rng.dirichlet([1, 1, 1]); theta[child - 1] += 2.0; theta /= theta.sum()
+        lab = [1.0, 1.0, float(child == 2), float(child == 3)]
+        rows.append(Row(person_id=i, doc_id=str(i), topicDistribution=Vectors.dense(theta),
+                        label=lab, labelMask=[1.0] * C))
+    df = spark.createDataFrame(rows)
+    V = np.zeros((C, K)); V[2, 1] = 6.0; V[3, 2] = 6.0; V[1] = 1.0; V[0] = 1.0
+    np.savez(tmp_path / "readout_heads_gated_pc_t.npz", V=V, b_raw=np.zeros(C),
+             const=np.zeros(C), degenerate=np.zeros(C, dtype=bool), C=np.int64(C),
+             K=np.int64(K), theta_topm=np.int64(0))
+    out = gpr.run_conditional_from_heads(df, tmp_path, "t", C=C, parent_int=parent_int,
+                                         int2cid={0: -1, 1: 10, 2: 20, 3: 30},
+                                         name_by_id={10: "G", 20: "A", 30: "B"},
+                                         min_count=10)
+    aucs = {(e["parent"], e["child"]): e["cond_auc"] for e in out["flat"]["edges"]
+            if e.get("cond_auc") is not None}
+    assert aucs[(1, 2)] > 0.9 and aucs[(1, 3)] > 0.9
+    assert "stacked" in out and (tmp_path / "results_conditional_t.json").exists()
