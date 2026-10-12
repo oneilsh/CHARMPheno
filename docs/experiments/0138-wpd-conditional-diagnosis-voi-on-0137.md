@@ -1,7 +1,7 @@
 ---
 id: 138
 slug: wpd-conditional-diagnosis-voi-on-0137
-status: running
+status: done
 model_class: gated_pc
 # NOT A FIT. WP-D (spec 2026-10-07 §D4) on the ribbon record 0137, no refit:
 #   part 1 — code-level VOI tables over Mondo candidate sets (off-cluster, numpy over the
@@ -195,4 +195,43 @@ question) changed nothing material (full-pool top-1 0.59 vs 0.60; balanced 0.55 
 conditional heads do the 3-way connective-tissue call at top-1 0.81 vs majority 0.64 —
 the generative presence model is the weak link, not the ordering.
 
+**2026-10-12 — part 3 re-run, fixed likelihood** (L = distinct codes; tau fit on one
+half of each set's patients, scored on the other). Fitted tau = 0.1 (both Mondo groups)
+and 0.05 (Marfan/EDS): each answered code is worth about a tenth of an independent
+observation — the presence model's per-code evidence is mostly redundant. **Calibration
+is now acceptable**: ECE of the max posterior 0.05–0.12 at 20 questions and on the full
+pool (Marfan/EDS full 0.25 at n = 58). With it, the posteriors move slowly and
+honestly: balanced top-1 at 20 questions, greedy / static / random, connective tissue
+0.070 / 0.063 / 0.053 (prior 0.053), cardiomyopathy 0.243 / 0.229 / 0.129 (0.125),
+Marfan/EDS 0.611 / 0.509 / 0.526 (0.333; n = 58, the random row is tie-noisy under a
+uniform prior). Full pool: top-1 0.41 / 0.55 / 0.67 against majority 0.30 / 0.43 /
+chance 0.33; balanced 0.12 / 0.27 / 0.70.
+
 ## Results
+
+1. **VOI tables (part 1) read clinically** in all four sets. Condition and drug codes
+   carry the discrimination (methotrexate/CCP → RA; C3/C4 → SLE; carvedilol, sacubitril,
+   LBBB → DCM; disopyramide, verapamil → HCM; aortic dissection/ectasia, valve disease,
+   atenolol → Marfan; orthostatic hypotension, tachycardia → generic EDS; joint and
+   myofascial pain, naltrexone, cromolyn → hEDS). Measurement tables measure work-up
+   intensity, not disease. The pre-registered Marfan-vs-EDS read passes.
+2. **Conditional diagnosis (part 2)**: the depth >= 1 heads are P(child | parent) by
+   construction; cond AUC 0.77–0.81, flat across depths 0–6; pooled ECE 0.020 (per-node
+   mean 0.086). Which-child top-1 beats the majority where siblings are balanced and
+   collapses to it where one child dominates.
+3. **Simulated acquisition (part 3)**: the ORDER is right — greedy EIG ≥ the static
+   table > random on balanced top-1 and P(true) in every set, as pre-registered. The
+   ENGINE is weak: the code-presence naive Bayes needs a temper of 0.05–0.1 to be
+   calibrated, and calibrated it is a weak classifier for broad sets (connective tissue,
+   19 members: full-pool balanced top-1 0.12) though a useful one for a focused clinical
+   contrast (Marfan vs EDS: 0.70 against 0.33). The discriminative heads of part 2 are
+   far stronger on the same patients.
+
+**Read.** VOI over the topic model's disease profiles ranks the right questions; the
+probabilities those questions update should come from the topic model itself, not from a
+per-code presence model built from its profiles. The natural next step (not built):
+**model-based acquisition** — after each revealed code, re-infer the patient's θ from the
+revealed codes (fold-in over the saved λ) and score the conditional heads, choosing the
+next code by expected change in the heads' posterior. That is the engine part 2 already
+validated, with the ordering part 3 validated.
+
