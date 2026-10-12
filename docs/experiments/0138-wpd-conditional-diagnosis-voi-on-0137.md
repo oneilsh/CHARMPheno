@@ -114,4 +114,18 @@ within cohort) and holds with depth; calibration is good pooled, uneven per node
 Part 3 (simulated acquisition) is justified. Re-read part 1 with `--voi-prior uniform`
 on a tighter set for the Marfan/EDS contrast first.
 
+**2026-10-12 — part 1 re-read, uniform prior.** The pattern matched only the EDS node
+(members: generic EDS and hEDS; Marfan forms no set of its own, and no readout node
+holds both — `--voi-adhoc` added for that contrast). Generic-EDS vs hEDS splits on a
+clinical axis: arrhythmia, orthostatic hypotension, tachycardia, gastroparesis,
+propranolol, fludrocortisone (dysautonomia/POTS) favour **generic EDS**; multiple joint
+pain, myofascial pain, spine/sacrum disorders, naltrexone (low-dose, for pain) and
+cromolyn (mast-cell) favour **hEDS**. The POTS side landing on generic EDS is the
+census's doing: hEDS's hypermobility-POTS topic is classed a stratum (no hEDS own code
+in its top 5) and so is not in hEDS's profile — the case flagged in the census entry,
+now with a visible consequence. Measurements all favour hEDS and are work-up panels
+(CBC differential, ferritin, B12, TSH, anion gap); contrast agents and mupirocin are care
+context. So: drug and condition tables are informative, measurement tables mostly
+measure care intensity — consistent across all three sets read.
+
 ## Results
