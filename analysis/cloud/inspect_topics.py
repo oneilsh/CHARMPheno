@@ -2364,6 +2364,131 @@ def build_collinearity(run_dir, profile_file, *, bundle_meta_path,
 
 
 
+# --------------------------------------------------------------------------- #
+# Measurement result-state census                                              #
+# --------------------------------------------------------------------------- #
+
+_MEAS_STATE_GROUP = {0: "order only ([measured])",
+                     1: "range result", 2: "range result", 3: "range result",
+                     10: "coded result", 11: "coded result", 12: "coded result",
+                     13: "coded result", 14: "coded result", 15: "coded result"}
+_MEAS_STATE_LABEL = {0: "measured", 1: "low", 2: "normal", 3: "high", 10: "neg",
+                     11: "pos", 12: "normal(coded)", 13: "abnormal",
+                     14: "low(coded)", 15: "high(coded)"}
+
+
+def measurement_state_census(token_ids, mass=None, *, base=100):
+    """How much of the measurement vocabulary carries a RESULT, not just an order.
+
+    Measurement tokens are synthetic: `concept_id * base + state`
+    (`charmpheno.omop.measurement_tokens`): state 0 = bare presence ("[measured]",
+    no reference range and no allowlisted coded value), 1-3 = range-derived
+    low/normal/high, 10-15 = coded qualitative states. `mass` (same order as
+    `token_ids`) is the fitted per-token mass (sum over topics of λ above its prior
+    floor) — the model's view of how often each token occurs. Returns a dict of
+    shares by state and by group, and per-test coverage (a test = a concept_id):
+    the share of tests with at least one result-bearing token."""
+    import numpy as np
+    tok = np.asarray(token_ids, dtype=np.int64)
+    st = tok % base
+    cid = tok // base
+    w = (np.ones(len(tok)) if mass is None else np.asarray(mass, dtype=np.float64))
+    out = {"n_tokens": int(len(tok)), "by_state": {}, "by_group": {}}
+    for s in sorted(set(st.tolist())):
+        sel = st == s
+        out["by_state"][_MEAS_STATE_LABEL.get(int(s), f"state{s}")] = {
+            "vocab": int(sel.sum()), "vocab_share": float(sel.mean()),
+            "mass_share": float(w[sel].sum() / w.sum()) if w.sum() > 0 else 0.0}
+    for g in ("order only ([measured])", "range result", "coded result"):
+        sel = np.array([_MEAS_STATE_GROUP.get(int(s), "") == g for s in st])
+        out["by_group"][g] = {
+            "vocab": int(sel.sum()), "vocab_share": float(sel.mean()),
+            "mass_share": float(w[sel].sum() / w.sum()) if w.sum() > 0 else 0.0}
+    tests = {}
+    for c, s, m in zip(cid.tolist(), st.tolist(), w.tolist()):
+        t = tests.setdefault(c, {"result": False, "order": False, "mass": 0.0,
+                                 "order_mass": 0.0})
+        t["mass"] += m
+        if s == 0:
+            t["order"] = True
+            t["order_mass"] += m
+        else:
+            t["result"] = True
+    n = len(tests)
+    out["n_tests"] = n
+    out["tests_with_result"] = sum(t["result"] for t in tests.values()) / max(n, 1)
+    out["tests_order_only"] = sum(t["order"] and not t["result"]
+                                  for t in tests.values()) / max(n, 1)
+    out["tests_mixed"] = sum(t["order"] and t["result"]
+                             for t in tests.values()) / max(n, 1)
+    out["_tests"] = tests
+    return out
+
+
+def build_measurement_state_report(run_dir, *, bundle_meta_path=None, names_path=None,
+                                   top=15):
+    """`--measurement-states`: the result-state census of the measurement domain."""
+    import numpy as np
+    run_dir = Path(run_dir)
+    npz, manifest = load_run(run_dir)
+    lams = domain_lambdas(npz)
+    dom_names = manifest.get("domain_names") or [f"dom{i}" for i in range(len(lams))]
+    if "measurement" not in dom_names:
+        raise SystemExit(f"[inspect_topics] no measurement domain in {dom_names}")
+    d = dom_names.index("measurement")
+    meta = load_bundle_meta(bundle_meta_path) if bundle_meta_path else None
+    if not meta or "vocab_maps" not in meta:
+        raise SystemExit("[inspect_topics] --measurement-states needs the bundle meta "
+                         "(<run>/bundle_meta.json)")
+    vm = {int(c): int(i) for c, i in meta["vocab_maps"][d].items()}
+    lam = np.asarray(lams[d], dtype=np.float64)
+    # Fitted per-token mass: λ above its prior floor, summed over topics. The floor
+    # is estimated as the smallest λ entry (the η every row starts from), so a token
+    # the corpus never fed contributes ~0.
+    mass_v = np.clip(lam - lam.min(), 0.0, None).sum(axis=0)
+    toks = sorted(vm, key=lambda c: vm[c])
+    mass = mass_v[[vm[c] for c in toks]]
+    r = measurement_state_census(toks, mass)
+    names = load_concept_names(names_path) if names_path else {}
+    by_cid = {}
+    for t in toks:
+        nm = names.get(int(t))
+        if nm and (t // 100) not in by_cid:
+            by_cid[t // 100] = str(nm).rsplit(" [", 1)[0]
+
+    def test_name(c):
+        return by_cid.get(c) or f"cid:{c}"
+
+    L = [f"# {run_dir.name} — measurement result-state census",
+         f"{r['n_tokens']:,} measurement tokens over {r['n_tests']:,} tests "
+         f"(token = test x result state; vocabulary floor min_df/min_patient_count "
+         f"applies per token). Mass = fitted token mass (λ above its floor).", "",
+         "| group | vocab tokens | vocab share | mass share |", "|---|--:|--:|--:|"]
+    for g, v in r["by_group"].items():
+        L.append(f"| {g} | {v['vocab']:,} | {100 * v['vocab_share']:.1f}% | "
+                 f"{100 * v['mass_share']:.1f}% |")
+    L += ["", "| state | vocab tokens | vocab share | mass share |", "|---|--:|--:|--:|"]
+    for s, v in r["by_state"].items():
+        L.append(f"| {s} | {v['vocab']:,} | {100 * v['vocab_share']:.1f}% | "
+                 f"{100 * v['mass_share']:.1f}% |")
+    L += ["", f"tests with at least one result-bearing token: "
+          f"{100 * r['tests_with_result']:.1f}% · order-only tests: "
+          f"{100 * r['tests_order_only']:.1f}% · tests with both: "
+          f"{100 * r['tests_mixed']:.1f}%", "",
+          f"Largest order-only tests by mass (share of all measurement mass):"]
+    tot = float(mass.sum()) or 1.0
+    oo = sorted(((c, t) for c, t in r["_tests"].items() if not t["result"]),
+                key=lambda x: -x[1]["mass"])[:int(top)]
+    for c, t in oo:
+        L.append(f"- {_trunc(test_name(c), 70)}  {100 * t['mass'] / tot:.2f}%")
+    L += ["", "Largest tests by mass, with their order-only fraction:"]
+    big = sorted(r["_tests"].items(), key=lambda x: -x[1]["mass"])[:int(top)]
+    for c, t in big:
+        L.append(f"- {_trunc(test_name(c), 70)}  {100 * t['mass'] / tot:.2f}% · order-only "
+                 f"{100 * t['order_mass'] / max(t['mass'], 1e-12):.0f}%")
+    return "\n".join(L) + "\n"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -2470,6 +2595,12 @@ def main():
                          "the HPO profile says, or something else? Needs "
                          "--credited-file, the bundle meta, tpn>=2. "
                          "Suppresses other reports.")
+    ap.add_argument("--measurement-states", action="store_true",
+                    help="Census of the measurement vocabulary by RESULT state: "
+                         "order-only ([measured]) vs range low/normal/high vs coded "
+                         "pos/neg, by vocabulary and by fitted token mass, and the "
+                         "share of tests with any result-bearing token. Needs the "
+                         "bundle meta. Suppresses other reports.")
     ap.add_argument("--profile-census", action="store_true",
                     help="Emit the PROFILE CENSUS (spec 2026-10-07 §D3, exp "
                          "0136): each block topic classified starved / stratum "
@@ -2569,6 +2700,10 @@ def main():
             rel_lambda=args.relevance_lambda, prior=args.voi_prior,
             adhoc=args.voi_adhoc)
         default_out = "voi_tables.md"
+    elif args.measurement_states:
+        report = build_measurement_state_report(
+            run_dir, bundle_meta_path=args.bundle_meta, names_path=args.concept_names)
+        default_out = "measurement_states.md"
     elif args.profile_census:
         own_path = args.own_codes
         if own_path == "auto":

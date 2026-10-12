@@ -992,3 +992,43 @@ def test_census_prints_kl_and_anchor_flags_and_relevance_header(tmp_path):
                                   grep_pattern="node", rel_lambda=0.6)
     assert "words ranked by relevance (lambda=0.6)" in rep
     assert " kl" in rep and "ANCHOR" in rep            # the sharp synthetic topics dominate
+
+
+def test_measurement_state_census_splits_orders_from_results():
+    import inspect_topics as it
+    # test 7: order-only; test 8: range low/high + an order token; test 9: coded pos/neg
+    toks = [700, 801, 803, 800, 910, 911]
+    mass = [5.0, 1.0, 2.0, 2.0, 1.0, 1.0]
+    r = it.measurement_state_census(toks, mass)
+    g = r["by_group"]
+    assert g["order only ([measured])"]["vocab"] == 2
+    assert g["range result"]["vocab"] == 2 and g["coded result"]["vocab"] == 2
+    assert abs(g["order only ([measured])"]["mass_share"] - 7 / 12) < 1e-9
+    assert r["n_tests"] == 3
+    assert abs(r["tests_with_result"] - 2 / 3) < 1e-9
+    assert abs(r["tests_order_only"] - 1 / 3) < 1e-9
+    assert abs(r["tests_mixed"] - 1 / 3) < 1e-9
+    assert r["by_state"]["high"]["vocab"] == 1 and r["by_state"]["pos"]["vocab"] == 1
+
+
+def test_measurement_state_report_end_to_end_on_a_tiny_run(tmp_path):
+    import inspect_topics as it
+    lam0 = np.full((2, 3), 0.1)
+    lam1 = np.full((2, 4), 0.1)
+    lam1[0, 0] = 50.0          # token 700 (order-only test 7) carries most mass
+    lam1[1, 2] = 10.0          # token 803 (test 8, high)
+    np.savez(tmp_path / "gated_pc_result.npz", lambda_0=lam0, lambda_1=lam1)
+    (tmp_path / "manifest.json").write_text(json.dumps(
+        {"domain_names": ["condition", "measurement"]}))
+    (tmp_path / "bundle_meta.json").write_text(json.dumps({
+        "int2cid": {"0": -1}, "vocab_maps": [{"1": 0, "2": 1, "3": 2},
+                                             {"700": 0, "801": 1, "803": 2, "910": 3}]}))
+    names = tmp_path / "names.csv"
+    names.write_text("concept_id,concept_name\n700,Ferritin [measured]\n"
+                     "803,Creatinine [high]\n801,Creatinine [low]\n910,HIV Ab [neg]\n")
+    rep = it.build_measurement_state_report(
+        tmp_path, bundle_meta_path=str(tmp_path / "bundle_meta.json"),
+        names_path=str(names))
+    assert "4 measurement tokens over 3 tests" in rep
+    assert "- Ferritin" in rep and "order-only" in rep
+    assert "| order only ([measured]) | 1 | 25.0% |" in rep
