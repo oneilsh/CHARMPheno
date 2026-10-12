@@ -249,6 +249,14 @@ def run_conditional_from_heads(test_scored, run_dir, tag, *, C, parent_int, int2
     and the stacked product P_stack(c). No solve: the heads are the record's own
     (`readout_heads_gated_pc_<tag>.npz`), so this re-reads, never re-fits.
 
+    The two rows are not rival models. Under the closure mask every head of depth >= 1
+    is fit on its parent's positives, so sigma(z_c) IS P(c | parent) =
+    P_stack(c) / P_stack(parent); that is the conditional-diagnosis answer. The
+    P_stack(c) row ranks the MARGINAL within the parent cohort: the ancestor product
+    varies across a cohort that is already known to have the parent and carries no
+    which-child information, so it only adds noise, more with each level of depth.
+    It is kept as a reference for that reason (0138's first run, 2026-10-12).
+
     Returns the results dict; writes `results_conditional_<tag>.json`. Counts stay in
     the run dir (egress floor); the printed tables are the existing pooled format."""
     from gated_pc_cloud import (closure_matrix, conditional_readout,
@@ -272,13 +280,13 @@ def run_conditional_from_heads(test_scored, run_dir, tag, *, C, parent_int, int2
     out["flat"] = conditional_readout(proba, y, ones, parent_int, int(C),
                                       min_count=int(min_count))
     print(format_conditional_readout(out["flat"], int2cid, name_by_id).replace(
-        "[conditional sharpening]", "[conditional diagnosis: flat sigma(z_c)]"),
+        "[conditional sharpening]", "[conditional diagnosis: P(c|parent) = sigma(z_c), the conditional head — THE ANSWER]"),
         flush=True)
     P = stacked_proba(proba, closure_matrix(parent_int, int(C)))
     out["stacked"] = conditional_readout(P, y, ones, parent_int, int(C),
                                          min_count=int(min_count))
     print(format_conditional_readout(out["stacked"], int2cid, name_by_id).replace(
-        "[conditional sharpening]", "[conditional diagnosis: stacked P_stack(c)]"),
+        "[conditional sharpening]", "[reference: marginal P_stack(c) ranked within the parent cohort — the ancestor product is noise here]"),
         flush=True)
     _dump_partial_results(run_dir, out, name=f"results_conditional_{tag}.json")
     _cprint(f"[readout]   wrote {run_dir / f'results_conditional_{tag}.json'}",
