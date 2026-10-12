@@ -41,6 +41,10 @@ does not already know. They are reported in their own short list. The candidate
 set's OWN node is excluded the same way when it is itself a label node ("Cardiomyopathy"
 is the given, not a finding).
 
+`adhoc=True` builds ONE set from the label nodes whose names match the pattern, for
+contrasts no single readout node holds (Marfan vs EDS: their nearest common ancestor is
+a 19-member grouping).
+
 `prior="uniform"` swaps the population prior for a flat one. Under the population prior
 EIG is dominated by the common members (a 0% member can never be "favoured" enough to
 move the expected entropy), so rare-disease contrasts (Marfan vs EDS inside a large
@@ -154,7 +158,7 @@ def build_voi_report(run_dir, pattern, *, bundle_meta_path=None, vocab_path=None
                      results_arm="gated_pc_stacked.marginal_ranking.stacked",
                      L=40.0, rho=0.3, top=15, thin_frac=0.1, own_top=None,
                      domains=None, include_own=False, rel_lambda=None,
-                     prior="population"):
+                     prior="population", adhoc=False):
     """The VOI report for every candidate set matching `pattern` (markdown)."""
     import inspect_topics as it
 
@@ -218,7 +222,13 @@ def build_voi_report(run_dir, pattern, *, bundle_meta_path=None, vocab_path=None
 
     doms = [i for i, n in enumerate(dom_names)
             if domains is None or n in set(domains)]
-    sets = candidate_sets(rdag, pattern, names=rd_names)
+    if adhoc:
+        import re
+        rx = re.compile(pattern, re.I)
+        mem = [m for m in range(1, int(rdag["C_fit"])) if rx.search(rd_names.get(m, ""))]
+        sets = [(-1, f"ad hoc set /{pattern}/", mem)] if len(mem) >= 2 else []
+    else:
+        sets = candidate_sets(rdag, pattern, names=rd_names)
     L_ = [f"# {run_dir.name} — code-level VOI over Mondo candidate sets",
           f"pattern {pattern!r} · {len(sets)} set(s) · presence model L={L:g}, "
           f"rho={rho:g} · signatures only (own-code rule, thin < {thin_frac:g}) · "
@@ -234,7 +244,7 @@ def build_voi_report(run_dir, pattern, *, bundle_meta_path=None, vocab_path=None
             bg = background_profile(lam, n_bg, sh["evidence"])
             excl = set()
             if d == 0 and not include_own:
-                for m in members + ([n] if n < int(rdag["C_fit"]) else []):
+                for m in members + ([n] if 0 < n < int(rdag["C_fit"]) else []):
                     excl |= set(own_idx.get(m, ()))
             r = voi_for_set(members, profiles, bg, prior_counts, L=L, rho=rho,
                             exclude=excl, top=top)

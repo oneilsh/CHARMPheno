@@ -2498,6 +2498,9 @@ def main():
                     help="(--voi) prior over the candidate set: scored test positives "
                          "(default; common members dominate EIG) or uniform (the "
                          "rare-disease contrast, e.g. Marfan vs EDS)")
+    ap.add_argument("--voi-adhoc", action="store_true",
+                    help="(--voi) the regex picks LABEL nodes directly and they form one "
+                         "candidate set (a contrast no single readout node holds)")
     ap.add_argument("--relevance-lambda", type=float, default=None,
                     help="(--profile-census) rank displayed words by LDAvis relevance "
                          "at this lambda (the usage dashboard uses ~0.6) instead of "
@@ -2563,7 +2566,8 @@ def main():
                           if args.results_file != "results_readout.json" else None),
             L=args.voi_L, rho=args.voi_rho, top=args.voi_top,
             thin_frac=args.thin_frac, own_top=args.own_top,
-            rel_lambda=args.relevance_lambda, prior=args.voi_prior)
+            rel_lambda=args.relevance_lambda, prior=args.voi_prior,
+            adhoc=args.voi_adhoc)
         default_out = "voi_tables.md"
     elif args.profile_census:
         own_path = args.own_codes
