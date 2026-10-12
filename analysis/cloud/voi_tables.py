@@ -146,7 +146,7 @@ def build_voi_report(run_dir, pattern, *, bundle_meta_path=None, vocab_path=None
                      names_path=None, own_codes_path=None, results_name=None,
                      results_arm="gated_pc_stacked.marginal_ranking.stacked",
                      L=40.0, rho=0.3, top=15, thin_frac=0.1, own_top=None,
-                     domains=None, include_own=False):
+                     domains=None, include_own=False, rel_lambda=None):
     """The VOI report for every candidate set matching `pattern` (markdown)."""
     import inspect_topics as it
 
@@ -186,10 +186,11 @@ def build_voi_report(run_dir, pattern, *, bundle_meta_path=None, vocab_path=None
         vm0 = {c: i for i, c in inv_maps[0].items()}
         own_idx = it.own_code_vocab_idx(it.load_code_map(own_codes_path), int2cid, vm0)
     kinds = {}
+    _pw0 = it.model_word_marginal(lams[0])
     for e, blk in block.items():
         kinds[e] = it.classify_block_topics(
             blk, lams, sh, n_bg, own_idx=(own_idx.get(e) or None) if own_idx else None,
-            thin_frac=thin_frac, own_top=own_top)
+            thin_frac=thin_frac, own_top=own_top, pw0=_pw0, rel_lambda=rel_lambda)
     sig = {e: [t for t, k, _, _ in r if k == "signature"] for e, r in kinds.items()}
 
     prior_counts = {}
