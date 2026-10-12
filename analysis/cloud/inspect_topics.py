@@ -1084,7 +1084,7 @@ def own_code_vocab_idx(own_by_node, int2cid, vocab_map0):
 
 def classify_block_topics(block_topics, lams, sh, n_bg, *, starved_frac=0.5,
                           stratum_cos=0.8, dup_cos=0.8, bg_vecs=None,
-                          own_idx=None, top_m=15):
+                          own_idx=None, top_m=15, thin_frac=0.1, own_top=None):
     """Classify the topics of ONE node's block (spec 2026-10-07 §D3).
 
     `tpn` is a CEILING, not the number of profiles a disease has; this reads the
@@ -1122,6 +1122,14 @@ def classify_block_topics(block_topics, lams, sh, n_bg, *, starved_frac=0.5,
     disease's true signature (hyperlipidemia, bg cos 0.71) is not a stratum.
     The cosine rule stays as the secondary flag."""
     own = None if own_idx is None else {int(i) for i in own_idx}
+    own_top = int(own_top or top_m)
+    # THIN (0137 census, 2026-10-12): at tpn 5 a rare disease's block grows fed but
+    # tiny topics that read as noise (Marfan's evidence-36 carotid-dissection/goiter
+    # topic next to an evidence-891 aortic one). A fed topic below `thin_frac` of its
+    # block's best evidence is not counted as a profile. 0 disables.
+    fed_ev = [float(sh["evidence"][t]) for t in block_topics
+              if sh["support_frac"][t] <= starved_frac]
+    thin_floor = float(thin_frac) * max(fed_ev) if (fed_ev and thin_frac) else 0.0
     if bg_vecs is None:
         bg_vecs = {b: _topic_unit_vec(b, lams) for b in range(n_bg)}
     bg_mat = (np.stack([bg_vecs[b] for b in range(n_bg)])
@@ -1139,13 +1147,17 @@ def classify_block_topics(block_topics, lams, sh, n_bg, *, starved_frac=0.5,
         vecs[t] = v
         c_bg = float(np.max(bg_mat @ v)) if n_bg else 0.0
         bgc[t] = c_bg
+        if float(sh["evidence"][t]) < thin_floor:
+            kinds[t] = "thin"; sigc[t] = float("nan")
+            continue
         if own is not None:
             # Own-code identity DECIDES (0136 2026-10-09): a topic carrying the
             # node's own codes is the node's, even when a background topic looks
             # like it (atrial fibrillation's own-code topic sits at bg cos 0.81 —
             # the background duplicated the disease, not the reverse). The cosine
-            # is then only the reported flag.
-            if not (set(_top_idx(lams[0][t], top_m)) & own):
+            # is then only the reported flag. `own_top` < `top_m` tightens the rule
+            # for common diseases whose own code rides in almost every topic.
+            if not (set(_top_idx(lams[0][t], own_top)) & own):
                 kinds[t] = "stratum"; sigc[t] = float("nan")
                 continue
         elif c_bg >= stratum_cos:
@@ -1165,7 +1177,7 @@ def build_profile_census(run_dir, *, bundle_meta_path=None, vocab_path=None,
                          names_path=None, profile_file=None, grep_pattern=None,
                          exemplars=8, t_words=6, starved_frac=0.5,
                          stratum_cos=0.8, dup_cos=0.8, top_m=15,
-                         own_codes_path=None):
+                         own_codes_path=None, thin_frac=0.1, own_top=None):
     """The PROFILE CENSUS (spec 2026-10-07 §D3; exp 0136): per node, how many of
     its `tpn` block topics are signatures, strata, duplicates, or starved — and
     therefore what `n_profiles(d)` is and what `tpn_max` should be.
@@ -1251,12 +1263,12 @@ def build_profile_census(run_dir, *, bundle_meta_path=None, vocab_path=None,
             # it falls back to the cosine rule and is reported apart, so it does
             # not read as "0 profiles".
             own_idx=(own_idx.get(e) or None) if own_idx is not None else None,
-            top_m=top_m)
+            top_m=top_m, thin_frac=thin_frac, own_top=own_top)
 
     kinds_all = [k for r in rows.values() for _, k, _, _ in r]
     n_topics = len(kinds_all)
     cnt = {k: kinds_all.count(k) for k in ("signature", "stratum", "duplicate",
-                                           "starved")}
+                                           "starved", "thin")}
     n_prof = {e: sum(1 for _, k, _, _ in r if k == "signature")
               for e, r in rows.items()}
     hist = [sum(1 for v in n_prof.values() if v == i) for i in range(tpn + 1)]
@@ -1280,7 +1292,9 @@ def build_profile_census(run_dir, *, bundle_meta_path=None, vocab_path=None,
       f"({100 * cnt['signature'] / max(n_topics, 1):.0f}%) · stratum {cnt['stratum']} "
       f"({100 * cnt['stratum'] / max(n_topics, 1):.0f}%) · duplicate "
       f"{cnt['duplicate']} ({100 * cnt['duplicate'] / max(n_topics, 1):.0f}%) · "
-      f"starved {cnt['starved']} ({100 * cnt['starved'] / max(n_topics, 1):.0f}%)")
+      f"starved {cnt['starved']} ({100 * cnt['starved'] / max(n_topics, 1):.0f}%) · "
+      f"thin {cnt['thin']} ({100 * cnt['thin'] / max(n_topics, 1):.0f}%, evidence < "
+      f"{thin_frac:g} x the block's best)")
     w("n_profiles per node: " + " · ".join(
         f"{i}: {hist[i]} ({100 * hist[i] / max(len(rows), 1):.0f}%)"
         for i in range(tpn + 1))
@@ -2391,6 +2405,26 @@ def main():
                          "exemplars, --grep, and the tpn_max verdict. Honours "
                          "--bundle-meta, --top-words, --digest-exemplars. "
                          "Suppresses other reports.")
+    ap.add_argument("--voi", default=None, metavar="REGEX",
+                    help="Code-level VOI tables (WP-D part 1, voi_tables.py) for every "
+                         "readout-DAG node whose name matches REGEX (Mondo groups, e.g. "
+                         "'^cardiomyopathy$|connective tissue'). Needs the run's "
+                         "readout_dag.json; honours --own-codes, --thin-frac, "
+                         "--own-top, --results-file (prior). Suppresses other reports.")
+    ap.add_argument("--voi-L", type=float, default=40.0,
+                    help="(--voi) tokens per document per domain in the presence model")
+    ap.add_argument("--voi-rho", type=float, default=0.3,
+                    help="(--voi) share of a case's tokens from the disease profile")
+    ap.add_argument("--voi-top", type=int, default=15,
+                    help="(--voi) codes per table")
+    ap.add_argument("--thin-frac", type=float, default=0.1,
+                    help="(--profile-census) a fed block topic with evidence below "
+                         "this fraction of its block's best is 'thin', not a profile "
+                         "(0 disables; default 0.1)")
+    ap.add_argument("--own-top", type=int, default=None,
+                    help="(--profile-census --own-codes) the own code must rank in "
+                         "the topic's top N condition tokens (default 15; 5 is the "
+                         "strict rule for common diseases)")
     ap.add_argument("--own-codes", nargs="?", const="auto", default=None,
                     metavar="TSV",
                     help="(--profile-census) WP-C' own-code identity: the fit's "
@@ -2430,6 +2464,20 @@ def main():
             run_dir, args.credited_file, bundle_meta_path=args.bundle_meta,
             readout_label=args.readout_label)
         default_out = "collinearity.md"
+    elif args.voi:
+        import voi_tables
+        own_path = args.own_codes
+        if own_path == "auto":
+            own_path = str(run_dir / "code_map.tsv")
+        report = voi_tables.build_voi_report(
+            run_dir, args.voi, bundle_meta_path=args.bundle_meta,
+            vocab_path=args.vocab_map, names_path=args.concept_names,
+            own_codes_path=own_path,
+            results_name=(args.results_file
+                          if args.results_file != "results_readout.json" else None),
+            L=args.voi_L, rho=args.voi_rho, top=args.voi_top,
+            thin_frac=args.thin_frac, own_top=args.own_top)
+        default_out = "voi_tables.md"
     elif args.profile_census:
         own_path = args.own_codes
         if own_path == "auto":
@@ -2442,7 +2490,8 @@ def main():
             run_dir, bundle_meta_path=args.bundle_meta, vocab_path=args.vocab_map,
             names_path=args.concept_names, profile_file=args.credited_file,
             grep_pattern=args.grep, exemplars=args.digest_exemplars,
-            t_words=args.top_words, own_codes_path=own_path)
+            t_words=args.top_words, own_codes_path=own_path,
+            thin_frac=args.thin_frac, own_top=args.own_top)
         default_out = "profile_census.md"
     elif args.profile_align:
         if not args.credited_file:
