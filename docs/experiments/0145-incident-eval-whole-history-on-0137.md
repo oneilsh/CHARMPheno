@@ -37,9 +37,9 @@ grep -E "^WHOLE|^## |^\| 0" "$RUN"/prevalence_check_history.md | cut -c1-220
 ## Run log
 
 **2026-10-13 — run.** 54,753 test documents, every one with a sidecar index (coverage
-100%). Prior cells: lookback rule 1,215,542; whole-history rule larger (the header line
-was cut in the paste — containment of lookback cells in whole-history cells to be
-filled from `prevalence_check_history.md`).
+100%). Prior cells: lookback rule 1,215,542; whole-history rule 2,524,695 (2.08×).
+Containment of lookback cells in whole-history cells **1.000** — the sidecar index and
+the Mondo roll-up agree with the bundle's features exactly.
 
 ## Results
 
