@@ -447,6 +447,182 @@ def run_acquisition(test_df, run_dir, pattern, *, adhoc=False, prior="population
     return js
 
 
+def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
+                     results_name="results_readout_stacked_mass99.json",
+                     heads_tag="stacked_mass99", max_patients=600, max_train=2000,
+                     thin_frac=0.1, own_top=5, rel_lambda=0.6, rho=0.3, seed=0,
+                     tag=None):
+    """Framing 1 — DIFFERENTIAL WITH REASONS (spec 2026-10-13 clinician framings,
+    R0/R1; `differential.py`). Four engines on the same held-out patients positive on
+    exactly one member: E1 presence model with subtype profiles, E2 renormalized
+    stacked heads, E3 a multiclass head fit on the train split, E4 the gated
+    per-disease likelihood. Records lose attestation codes and `[measured]` tokens
+    first. Tempers (E1, E4) are fit on one half of the patients and every engine is
+    scored on the other. Writes `differential[_<tag>].md/.json` (pooled only)."""
+    import time
+    import differential as dfm
+    import model_acquisition as ma
+    import voi_tables as vt
+    from gated_pc_cloud import closure_matrix
+    run_dir = Path(run_dir)
+    bm, cm = run_dir / "bundle_meta.json", run_dir / "code_map.tsv"
+    ctx = vt.load_voi_context(
+        run_dir, bundle_meta_path=str(bm) if bm.exists() else None,
+        own_codes_path=str(cm) if cm.exists() else None, results_name=results_name,
+        thin_frac=thin_frac, own_top=own_top, rel_lambda=rel_lambda)
+    npz = np.load(run_dir / "gated_pc_result.npz")
+    lam_keys = sorted((k for k in npz.files if k.startswith("lambda_")),
+                      key=lambda k: int(k.split("_", 1)[1]))
+    lams_fit = [npz[k] for k in lam_keys] if lam_keys else [npz["lambda"]]
+    alpha = npz["alpha"]
+    hz = np.load(run_dir / f"readout_heads_gated_pc_{heads_tag}.npz")
+    rd = json.loads((run_dir / "readout_dag.json").read_text())
+    M = closure_matrix({int(c): [int(x) for x in ps] for c, ps in rd["parent_int"].items()},
+                       int(rd["C"]))
+    heads = (hz["V"], hz["b_raw"], hz["degenerate"], hz["const"], int(hz["theta_topm"]))
+    measured = set()
+    if "measurement" in ctx.dom_names and ctx.inv_maps:
+        dm = ctx.dom_names.index("measurement")
+        measured = {int(v) for v, tok in ctx.inv_maps[dm].items() if int(tok) % 100 == 0}
+    ev = np.asarray(ctx.sh["evidence"], dtype=np.float64)
+    sets = vt.select_sets(ctx, pattern, adhoc=adhoc)
+    if not sets:
+        raise SystemExit(f"[differential] no candidate set matches {pattern!r}")
+    L_ = [f"# {run_dir.name} — differential with reasons (framing 1)",
+          f"pattern {pattern!r}{' (ad hoc)' if adhoc else ''} · records minus attestation "
+          f"codes and {len(measured):,} [measured] tokens · E1 presence subtypes · E2 "
+          f"stacked heads ({heads_tag}) · E3 multiclass head (train split) · E4 gated "
+          f"likelihood · tempers fit on one half, all scored on the other", ""]
+    js = {}
+    eng = None
+    for n, gname, members in sets:
+        t0 = time.time()
+        excl = {0: vt.set_exclusions(ctx, n, members)}
+        if measured:
+            excl[dm] = measured
+        subtypes = {}
+        for m in members:
+            sig = ctx.sig.get(m) or [t for t, k, _, _ in ctx.kinds.get(m, [])
+                                     if k != "starved"]
+            subtypes[m] = [(t, ev[t]) for t in sig]
+        if eng is None:
+            eng = ma.ModelEngine(lams_fit, alpha, heads,
+                                 {m: [int(a) for a in np.flatnonzero(M[m])]
+                                  for m in members}, members)
+        else:
+            eng.__init__(lams_fit, alpha, heads,
+                         {m: [int(a) for a in np.flatnonzero(M[m])] for m in members},
+                         members)
+        e1 = dfm.PresenceSubtypeEngine(lams_fit, subtypes, ctx.n_bg, ev, members, excl,
+                                       rho=rho)
+        bg = list(range(ctx.n_bg))
+        e4 = dfm.GatedLikelihoodEngine(eng.eb, alpha,
+                                       {m: bg + list(ctx.block[m]) for m in members},
+                                       members)
+        feat = bg + sorted({t for m in members for t in ctx.block[m]})
+
+        def prep(rows):
+            out = []
+            for truth, bags, _ in rows:
+                if len(truth) != 1:
+                    continue
+                fb, lens = dfm.filter_record(bags, excl)
+                gi = [eng.gidx(d, v) for d, b in fb.items() for v in b]
+                gc = [c for d, b in fb.items() for c in b.values()]
+                out.append((truth, fb, lens, gi, gc))
+            return out
+        te_raw, n_te = collect_set_patients(test_df, members, len(ctx.lams),
+                                            max_patients=max_patients, seed=seed)
+        tr_raw, n_tr = collect_set_patients(train_df, members, len(ctx.lams),
+                                            max_patients=max_train, seed=seed)
+        n_multi = sum(len(t) > 1 for t, _, _ in te_raw)
+        te, tr = prep(te_raw), prep(tr_raw)
+        _cprint(f"[differential]   {gname}: {len(te)} single-positive test patients "
+                f"({n_multi} multi-positive set aside), {len(tr)} train", flush=True)
+        if len(te) < 2 * dfm.EGRESS_FLOOR:
+            L_.append(f"## {gname}\n(fewer than {2 * dfm.EGRESS_FLOOR} single-positive "
+                      f"held-out patients; suppressed)")
+            continue
+        def theta(row):
+            g = eng.fold_in(row[3], row[4])
+            return g / g.sum()
+        th_te = np.stack([theta(r) for r in te])
+        truths = [r[0] for r in te]
+        e3 = None
+        ytr = [r[0][0] for r in tr]
+        if len(set(ytr)) >= 2:
+            th_tr = np.stack([theta(r) for r in tr])
+            e3 = dfm.MulticlassHead(feat, len(members), seed=seed).fit(th_tr, ytr)
+        s1 = [e1.scores(e1.subtype_ll(r[1], r[2])) for r in te]
+        s4, lphi4 = zip(*[e4.elbos(r[3], r[4]) for r in te])
+        pc = ctx.prior_counts
+        pri = np.array([float(pc.get(m, 0) or 0) for m in members])
+        pri = pri / pri.sum() if pri.sum() > 0 else np.full(len(members), 1 / len(members))
+        lp = np.log(np.clip(pri, 1e-12, 1.0))
+        fit_i, ev_i = list(range(0, len(te), 2)), list(range(1, len(te), 2))
+        tau1, _ = dfm.fit_tau_scores(lp, [s1[i] for i in fit_i], [truths[i] for i in fit_i])
+        tau4, _ = dfm.fit_tau_scores(lp, [s4[i] for i in fit_i], [truths[i] for i in fit_i])
+        tv = [truths[i] for i in ev_i]
+        res = {"n_eval": len(ev_i), "n_fit": len(fit_i), "n_train": len(tr),
+               "tau_e1": tau1, "tau_e4": tau4,
+               "e3_lambda": (e3.lam if e3 is not None else None)}
+        rows = {"prior": [pri for _ in ev_i],
+                "E1 presence subtypes": [dfm.posterior_from_scores(lp, s1[i], tau1)
+                                         for i in ev_i],
+                "E2 stacked heads": [eng.posterior(th_te[i]) for i in ev_i],
+                "E4 gated likelihood": [dfm.posterior_from_scores(lp, s4[i], tau4)
+                                        for i in ev_i]}
+        if e3 is not None:
+            rows["E3 multiclass head"] = list(e3.predict(th_te[ev_i]))
+        res["metrics"] = {k: dfm.metrics(v, tv) for k, v in rows.items()}
+        # reasons on correctly called evaluation patients
+        r1, r4 = [], []
+        for j, i in enumerate(ev_i):
+            t = truths[i][0]
+            m = members[t]
+            if int(np.argmax(rows["E1 presence subtypes"][j])) == t:
+                r1.append((m, e1.reasons(e1.subtype_ll(te[i][1], te[i][2]), m)))
+            if int(np.argmax(rows["E4 gated likelihood"][j])) == t:
+                rs = e4.reasons(te[i][3], te[i][4], lphi4[i], m)
+                r4.append((m, {_split_gidx(eng, g): x for g, x in rs.items()}))
+        res["reasons_e1"] = dfm.pool_reasons(r1)
+        res["reasons_e4"] = dfm.pool_reasons(r4)
+        named = {m: ctx.rd_names.get(m, str(m)) for m in members}
+        L_.append(f"## {gname} — {len(members)} members · {len(ev_i)} scored patients "
+                  f"(τ fit on {len(fit_i)}) · {len(tr)} train patients for E3 · "
+                  f"τ E1 {tau1:.3g}, E4 {tau4:.3g}")
+        L_.append("")
+        L_.append("| engine | top-1 | top-3 | bal top-1 | log loss | ECE |")
+        L_.append("|---|--:|--:|--:|--:|--:|")
+        for k, mtr in res["metrics"].items():
+            L_.append(f"| {k} | {mtr['top1']:.3f} | {mtr['top3']:.3f} | "
+                      f"{mtr['bal_top1']:.3f} | {mtr['logloss']:.3f} | {mtr['ece']:.3f} |")
+        for key, lab in (("reasons_e1", "E1"), ("reasons_e4", "E4")):
+            if res[key]:
+                L_.append("")
+                L_.append(f"{lab} reasons (top supporting codes, correctly called "
+                          f"patients, members with >= {dfm.EGRESS_FLOOR}):")
+                for m, codes in res[key].items():
+                    L_.append(f"- {named[m][:40]}: " + " · ".join(
+                        ctx.code_name(d, v) for d, v in codes))
+        L_.append("")
+        _cprint(f"[differential]   {gname}: done in {time.time() - t0:.0f}s", flush=True)
+        js[gname] = {k: v for k, v in res.items() if not k.startswith("reasons")}
+    text = "\n".join(L_).rstrip() + "\n"
+    stem = "differential" + (f"_{tag}" if tag else "")
+    (run_dir / f"{stem}.md").write_text(text)
+    (run_dir / f"{stem}.json").write_text(json.dumps(js, indent=1, default=str))
+    print(text, flush=True)
+    _cprint(f"[differential]   wrote {run_dir / (stem + '.md')}", flush=True)
+    return js
+
+
+def _split_gidx(eng, g):
+    """Global concatenated vocab id -> (domain, vocab idx)."""
+    d = int(np.searchsorted(eng.offsets, g, side="right") - 1)
+    return d, int(g - eng.offsets[d])
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Post-hoc case-finding readout on a finished gated_pc run "
@@ -485,6 +661,15 @@ def build_parser() -> argparse.ArgumentParser:
                         "posterior on the true disease. Needs the run's "
                         "readout_dag.json, code_map.tsv; no transform, no solve. "
                         "Writes acquisition[_<tag>].md/.json.")
+    p.add_argument("--differential", default=None, metavar="REGEX",
+                   help="Framing 1 (spec 2026-10-13): DIFFERENTIAL WITH REASONS for the "
+                        "candidate sets matching REGEX — four engines (presence "
+                        "subtypes, stacked heads, multiclass head, gated likelihood) "
+                        "scored on held-out single-positive patients. --acq-adhoc, "
+                        "--acq-heads and --acq-tag apply. Writes "
+                        "differential[_<tag>].md/.json.")
+    p.add_argument("--diff-max-patients", type=int, default=600)
+    p.add_argument("--diff-max-train", type=int, default=2000)
     p.add_argument("--acq-adhoc", action="store_true",
                    help="(--acquisition) REGEX picks label nodes as ONE set")
     p.add_argument("--acq-prior", choices=("population", "uniform"),
@@ -1465,6 +1650,15 @@ def main(argv=None) -> int:
                 _cmp = write_code_map(run_dir, _ncm)
                 _cprint(f"[readout]   wrote native code map ({len(_ncm)} pairs) -> "
                       f"{_cmp}", flush=True)
+
+        if args.differential:
+            with _phase("differential with reasons (framing 1)"):
+                run_differential(
+                    bundle.test_df, bundle.train_df, run_dir, args.differential,
+                    adhoc=args.acq_adhoc, heads_tag=args.acq_heads,
+                    max_patients=args.diff_max_patients,
+                    max_train=args.diff_max_train, tag=args.acq_tag)
+            return 0
 
         if args.acquisition:
             with _phase("simulated acquisition (WP-D part 3)"):

@@ -238,7 +238,8 @@ def load_voi_context(run_dir, *, bundle_meta_path=None, vocab_path=None,
                            dom_names=dom_names, rdag=rdag, rd_names=rd_names,
                            own_idx=own_idx, sig=sig, prior_counts=prior_counts,
                            code_name=code_name, results_name=results_name,
-                           C_fit=int(rdag["C_fit"]), inv_maps=inv_maps)
+                           C_fit=int(rdag["C_fit"]), inv_maps=inv_maps,
+                           block=block, kinds=kinds)
 
 
 def select_sets(ctx, pattern, *, adhoc=False):
