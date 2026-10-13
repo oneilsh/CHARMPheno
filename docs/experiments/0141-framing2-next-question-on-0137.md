@@ -1,7 +1,7 @@
 ---
 id: 141
 slug: framing2-next-question-on-0137
-status: running
+status: done
 model_class: gated_pc
 # NOT A FIT. Framing 2 of spec 2026-10-13 (clinician framings): "given everything
 # already in this record, which further fact — a condition, a medication, a test RESULT —
@@ -101,4 +101,46 @@ nohup bash "$RUN"/next_question2.sh > "$RUN"/next_question2_log.md 2>&1 &
 cat "$RUN"/differential_groups_nq80.md "$RUN"/differential_marfan_eds_nq80.md | cut -c1-170
 ```
 
+**2026-10-13 — run 2: 20% visible, E3 and E1.** Framing 1 with the name-matched
+attestation: connective tissue unchanged; cardiomyopathy E3 balanced top-1 0.297, ECE
+0.048 (was 0.316 / 0.089); HCM's reasons no longer lead with its own name (essential
+hypertension, cardiomegaly, metoprolol, aortic valve disorder, diltiazem); DCM's still
+lead with "Primary cardiomyopathy" (not name-matched).
+
+P(true) on the E3 differential, 20% visible → top 5 → full record:
+
+| set | visible | VOI (E3) | VOI (E1) | pop. table | likely present | random | 5 random hidden | full |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| connective tissue (267) | 0.186 | 0.211 | 0.206 | **0.213** | 0.187 | 0.185 | 0.194 | 0.278 |
+| cardiomyopathy (221) | 0.296 | 0.313 | **0.328** | **0.328** | 0.297 | 0.297 | 0.299 | 0.399 |
+| Marfan/EDS (56) | 0.508 | 0.494 | **0.525** | 0.509 | 0.510 | 0.510 | 0.512 | 0.540 |
+
+Yield@5 (share of the 5 asked that the patient has): VOI 0.08–0.17, population table
+0.04–0.13, likely present 0.26–0.65. On E1's own differential VOI (E1) is best or tied at
+k = 5 in all three sets (0.175 / 0.289 / 0.468 vs table 0.173 / 0.282 / 0.463).
+
 ## Results
+
+1. **Early in a workup, informative questions work; personalization adds little.** With
+   20% of the record visible, five questions chosen by VOI or by the population EIG table
+   close ~30% of the gap to the full record (connective tissue 0.186 → 0.213 of 0.278;
+   cardiomyopathy 0.296 → 0.328 of 0.399) while confirming only about half a fact on
+   average — more than revealing five TRUE facts at random (0.194 / 0.299). Patient-
+   specific VOI does not beat the population table under E3; under E1 it matches it on
+   cardiomyopathy and edges it elsewhere. Late in a workup (run 1, 80% visible) nothing
+   separates because nothing moves.
+2. **"Most likely present" is a trap**: highest yield (asks about what the patient
+   probably has — hypertension-like codes) and zero gain.
+3. **The evaluation under-credits VOI by construction.** VOI asks mostly about facts the
+   patient does NOT have (yield ≤ 0.17); a clinician's "no" would be informative, but in
+   positive-unlabeled data an absent code cannot be scored, so those answers count for
+   nothing here.
+4. **Content** stays clinically sensible (methotrexate / hydroxychloroquine / psoriasis /
+   hydroxyurea; postpartum and pregnancy findings for peripartum CM; aortic valve disorder
+   and retinal detachment for Marfan), † on 18–42% of the top 3. Oddities: a normal HDW
+   result and amoxapine.
+
+**Read.** Framing 2's deliverable is the population VOI table per group, filtered to what
+the patient does not already show (and with † marks) — the personalized ranking is not
+worth its cost on this record. The modest absolute gains are bounded by the differential
+engines themselves (framing 1), not by question choice.
