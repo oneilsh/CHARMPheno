@@ -871,6 +871,87 @@ def run_lookalikes(test_scored, run_dir, pattern, *, C, parent_int, adhoc=False,
     return js
 
 
+def run_prevalence_check(test_scored, run_dir, *, C, parent_int,
+                         heads_tag="stacked_mass99", tag=None, top=15):
+    """How much of the case-finding AUC is prevalent recall? (insight 0100;
+    `prevalence_check.py`). Scores the test split with the saved heads (no solve), flags
+    each (patient, node) with a mapped attestation code of the node or a label
+    descendant in the PRE-INDEX condition features, and reports per-node AUC over all
+    patients vs with those patients set aside — flat heads and the stacked product.
+    Writes `prevalence_check[_<tag>].md/.json`."""
+    import prevalence_check as pv
+    import voi_tables as vt
+    from gated_pc_cloud import (_collect_lean_proba, _doc_key_column, closure_matrix,
+                                stacked_proba)
+    run_dir = Path(run_dir)
+    bm, cm = run_dir / "bundle_meta.json", run_dir / "code_map.tsv"
+    if not cm.exists():
+        raise SystemExit("[prevalence] needs <run>/code_map.tsv (the attestation map)")
+    ctx = vt.load_voi_context(run_dir, bundle_meta_path=str(bm) if bm.exists() else None,
+                              own_codes_path=str(cm))
+    hp = run_dir / f"readout_heads_gated_pc_{heads_tag}.npz"
+    z = np.load(hp)
+    if int(z["C"]) != int(C):
+        raise SystemExit(f"[prevalence] heads {hp.name} are C={int(z['C'])}, frames C={C}")
+    proba, y, _m, keys, _e = _collect_lean_proba(
+        test_scored, int(C), z["V"], z["b_raw"], degenerate=z["degenerate"],
+        const=z["const"], theta_topm=int(z["theta_topm"]))
+    P = stacked_proba(proba, closure_matrix(parent_int, int(C)))
+    col = "features_0" if "features_0" in test_scored.columns else "features"
+
+    def _codes(row):
+        v = row[col]
+        idx = getattr(v, "indices", None)
+        if idx is None:
+            arr = np.asarray(v.toArray() if hasattr(v, "toArray") else v)
+            idx = np.flatnonzero(arr)
+        return int(row["doc_key"]), [int(i) for i in idx]
+    rows = (test_scored.withColumn("doc_key", _doc_key_column(test_scored, "person_id"))
+            .select("doc_key", col).rdd.map(_codes).collect())
+    codes = dict(rows)
+    v2n = pv.vocab_to_nodes(ctx.own_idx, ctx.rdag["pos_sources"])
+    prior = pv.prior_matrix([int(k) for k in keys], codes, v2n, int(C))
+    nodes = list(range(1, int(C)))
+    res = {}
+    L_ = [f"# {run_dir.name} — prevalence check: AUC with prior-diagnosis patients set "
+          f"aside", f"heads {hp.name} · {len(keys):,} test patients · prior = a mapped "
+          f"attestation code of the node (or a label descendant) in the 5-year pre-index "
+          f"condition features (a lower bound: older diagnoses count as incident)", ""]
+    for arm, score in (("stacked", P), ("flat", proba)):
+        per = pv.node_aucs(score, y, prior, nodes)
+        sm = pv.summarize(per)
+        res[arm] = {"summary": sm, "per_node": per}
+        if not sm.get("n_nodes"):
+            L_.append(f"## {arm}: no node with >= {pv.EGRESS_FLOOR} positives both ways")
+            continue
+        L_ += [f"## {arm} — {sm['n_nodes']} nodes · macro AUC all {sm['macro_auc_all']:.4f}"
+               f" → incident {sm['macro_auc_incident']:.4f} · gap median "
+               f"{sm['gap_median']:+.4f}, p90 {sm['gap_p90']:+.4f}, > 0.05 on "
+               f"{sm['n_gap_over_0p05']} nodes · median prior share of positives "
+               f"{sm['prior_share_pos_median']:.2f}", "",
+               "| prior share of positives | nodes | AUC all | AUC incident | median gap |",
+               "|---|--:|--:|--:|--:|"]
+        for band, b in sm["by_prior_share"].items():
+            L_.append(f"| {band} | {b['n_nodes']} | {b['auc_all']:.3f} | "
+                      f"{b['auc_incident']:.3f} | {b['median_gap']:+.3f} |")
+        worst = sorted(per.items(), key=lambda kv: -(kv[1]["auc_all"]
+                                                     - kv[1]["auc_incident"]))[:int(top)]
+        L_ += ["", f"largest gaps ({arm}):"]
+        for c, v in worst:
+            L_.append(f"- {str(ctx.rd_names.get(c, c))[:40]}: {v['auc_all']:.3f} → "
+                      f"{v['auc_incident']:.3f} · prior share of positives "
+                      f"{v['prior_share_pos']:.2f} · positives {v['n_pos_all']} → "
+                      f"{v['n_pos_incident']}")
+        L_.append("")
+    text = "\n".join(L_).rstrip() + "\n"
+    stem = "prevalence_check" + (f"_{tag}" if tag else "")
+    (run_dir / f"{stem}.md").write_text(text)
+    (run_dir / f"{stem}.json").write_text(json.dumps(res, indent=1, default=str))
+    print(text, flush=True)
+    _cprint(f"[prevalence]   wrote {run_dir / (stem + '.md')}", flush=True)
+    return res
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Post-hoc case-finding readout on a finished gated_pc run "
@@ -923,6 +1004,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "(--acq-heads), the top --look-top profiled. Transforms the "
                         "test split only; --acq-adhoc and --acq-tag apply.")
     p.add_argument("--look-top", type=int, default=200)
+    p.add_argument("--prevalence-check", action="store_true",
+                   help="Insight 0100: per-node AUC of the saved heads (--acq-heads) "
+                        "over all test patients vs with prior-diagnosis patients set "
+                        "aside (mapped own code in the pre-index features). Transforms "
+                        "the test split only.")
     p.add_argument("--diff-max-patients", type=int, default=600)
     p.add_argument("--diff-max-train", type=int, default=2000)
     p.add_argument("--diff-next-question", action="store_true",
@@ -2006,7 +2092,8 @@ def main(argv=None) -> int:
                 # Conditional-from-heads scores the test split only: never
                 # materialize the (much larger) train transform for it.
                 _n_tr = ("not materialized"
-                         if (args.conditional_from_heads or args.lookalikes)
+                         if (args.conditional_from_heads or args.lookalikes
+                             or args.prevalence_check)
                          else _tr_w.count())
                 _n_te = _te_w.count()
                 train_scored.unpersist(); test_scored.unpersist()
@@ -2015,6 +2102,15 @@ def main(argv=None) -> int:
                 _cprint(f"[readout]   frames widened to the readout node space: "
                       f"C={_C_ro} (fit C={C}), mask mode={_mm}, train docs={_n_tr} "
                       f"test docs={_n_te}", flush=True)
+
+        if args.prevalence_check:
+            if _rdag is None:
+                raise SystemExit("[readout] --prevalence-check needs the Mondo readout DAG")
+            with _phase("prevalence check (insight 0100)"):
+                run_prevalence_check(test_scored, run_dir, C=_C_ro,
+                                     parent_int=_parent_ro, heads_tag=args.acq_heads,
+                                     tag=args.acq_tag)
+            return 0
 
         if args.lookalikes:
             if _rdag is None:
