@@ -1,7 +1,7 @@
 ---
 id: 140
 slug: framing1-differential-engines-on-0137
-status: running
+status: done
 model_class: gated_pc
 # NOT A FIT. Framing 1 of spec 2026-10-13 (clinician framings): "for this patient, which
 # disease in group G, and what in their record points there?" — four engines on the
@@ -92,4 +92,52 @@ nohup bash "$RUN"/differential.sh > "$RUN"/differential_log2.md 2>&1 &
 cat "$RUN"/differential_groups.md "$RUN"/differential_marfan_eds.md | cut -c1-170
 ```
 
+**2026-10-13 — re-run with the train-split prior and names.**
+
+| set | engine | top-1 | top-3 | bal top-1 | log loss | ECE |
+|---|---|--:|--:|--:|--:|--:|
+| connective tissue (19; 272 scored) | prior | 0.210 | 0.581 | 0.062 | 2.24 | 0.064 |
+| | E1 presence subtypes | 0.346 | 0.673 | 0.118 | 1.97 | 0.058 |
+| | E2 stacked heads | 0.143 | 0.283 | 0.153 | 9.20 | 0.513 |
+| | E3 multiclass head | **0.415** | **0.695** | **0.169** | **1.90** | 0.075 |
+| | E4 gated likelihood | 0.346 | 0.662 | 0.136 | 2.07 | 0.056 |
+| cardiomyopathy (8; 223) | prior | 0.390 | 0.776 | 0.125 | 1.64 | 0.011 |
+| | E1 | 0.422 | 0.821 | 0.164 | 1.45 | 0.125 |
+| | E2 | 0.422 | 0.713 | 0.184 | 4.25 | 0.235 |
+| | E3 | **0.587** | **0.839** | **0.316** | **1.21** | 0.089 |
+| | E4 | 0.395 | 0.789 | 0.127 | 1.54 | 0.113 |
+| Marfan/EDS (3; 57) | prior | 0.561 | 1.000 | 0.333 | 0.99 | 0.090 |
+| | E1 | 0.561 | 1.000 | 0.360 | 1.00 | 0.205 |
+| | E2 | 0.544 | 1.000 | 0.350 | 2.07 | 0.290 |
+| | E3 | 0.614 | 1.000 | 0.422 | 0.92 | 0.147 |
+| | E4 | **0.632** | 1.000 | **0.438** | **0.87** | 0.094 |
+
+Fitted tempers: E1 0.035–0.065, E4 0.026–0.18 — both generative engines need their
+likelihood shrunk 5–40×, the naive-Bayes / long-record overconfidence measured again.
+
 ## Results
+
+1. **E3 (multiclass head on log θ) is the framing-1 engine** for the Mondo groups: best
+   top-1, top-3, balanced top-1 and log loss on both, ECE 0.075–0.089. Gains over the
+   prior are real but modest on the 19-member group (balanced 0.062 → 0.169) and solid on
+   cardiomyopathy (0.125 → 0.316; top-1 0.39 → 0.59).
+2. **E4 (gated likelihood) is competitive on the focused contrast** (Marfan/EDS: best
+   balanced top-1 and log loss, ECE 0.094) but at n = 57 it is not separable from E3.
+   E1 is the best calibrated on connective tissue (0.058) with little accuracy.
+3. **E2 is confirmed unusable as a differential** (ECE 0.24–0.51).
+4. **The reasons read clinically.** RA: methotrexate, hydroxychloroquine, arthropathy,
+   folic acid (E4 adds abatacept, and fibromyalgia — a frequent RA comorbidity). Leiomyoma:
+   excessive menstruation, ovarian cyst, anemia, iron-deficiency anemia. DCM: chronic
+   systolic heart failure, carvedilol, heart failure. Generic EDS: orthostatic
+   hypotension, fludrocortisone, tachycardia, arrhythmia, gastroparesis. Two kinds of
+   noise: (a) normal-result tokens (urine pH, heart rate, diastolic BP [normal]) — care
+   context of the member's population; (b) **"Cardiomyopathy" supporting DCM**: the
+   group's own generic code survives because the group node is a Mondo ANCESTOR, not a
+   label node, so it has no own codes in the code map. Group attestation for ancestor
+   nodes needs a code list for them (next deliberate code-map rebuild).
+
+**Read.** Framing 1 ships with E3, reasons from E3's attribution (added next; E1/E4
+reasons above are the cross-check). Framing 2 values "yes" answers with E3 and the topic
+model's predictive presence; a "no" is not valued — consistent with D2/PU (an absent
+code is not a negative) and with the spec's yes-only evaluation. E4 stays as the
+focused-contrast alternative.
