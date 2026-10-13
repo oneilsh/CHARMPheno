@@ -1,7 +1,7 @@
 ---
 id: 142
 slug: framing3-undiagnosed-lookalikes-on-0137
-status: running
+status: done
 model_class: gated_pc
 # NOT A FIT. Framing 3 of spec 2026-10-13 (clinician framings): "who looks like disease
 # X but carries no X code, and why?" (`lookalikes.py`, `gated_pc_readout --lookalikes`).
@@ -82,4 +82,31 @@ nohup bash "$RUN"/lookalikes.sh > "$RUN"/lookalikes_log2.md 2>&1 &
 cat "$RUN"/lookalikes_groups.md "$RUN"/lookalikes_marfan_eds.md | cut -c1-170
 ```
 
+**2026-10-13 — re-run with the split.** No look-alike anywhere carries ONLY an unmapped
+X-named concept (HCM: < 20) — the first run's "unmapped" reading is withdrawn. Share of
+the top 200 whose X code sits in their PRE-INDEX history: leiomyoma 92.5% (random 3.3%),
+SLE 63.0% (1.3%), RA 56.0% (2.5%), DCM 28.5%, pituitary tumour 26.0%, ET 25.5%,
+sarcoidosis 19.0%, PMR 17.0%, EDS / PsA 14.5%, myocarditis 14.0%, PV / palmar
+fibromatosis 13.5%; the rest < 20 patients. Undiagnosed-by-code share: 71–100% for every
+X except leiomyoma (< 20 patients), SLE 37%, RA 44%. EDS's undiagnosed-only profile:
+orthostatic hypotension, fibromyalgia, migraine with aura, IBS, gaseous distension,
+topiramate, tizanidine, immunoglobulins tested normal — the hypermobility-spectrum /
+dysautonomia picture without an EDS code.
+
 ## Results
+
+1. **For the rare diseases, framing 3 finds look-alikes who are genuinely undiagnosed by
+   code** (71–100% of the top 200), with profiles that read as the disease's clinical
+   picture (EDS above; first-run notes on SLE, dermatomyositis, PV, SSc, HES).
+2. **For common chronic diseases the top look-alikes are mostly PREVIOUSLY diagnosed**
+   (leiomyoma 92.5%, SLE 63%, RA 56%): their code is in the 5-year pre-index history but
+   not in the label year. This is a label-definition effect of lookback mode ("coded in
+   the year after index"), not a code-map gap, and it reaches beyond framing 3: the
+   case-finding labels treat un-recoded prevalent cases as negatives, and part of what the
+   readout rewards for these diseases is recognizing a past diagnosis.
+3. **Sibling diagnoses** dominate several profiles (AS / PsA → RA; HCM ↔ DCM; ET ↔ PV):
+   the differential problem, not undiagnosed disease.
+
+**Read.** Framing 3 works for rare diseases; for common chronic ones the label window
+needs a decision (e.g. count any pre-index X code as a positive, or exclude such patients
+from the negatives) before look-alikes or case-finding AUCs can be taken at face value.
