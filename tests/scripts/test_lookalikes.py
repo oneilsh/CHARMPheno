@@ -62,6 +62,7 @@ def test_run_lookalikes_end_to_end(spark, tmp_path):
         "int2cid": {str(e): 1000 + e for e in range(4)},
         "vocab_maps": [{str(500 + i): i for i in range(12)}],
         "name_by_id": {str(1000 + e): f"node{e}" for e in range(4)}}))
+    (tmp_path / "code_map.tsv").write_text("std_cid\tnode_cid\n503\t1001\n")
     (tmp_path / "concept_names.csv").write_text(
         "concept_id,concept_name\n504,node1\n505,marker five\n500,marker zero\n")
     Vh = np.zeros((C, K)); Vh[1, 1] = 12.0; Vh[2, 4] = 12.0
@@ -80,6 +81,8 @@ def test_run_lookalikes_end_to_end(spark, tmp_path):
             codes |= {0, 5}
         if kind == "look":
             codes.add(4)                              # the unmapped node1-named concept
+            if i < 70:
+                codes.add(3)                          # node1's MAPPED code, pre-index
         if kind == "pos2":
             th[4] += 2.0
         th /= th.sum()
@@ -92,7 +95,17 @@ def test_run_lookalikes_end_to_end(spark, tmp_path):
                             adhoc=True, heads_tag="t", top_n=40, bg_n=300, tag="t")
     rep = (tmp_path / "lookalikes_t.md").read_text()
     assert js["node1"]["auc"] > 0.8
-    assert js["node1"]["named_top"][0] >= 30            # the look-alikes carry it
+    j = js["node1"]
+    assert j["prior_dx"] == 10                          # mapped code in history
+    assert j["unmapped_only"] >= 25                     # the planted missed cases
+    assert j["prior_dx"] + j["unmapped_only"] + j["undiagnosed"] == j["n_top"]
     prof = [r[0] for r in js["node1"]["profile"]]
     assert "marker five" in prof or "marker zero" in prof
-    assert "unmapped X-named concept" in rep and "## node2" in rep
+    assert "only an UNMAPPED X-named concept" in rep and "## node2" in rep
+
+
+def test_split_lookalikes_partitions_by_code_evidence():
+    bags = [{0: {1: 1.0}}, {0: {2: 1.0}}, {0: {3: 1.0}}, {0: {1: 1.0, 2: 1.0}}]
+    g = lk.split_lookalikes(bags, {1}, {2})
+    assert len(g["prior_dx"]) == 2 and len(g["unmapped_only"]) == 1
+    assert len(g["undiagnosed"]) == 1

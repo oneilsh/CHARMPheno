@@ -815,30 +815,53 @@ def run_lookalikes(test_scored, run_dir, pattern, *, C, parent_int, adhoc=False,
             excl[dm] = measured
         topb = [bags[k] for k in pl["top"] if k in bags]
         posb = [bags[k] for k in pl["pos"] if k in bags]
+        # Who are the look-alikes? Features are the PRE-index history and labels the
+        # year after it (lookback mode), so "no X label" includes patients whose X
+        # diagnosis is in their history but was not re-coded in the label year.
+        own = set(ctx.own_idx.get(X, ()))
+        unmapped = named - own
+        grp = lk.split_lookalikes(topb, own, unmapped)
+        und = grp["undiagnosed"]
         prof = lk.feature_profile(topb, posb, bgb, excl_by_dom=excl)
-        nt, nT = lk.share_with(topb, {0: named})
-        nbg, nB = lk.share_with(bgb, {0: named})
+        prof_u = (lk.feature_profile(und, posb, bgb, excl_by_dom=excl)
+                  if len(und) >= lk.EGRESS_FLOOR else [])
+        nbg_prior, nB = lk.share_with(bgb, {0: own})
         fmt = lambda n, N: (f"{100 * n / N:.1f}%" if n >= lk.EGRESS_FLOOR else
                             ("0" if n == 0 else f"<{lk.EGRESS_FLOOR} pts"))
+        nT = len(topb)
         L_.append(f"## {nm} — AUC {pl['auc']:.3f} · {pl['n_pos']} test positives · "
                   f"look-alike cut P_stack ≥ {pl['cut']:.3f}")
-        if named:
-            L_.append(f"unmapped X-named concept ({len(named)}): look-alikes "
-                      f"{fmt(nt, nT)} vs random {fmt(nbg, nB)}")
-        if prof:
+        L_.append(f"top {nT} look-alikes: X code in their pre-index history "
+                  f"{fmt(len(grp['prior_dx']), nT)} (random {fmt(nbg_prior, nB)}) · "
+                  f"only an UNMAPPED X-named concept {fmt(len(grp['unmapped_only']), nT)} · "
+                  f"neither (undiagnosed by code) {fmt(len(und), nT)}"
+                  + (f" · X-named concepts: {len(named & own)} mapped, {len(unmapped)} "
+                     f"unmapped" if named else ""))
+        for title, rows in (("all look-alikes", prof),
+                            ("undiagnosed-by-code look-alikes only", prof_u)):
             L_.append("")
+            if not rows:
+                L_.append(f"{title}: no code carried by >= {lk.EGRESS_FLOOR} of them is "
+                          f"X-like" + ("" if title.startswith("all") or
+                                       len(und) >= lk.EGRESS_FLOOR else
+                                       f" (fewer than {lk.EGRESS_FLOOR} patients)"))
+                continue
+            L_.append(f"{title}:")
             L_.append("| code | look-alikes | X patients | random |")
             L_.append("|---|--:|--:|--:|")
-            for (d, v), rt, rp, rb, lift in prof:
+            for (d, v), rt, rp, rb, lift in rows:
                 L_.append(f"| {ctx.code_name(d, v)} | {100 * rt:.0f}% | {100 * rp:.0f}% "
                           f"| {100 * rb:.1f}% |")
-        else:
-            L_.append("(no code carried by >= 20 look-alikes is X-like)")
         L_.append("")
         js[nm] = {"auc": pl["auc"], "n_pos": pl["n_pos"], "cut": pl["cut"],
-                  "named_top": [nt, nT], "named_bg": [nbg, nB],
+                  "n_top": nT, "prior_dx": len(grp["prior_dx"]),
+                  "unmapped_only": len(grp["unmapped_only"]), "undiagnosed": len(und),
+                  "prior_dx_bg": [nbg_prior, nB],
+                  "named_mapped": len(named & own), "named_unmapped": len(unmapped),
                   "profile": [[ctx.code_name(d, v), rt, rp, rb, lift]
-                              for (d, v), rt, rp, rb, lift in prof]}
+                              for (d, v), rt, rp, rb, lift in prof],
+                  "profile_undiagnosed": [[ctx.code_name(d, v), rt, rp, rb, lift]
+                                          for (d, v), rt, rp, rb, lift in prof_u]}
     text = "\n".join(L_).rstrip() + "\n"
     stem = "lookalikes" + (f"_{tag}" if tag else "")
     (run_dir / f"{stem}.md").write_text(text)

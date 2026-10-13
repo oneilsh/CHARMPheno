@@ -7,6 +7,13 @@ stacked readout head P_stack(X) — the marginal case-finding score already meas
 relative to a random sample of the test split, kept only when X's own patients also
 carry them more than background (so the profile is X-like, not merely "sick").
 
+WHO THE LOOK-ALIKES ARE (0142 first run). In lookback mode the features are the
+pre-index history and the label is "coded in the year after the index date", so "no X
+label" also covers patients whose X diagnosis sits in their history and was not re-coded
+in the label year. `split_lookalikes` separates (i) X attestation code in the history,
+(ii) only an X-named concept the code map missed, (iii) neither — the undiagnosed-by-code
+look-alikes, profiled on their own.
+
 One validation the data hand us for free: concepts whose NAME is X's name but which the
 code map missed (0141: a second "Hypertrophic cardiomyopathy" concept) are true X
 diagnoses that the label never saw. If the ranking is finding real undiagnosed-by-label
@@ -20,7 +27,7 @@ from __future__ import annotations
 import numpy as np
 
 __all__ = ["auc", "top_lookalikes", "code_counts", "feature_profile", "share_with",
-           "EGRESS_FLOOR"]
+           "split_lookalikes", "EGRESS_FLOOR"]
 
 EGRESS_FLOOR = 20
 
@@ -98,3 +105,19 @@ def share_with(bags_list, ids_by_dom):
         if any(int(v) in ids_by_dom.get(d, ()) for d, b in bags.items() for v in b):
             n += 1
     return n, len(bags_list)
+
+
+def split_lookalikes(bags_list, own_ids, unmapped_ids, *, dom=0):
+    """Partition look-alike records: `prior_dx` (carries one of X's attestation codes),
+    `unmapped_only` (no attestation code, but an X-named concept the map missed),
+    `undiagnosed` (neither)."""
+    out = {"prior_dx": [], "unmapped_only": [], "undiagnosed": []}
+    for b in bags_list:
+        codes = set(int(v) for v in b.get(dom, {}))
+        if codes & own_ids:
+            out["prior_dx"].append(b)
+        elif codes & unmapped_ids:
+            out["unmapped_only"].append(b)
+        else:
+            out["undiagnosed"].append(b)
+    return out
