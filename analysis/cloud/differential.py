@@ -347,3 +347,157 @@ def pool_reasons(per_patient, *, floor=EGRESS_FLOOR, top=5):
         ranked = sorted(a.items(), key=lambda kv: -kv[1] / n[m])
         out[m] = [k for k, x in ranked[:top] if x > 0]
     return out
+
+
+# ----------------------------------------------------------------------------- #
+# E3 reasons — attribution through θ                                              #
+# ----------------------------------------------------------------------------- #
+
+def e3_reasons(head, theta, gamma_sum, eb_cols, cnt, member):
+    """Per record code, its contribution to the member's logit relative to the other
+    members' mean, through the fold-in: code v moves θ_k by c_v r_kv / sum(γ) with
+    r_kv = θ_k eb_kv / Σ_j θ_j eb_jv, and the head's logit moves by W[k, m] / (sd_k θ_k)
+    per unit θ_k (features are standardized log θ). θ_k cancels:
+
+        contrib_v(m) = c_v / sum(γ) · Σ_{k in features} (W[k, m] / sd_k) · eb_kv / Σ_j θ_j eb_jv
+
+    A first-order (gradient) attribution — cheap, and exact in the small-change limit.
+    `eb_cols` is the (K, n) exp(E[log β]) at the record's codes; returns (n,)."""
+    theta = np.asarray(theta, dtype=np.float64)
+    norm = theta @ eb_cols + 1e-100                                # (n,)
+    Wd = head.W / head.sd[:, None]                                 # (F, M)
+    G = (Wd.T @ eb_cols[head.ft]) / norm                           # (M, n)
+    G = G - G.mean(axis=0, keepdims=True)
+    return np.asarray(cnt, dtype=np.float64) / float(gamma_sum) * G[member]
+
+
+# ----------------------------------------------------------------------------- #
+# Framing 2 — next question                                                      #
+# ----------------------------------------------------------------------------- #
+
+def hide_split(fb, frac, rng, *, min_codes=5):
+    """Hide a random `frac` of a filtered record's codes. Returns (visible bags,
+    hidden {(d, v): count}) or None for a record with fewer than `min_codes` codes."""
+    items = [(d, v, c) for d, b in fb.items() for v, c in b.items()]
+    if len(items) < int(min_codes):
+        return None
+    n_h = max(1, int(round(frac * len(items))))
+    h = set(rng.choice(len(items), size=n_h, replace=False).tolist())
+    vis, hid = {}, {}
+    for i, (d, v, c) in enumerate(items):
+        if i in h:
+            hid[(d, v)] = c
+        else:
+            vis.setdefault(d, {})[v] = c
+    return vis, hid
+
+
+def kl_rows(Q, q):
+    Q = np.clip(np.atleast_2d(Q), 1e-300, 1.0)
+    q = np.clip(np.asarray(q), 1e-300, 1.0)
+    return (Q * (np.log(Q) - np.log(q[None, :]))).sum(axis=1)
+
+
+def question_values(q0, q_after, p_yes):
+    """Value of asking each candidate = P(yes) · KL(q after yes || q now), nats. A NO
+    is not valued: an absent code is not a negative in this data (spec D2)."""
+    return np.asarray(p_yes) * kl_rows(q_after, q0)
+
+
+NQ_STRATEGIES = ("VOI", "likely present", "population table", "random")
+
+
+def evaluate_next_question(eng, head, patients, pool_items, flagged, rng, *,
+                           ks=(1, 3, 5), frac=0.2):
+    """Spec R2.3 — positive-unlabeled-aware evaluation of "what to ask next".
+
+    For each patient (`(truth idx list, filtered bags)`), hide a random `frac` of the
+    record's codes; on the visible rest, rank the pool's not-yet-visible candidates
+    four ways — VOI (P(yes) · KL of the E3 differential after a yes), most likely
+    present (P(yes) alone), the population EIG table order (the pool's own order), and
+    random — and for the top k of each:
+      * yield = the share that are among the hidden codes (known YES answers); absent
+        candidates are unlabeled and never scored as NO;
+      * the differential after revealing the ones that were hidden (P(true), top-1),
+    against revealing k random hidden codes (the "any extra fact" baseline) and all of
+    them (the full record). `flagged` maps pool index -> True for likely treatments /
+    diagnostic consequences (R2.2). Returns pooled numbers plus, for the VOI top 3, a
+    {pool index: n patients} recommendation count."""
+    pool_g = np.array([eng.gidx(d, v) for d, v in pool_items], dtype=np.int64)
+    pool_dom = np.array([d for d, _ in pool_items], dtype=np.int64)
+    Eb_pool = eng.ebeta_cols(pool_items)
+    ks = tuple(sorted(int(k) for k in ks))
+    acc = {(s, k): {"yield": [], "p_true": [], "top1": []}
+           for s in NQ_STRATEGIES + ("random hidden",) for k in ks}
+    base = {"p_true": [], "top1": []}
+    full = {"p_true": [], "top1": []}
+    rec, n_flag, n_top = {}, 0, 0
+
+    def post(bags):
+        idx = [eng.gidx(d, v) for d, b in bags.items() for v in b]
+        cnt = [c for b in bags.values() for c in b.values()]
+        g = eng.fold_in(idx, cnt)
+        return head.predict(g / g.sum())[0], g, idx, cnt
+
+    for truth, fb in patients:
+        sp = hide_split(fb, frac, rng)
+        if sp is None:
+            continue
+        vis, hid = sp
+        q0, g0, vidx, vcnt = post(vis)
+        base["p_true"].append(float(q0[truth].sum()))
+        base["top1"].append(int(np.argmax(q0)) in truth)
+        allb = {d: dict(b) for d, b in vis.items()}
+        for (d, v), c in hid.items():
+            allb.setdefault(d, {})[v] = c
+        qf, _, _, _ = post(allb)
+        full["p_true"].append(float(qf[truth].sum()))
+        full["top1"].append(int(np.argmax(qf)) in truth)
+        cand = np.array([j for j, (d, v) in enumerate(pool_items)
+                         if v not in vis.get(d, {})], dtype=np.int64)
+        if cand.size == 0:
+            continue
+        theta0 = g0 / g0.sum()
+        qa = head.predict(eng.candidate_thetas(g0, vidx, vcnt, pool_g[cand]))
+        L = np.array([float(len(vis.get(int(d), {}))) for d in pool_dom[cand]])
+        p_yes = 1.0 - np.exp(-L * (theta0 @ Eb_pool[:, cand]))
+        val = question_values(q0, qa, p_yes)
+        orders = {"VOI": cand[np.argsort(-val, kind="stable")],
+                  "likely present": cand[np.argsort(-p_yes, kind="stable")],
+                  "population table": cand,
+                  "random": cand[rng.permutation(cand.size)]}
+        for j in orders["VOI"][:3]:
+            rec[int(j)] = rec.get(int(j), 0) + 1
+            n_flag += bool(flagged.get(int(j), False))
+            n_top += 1
+        hid_keys = list(hid)
+        for k in ks:
+            for s, order in orders.items():
+                picks = [pool_items[int(j)] for j in order[:k]]
+                got = [it for it in picks if it in hid]
+                b = {d: dict(x) for d, x in vis.items()}
+                for (d, v) in got:
+                    b.setdefault(d, {})[v] = hid[(d, v)]
+                q, _, _, _ = post(b) if got else (q0, None, None, None)
+                a = acc[(s, k)]
+                a["yield"].append(len(got) / k)
+                a["p_true"].append(float(q[truth].sum()))
+                a["top1"].append(int(np.argmax(q)) in truth)
+            sel = rng.choice(len(hid_keys), size=min(k, len(hid_keys)), replace=False)
+            b = {d: dict(x) for d, x in vis.items()}
+            for i in sel:
+                d, v = hid_keys[int(i)]
+                b.setdefault(d, {})[v] = hid[(d, v)]
+            q, _, _, _ = post(b)
+            a = acc[("random hidden", k)]
+            a["yield"].append(1.0)
+            a["p_true"].append(float(q[truth].sum()))
+            a["top1"].append(int(np.argmax(q)) in truth)
+    mean = lambda x: float(np.mean(x)) if len(x) else float("nan")
+    return {"n": len(base["p_true"]), "ks": list(ks),
+            "visible": {k: mean(v) for k, v in base.items()},
+            "full": {k: mean(v) for k, v in full.items()},
+            "by": {f"{s}@{k}": {m: mean(v) for m, v in a.items()}
+                   for (s, k), a in acc.items()},
+            "flag_share_top3": (n_flag / n_top) if n_top else float("nan"),
+            "recommended": rec}
