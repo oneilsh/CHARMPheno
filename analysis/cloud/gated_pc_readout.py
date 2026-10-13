@@ -718,6 +718,136 @@ def _split_gidx(eng, g):
     return d, int(g - eng.offsets[d])
 
 
+def run_lookalikes(test_scored, run_dir, pattern, *, C, parent_int, adhoc=False,
+                   heads_tag="stacked_mass99", top_n=200, pos_cap=1000, bg_n=3000,
+                   seed=0, tag=None, thin_frac=0.1, own_top=5, rel_lambda=0.6):
+    """Framing 3 — UNDIAGNOSED LOOK-ALIKES (spec 2026-10-13, R3; `lookalikes.py`).
+    For every member X of the candidate sets matching `pattern`: rank held-out
+    patients WITHOUT an X label by the record's stacked readout P_stack(X) (saved
+    heads, test split only, no solve), and profile the top `top_n` against a random
+    test sample and X's own patients. Also reports how often the look-alikes carry a
+    concept NAMED like X that the code map missed (true diagnoses the label never
+    saw). Writes `lookalikes[_<tag>].md/.json` (pooled; rates on >= 20 patients)."""
+    import lookalikes as lk
+    import voi_tables as vt
+    from gated_pc_cloud import (_collect_lean_proba, _doc_key_column, closure_matrix,
+                                stacked_proba)
+    from pyspark.sql import functions as F
+    run_dir = Path(run_dir)
+    bm, cm = run_dir / "bundle_meta.json", run_dir / "code_map.tsv"
+    names_csv = run_dir / "concept_names.csv"
+    ctx = vt.load_voi_context(
+        run_dir, bundle_meta_path=str(bm) if bm.exists() else None,
+        own_codes_path=str(cm) if cm.exists() else None,
+        names_path=str(names_csv) if names_csv.exists() else None,
+        thin_frac=thin_frac, own_top=own_top, rel_lambda=rel_lambda)
+    sets = vt.select_sets(ctx, pattern, adhoc=adhoc)
+    targets = sorted({m for _, _, mem in sets for m in mem})
+    if not targets:
+        raise SystemExit(f"[lookalikes] no candidate set matches {pattern!r}")
+    hp = run_dir / f"readout_heads_gated_pc_{heads_tag}.npz"
+    z = np.load(hp)
+    if int(z["C"]) != int(C):
+        raise SystemExit(f"[lookalikes] heads {hp.name} are C={int(z['C'])}, frames C={C}")
+    _cprint(f"[lookalikes]   scoring the test split with {hp.name} for "
+            f"{len(targets)} target(s)", flush=True)
+    proba, y, _m, keys, _e = _collect_lean_proba(
+        test_scored, int(C), z["V"], z["b_raw"], degenerate=z["degenerate"],
+        const=z["const"], theta_topm=int(z["theta_topm"]))
+    P = stacked_proba(proba, closure_matrix(parent_int, int(C)))
+    rng = np.random.default_rng(int(seed))
+    keys = [int(k) for k in keys]
+    plan, want = {}, set()
+    for X in targets:
+        yx = y[:, X].astype(bool)
+        if int(yx.sum()) < lk.EGRESS_FLOOR:
+            continue
+        top, cut = lk.top_lookalikes(P[:, X], yx, keys, top_n)
+        pos_i = np.flatnonzero(yx)
+        pos = [keys[i] for i in rng.choice(pos_i, size=min(pos_cap, pos_i.size),
+                                           replace=False)]
+        plan[X] = {"auc": lk.auc(P[:, X], yx), "n_pos": int(yx.sum()), "cut": cut,
+                   "top": top, "pos": pos}
+        want.update(top); want.update(pos)
+    bg = [keys[i] for i in rng.choice(len(keys), size=min(bg_n, len(keys)),
+                                      replace=False)]
+    want.update(bg)
+    fcols = sorted((c for c in test_scored.columns if c.startswith("features_")),
+                   key=lambda c: int(c.split("_")[1])) or ["features"]
+    spark = test_scored.sparkSession
+    kdf = spark.createDataFrame([(int(k),) for k in want], ["doc_key"])
+    rows = (test_scored.withColumn("doc_key", _doc_key_column(test_scored, "person_id"))
+            .join(F.broadcast(kdf), "doc_key").select("doc_key", *fcols).collect())
+    bags = {}
+    for r in rows:
+        b = {}
+        for d, c in enumerate(fcols):
+            vec = r[c]
+            if vec is None:
+                continue
+            idx = getattr(vec, "indices", None)
+            if idx is None:
+                arr = np.asarray(vec.toArray() if hasattr(vec, "toArray") else vec)
+                idx = np.flatnonzero(arr)
+            b[d] = {int(i): 1.0 for i in idx}
+        bags[int(r["doc_key"])] = b
+    measured = set()
+    if "measurement" in ctx.dom_names and ctx.inv_maps:
+        dm = ctx.dom_names.index("measurement")
+        measured = {int(v) for v, tok in ctx.inv_maps[dm].items() if int(tok) % 100 == 0}
+    bgb = [bags[k] for k in bg if k in bags]
+    L_ = [f"# {run_dir.name} — undiagnosed look-alikes (framing 3)",
+          f"pattern {pattern!r}{' (ad hoc)' if adhoc else ''} · ranking P_stack(X) "
+          f"({heads_tag}) over test patients without an X label · top {top_n} "
+          f"profiled against {len(bgb)} random test patients and up to {pos_cap} of X's "
+          f"own · [measured] and X's attestation codes excluded from profiles · rates "
+          f"shown only on >= {lk.EGRESS_FLOOR} patients", ""]
+    js = {}
+    for X, pl in plan.items():
+        nm = str(ctx.rd_names.get(X, X))
+        named = set()
+        if ctx.names and ctx.inv_maps:
+            for v, cid in ctx.inv_maps[0].items():
+                if str(ctx.names.get(int(cid), "")).strip().lower() == nm.strip().lower():
+                    named.add(int(v))
+        excl = {0: set(ctx.own_idx.get(X, ())) | named}
+        if measured:
+            excl[dm] = measured
+        topb = [bags[k] for k in pl["top"] if k in bags]
+        posb = [bags[k] for k in pl["pos"] if k in bags]
+        prof = lk.feature_profile(topb, posb, bgb, excl_by_dom=excl)
+        nt, nT = lk.share_with(topb, {0: named})
+        nbg, nB = lk.share_with(bgb, {0: named})
+        fmt = lambda n, N: (f"{100 * n / N:.1f}%" if n >= lk.EGRESS_FLOOR else
+                            ("0" if n == 0 else f"<{lk.EGRESS_FLOOR} pts"))
+        L_.append(f"## {nm} — AUC {pl['auc']:.3f} · {pl['n_pos']} test positives · "
+                  f"look-alike cut P_stack ≥ {pl['cut']:.3f}")
+        if named:
+            L_.append(f"unmapped X-named concept ({len(named)}): look-alikes "
+                      f"{fmt(nt, nT)} vs random {fmt(nbg, nB)}")
+        if prof:
+            L_.append("")
+            L_.append("| code | look-alikes | X patients | random |")
+            L_.append("|---|--:|--:|--:|")
+            for (d, v), rt, rp, rb, lift in prof:
+                L_.append(f"| {ctx.code_name(d, v)} | {100 * rt:.0f}% | {100 * rp:.0f}% "
+                          f"| {100 * rb:.1f}% |")
+        else:
+            L_.append("(no code carried by >= 20 look-alikes is X-like)")
+        L_.append("")
+        js[nm] = {"auc": pl["auc"], "n_pos": pl["n_pos"], "cut": pl["cut"],
+                  "named_top": [nt, nT], "named_bg": [nbg, nB],
+                  "profile": [[ctx.code_name(d, v), rt, rp, rb, lift]
+                              for (d, v), rt, rp, rb, lift in prof]}
+    text = "\n".join(L_).rstrip() + "\n"
+    stem = "lookalikes" + (f"_{tag}" if tag else "")
+    (run_dir / f"{stem}.md").write_text(text)
+    (run_dir / f"{stem}.json").write_text(json.dumps(js, indent=1, default=str))
+    print(text, flush=True)
+    _cprint(f"[lookalikes]   wrote {run_dir / (stem + '.md')}", flush=True)
+    return js
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Post-hoc case-finding readout on a finished gated_pc run "
@@ -763,6 +893,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "scored on held-out single-positive patients. --acq-adhoc, "
                         "--acq-heads and --acq-tag apply. Writes "
                         "differential[_<tag>].md/.json.")
+    p.add_argument("--lookalikes", default=None, metavar="REGEX",
+                   help="Framing 3 (spec 2026-10-13): UNDIAGNOSED LOOK-ALIKES for every "
+                        "member of the candidate sets matching REGEX — test patients "
+                        "without the label ranked by the saved stacked heads "
+                        "(--acq-heads), the top --look-top profiled. Transforms the "
+                        "test split only; --acq-adhoc and --acq-tag apply.")
+    p.add_argument("--look-top", type=int, default=200)
     p.add_argument("--diff-max-patients", type=int, default=600)
     p.add_argument("--diff-max-train", type=int, default=2000)
     p.add_argument("--diff-next-question", action="store_true",
@@ -1845,7 +1982,8 @@ def main(argv=None) -> int:
                 # the widened train frame, never these.
                 # Conditional-from-heads scores the test split only: never
                 # materialize the (much larger) train transform for it.
-                _n_tr = ("not materialized" if args.conditional_from_heads
+                _n_tr = ("not materialized"
+                         if (args.conditional_from_heads or args.lookalikes)
                          else _tr_w.count())
                 _n_te = _te_w.count()
                 train_scored.unpersist(); test_scored.unpersist()
@@ -1854,6 +1992,16 @@ def main(argv=None) -> int:
                 _cprint(f"[readout]   frames widened to the readout node space: "
                       f"C={_C_ro} (fit C={C}), mask mode={_mm}, train docs={_n_tr} "
                       f"test docs={_n_te}", flush=True)
+
+        if args.lookalikes:
+            if _rdag is None:
+                raise SystemExit("[readout] --lookalikes needs the Mondo readout DAG")
+            with _phase("undiagnosed look-alikes (framing 3)"):
+                run_lookalikes(test_scored, run_dir, args.lookalikes, C=_C_ro,
+                               parent_int=_parent_ro, adhoc=args.acq_adhoc,
+                               heads_tag=args.acq_heads, top_n=args.look_top,
+                               tag=args.acq_tag)
+            return 0
 
         if args.conditional_from_heads:
             if _rdag is None:
