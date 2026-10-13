@@ -1,7 +1,7 @@
 ---
 id: 144
 slug: incident-heads-on-0137
-status: planned
+status: done
 model_class: gated_pc
 # NOT A FIT. First step of the label redesign (insight 0100, exp 0143). 0143 found
 # 0137's stacked macro AUC falls 0.818 -> 0.702 once patients with a prior diagnosis of
@@ -45,4 +45,46 @@ Outputs (record files untouched): `results_readout_stacked_incident_mass99.json`
 
 ## Run log
 
+**2026-10-13 — run.** 535 readout nodes with >= 20 positives both ways (same set as 0143).
+
 ## Results
+
+**Training the heads on incident labels makes them WORSE at finding new diagnoses.**
+
+| heads | arm | macro AUC all | macro AUC incident | gap median | nodes losing > 0.05 |
+|---|---|--:|--:|--:|--:|
+| record (mixed labels, 0143) | stacked | 0.818 | **0.702** | +0.12 | 439 |
+| incident-trained (0144) | stacked | 0.670 | **0.628** | +0.035 | 223 |
+| record (0143) | flat | 0.727 | **0.616** | — | 399 |
+| incident-trained (0144) | flat | 0.683 | **0.602** | +0.074 | 326 |
+
+By prior share of positives (incident AUC, stacked): 0.0–0.1 0.624 · 0.1–0.3 0.643 ·
+0.3–0.6 0.621 · 0.6–1.0 0.632 — flat across bands again, ~0.07 below the record's.
+
+1. **Read (1) of the pre-registration: no recovery.** Incident AUC falls 0.074 stacked,
+   0.014 flat. 0143's ~0.70 is not an artefact of head training that a readout-side
+   relabel can fix.
+2. **The stacking gain mostly collapses**: stacked − flat on incident is +0.086 with the
+   record's heads, +0.026 here. Under the incident rule a node's cell is masked for any
+   prior code of the node OR a label descendant, so the ancestor heads that carry the
+   stacked product lose most of their positives (e.g. demyelinating disease 490 → 106,
+   thoracic cancer 1353 → 310 test positives).
+3. **'All' AUC falls as expected** (0.818 → 0.670): the heads no longer reward re-coding.
+   The residual gap (median +0.035 stacked) is the topic signal itself: prevalent
+   patients carry more of X's topic mass than incident ones.
+
+**Why mixed labels win on incident evaluation (working reading).** Prevalent positives
+are real X patients; their θ shows the head what X's topic signature looks like, and
+that transfers to the not-yet-coded. The incident rule halves the positives (median
+prior share 0.53) at the same l2 (100), and removes the clearest examples. So the
+label rules should be split three ways, not two: **evaluate incident; train heads
+(and gate topics) on the broadest positive set** — prevalent + incident, all-ever.
+That is the direction the rebuild was already taking for topic gating; this result
+extends it to the heads. Not tested here: a lower l2 for the incident heads (would
+narrow the gap if under-fitting from fewer positives is part of it, but cannot add the
+lost examples back).
+
+**Consequence.** The record's own heads stay the case-finding heads; their incident
+macro AUC (0.702 stacked) is the honest headline for 0137. Incident-only heads are
+dropped. The rebuild keeps: all-ever attestation gating for topics, incident evaluation
+(`preindex_closure` arm), and mixed (or all-ever) head training.
