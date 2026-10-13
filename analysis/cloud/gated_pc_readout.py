@@ -913,14 +913,60 @@ def run_lookalikes(test_scored, run_dir, pattern, *, C, parent_int, adhoc=False,
     return js
 
 
+def _whole_history_prior(test_scored, keys, run_dir, *, C, readout_int2cid,
+                         parent_adj, sidecar_uri=None):
+    """Exp 0145 (spec 2026-10-13 label redesign R1): prior[d, X] from the E4 sidecar —
+    a first attestation of X's Mondo term or a descendant dated BEFORE the person's
+    index (the sidecar's own index_horizon, re-derived by the assembler's index
+    builder at sidecar build). Whole history, not the 5-year lookback. Returns
+    (prior, receipt)."""
+    import prevalence_check as pv
+    from pyspark.sql import functions as F
+    from conversion_sidecar import try_load_index_horizon, try_load_sidecar
+    import distributed_readout as _dr
+    wp = Path(run_dir) / "conversion_sidecar.json"
+    if not wp.exists():
+        raise SystemExit("[prevalence] --prev-history needs <run>/conversion_sidecar.json "
+                         "(make build-conversion-sidecar ID=N)")
+    wit = json.loads(wp.read_text())
+    uri = sidecar_uri or wit.get("sidecar_uri")
+    spark = test_scored.sparkSession
+    first = try_load_sidecar(spark, uri, wit["key"])
+    hz = try_load_index_horizon(spark, uri, wit["key"])
+    if first is None or hz is None:
+        raise SystemExit(f"[prevalence] sidecar MISS at {uri}/{wit['key']} — rebuild it "
+                         "on this cluster (make build-conversion-sidecar ID=N)")
+    persons = test_scored.select("person_id").distinct()
+    hz_t = hz.join(persons, "person_id").select("person_id", "index_date").cache()
+    n_docs, n_idx = len(keys), hz_t.count()
+    pairs = (first.join(hz_t, "person_id")
+             .where(F.col("first_attested_date") < F.col("index_date"))
+             .select("person_id", "node_cid").distinct().cache())
+    nodes = [int(r[0]) for r in pairs.select("node_cid").distinct().collect()]
+    n2r = pv.sidecar_nodes_to_readout(nodes, readout_int2cid, parent_adj)
+    mrows = [(int(n), int(r)) for n, rs in n2r.items() for r in rs]
+    mdf = spark.createDataFrame(mrows, "node_cid long, rnode int")
+    got = (pairs.join(F.broadcast(mdf), "node_cid").groupBy("person_id")
+           .agg(F.collect_set("rnode").alias("ns")).collect())
+    by_person = {int(r["person_id"]): r["ns"] for r in got}
+    prior = pv.prior_from_sets(keys, by_person, int(C), _dr.person_of)
+    pairs.unpersist(); hz_t.unpersist()
+    return prior, {"n_test_docs": n_docs, "n_with_index": n_idx,
+                   "n_sidecar_nodes_prior": len(nodes), "n_mapped_to_readout": len(n2r)}
+
+
 def run_prevalence_check(test_scored, run_dir, *, C, parent_int,
-                         heads_tag="stacked_mass99", tag=None, top=15):
+                         heads_tag="stacked_mass99", tag=None, top=15,
+                         history=None):
     """How much of the case-finding AUC is prevalent recall? (insight 0100;
     `prevalence_check.py`). Scores the test split with the saved heads (no solve), flags
     each (patient, node) with a mapped attestation code of the node or a label
     descendant in the PRE-INDEX condition features, and reports per-node AUC over all
     patients vs with those patients set aside — flat heads and the stacked product.
-    Writes `prevalence_check[_<tag>].md/.json`."""
+    Writes `prevalence_check[_<tag>].md/.json`.
+
+    `history` (exp 0145): a dict of `_whole_history_prior` kwargs; adds the
+    WHOLE-HISTORY prior rule beside the lookback one, with a containment check."""
     import prevalence_check as pv
     import voi_tables as vt
     from gated_pc_cloud import (_collect_lean_proba, _doc_key_column, closure_matrix,
@@ -956,35 +1002,52 @@ def run_prevalence_check(test_scored, run_dir, *, C, parent_int,
     nodes = list(range(1, int(C)))
     res = {}
     L_ = [f"# {run_dir.name} — prevalence check: AUC with prior-diagnosis patients set "
-          f"aside", f"heads {hp.name} · {len(keys):,} test patients · prior = a mapped "
-          f"attestation code of the node (or a label descendant) in the 5-year pre-index "
-          f"condition features (a lower bound: older diagnoses count as incident)", ""]
-    for arm, score in (("stacked", P), ("flat", proba)):
-        per = pv.node_aucs(score, y, prior, nodes)
-        sm = pv.summarize(per)
-        res[arm] = {"summary": sm, "per_node": per}
-        if not sm.get("n_nodes"):
-            L_.append(f"## {arm}: no node with >= {pv.EGRESS_FLOOR} positives both ways")
-            continue
-        L_ += [f"## {arm} — {sm['n_nodes']} nodes · macro AUC all {sm['macro_auc_all']:.4f}"
-               f" → incident {sm['macro_auc_incident']:.4f} · gap median "
-               f"{sm['gap_median']:+.4f}, p90 {sm['gap_p90']:+.4f}, > 0.05 on "
-               f"{sm['n_gap_over_0p05']} nodes · median prior share of positives "
-               f"{sm['prior_share_pos_median']:.2f}", "",
-               "| prior share of positives | nodes | AUC all | AUC incident | median gap |",
-               "|---|--:|--:|--:|--:|"]
-        for band, b in sm["by_prior_share"].items():
-            L_.append(f"| {band} | {b['n_nodes']} | {b['auc_all']:.3f} | "
-                      f"{b['auc_incident']:.3f} | {b['median_gap']:+.3f} |")
-        worst = sorted(per.items(), key=lambda kv: -(kv[1]["auc_all"]
-                                                     - kv[1]["auc_incident"]))[:int(top)]
-        L_ += ["", f"largest gaps ({arm}):"]
-        for c, v in worst:
-            L_.append(f"- {str(ctx.rd_names.get(c, c))[:40]}: {v['auc_all']:.3f} → "
-                      f"{v['auc_incident']:.3f} · prior share of positives "
-                      f"{v['prior_share_pos']:.2f} · positives {v['n_pos_all']} → "
-                      f"{v['n_pos_incident']}")
-        L_.append("")
+          f"aside", f"heads {hp.name} · {len(keys):,} test patients · LOOKBACK prior = a "
+          f"mapped attestation code of the node (or a label descendant) in the 5-year "
+          f"pre-index condition features (a lower bound: older diagnoses count as "
+          f"incident)", ""]
+    rules = [("", prior)]
+    if history:
+        prior_h, rec = _whole_history_prior(test_scored, keys, run_dir, C=int(C),
+                                            **history)
+        res["history_receipt"] = rec
+        res["containment_lookback_in_history"] = pv.containment(prior, prior_h)
+        L_ += [f"WHOLE-HISTORY prior (exp 0145) = a sidecar first attestation of the "
+               f"node's Mondo term or a descendant before the index · test docs "
+               f"{rec['n_test_docs']:,}, with a sidecar index {rec['n_with_index']:,} · "
+               f"prior cells: lookback {int(prior.sum()):,}, whole history "
+               f"{int(prior_h.sum()):,} · lookback cells inside whole-history "
+               f"{res['containment_lookback_in_history']:.3f} (expect ~1; low = index "
+               f"or node-id mismatch)", ""]
+        rules.append(("history_", prior_h))
+    for pre, pri in rules:
+        for arm0, score in (("stacked", P), ("flat", proba)):
+            arm = pre + arm0
+            per = pv.node_aucs(score, y, pri, nodes)
+            sm = pv.summarize(per)
+            res[arm] = {"summary": sm, "per_node": per}
+            if not sm.get("n_nodes"):
+                L_.append(f"## {arm}: no node with >= {pv.EGRESS_FLOOR} positives both ways")
+                continue
+            L_ += [f"## {arm} — {sm['n_nodes']} nodes · macro AUC all {sm['macro_auc_all']:.4f}"
+                   f" → incident {sm['macro_auc_incident']:.4f} · gap median "
+                   f"{sm['gap_median']:+.4f}, p90 {sm['gap_p90']:+.4f}, > 0.05 on "
+                   f"{sm['n_gap_over_0p05']} nodes · median prior share of positives "
+                   f"{sm['prior_share_pos_median']:.2f}", "",
+                   "| prior share of positives | nodes | AUC all | AUC incident | median gap |",
+                   "|---|--:|--:|--:|--:|"]
+            for band, b in sm["by_prior_share"].items():
+                L_.append(f"| {band} | {b['n_nodes']} | {b['auc_all']:.3f} | "
+                          f"{b['auc_incident']:.3f} | {b['median_gap']:+.3f} |")
+            worst = sorted(per.items(), key=lambda kv: -(kv[1]["auc_all"]
+                                                         - kv[1]["auc_incident"]))[:int(top)]
+            L_ += ["", f"largest gaps ({arm}):"]
+            for c, v in worst:
+                L_.append(f"- {str(ctx.rd_names.get(c, c))[:40]}: {v['auc_all']:.3f} → "
+                          f"{v['auc_incident']:.3f} · prior share of positives "
+                          f"{v['prior_share_pos']:.2f} · positives {v['n_pos_all']} → "
+                          f"{v['n_pos_incident']}")
+            L_.append("")
     text = "\n".join(L_).rstrip() + "\n"
     stem = "prevalence_check" + (f"_{tag}" if tag else "")
     (run_dir / f"{stem}.md").write_text(text)
@@ -1051,6 +1114,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "over all test patients vs with prior-diagnosis patients set "
                         "aside (mapped own code in the pre-index features). Transforms "
                         "the test split only.")
+    p.add_argument("--prev-history", action="store_true",
+                   help="(--prevalence-check) exp 0145: add the WHOLE-HISTORY prior rule "
+                        "from the E4 sidecar (first attestation before the index) beside "
+                        "the 5-year lookback rule. Needs <run>/conversion_sidecar.json.")
+    p.add_argument("--prev-sidecar-uri", default=None,
+                   help="(--prev-history) sidecar root; default the witness's")
     p.add_argument("--readout-incident", action="store_true",
                    help="Exp 0144 (insight 0100): INCIDENT heads on the saved fit — "
                         "every (patient, node) cell with prior evidence for the node "
@@ -2157,9 +2226,12 @@ def main(argv=None) -> int:
             if _rdag is None:
                 raise SystemExit("[readout] --prevalence-check needs the Mondo readout DAG")
             with _phase("prevalence check (insight 0100)"):
-                run_prevalence_check(test_scored, run_dir, C=_C_ro,
-                                     parent_int=_parent_ro, heads_tag=args.acq_heads,
-                                     tag=args.acq_tag)
+                run_prevalence_check(
+                    test_scored, run_dir, C=_C_ro, parent_int=_parent_ro,
+                    heads_tag=args.acq_heads, tag=args.acq_tag,
+                    history=(dict(readout_int2cid=_rdag.int2cid, parent_adj=_padj,
+                                  sidecar_uri=args.prev_sidecar_uri)
+                             if args.prev_history else None))
             return 0
 
         if args.lookalikes:

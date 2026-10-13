@@ -24,7 +24,8 @@ import numpy as np
 
 import lookalikes as lk
 
-__all__ = ["vocab_to_nodes", "prior_matrix", "node_aucs", "summarize", "EGRESS_FLOOR"]
+__all__ = ["vocab_to_nodes", "prior_matrix", "sidecar_nodes_to_readout",
+           "prior_from_sets", "containment", "node_aucs", "summarize", "EGRESS_FLOOR"]
 
 EGRESS_FLOOR = 20
 
@@ -53,6 +54,56 @@ def prior_matrix(keys, codes_by_key, v2n, C):
             if ns:
                 M[i, ns] = True
     return M
+
+
+def _curie(cid):
+    return f"MONDO:{int(cid):07d}"
+
+
+def sidecar_nodes_to_readout(node_cids, readout_int2cid, parent_adj, *, root_cid=-1):
+    """{sidecar Mondo node cid: [readout nodes]} — WHOLE-HISTORY prior rule (exp 0145).
+
+    The E4 sidecar's node ids come from the code map rebuilt WITHOUT the label-set
+    filter (`conversion_sidecar.code_map_from_manifest`), so they can be finer Mondo
+    terms than the fit's labels. A first attestation of term t counts as prior
+    evidence for every readout node whose Mondo term is t or an ancestor of t — the
+    is-a reading of "a prior diagnosis of something under X". `parent_adj` is Mondo's
+    `{curie: [parent curies]}`; the readout root is never a target."""
+    cid2r = {int(c): int(r) for r, c in readout_int2cid.items()
+             if int(r) != 0 and int(c) != int(root_cid)}
+    out = {}
+    for n in node_cids:
+        seen, stack = set(), [_curie(n)]
+        while stack:
+            t = stack.pop()
+            if t in seen:
+                continue
+            seen.add(t)
+            stack.extend(parent_adj.get(t, ()))
+        rs = sorted({cid2r[int(t.split(":", 1)[1])] for t in seen
+                     if int(t.split(":", 1)[1]) in cid2r})
+        if rs:
+            out[int(n)] = rs
+    return out
+
+
+def prior_from_sets(keys, nodes_by_person, C, person_of):
+    """(D, C) bool from `{person_id: iterable of readout nodes}`; `person_of` maps a
+    doc key to its person."""
+    M = np.zeros((len(keys), int(C)), dtype=bool)
+    for i, k in enumerate(keys):
+        ns = nodes_by_person.get(int(person_of(k)))
+        if ns:
+            M[i, sorted(int(n) for n in ns)] = True
+    return M
+
+
+def containment(a, b):
+    """Share of `a`'s True cells that are also True in `b` (nan if `a` is empty). The
+    lookback rule's prior cells should sit inside the whole-history rule's — a low
+    share means the two disagree about the index date or the node ids."""
+    n = int(a.sum())
+    return float((a & b).sum() / n) if n else float("nan")
 
 
 def node_aucs(score, y, prior, nodes, *, floor=EGRESS_FLOOR):

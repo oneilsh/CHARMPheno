@@ -125,3 +125,87 @@ def test_mask_prior_cells_on_a_spark_frame(spark):
     got = {r.person_id: r.labelMask for r in
            gpr.mask_prior_cells(df, {3: [1, 3]}).collect()}
     assert got == {1: [1.0, 0.0, 1.0, 0.0], 2: [1.0] * 4}
+
+
+def test_sidecar_nodes_roll_up_the_mondo_is_a_to_readout_nodes():
+    parent_adj = {"MONDO:0000005": ["MONDO:0000001"], "MONDO:0000001": ["MONDO:0000009"]}
+    int2cid = {0: -1, 1: 1, 2: 2, 3: 9}
+    got = pv.sidecar_nodes_to_readout([5, 2, 77], int2cid, parent_adj)
+    assert got == {5: [1, 3], 2: [2]}                   # 77 hits no readout node
+
+
+def test_prior_from_sets_and_containment():
+    M = pv.prior_from_sets([64, 128, 192], {1: [2], 3: [1, 2]}, 3, lambda k: k // 64)
+    assert M.tolist() == [[False, False, True], [False] * 3, [False, True, True]]
+    a = np.array([[True, False], [True, True]])
+    assert pv.containment(a, a) == 1.0 and pv.containment(a, ~a) == 0.0
+
+
+def test_run_prevalence_check_whole_history(spark, tmp_path):
+    import datetime as dt
+    from pyspark.ml.linalg import Vectors
+    from pyspark.sql import Row
+    from test_inspect_topics import _make_census_run
+    import gated_pc_readout as gpr
+    _make_census_run(tmp_path)
+    C, K = 4, 10
+    (tmp_path / "readout_dag.json").write_text(json.dumps({
+        "version": 1, "C_fit": 4, "C": 4,
+        "parent_int": {"1": [0], "2": [0], "3": [0]},
+        "int2cid": {"0": -1, "1": 1001, "2": 1002, "3": 1003},
+        "name_by_id": {str(1000 + e): f"node{e}" for e in range(4)},
+        "pos_sources": [[0], [1], [2], [3]]}))
+    (tmp_path / "bundle_meta.json").write_text(json.dumps({
+        "int2cid": {"0": -1, "1": 1001, "2": 1002, "3": 1003},
+        "vocab_maps": [{str(500 + i): i for i in range(12)}],
+        "name_by_id": {str(1000 + e): f"node{e}" for e in range(4)}}))
+    (tmp_path / "code_map.tsv").write_text("std_cid\tnode_cid\n503\t1001\n")
+    Vh = np.zeros((C, K)); Vh[1, 1] = 12.0
+    np.savez(tmp_path / "readout_heads_gated_pc_t.npz", V=Vh,
+             b_raw=np.array([5.0, -4.0, -4.0, -4.0]), const=np.zeros(C),
+             degenerate=np.zeros(C, bool), C=np.int64(C), K=np.int64(K),
+             theta_topm=np.int64(0))
+    rng = np.random.default_rng(1)
+    idx = dt.date(2020, 1, 1)
+    rows, first, hz = [], [], []
+    for i in range(500):
+        kind = "prev" if i < 80 else "old" if i < 110 else "inc" if i < 170 else "neg"
+        th = rng.dirichlet(np.ones(K))
+        codes = set(rng.choice(np.arange(6, 12), 3, replace=False).tolist())
+        if kind == "prev":
+            th[1] += 3.0
+            codes.add(3)
+            first.append(Row(person_id=i, node_cid=1005,
+                             first_attested_date=dt.date(2018, 5, 1)))
+        if kind == "old":           # diagnosed 8 years back: outside the lookback
+            th[1] += 2.0
+            first.append(Row(person_id=i, node_cid=1001,
+                             first_attested_date=dt.date(2012, 5, 1)))
+        if kind == "inc":
+            th[1] += 0.4
+            first.append(Row(person_id=i, node_cid=1001,       # AFTER the index
+                             first_attested_date=dt.date(2020, 6, 1)))
+        th /= th.sum()
+        lab = [1.0, float(kind in ("inc", "old") or (kind == "prev" and i < 60)), 0.0, 0.0]
+        rows.append(Row(person_id=i, topicDistribution=Vectors.dense(th), label=lab,
+                        labelMask=[1.0] * C,
+                        features_0=Vectors.sparse(12, sorted(codes), [1.0] * len(codes))))
+        hz.append(Row(person_id=i, index_date=idx,
+                      observation_period_end_date=dt.date(2023, 1, 1)))
+    uri = tmp_path / "sidecar"
+    spark.createDataFrame(first).write.parquet(str(uri / "k1" / "first_attestation.parquet"))
+    spark.createDataFrame(hz).write.parquet(str(uri / "k1" / "index_horizon.parquet"))
+    (tmp_path / "conversion_sidecar.json").write_text(json.dumps(
+        {"key": "k1", "sidecar_uri": str(uri)}))
+    df = spark.createDataFrame(rows)
+    padj = {"MONDO:0001005": ["MONDO:0001001"]}
+    res = gpr.run_prevalence_check(
+        df, tmp_path, C=C, parent_int={0: [], 1: [0], 2: [0], 3: [0]}, heads_tag="t",
+        tag="h", history=dict(readout_int2cid={0: -1, 1: 1001, 2: 1002, 3: 1003},
+                              parent_adj=padj))
+    assert res["containment_lookback_in_history"] == 1.0
+    assert res["history_receipt"]["n_with_index"] == 500
+    lb, hi = res["stacked"]["per_node"][1], res["history_stacked"]["per_node"][1]
+    assert lb["n_pos_incident"] == 90          # 30 old + 60 incident; old look new
+    assert hi["n_pos_incident"] == 60          # old ones now set aside, post-index ignored
+    assert "WHOLE-HISTORY prior" in (tmp_path / "prevalence_check_h.md").read_text()
