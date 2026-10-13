@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-13
 **Topic:** labels, leakage, index date, case-finding evaluation, exps 0137, 0142
-**Status:** Mechanism read from code; consequence measured in 0142.
+**Status:** Mechanism read from code; consequence measured in 0142 and 0143.
 
 ## Observation
 
@@ -24,8 +24,10 @@
 
 ## Why it matters
 
-- Every ribbon-era (0134–0142) case-finding figure mixes prevalent and incident cases; the
-  within-cohort / de-novo AUCs are optimistic for chronic diseases by an unmeasured amount.
+- Every ribbon-era (0134–0142) case-finding figure mixes prevalent and incident cases.
+  Measured (0143): median 53% of a node's label-year positives had a prior code; with
+  them set aside, 0137's macro AUC falls 0.818 → 0.702 (stacked) and 0.727 → 0.616 (flat),
+  with incident AUC ~0.70 in every prior-share band — the excess was prevalent recall.
 - The random index is worth keeping (no anchoring bias between cases and background, one
   index serves every disease); the repair is in the LABEL, per node: the incident arm
   (`preindex_closure`, E1/E2 machinery) masks node X for patients with a prior X
