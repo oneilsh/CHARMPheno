@@ -239,6 +239,48 @@ def observe_root_everywhere(df, C, mask_col="labelMask"):
     return df.withColumn(mask_col, F.concat(F.array(F.lit(1.0)), tail))
 
 
+def incident_mask_kernel(get_v2n):
+    """The per-row kernel of `mask_prior_cells`: `(features vector, mask) -> mask` with
+    every node the patient has PRIOR evidence for (a mapped attestation code of the
+    node or a label descendant in the pre-index condition features — exactly
+    `prevalence_check.prior_matrix`'s rule) set to 0.0. The root (node 0) is never
+    touched. `get_v2n()` returns {vocab idx: [nodes]}; on the cluster it reads a
+    broadcast, so nothing array-shaped rides the task closure (ADR 0047).
+
+    A plain nested function on purpose: cloudpickle ships it by value, so no module
+    needs to be on --py-files."""
+    def kernel(vec, mask):
+        if mask is None:
+            return None
+        v2n = get_v2n()
+        idx = getattr(vec, "indices", None)
+        if idx is None:
+            arr = vec.toArray() if hasattr(vec, "toArray") else (vec or [])
+            idx = [i for i, x in enumerate(arr) if x]
+        out = list(mask)
+        for v in idx:
+            for n in v2n.get(int(v), ()):
+                if n != 0:
+                    out[n] = 0.0
+        return out
+    return kernel
+
+
+def mask_prior_cells(df, v2n, *, feat_col="features_0", mask_col="labelMask"):
+    """INCIDENT label rule (insight 0100; exp 0144), readout-side: a patient with prior
+    evidence for node X is neither a positive nor a negative for X's head, so the solve
+    learns "will X be newly coded", not "will X be coded again". Python UDF over the
+    widened `array<double>` mask; the caller caches and materializes the result (the
+    solver makes repeated passes)."""
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import ArrayType, DoubleType
+    bc = df.sparkSession.sparkContext.broadcast(
+        {int(k): [int(n) for n in ns] for k, ns in v2n.items()})
+    kern = incident_mask_kernel(lambda: bc.value)
+    udf = F.udf(kern, ArrayType(DoubleType()))
+    return df.withColumn(mask_col, udf(F.col(feat_col), F.col(mask_col)))
+
+
 def run_conditional_from_heads(test_scored, run_dir, tag, *, C, parent_int, int2cid,
                                name_by_id, min_count=20):
     """CONDITIONAL DIAGNOSIS on held-out patients from a finished readout's saved
@@ -1009,6 +1051,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "over all test patients vs with prior-diagnosis patients set "
                         "aside (mapped own code in the pre-index features). Transforms "
                         "the test split only.")
+    p.add_argument("--readout-incident", action="store_true",
+                   help="Exp 0144 (insight 0100): INCIDENT heads on the saved fit — "
+                        "every (patient, node) cell with prior evidence for the node "
+                        "(mapped own code, or a label descendant's, in the pre-index "
+                        "condition features) is masked in BOTH splits before the "
+                        "solve; outputs are tagged 'incident_…'; then the prevalence "
+                        "check runs on the new heads over the unmasked test split. "
+                        "Needs the Mondo readout DAG and <run>/code_map.tsv.")
     p.add_argument("--diff-max-patients", type=int, default=600)
     p.add_argument("--diff-max-train", type=int, default=2000)
     p.add_argument("--diff-next-question", action="store_true",
@@ -2136,6 +2186,31 @@ def main(argv=None) -> int:
                     min_count=min_count)
             return 0
 
+        _test_unmasked = test_scored
+        if args.readout_incident:
+            if _rdag is None:
+                raise SystemExit("[readout] --readout-incident needs the Mondo readout DAG")
+            with _phase("incident label rule: mask prior-evidence cells (exp 0144)"):
+                import prevalence_check as _pv
+                import voi_tables as _vt
+                _bm, _cmp = run_dir / "bundle_meta.json", run_dir / "code_map.tsv"
+                if not _cmp.exists():
+                    raise SystemExit("[readout] --readout-incident needs "
+                                     "<run>/code_map.tsv (the attestation map)")
+                _ctx = _vt.load_voi_context(
+                    run_dir, bundle_meta_path=str(_bm) if _bm.exists() else None,
+                    own_codes_path=str(_cmp))
+                _v2n = _pv.vocab_to_nodes(_ctx.own_idx, _rdag.pos_sources)
+                _fc = ("features_0" if "features_0" in train_scored.columns
+                       else "features")
+                _tr_i = mask_prior_cells(train_scored, _v2n, feat_col=_fc).cache()
+                _te_i = mask_prior_cells(test_scored, _v2n, feat_col=_fc).cache()
+                _cprint(f"[readout]   incident masking: {len(_v2n):,} condition codes "
+                        f"attest readout nodes; train docs={_tr_i.count()} test "
+                        f"docs={_te_i.count()} (masked frames materialized)", flush=True)
+                train_scored.unpersist()
+                train_scored, test_scored = _tr_i, _te_i
+
         with _phase("score"):
             # E2/WP4: the incident arm's eligibility comes from the BUNDLE (spec
             # R2.3 — a corpus property; nothing this run computes may enter it),
@@ -2186,6 +2261,8 @@ def main(argv=None) -> int:
                 _mtag = "flat" + (f"_{_mtag}" if _mtag else "")
                 _cprint(f"[readout]   FLAT read of a label-set fit: results -> "
                       f"results_readout_{_mtag}.json (record untouched)", flush=True)
+            if args.readout_incident:
+                _mtag = "incident" + (f"_{_mtag}" if _mtag else "")
             if args.readout_stacked:
                 # Its own tag: the arm re-solves the SAME heads plus a changed
                 # root head, and the record's results/heads files stay the
@@ -2210,6 +2287,15 @@ def main(argv=None) -> int:
                         theta_mass=args.readout_theta_mass, C=_C_ro)
             _cprint(f"[readout]   arm results written to {run_dir / _rname}",
                   flush=True)
+            if args.readout_incident and args.readout_stacked:
+                # The comparison that matters: these heads vs the record's on the
+                # SAME unmasked test split under the same prior rule (0143: the
+                # record's stacked incident macro AUC 0.702, flat 0.616).
+                with _phase("prevalence check on the incident heads (exp 0144)"):
+                    run_prevalence_check(_test_unmasked, run_dir, C=_C_ro,
+                                         parent_int=_parent_ro, heads_tag=_mtag,
+                                         tag=_mtag)
+                _test_unmasked.unpersist()
             train_scored.unpersist(); test_scored.unpersist()
 
             # Echo the other arms' stored summary (only gated_pc can be re-scored).
