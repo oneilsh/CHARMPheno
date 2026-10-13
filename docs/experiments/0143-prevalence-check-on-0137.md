@@ -1,7 +1,7 @@
 ---
 id: 143
 slug: prevalence-check-on-0137
-status: planned
+status: done
 model_class: gated_pc
 # NOT A FIT. Insight 0100's measurement: how much of 0137's case-finding AUC is
 # prevalent recall? Per readout node X, the saved stacked_mass99 heads (flat and stacked)
@@ -32,4 +32,35 @@ grep -E "^## |^\| 0|^- " "$RUN"/prevalence_check.md | cut -c1-170
 
 ## Run log
 
+**2026-10-13 — run.** 535 readout nodes with >= 20 positives both ways.
+
 ## Results
+
+| arm | macro AUC all | macro AUC incident | gap median | gap p90 | nodes losing > 0.05 |
+|---|--:|--:|--:|--:|--:|
+| stacked | 0.8176 | **0.7022** | +0.120 | +0.195 | 439 / 535 |
+| flat | 0.7269 | **0.6163** | +0.110 | +0.205 | 399 / 535 |
+
+By the share of a node's label-year positives that had a prior code (stacked):
+
+| prior share | nodes | AUC all | AUC incident | median gap |
+|---|--:|--:|--:|--:|
+| 0.0–0.1 | 27 | 0.715 | 0.715 | +0.000 |
+| 0.1–0.3 | 59 | 0.759 | 0.724 | +0.035 |
+| 0.3–0.6 | 251 | 0.803 | 0.700 | +0.104 |
+| 0.6–1.0 | 198 | 0.867 | 0.697 | +0.166 |
+
+Median prior share of positives: 0.53. Largest stacked gaps: cardiovascular disorder
+0.870 → 0.623, celiac 0.796 → 0.551, multiple sclerosis 0.915 → 0.675, pituitary tumour
+0.852 → 0.619, thoracic cancer 0.901 → 0.671, hypertensive disorder 0.884 → 0.658,
+breast carcinoma 0.905 → 0.682, vitiligo 0.858 → 0.625.
+
+**Read.** About half of every node's label-year positives are prevalent re-codes, and the
+readout's AUC above ~0.70 is almost entirely recognizing them: the incident AUC is ~0.70
+(stacked) / ~0.61 (flat) in EVERY prior-share band, and the "all" AUC rises with the
+prevalent share. Genuine new-diagnosis case-finding on 0137 is ~0.70 stacked — and that is
+a lower bound only on the gap (5-year lookback). Two caveats in the model's favour: these
+heads were TRAINED on the mixed labels, and the topics were gated on label-year
+attestation only (prevalent-not-recoded patients never taught X's topics). So the label
+redesign (insight 0100) precedes everything else; its first cheap step is readout-side —
+refit the heads with prior cells masked (incident training) on the saved fit.
