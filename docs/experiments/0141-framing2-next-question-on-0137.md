@@ -1,7 +1,7 @@
 ---
 id: 141
 slug: framing2-next-question-on-0137
-status: planned
+status: running
 model_class: gated_pc
 # NOT A FIT. Framing 2 of spec 2026-10-13 (clinician framings): "given everything
 # already in this record, which further fact — a condition, a medication, a test RESULT —
@@ -47,5 +47,33 @@ cat "$RUN"/differential_groups_nq.md "$RUN"/differential_marfan_eds_nq.md | cut 
 (`concept_names.csv` from 0140 is reused from the run dir.)
 
 ## Run log
+
+**2026-10-13 — first run.** Framing-1 numbers reproduce 0140 exactly (same seed).
+
+Next question, P(true) on the E3 differential (visible 80% → after the top 3 → full
+record):
+
+| set | visible | VOI@3 | likely present@3 | table@3 | random@3 | 3 random hidden | full record |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| connective tissue (267) | 0.262 | 0.264 | 0.263 | 0.267 | 0.262 | 0.263 | 0.278 |
+| cardiomyopathy (221) | 0.393 | 0.402 | 0.395 | 0.403 | 0.393 | 0.397 | 0.422 |
+| Marfan/EDS (56) | 0.526 | 0.527 | 0.527 | 0.526 | 0.526 | 0.530 | 0.540 |
+
+Yield@3: VOI 0.01 / 0.09 / 0.05; likely present 0.13 / 0.45 / 0.33; table 0.02 / 0.06 / 0.00.
+Flagged † in the VOI top 3: 22% / 29% / 36%.
+
+**Read.** No strategy separates, because nothing moves the differential: revealing ALL
+of the hidden 20% (oracle) raises P(true) by only 0.014–0.029. One more fact is worth
+almost nothing to E3 on a long record — the same arithmetic as insight 0098, now on full
+records: a code's pull on θ is ~ its count / (α·K + record tokens), α·K ≈ 1,570. The
+protocol cannot discriminate strategies when the ceiling itself is ~0.02. The CONTENT of
+the recommendations is clinically sensible (Postpartum finding → peripartum CM; aortic
+valve disorder and RETINAL DETACHMENT → Marfan; hyperprolactinemia → pituitary tumour;
+methotrexate / psoriasis / hydroxyurea for the connective-tissue split), with † on
+roughly a quarter to a third.
+Leak found: E3's reasons for HCM lead with "Hypertrophic cardiomyopathy" and VOI
+recommends it († flagged) — a disease-naming code that is not among the member's
+attestation codes in the code map (to check: its concept vs code_map.tsv). DCM's
+reasons likewise carry the group-level "Cardiomyopathy" / "Primary cardiomyopathy".
 
 ## Results
