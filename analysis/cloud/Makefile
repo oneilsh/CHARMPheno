@@ -882,6 +882,32 @@ diag-episode-probe: zip cluster-overlay $(WORKSPACE_ENV)
 	    --run-dir "$(RUNS_DIR)/$(shell printf '%04d' $(ID))-*" \
 	    $(GPR_ARGS)
 
+# WEARABLES x RARE DISEASE census (side question 2026-10-13; no fit, no cache keys):
+# persons with >= --min-days of Fitbit daily summaries AND a Mondo-rare diagnosis
+# (subsets rare / orphanet_rare / gard_rare / nord_rare), and the rare diseases with
+# the most wearables data. Pooled; rows under 20 dropped. Output in OUT (a workspace dir).
+# Example:
+#   make diag-wearables-rare
+#   make diag-wearables-rare GPR_ARGS="--flags gard_rare --min-days 90"
+WEAR_OUT ?= $(RUNS_DIR)/wearables-rare
+diag-wearables-rare: zip cluster-overlay $(WORKSPACE_ENV)
+	mkdir -p "$(WEAR_OUT)" && . ./$(WORKSPACE_ENV) && \
+	PYTHONPATH=$(REPO_ROOT):$(REPO_ROOT)/analysis/cloud:$$PYTHONPATH spark-submit \
+	    --master yarn \
+	    --deploy-mode client \
+	    --driver-memory 8g \
+	    --conf spark.executor.cores=2 \
+	    --conf spark.executor.memory=4g \
+	    --conf spark.executor.memoryOverhead=2g \
+	    --conf spark.task.maxFailures=8 \
+	    --conf spark.dynamicAllocation.enabled=false \
+	    --conf spark.executor.instances=12 \
+	    $(foreach kv,$(GPR_SPARK_CONF),--conf $(kv)) \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY) \
+	    $(REPO_ROOT)/analysis/cloud/diag_wearables_rare.py \
+	    --out-dir "$(WEAR_OUT)" \
+	    $(GPR_ARGS) 2>&1 | tee -a "$(WEAR_OUT)/wearables_rare_log.md"
+
 # Print summary.md for an experiment (copy/paste back to chat)
 summary:
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
