@@ -76,4 +76,29 @@ recommends it († flagged) — a disease-naming code that is not among the memb
 attestation codes in the code map (to check: its concept vs code_map.tsv). DCM's
 reasons likewise carry the group-level "Cardiomyopathy" / "Primary cardiomyopathy".
 
+Leak check (2026-10-13, code_map.tsv): "Hypertrophic cardiomyopathy" 4124693 and
+"Hypertrophic obstructive cardiomyopathy" 316428 map to the HCM node, but a second
+"Hypertrophic cardiomyopathy" concept 40565500 is NOT in the code map (a code-map gap —
+patients carrying only it are also unlabeled for HCM); "Cardiomyopathy" 321319 and
+"Primary cardiomyopathy" 4232495 have no node (the group is a Mondo ancestor). Readout-
+side fix: condition concepts whose name equals a member's or the group's name are
+treated as attestation (catches 40565500 and 321319, not "Primary cardiomyopathy"). The
+code-map gap goes to the next deliberate rebuild.
+
+**Run 2 (planned): early in the workup, two engines.** 80% of each record hidden (20%
+visible), so a single fact can matter; questions valued under E3 (topic-model P(yes) ·
+E3 shift) AND under E1 (its own P(yes) · its tempered shift; a NO is already in E1's
+record); every outcome reported under both differentials.
+
+```bash
+cd ~/repos/CHARMPheno && git fetch origin claude/dismech-ribbon && git checkout claude/dismech-ribbon && git pull --ff-only
+RUN=/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs/0137-dismech-ribbon-record-tpn5-v2codemap
+cat > "$RUN"/next_question2.sh <<'EOF'
+make -C analysis/cloud gated-pc-readout ID=137 GPR_ARGS="--differential '^cardiomyopathy\$\$|^connective tissue disorder\$\$' --diff-next-question --diff-nq-hide 0.8 --acq-tag groups_nq80"
+make -C analysis/cloud gated-pc-readout ID=137 GPR_ARGS="--differential '^Marfan syndrome|^Ehlers-Danlos syndrome' --acq-adhoc --diff-next-question --diff-nq-hide 0.8 --acq-tag marfan_eds_nq80"
+EOF
+nohup bash "$RUN"/next_question2.sh > "$RUN"/next_question2_log.md 2>&1 &
+cat "$RUN"/differential_groups_nq80.md "$RUN"/differential_marfan_eds_nq80.md | cut -c1-170
+```
+
 ## Results

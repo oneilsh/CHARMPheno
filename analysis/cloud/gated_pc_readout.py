@@ -451,7 +451,7 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
                      results_name="results_readout_stacked_mass99.json",
                      heads_tag="stacked_mass99", max_patients=600, max_train=2000,
                      thin_frac=0.1, own_top=5, rel_lambda=0.6, rho=0.3, seed=0,
-                     tag=None, next_question=False, nq_pool=100):
+                     tag=None, next_question=False, nq_pool=100, nq_hide=0.2):
     """Framing 1 — DIFFERENTIAL WITH REASONS (spec 2026-10-13 clinician framings,
     R0/R1; `differential.py`). Four engines on the same held-out patients positive on
     exactly one member: E1 presence model with subtype profiles, E2 renormalized
@@ -500,6 +500,15 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
     for n, gname, members in sets:
         t0 = time.time()
         excl = {0: vt.set_exclusions(ctx, n, members)}
+        # Name-matched attestation (0141): a condition concept whose name IS a member's
+        # or the group's name ("Hypertrophic cardiomyopathy" 40565500, "Cardiomyopathy")
+        # but which the code map missed is attestation too, not a finding.
+        nm_targets = {str(ctx.rd_names.get(m, "")).strip().lower() for m in members}
+        nm_targets.add(str(gname).strip().lower())
+        if ctx.names and ctx.inv_maps:
+            for v, cid in ctx.inv_maps[0].items():
+                if str(ctx.names.get(int(cid), "")).strip().lower() in nm_targets:
+                    excl[0].add(int(v))
         if measured:
             excl[dm] = measured
         subtypes = {}
@@ -622,7 +631,8 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
         L_.append("")
         if next_question and e3 is not None:
             nq = _next_question_block(ctx, eng, e3, members, te, ev_i, truths, pri,
-                                      excl, named, nq_pool, seed)
+                                      excl, named, nq_pool, seed, frac=nq_hide,
+                                      e1=e1, e1_lp=lp, e1_tau=tau1)
             L_.extend(nq["lines"])
             res["next_question"] = nq["res"]
         _cprint(f"[differential]   {gname}: done in {time.time() - t0:.0f}s", flush=True)
@@ -637,7 +647,8 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
 
 
 def _next_question_block(ctx, eng, head, members, te, ev_i, truths, pri, excl, named,
-                         pool_per_dom, seed):
+                         pool_per_dom, seed, *, frac=0.2, e1=None, e1_lp=None,
+                         e1_tau=1.0):
     """Framing 2 (spec R2) on the framing-1 evaluation half: the candidate pool is the
     population-EIG table over condition, drug and measurement-result codes (attestation
     and [measured] excluded), the differential is E3's. Candidates whose presence
@@ -654,7 +665,8 @@ def _next_question_block(ctx, eng, head, members, te, ev_i, truths, pri, excl, n
         u = [j for j, m in enumerate(members) if pr.get(m) is not None]
         used = u if used is None else [j for j in used if j in u]
         profs[d], bgs[d] = pr, bg
-    lines = ["### Next question (framing 2, E3 differential; 20% of each record hidden)"]
+    lines = [f"### Next question (framing 2; {100 * frac:.0f}% of each record hidden; "
+             f"differentials E3 and E1)"]
     if not used or len(used) < 2:
         return {"lines": lines + ["(fewer than 2 members with a profile)"], "res": None}
     pu = np.asarray(pri)[used]
@@ -668,7 +680,8 @@ def _next_question_block(ctx, eng, head, members, te, ev_i, truths, pri, excl, n
         flagged[j] = bool(q.max() / q.sum() >= 0.9)
     pats = [(truths[i], te[i][1]) for i in ev_i]
     rng = np.random.default_rng(int(seed))
-    r = dfm.evaluate_next_question(eng, head, pats, pool_items, flagged, rng)
+    r = dfm.evaluate_next_question(eng, head, pats, pool_items, flagged, rng, frac=frac,
+                                   e1=e1, e1_lp=e1_lp, e1_tau=e1_tau)
     if r["n"] < dfm.EGRESS_FLOOR:
         return {"lines": lines + ["(fewer than 20 evaluable patients; suppressed)"],
                 "res": None}
@@ -676,18 +689,21 @@ def _next_question_block(ctx, eng, head, members, te, ev_i, truths, pri, excl, n
     lines += [f"{r['n']} patients · pool {len(pool_items)} codes (condition, drug, "
               f"measurement results) · likely-treatment flags in VOI top 3: "
               f"{100 * r['flag_share_top3']:.0f}%", "",
-              "| strategy | k | yield | P(true) | top-1 |", "|---|--:|--:|--:|--:|",
-              f"| visible record (80%) | — | — | {v['p_true']:.3f} | {v['top1']:.3f} |"]
+              "| strategy | k | yield | P(true) E3 | top-1 E3 | P(true) E1 | top-1 E1 |",
+              "|---|--:|--:|--:|--:|--:|--:|",
+              f"| visible record ({100 - 100 * frac:.0f}%) | — | — | {v['p_true']:.3f} | "
+              f"{v['top1']:.3f} | {v['p_true_e1']:.3f} | {v['top1_e1']:.3f} |"]
     for k in r["ks"]:
-        for s_ in dfm.NQ_STRATEGIES + ("random hidden",):
+        for s_ in tuple(r["strategies"]) + ("random hidden",):
             x = r["by"][f"{s_}@{k}"]
             lines.append(f"| {s_} | {k} | {x['yield']:.3f} | {x['p_true']:.3f} | "
-                         f"{x['top1']:.3f} |")
-    lines.append(f"| full record | — | — | {f['p_true']:.3f} | {f['top1']:.3f} |")
+                         f"{x['top1']:.3f} | {x['p_true_e1']:.3f} | {x['top1_e1']:.3f} |")
+    lines.append(f"| full record | — | — | {f['p_true']:.3f} | {f['top1']:.3f} | "
+                 f"{f['p_true_e1']:.3f} | {f['top1_e1']:.3f} |")
     top = sorted(((j, c) for j, c in r["recommended"].items()
                   if c >= dfm.EGRESS_FLOOR), key=lambda x: -x[1])[:10]
     if top:
-        lines += ["", "Most often in the VOI top 3 (>= 20 patients; † = likely "
+        lines += ["", "Most often in the VOI (E3) top 3 (>= 20 patients; † = likely "
                   "treatment / consequence):"]
         lines.append(" · ".join(ctx.code_name(*pool_items[j]) + (" †" if flagged[j] else "")
                                 for j, _ in top))
@@ -751,8 +767,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--diff-max-train", type=int, default=2000)
     p.add_argument("--diff-next-question", action="store_true",
                    help="(--differential) also run framing 2 — the next-question "
-                        "evaluation (hide 20%% of each record; yield and gain of the "
-                        "top-k recommendations) on the E3 differential")
+                        "evaluation (hide --diff-nq-hide of each record; yield and gain "
+                        "of the top-k recommendations under the E3 and E1 "
+                        "differentials)")
+    p.add_argument("--diff-nq-hide", type=float, default=0.2,
+                   help="(--diff-next-question) fraction of each record hidden; 0.8 = "
+                        "early in a workup (20%% visible)")
     p.add_argument("--acq-adhoc", action="store_true",
                    help="(--acquisition) REGEX picks label nodes as ONE set")
     p.add_argument("--acq-prior", choices=("population", "uniform"),
@@ -1741,7 +1761,8 @@ def main(argv=None) -> int:
                     adhoc=args.acq_adhoc, heads_tag=args.acq_heads,
                     max_patients=args.diff_max_patients,
                     max_train=args.diff_max_train, tag=args.acq_tag,
-                    next_question=args.diff_next_question)
+                    next_question=args.diff_next_question,
+                    nq_hide=args.diff_nq_hide)
             return 0
 
         if args.acquisition:

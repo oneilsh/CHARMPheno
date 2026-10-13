@@ -155,6 +155,9 @@ def test_run_differential_end_to_end_on_a_tiny_run(tmp_path, monkeypatch):
         out.append(([0, 1], {0: {11: 1.0}}, {0: 1.0}))   # multi-positive: set aside
         return out, n + 1
     monkeypatch.setattr(gpr, "collect_set_patients", fake)
+    # a concept NAMED like a member (code 7, in every record) is attestation (0141)
+    (tmp_path / "concept_names.csv").write_text("concept_id,concept_name\n507,node1\n"
+                                                "500,marker one\n")
     js = gpr.run_differential("test", "train", tmp_path, "^node1$|^node2$", adhoc=True,
                               tag="t", next_question=True, nq_pool=6)
     rep = (tmp_path / "differential_t.md").read_text()
@@ -167,8 +170,11 @@ def test_run_differential_end_to_end_on_a_tiny_run(tmp_path, monkeypatch):
     assert m["E3 multiclass head"]["top1"] > 0.9
     assert js[next(iter(js))]["n_eval"] == 60
     assert "E1 reasons" in rep and "E3 reasons" in rep
-    assert "### Next question" in rep and "| VOI | 3 |" in rep
+    assert "### Next question" in rep and "| VOI (E3) | 3 |" in rep
+    assert "| VOI (E1) | 3 |" in rep
     assert js[next(iter(js))]["next_question"]["n"] == 60
+    reasons = rep.split("E1 reasons")[1].split("###")[0]
+    assert "marker one" in reasons and "· node1" not in reasons and ": node1" not in reasons
 
 
 def test_hide_split_and_question_values():
@@ -225,8 +231,38 @@ def test_next_question_voi_finds_hidden_markers_more_than_random():
     r = df.evaluate_next_question(eng, head, pats, pool, {}, np.random.default_rng(1),
                                   ks=(1, 3), frac=0.5)
     assert r["n"] == len(pats)
-    assert 0.0 <= r["by"]["VOI@1"]["yield"] <= 1.0
+    assert 0.0 <= r["by"]["VOI (E3)@1"]["yield"] <= 1.0
     # revealing every hidden code restores the full-record call
     assert r["full"]["top1"] >= r["visible"]["top1"]
     assert r["by"]["random hidden@3"]["yield"] == 1.0
     assert sum(r["recommended"].values()) == 3 * len(pats)
+
+
+def test_e1_candidate_scores_match_a_full_recompute():
+    lams, subtypes, ev = _presence_world()
+    eng = df.PresenceSubtypeEngine(lams, subtypes, 1, ev, [10, 20], {0: {9}})
+    bags = {0: {5: 1.0, 6: 1.0}}
+    lens = {0: 2.0}
+    cand = [(0, 0), (0, 1), (0, 2)]
+    S, P = eng.candidate_scores(bags, lens, cand)
+    for c, (d, v) in enumerate(cand):
+        b = {0: dict(bags[0])}
+        b[0][v] = 1.0
+        full = eng.scores(eng.subtype_ll(b, {0: 3.0}))
+        assert np.allclose(S[c], full)
+    assert np.all((P > 0) & (P < 1))
+    # code 0 (A's aortic marker) is far more likely present under A than under B
+    assert P[0, 0] > P[0, 1]
+
+
+def test_next_question_with_the_e1_engine_reports_both_differentials():
+    eng, head, pats, _ = _toy_engine_and_head()
+    lams = [np.exp(np.log(eng.eb[:, :V]))]                     # any positive rows
+    e1 = df.PresenceSubtypeEngine(lams, {1: [(2, 1.0)], 2: [(3, 1.0)]}, 2,
+                                  np.ones(4), [1, 2], {})
+    r = df.evaluate_next_question(eng, head, pats, [(0, v) for v in range(V)], {},
+                                  np.random.default_rng(2), ks=(1,), frac=0.8, e1=e1,
+                                  e1_lp=np.log([0.5, 0.5]), e1_tau=1.0)
+    assert "VOI (E1)" in r["strategies"] and r["frac_hidden"] == 0.8
+    x = r["by"]["VOI (E1)@1"]
+    assert 0.0 <= x["p_true_e1"] <= 1.0 and 0.0 <= x["p_true"] <= 1.0
