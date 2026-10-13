@@ -451,7 +451,7 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
                      results_name="results_readout_stacked_mass99.json",
                      heads_tag="stacked_mass99", max_patients=600, max_train=2000,
                      thin_frac=0.1, own_top=5, rel_lambda=0.6, rho=0.3, seed=0,
-                     tag=None):
+                     tag=None, next_question=False, nq_pool=100):
     """Framing 1 — DIFFERENTIAL WITH REASONS (spec 2026-10-13 clinician framings,
     R0/R1; `differential.py`). Four engines on the same held-out patients positive on
     exactly one member: E1 presence model with subtype profiles, E2 renormalized
@@ -549,6 +549,7 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
             g = eng.fold_in(row[3], row[4])
             return g / g.sum()
         th_te = np.stack([theta(r) for r in te])
+        gsum_te = [float(eng.alpha.sum() + sum(r[4])) for r in te]
         truths = [r[0] for r in te]
         e3 = None
         ytr = [r[0][0] for r in tr]
@@ -581,15 +582,22 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
             rows["E3 multiclass head"] = list(e3.predict(th_te[ev_i]))
         res["metrics"] = {k: dfm.metrics(v, tv) for k, v in rows.items()}
         # reasons on correctly called evaluation patients
-        r1, r4 = [], []
+        r1, r3, r4 = [], [], []
         for j, i in enumerate(ev_i):
             t = truths[i][0]
             m = members[t]
+            if e3 is not None and int(np.argmax(rows["E3 multiclass head"][j])) == t \
+                    and te[i][3]:
+                c3 = dfm.e3_reasons(e3, th_te[i], gsum_te[i], eng.eb[:, te[i][3]],
+                                    te[i][4], t)
+                r3.append((m, {_split_gidx(eng, g): float(x)
+                               for g, x in zip(te[i][3], c3)}))
             if int(np.argmax(rows["E1 presence subtypes"][j])) == t:
                 r1.append((m, e1.reasons(e1.subtype_ll(te[i][1], te[i][2]), m)))
             if int(np.argmax(rows["E4 gated likelihood"][j])) == t:
                 rs = e4.reasons(te[i][3], te[i][4], lphi4[i], m)
                 r4.append((m, {_split_gidx(eng, g): x for g, x in rs.items()}))
+        res["reasons_e3"] = dfm.pool_reasons(r3)
         res["reasons_e1"] = dfm.pool_reasons(r1)
         res["reasons_e4"] = dfm.pool_reasons(r4)
         named = {m: ctx.rd_names.get(m, str(m)) for m in members}
@@ -602,7 +610,8 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
         for k, mtr in res["metrics"].items():
             L_.append(f"| {k} | {mtr['top1']:.3f} | {mtr['top3']:.3f} | "
                       f"{mtr['bal_top1']:.3f} | {mtr['logloss']:.3f} | {mtr['ece']:.3f} |")
-        for key, lab in (("reasons_e1", "E1"), ("reasons_e4", "E4")):
+        for key, lab in (("reasons_e3", "E3"), ("reasons_e1", "E1"),
+                         ("reasons_e4", "E4")):
             if res[key]:
                 L_.append("")
                 L_.append(f"{lab} reasons (top supporting codes, correctly called "
@@ -611,6 +620,11 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
                     L_.append(f"- {named[m][:40]}: " + " · ".join(
                         ctx.code_name(d, v) for d, v in codes))
         L_.append("")
+        if next_question and e3 is not None:
+            nq = _next_question_block(ctx, eng, e3, members, te, ev_i, truths, pri,
+                                      excl, named, nq_pool, seed)
+            L_.extend(nq["lines"])
+            res["next_question"] = nq["res"]
         _cprint(f"[differential]   {gname}: done in {time.time() - t0:.0f}s", flush=True)
         js[gname] = {k: v for k, v in res.items() if not k.startswith("reasons")}
     text = "\n".join(L_).rstrip() + "\n"
@@ -620,6 +634,66 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
     print(text, flush=True)
     _cprint(f"[differential]   wrote {run_dir / (stem + '.md')}", flush=True)
     return js
+
+
+def _next_question_block(ctx, eng, head, members, te, ev_i, truths, pri, excl, named,
+                         pool_per_dom, seed):
+    """Framing 2 (spec R2) on the framing-1 evaluation half: the candidate pool is the
+    population-EIG table over condition, drug and measurement-result codes (attestation
+    and [measured] excluded), the differential is E3's. Candidates whose presence
+    alone would give one member >= 90% (presence model, prior `pri`) are flagged as
+    likely treatments / diagnostic consequences (R2.2)."""
+    import differential as dfm
+    import voi_acquisition as va
+    import voi_tables as vt
+    doms = [i for i, nm in enumerate(ctx.dom_names)
+            if nm in ("condition", "drug", "measurement")]
+    profs, bgs, used = {}, {}, None
+    for d in doms:
+        pr, bg = vt.set_profiles(ctx, members, d)
+        u = [j for j, m in enumerate(members) if pr.get(m) is not None]
+        used = u if used is None else [j for j in used if j in u]
+        profs[d], bgs[d] = pr, bg
+    lines = ["### Next question (framing 2, E3 differential; 20% of each record hidden)"]
+    if not used or len(used) < 2:
+        return {"lines": lines + ["(fewer than 2 members with a profile)"], "res": None}
+    pu = np.asarray(pri)[used]
+    pu = pu / pu.sum()
+    P = {d: np.stack([profs[d][members[j]] for j in used]) for d in doms}
+    pool_items, _ = va.build_pool(pu, P, bgs, excl, pool=pool_per_dom)
+    flagged = {}
+    for j, (d, v) in enumerate(pool_items):
+        pm = vt.presence_prob(P[d][:, v], bgs[d][v])
+        q = pu * pm
+        flagged[j] = bool(q.max() / q.sum() >= 0.9)
+    pats = [(truths[i], te[i][1]) for i in ev_i]
+    rng = np.random.default_rng(int(seed))
+    r = dfm.evaluate_next_question(eng, head, pats, pool_items, flagged, rng)
+    if r["n"] < dfm.EGRESS_FLOOR:
+        return {"lines": lines + ["(fewer than 20 evaluable patients; suppressed)"],
+                "res": None}
+    v, f = r["visible"], r["full"]
+    lines += [f"{r['n']} patients · pool {len(pool_items)} codes (condition, drug, "
+              f"measurement results) · likely-treatment flags in VOI top 3: "
+              f"{100 * r['flag_share_top3']:.0f}%", "",
+              "| strategy | k | yield | P(true) | top-1 |", "|---|--:|--:|--:|--:|",
+              f"| visible record (80%) | — | — | {v['p_true']:.3f} | {v['top1']:.3f} |"]
+    for k in r["ks"]:
+        for s_ in dfm.NQ_STRATEGIES + ("random hidden",):
+            x = r["by"][f"{s_}@{k}"]
+            lines.append(f"| {s_} | {k} | {x['yield']:.3f} | {x['p_true']:.3f} | "
+                         f"{x['top1']:.3f} |")
+    lines.append(f"| full record | — | — | {f['p_true']:.3f} | {f['top1']:.3f} |")
+    top = sorted(((j, c) for j, c in r["recommended"].items()
+                  if c >= dfm.EGRESS_FLOOR), key=lambda x: -x[1])[:10]
+    if top:
+        lines += ["", "Most often in the VOI top 3 (>= 20 patients; † = likely "
+                  "treatment / consequence):"]
+        lines.append(" · ".join(ctx.code_name(*pool_items[j]) + (" †" if flagged[j] else "")
+                                for j, _ in top))
+    lines.append("")
+    res = {k: v for k, v in r.items() if k != "recommended"}
+    return {"lines": lines, "res": res}
 
 
 def _split_gidx(eng, g):
@@ -675,6 +749,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "differential[_<tag>].md/.json.")
     p.add_argument("--diff-max-patients", type=int, default=600)
     p.add_argument("--diff-max-train", type=int, default=2000)
+    p.add_argument("--diff-next-question", action="store_true",
+                   help="(--differential) also run framing 2 — the next-question "
+                        "evaluation (hide 20%% of each record; yield and gain of the "
+                        "top-k recommendations) on the E3 differential")
     p.add_argument("--acq-adhoc", action="store_true",
                    help="(--acquisition) REGEX picks label nodes as ONE set")
     p.add_argument("--acq-prior", choices=("population", "uniform"),
@@ -1662,7 +1740,8 @@ def main(argv=None) -> int:
                     bundle.test_df, bundle.train_df, run_dir, args.differential,
                     adhoc=args.acq_adhoc, heads_tag=args.acq_heads,
                     max_patients=args.diff_max_patients,
-                    max_train=args.diff_max_train, tag=args.acq_tag)
+                    max_train=args.diff_max_train, tag=args.acq_tag,
+                    next_question=args.diff_next_question)
             return 0
 
         if args.acquisition:

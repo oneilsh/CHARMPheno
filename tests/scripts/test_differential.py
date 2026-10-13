@@ -149,14 +149,14 @@ def test_run_differential_end_to_end_on_a_tiny_run(tmp_path, monkeypatch):
         out = []
         for i in range(n):
             t = int(rng.random() < 0.5)
-            bag = {11: 3.0, 7: 1.0}
+            bag = {11: 3.0, 7: 1.0, 8: 1.0, 9: 1.0, 10: 1.0}
             bag.update({0: 2.0} if t == 0 else {2: 2.0, 3: 1.0})
             out.append(([t], {0: bag}, {0: float(len(bag))}))
         out.append(([0, 1], {0: {11: 1.0}}, {0: 1.0}))   # multi-positive: set aside
         return out, n + 1
     monkeypatch.setattr(gpr, "collect_set_patients", fake)
     js = gpr.run_differential("test", "train", tmp_path, "^node1$|^node2$", adhoc=True,
-                              tag="t")
+                              tag="t", next_question=True, nq_pool=6)
     rep = (tmp_path / "differential_t.md").read_text()
     m = js[next(iter(js))]["metrics"]
     for k in ("E1 presence subtypes", "E2 stacked heads", "E3 multiclass head",
@@ -166,4 +166,67 @@ def test_run_differential_end_to_end_on_a_tiny_run(tmp_path, monkeypatch):
     assert m["E4 gated likelihood"]["top1"] > 0.9
     assert m["E3 multiclass head"]["top1"] > 0.9
     assert js[next(iter(js))]["n_eval"] == 60
-    assert "E1 reasons" in rep
+    assert "E1 reasons" in rep and "E3 reasons" in rep
+    assert "### Next question" in rep and "| VOI | 3 |" in rep
+    assert js[next(iter(js))]["next_question"]["n"] == 60
+
+
+def test_hide_split_and_question_values():
+    rng = np.random.default_rng(0)
+    fb = {0: {i: 1.0 for i in range(8)}, 1: {0: 2.0, 1: 1.0}}
+    vis, hid = df.hide_split(fb, 0.2, rng)
+    assert len(hid) == 2 and sum(len(b) for b in vis.values()) == 8
+    assert df.hide_split({0: {1: 1.0}}, 0.2, rng) is None
+    q0 = np.array([0.5, 0.5])
+    qa = np.array([[0.5, 0.5], [0.9, 0.1], [0.9, 0.1]])
+    v = df.question_values(q0, qa, [1.0, 1.0, 0.1])
+    assert v[0] == 0.0 and v[1] > v[2] > 0.0
+
+
+def _toy_engine_and_head():
+    import model_acquisition as ma
+    # K = 4 topics: 0, 1 background; 2 emits code 0 (member A); 3 emits code 1 (member B)
+    lam = np.full((4, V), 0.5)
+    lam[0, 3:] = lam[1, 3:] = 40.0
+    lam[2, 0] = 200.0
+    lam[3, 1] = 200.0
+    heads = (np.zeros((3, 4)), np.zeros(3), np.zeros(3, bool), np.zeros(3), 0)
+    eng = ma.ModelEngine([lam], np.full(4, 0.5), heads, {1: [0, 1], 2: [0, 2]}, [1, 2])
+    rng = np.random.default_rng(0)
+    pats = []
+    for i in range(160):
+        t = int(rng.random() < 0.5)
+        bag = {int(x): 1.0 for x in rng.choice(np.arange(3, V), 5, replace=False)}
+        bag[0 if t == 0 else 1] = 2.0
+        pats.append(([t], {0: bag}))
+    th = []
+    for _, b in pats:
+        g = eng.fold_in([eng.gidx(0, v) for v in b[0]], list(b[0].values()))
+        th.append(g / g.sum())
+    head = df.MulticlassHead(np.arange(4), 2).fit(np.stack(th[:100]),
+                                                  [p[0][0] for p in pats[:100]])
+    return eng, head, pats[100:], np.stack(th[100:])
+
+
+def test_e3_reasons_point_at_the_marker_code():
+    eng, head, pats, th = _toy_engine_and_head()
+    truth, b = pats[0]
+    idx = [eng.gidx(0, v) for v in b[0]]
+    cnt = list(b[0].values())
+    c = df.e3_reasons(head, th[0], eng.alpha.sum() + sum(cnt), eng.eb[:, idx], cnt,
+                      truth[0])
+    marker = 0 if truth[0] == 0 else 1
+    assert list(b[0])[int(np.argmax(c))] == marker
+
+
+def test_next_question_voi_finds_hidden_markers_more_than_random():
+    eng, head, pats, _ = _toy_engine_and_head()
+    pool = [(0, v) for v in range(V)]
+    r = df.evaluate_next_question(eng, head, pats, pool, {}, np.random.default_rng(1),
+                                  ks=(1, 3), frac=0.5)
+    assert r["n"] == len(pats)
+    assert 0.0 <= r["by"]["VOI@1"]["yield"] <= 1.0
+    # revealing every hidden code restores the full-record call
+    assert r["full"]["top1"] >= r["visible"]["top1"]
+    assert r["by"]["random hidden@3"]["yield"] == 1.0
+    assert sum(r["recommended"].values()) == 3 * len(pats)
