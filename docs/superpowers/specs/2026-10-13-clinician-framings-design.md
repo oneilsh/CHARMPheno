@@ -106,6 +106,37 @@ at a time from nothing", which is not a question a clinician asks. Three questio
 - **R3.3** Output for inspection: per X, the pooled feature profile of the top-ranked
   look-alikes (codes over-represented vs the group), never patient lists in the tree.
 
+## Revision 2026-10-13 (after 0143-0145): match each head to its framing
+
+0143-0145 showed the readout heads answer "X coded in the next year", trained on mixed
+prevalent + incident labels on the FULL record (own codes included). That is not
+leakage (train split only; test θ is folded from the test record), but it is a
+shortcut (past X codes -> X topic mass -> X re-coded) and it calibrates the heads for
+re-coding, not new diagnosis. Rule: **train each head on the same kind of record it
+is applied to, with the broadest positive set; evaluate on the population the
+question is about.**
+
+- **Framings 1 / 2 (E3)** already match: trained and scored on records with the set's
+  attestation codes removed (`filter_record`). Widening: train positives = patients
+  EVER coded with exactly one member (sidecar), not only the label year.
+  "Exactly one member" (R0.1) is the multiclass head's requirement of a single true
+  class; patients coded with two or more members are set aside and counted. A
+  multi-label variant is the open alternative for comorbid patients.
+- **Framing 3 splits.** 3a *missed known cases* (an X diagnosis anywhere in the
+  history the current record does not reflect) is a lookup on the sidecar, not a
+  model. 3b *undiagnosed look-alikes* gets its own head per X: X's attestation codes
+  (and its label descendants') removed from the record at training AND scoring, θ
+  folded from the stripped record, labels = ever-X (train split); evaluated on
+  patients with no X before the index, against later X diagnoses (sidecar). Replaces
+  0142's after-the-fact prior_dx / undiagnosed partition.
+- **Scale.** Exact 3b costs one fold-in per disease per patient — fine for the
+  framing sets now, not for every node. Long-term candidate: the leave-codes-out
+  approximation γ_strip(X) ≈ γ − Σ over X's tokens of count × φ_token from ONE full
+  fold-in per patient (X's codes are few, so one CAVI step's worth of removal should
+  be close), validated against the exact refold on the framing sets first.
+- The screening number (incident macro AUC on the readout heads, 0145 rule:
+  stacked 0.694) stays as the population benchmark.
+
 ## Open
 
 - Whether E4 is affordable at K = 3,145 for every member of a 19-member set (it is a
