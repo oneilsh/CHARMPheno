@@ -466,9 +466,11 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
     from gated_pc_cloud import closure_matrix
     run_dir = Path(run_dir)
     bm, cm = run_dir / "bundle_meta.json", run_dir / "code_map.tsv"
+    names_csv = run_dir / "concept_names.csv"
     ctx = vt.load_voi_context(
         run_dir, bundle_meta_path=str(bm) if bm.exists() else None,
         own_codes_path=str(cm) if cm.exists() else None, results_name=results_name,
+        names_path=str(names_csv) if names_csv.exists() else None,
         thin_frac=thin_frac, own_top=own_top, rel_lambda=rel_lambda)
     npz = np.load(run_dir / "gated_pc_result.npz")
     lam_keys = sorted((k for k in npz.files if k.startswith("lambda_")),
@@ -555,10 +557,13 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
             e3 = dfm.MulticlassHead(feat, len(members), seed=seed).fit(th_tr, ytr)
         s1 = [e1.scores(e1.subtype_ll(r[1], r[2])) for r in te]
         s4, lphi4 = zip(*[e4.elbos(r[3], r[4]) for r in te])
-        pc = ctx.prior_counts
-        pri = np.array([float(pc.get(m, 0) or 0) for m in members])
-        pri = pri / pri.sum() if pri.sum() > 0 else np.full(len(members), 1 / len(members))
-        lp = np.log(np.clip(pri, 1e-12, 1.0))
+        # Prior over members from the TRAIN split's single-positive patients, add-one
+        # smoothed: a member absent from the scored-results file (0140 first run) got
+        # prior 1e-12 and could never be called, and a test-derived prior leaks.
+        pri = np.bincount(np.asarray(ytr, dtype=np.int64),
+                          minlength=len(members)).astype(np.float64) + 1.0
+        pri = pri / pri.sum()
+        lp = np.log(pri)
         fit_i, ev_i = list(range(0, len(te), 2)), list(range(1, len(te), 2))
         tau1, _ = dfm.fit_tau_scores(lp, [s1[i] for i in fit_i], [truths[i] for i in fit_i])
         tau4, _ = dfm.fit_tau_scores(lp, [s4[i] for i in fit_i], [truths[i] for i in fit_i])
