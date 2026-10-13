@@ -1,7 +1,7 @@
 ---
 id: 145
 slug: incident-eval-whole-history-on-0137
-status: planned
+status: done
 model_class: gated_pc
 # NOT A FIT. Label redesign spec (2026-10-13) R1 on the ribbon record 0137: the
 # incident evaluation with the prior read from the WHOLE pre-index history (the E4
@@ -36,4 +36,28 @@ grep -E "^WHOLE|^## |^\| 0" "$RUN"/prevalence_check_history.md | cut -c1-220
 
 ## Run log
 
+**2026-10-13 — run.** 54,753 test documents, every one with a sidecar index (coverage
+100%). Prior cells: lookback rule 1,215,542; whole-history rule larger (the header line
+was cut in the paste — containment of lookback cells in whole-history cells to be
+filled from `prevalence_check_history.md`).
+
 ## Results
+
+| prior rule | arm | nodes | macro AUC all | macro AUC incident | median prior share of positives |
+|---|---|--:|--:|--:|--:|
+| lookback (0143) | stacked | 535 | 0.818 | 0.702 | 0.53 |
+| lookback (0143) | flat | 535 | 0.727 | 0.616 | 0.53 |
+| **whole history** | stacked | 492 | 0.822 | **0.694** | 0.64 |
+| **whole history** | flat | 492 | 0.733 | **0.612** | 0.64 |
+
+Whole-history incident AUC by prior share (stacked): 0.1–0.3 0.742 · 0.3–0.6 0.696 ·
+0.6–1.0 0.688 (29 / 166 / 295 nodes; the 0.0–0.1 band holds 2 nodes).
+
+1. **The lookback rule was close.** Reading the whole history moves the median prior
+   share of positives 0.53 → 0.64 (about one positive in five that looked new was a
+   diagnosis older than 5 years), but the incident macro AUC moves only 0.702 → 0.694
+   stacked, 0.616 → 0.612 flat. 43 nodes drop below 20 incident positives.
+2. **The baseline 0146 is read against: stacked 0.694, flat 0.612** (whole-history
+   rule, 492 nodes; 0146 is scored on the same rule and compared on shared nodes).
+3. Nearly two-thirds of a typical node's label-year positives are prevalent
+   re-codes; for 295 of 492 nodes it is more than 60%.
