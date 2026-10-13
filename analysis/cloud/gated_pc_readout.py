@@ -1484,6 +1484,9 @@ def corpus_spec_from_manifest(manifest: dict, *, doc_min_length=None, billing=No
         # episode bundle recomputes the fit's OWN key. The readout reads the 365-day
         # `label`/`labelMask` regardless; this field only routes the cache key.
         "gate_frontier_mode": _pick("gate_frontier_mode", None),
+        # Label redesign R2: the all-ever train gate (absent = label year), so a
+        # re-readout of an `ever` fit recomputes the fit's own bundle key.
+        "gate_attestation": _pick("gate_attestation", None),
         # E1 (exp E-census onward). Mondo-only, defaults to False — what every
         # manifest written before the flag existed means — and the CLI wins in
         # both directions for a fit whose manifest omits or contradicts it, the

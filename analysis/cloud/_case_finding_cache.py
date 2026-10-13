@@ -79,7 +79,8 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
                              preindex_closure=False,
                              preindex_closure_version="",
                              episode_sampling=None,
-                             gate_frontier_mode=None) -> str:
+                             gate_frontier_mode=None,
+                             gate_attestation=None) -> str:
     """Stable 16-hex hash of the inputs that determine the assembled bundle.
 
     Folds cohort_defs_version() plus content hashes of condition_dag +
@@ -140,6 +141,10 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
     is the 90-day presentation window while its `label`/`labelMask` stay the 365-day
     frame (`gate90d`). Folded ONLY when a gate is requested (external path), the same
     discipline — an un-gated episode bundle keys byte-identically.
+
+    `gate_attestation` (label redesign R2, spec 2026-10-13) marks a bundle whose TRAIN
+    `frontier` is the all-ever attestation set (`ever`). Folded ONLY when not the
+    default label-year gate, so every existing key is byte-identical.
     """
     from charmpheno.omop import condition_dag, case_finding_assembly
     from charmpheno.omop.cohorts import cohort_defs_version
@@ -197,6 +202,8 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
     # discipline, so every existing key is byte-identical and the tripwire pins it.
     if gate_frontier_mode and str(gate_frontier_mode) != "none":
         payload["gate_frontier_mode"] = str(gate_frontier_mode)
+    if gate_attestation and str(gate_attestation) != "label":
+        payload["gate_attestation"] = str(gate_attestation)
     # Only fold the Gated-PC label columns into the key when they are requested,
     # so the default (emit_labels=False) path keeps its existing key and existing
     # dag-placement caches stay valid; a labeled bundle gets a distinct key.

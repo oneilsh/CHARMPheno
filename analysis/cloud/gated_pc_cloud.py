@@ -3359,6 +3359,14 @@ def multidomain_corpus_spec(args, extra_domains) -> dict:
                 int(getattr(args, "gate_frontier_days", 0) or 0))}
            if (episode_arm
                and int(getattr(args, "gate_frontier_days", 0) or 0) > 0) else {}),
+        # Label redesign R2 (spec 2026-10-13, exp 0146): the topic GATE read from
+        # ALL-EVER attestation instead of the label year. Present ONLY when asked, so
+        # every other bundle keys byte-identically to before; an `ever`-gated bundle
+        # carries the SAME label/labelMask and a different train `frontier`, so it is
+        # a distinct cached artifact.
+        **({"gate_attestation": "ever"}
+           if (mondo and str(getattr(args, "gate_attestation", "label")) == "ever")
+           else {}),
         # E1's pre-index closure column. Mondo-only — it is built by re-running
         # the SAME attestation provider on the feature window, and only the Mondo
         # paths construct one driver-side — and OFF by default, so an existing
@@ -3404,6 +3412,9 @@ def _multidomain_params(spec):
     if (str(spec.get("index_mode")) == "external"
             and spec.get("gate_frontier_mode")):
         key_extra["gate_frontier_mode"] = str(spec["gate_frontier_mode"])
+    # Label redesign R2: the all-ever train gate, folded only when on.
+    if spec.get("gate_attestation") and str(spec["gate_attestation"]) != "label":
+        key_extra["gate_attestation"] = str(spec["gate_attestation"])
     if mondo:
         key_extra.update(mondo=True, mondo_version=spec["mondo_version"],
                          mondo_branch=spec.get("mondo_branch") or "",
@@ -3764,6 +3775,85 @@ def _gate_attested_frame(df, first_attestation, *, gate_days):
                  .alias("attested_cids")))
 
 
+def _gate_ever_attested(docs, events, provider):
+    """Per TRAIN document, the label nodes its person attests ANYWHERE in the record.
+
+    `docs` = the bundle frame (`person_id`, `doc_id`); `events` = the full-history
+    condition frame (`person_id`, `concept_id`, ...). Each event inherits its
+    person's doc(s) — `source_cohort` is the first `:` component of the population
+    doc_id (`PatientCohortDocSpec`) — and goes through the SAME `provider` the label
+    used (same code map, same most-specific reduction on the flat ribbon), so gate
+    and label differ only in WHEN, never in HOW a code becomes a node. A doc whose
+    person attests nothing keeps a present, empty set."""
+    from pyspark.sql import functions as F
+    roster = docs.select("person_id", "doc_id").distinct().withColumn(
+        "source_cohort", F.element_at(F.split(F.col("doc_id"), ":"), 1))
+    ev = events.select("person_id", "concept_id").join(
+        roster.select("person_id", "source_cohort").distinct(), "person_id")
+    att = provider(ev).select("doc_id", "attested_cids")
+    return (roster.join(att, "doc_id", "left")
+            .withColumn("attested_cids", F.coalesce(
+                F.col("attested_cids"), F.array().cast("array<bigint>"))))
+
+
+def _gate_count_receipt(before, after):
+    """Pooled R2.3 receipt: gated (doc, node) cells and gated docs, label vs ever,
+    and the median per-node ratio of gated train docs."""
+    from pyspark.sql import functions as F
+
+    def per_node(df):
+        return {int(r["n"]): int(r["c"]) for r in
+                df.select(F.explode("frontier").alias("n")).groupBy("n")
+                  .agg(F.count("*").alias("c")).collect()}
+    b, a = per_node(before), per_node(after)
+    ratios = sorted(a.get(n, 0) / c for n, c in b.items() if c > 0)
+    return {"cells_label": sum(b.values()), "cells_ever": sum(a.values()),
+            "docs_gated_label": before.where(F.size("frontier") > 0).count(),
+            "docs_gated_ever": after.where(F.size("frontier") > 0).count(),
+            "median_node_ratio": (ratios[len(ratios) // 2] if ratios else float("nan")),
+            "n_nodes": len(b)}
+
+
+def _attach_gate_ever(spark, bundle, *, provider, before_dag, cdr, billing,
+                      person_mod, n_bg, tpn, _events=None):
+    """Label redesign R2 (spec 2026-10-13): overwrite each TRAIN document's `frontier`
+    with the roll-up of its person's ALL-EVER attestations; label/labelMask and the
+    test split untouched. MISS-only, inside the assemble closure, for the reason
+    `_attach_gate_frontier` gives (`before_dag` exists only there). One full-history
+    `condition_era` read (the sidecar's load; ~70 s on 0137's corpus). The roll-up
+    and the join integrity are `attach_frontiers` and `_overwrite_frontier`, called
+    as-is.
+
+    Why the future may gate a TRAIN document: the gate shapes topics on the train
+    split only; test documents are folded in ungated, so no test outcome reaches
+    them (spec 2026-10-13, Why)."""
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from charmpheno.omop.case_finding_assembly import attach_frontiers
+
+    keep = set(bundle.cid2int)
+    lay = DagLayout(bundle.parent_int, n_bg=n_bg, tpn=tpn)
+    events = _events
+    if events is None:
+        from charmpheno.omop import load_omop_bigquery
+        events = load_omop_bigquery(spark=spark, cdr_dataset=cdr,
+                                    billing_project=billing,
+                                    person_sample_mod=person_mod,
+                                    source_table="condition_era")
+    before = bundle.train_df
+    attested = _gate_ever_attested(before, events, provider)
+    gate_fr = attach_frontiers(attested, before_dag, keep, bundle.cid2int, lay)
+    after = _overwrite_frontier(before, gate_fr).cache()
+    rec = _gate_count_receipt(before, after)
+    print(f"[gate-ever] train gate, label year -> ever: gated (doc, node) cells "
+          f"{rec['cells_label']:,} -> {rec['cells_ever']:,}; docs with any gate "
+          f"{rec['docs_gated_label']:,} -> {rec['docs_gated_ever']:,}; median "
+          f"per-node ratio of gated docs {rec['median_node_ratio']:.2f} over "
+          f"{rec['n_nodes']} nodes", flush=True)
+    bundle.train_df = after
+    bundle.gate_ever_receipt = rec
+    return bundle
+
+
 def _overwrite_frontier(df, gate_frontier):
     """Overwrite `df`'s `frontier` with `gate_frontier`'s, joined on the doc key,
     refusing a missing / duplicate / mismatched join LOUDLY (WP-D3 join integrity).
@@ -4004,6 +4094,17 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
                           doc_spec=assemble_doc_spec, **assembly_params)
         bundle = _with_preindex(spark, bundle, before_dag=before_dag,
                                 provider=provider, assembly_params=assembly_params)
+        if spec.get("gate_attestation") == "ever":
+            if index_df is not None:
+                raise ValueError("--gate-attestation ever is defined on the population "
+                                 "path; an --index-arm bundle has its own gate "
+                                 "(--gate-frontier-days)")
+            with _phase("label redesign R2: all-ever topic gate (train, MISS-only)"):
+                bundle = _attach_gate_ever(
+                    spark, bundle, provider=provider, before_dag=before_dag,
+                    cdr=spec["cdr"], billing=spec["billing"],
+                    person_mod=assembly_params["person_mod"],
+                    n_bg=int(assembly_params["n_bg"]), tpn=int(assembly_params["tpn"]))
         if index_df is not None:
             bundle = _attach_bounded_doc_index(bundle, ordinal_df=ordinal_df)
             bundle = _with_gate_frontier(
@@ -4350,6 +4451,14 @@ def parse_args(argv=None):
     # driver post-pass; the gate mode (`gateNd`) folds into the bundle cache key, so
     # a gated bundle is a distinct artifact from the un-gated one. 0 (default) keeps
     # the 365-day frontier as the gate, so every existing key stays byte-identical.
+    p.add_argument("--gate-attestation", choices=("label", "ever"), default="label",
+                   help="Label redesign R2 (spec 2026-10-13): which attestations GATE a "
+                        "TRAIN document's topic blocks. 'label' (default, unchanged): X "
+                        "coded in the label window. 'ever': X coded anywhere in the "
+                        "person's record (full-history condition_era through the same "
+                        "code map and provider). label/labelMask and the TEST frontier "
+                        "are untouched. Native-Mondo population path only; a distinct "
+                        "bundle key.")
     p.add_argument("--gate-frontier-days", type=int, default=0,
                    help="exp 0111 (D13): forward-window width (days) of the GATE the "
                         "gated estimator reads, separated from the 365-day outcome "

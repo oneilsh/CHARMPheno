@@ -960,6 +960,10 @@ def build_gated_pc_args(
     if effective.get("gate_frontier_days") is not None:
         args.extend(["--gate-frontier-days",
                      str(effective["gate_frontier_days"])])
+    # Label redesign R2 (spec 2026-10-13): all-ever topic gate. Absent/'label' keeps
+    # every bundle key byte-identical.
+    if effective.get("gate_attestation") and str(effective["gate_attestation"]) != "label":
+        args.extend(["--gate-attestation", str(effective["gate_attestation"])])
     if effective.get("readout_sample_frac") is not None:
         args.extend(["--readout-sample-frac", str(effective["readout_sample_frac"])])
     if effective.get("readout_mode"):
