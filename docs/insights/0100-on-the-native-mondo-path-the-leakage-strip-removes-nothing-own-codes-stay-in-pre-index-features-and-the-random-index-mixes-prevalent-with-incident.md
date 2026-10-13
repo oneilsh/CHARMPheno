@@ -28,10 +28,16 @@
   Measured (0143): median 53% of a node's label-year positives had a prior code; with
   them set aside, 0137's macro AUC falls 0.818 → 0.702 (stacked) and 0.727 → 0.616 (flat),
   with incident AUC ~0.70 in every prior-share band — the excess was prevalent recall.
+- Training the heads on incident labels does NOT recover it (0144): incident macro AUC
+  0.628 stacked / 0.602 flat, below the mixed-label heads' 0.702 / 0.616. Prevalent
+  positives teach the heads what X looks like; dropping them halves the positives and
+  starves the ancestor heads the stacked product rests on. Rule: evaluate incident, but
+  train heads (and gate topics) on the broadest positive set.
 - The random index is worth keeping (no anchoring bias between cases and background, one
-  index serves every disease); the repair is in the LABEL, per node: the incident arm
+  index serves every disease); the repair is in the EVALUATION label, per node: the incident arm
   (`preindex_closure`, E1/E2 machinery) masks node X for patients with a prior X
-  attestation instead of calling them negatives. "Prior" should read the whole pre-index
+  attestation instead of calling them negatives (for scoring; not for head training —
+  0144). "Prior" should read the whole pre-index
   history, not only the 5-year lookback.
 - The native-path strip should drop the code map's mapped codes (`std_cid`s), not node
   ids, wherever own codes must not be features (a prevalent "who has X" task).
