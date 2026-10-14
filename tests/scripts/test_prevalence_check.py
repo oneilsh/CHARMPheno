@@ -209,3 +209,27 @@ def test_run_prevalence_check_whole_history(spark, tmp_path):
     assert lb["n_pos_incident"] == 90          # 30 old + 60 incident; old look new
     assert hi["n_pos_incident"] == 60          # old ones now set aside, post-index ignored
     assert "WHOLE-HISTORY prior" in (tmp_path / "prevalence_check_h.md").read_text()
+
+
+def test_ever_member_frame_and_collect_with_ever(spark, tmp_path):
+    import datetime as dt
+    from pyspark.ml.linalg import Vectors
+    from pyspark.sql import Row
+    import gated_pc_readout as gpr
+    uri = tmp_path / "sc"
+    spark.createDataFrame([
+        Row(person_id=1, node_cid=1005, first_attested_date=dt.date(2010, 1, 1)),
+        Row(person_id=2, node_cid=1002, first_attested_date=dt.date(2030, 1, 1)),
+        Row(person_id=3, node_cid=7777, first_attested_date=dt.date(2010, 1, 1)),
+    ]).write.parquet(str(uri / "k" / "first_attestation.parquet"))
+    (tmp_path / "conversion_sidecar.json").write_text(json.dumps(
+        {"key": "k", "sidecar_uri": str(uri)}))
+    padj = {"MONDO:0001005": ["MONDO:0001001"]}
+    ever = gpr.ever_member_frame(spark, tmp_path, [1, 2], [1001, 1002], padj)
+    got = {r["person_id"]: sorted(r["__ever"]) for r in ever.collect()}
+    assert got == {1: [0], 2: [1]}                       # 1005 rolls up to member 0
+    df_ = spark.createDataFrame([
+        Row(person_id=i, label=[1.0, float(i == 4), 0.0],
+            features_0=Vectors.sparse(5, [0], [1.0])) for i in (1, 2, 3, 4)])
+    out, n = gpr.collect_set_patients(df_, [1, 2], 1, ever_df=ever)
+    assert sorted(t for t, _, _ in out) == [[0], [0], [1]] and n == 3
