@@ -239,6 +239,71 @@ def observe_root_everywhere(df, C, mask_col="labelMask"):
     return df.withColumn(mask_col, F.concat(F.array(F.lit(1.0)), tail))
 
 
+def raw_feature_cols(df):
+    """The per-domain BOW columns of a bundle frame, in domain order."""
+    cols = sorted((c for c in df.columns if c.startswith("features_")),
+                  key=lambda c: int(c.split("_", 1)[1]))
+    return cols or (["features"] if "features" in df.columns else [])
+
+
+def select_raw_codes(train_df, n_top, feat_cols):
+    """The `n_top` (domain, vocab idx) tokens carried by the most TRAIN documents
+    (document frequency, all domains pooled), sorted by (domain, idx). The raw-code
+    baseline's feature set (exp 0147). One RDD pass; only (domain, idx) counts come
+    back to the driver."""
+    cols = list(feat_cols)
+
+    def _toks(row):
+        for d, c in enumerate(cols):
+            v = row[c]
+            idx = getattr(v, "indices", None)
+            if idx is None:
+                arr = v.toArray() if hasattr(v, "toArray") else (v or [])
+                idx = [i for i, x in enumerate(arr) if x]
+            for i in idx:
+                yield ((d, int(i)), 1)
+    counts = (train_df.select(*cols).rdd.flatMap(_toks)
+              .reduceByKey(lambda a, b: a + b).collect())
+    counts.sort(key=lambda kv: (-kv[1], kv[0]))
+    return sorted(k for k, _ in counts[:int(n_top)])
+
+
+def raw_presence_kernel(get_pos, n_cols):
+    """`(*domain vectors) -> DenseVector(n)`: 1.0 where the document carries a selected
+    token. `get_pos()` returns {(domain, idx): column}; a broadcast on the cluster
+    (ADR 0047). Nested so cloudpickle ships it by value."""
+    def kernel(*vecs):
+        from pyspark.ml.linalg import Vectors
+        pos = get_pos()
+        out = [0.0] * int(n_cols)
+        for d, v in enumerate(vecs):
+            if v is None:
+                continue
+            idx = getattr(v, "indices", None)
+            if idx is None:
+                arr = v.toArray() if hasattr(v, "toArray") else v
+                idx = [i for i, x in enumerate(arr) if x]
+            for i in idx:
+                j = pos.get((d, int(i)))
+                if j is not None:
+                    out[j] = 1.0
+        return Vectors.dense(out)
+    return kernel
+
+
+def attach_raw_presence(df, selected, feat_cols, *, out_col="topicDistribution"):
+    """Replace `out_col` with the binary presence of the `selected` tokens, so the
+    unchanged readout machinery (solve, stacked product, prevalence check) runs on raw
+    codes instead of θ (exp 0147)."""
+    from pyspark.ml.linalg import VectorUDT
+    from pyspark.sql import functions as F
+    pos = {(int(d), int(i)): j for j, (d, i) in enumerate(selected)}
+    bc = df.sparkSession.sparkContext.broadcast(pos)
+    udf = F.udf(raw_presence_kernel(lambda: bc.value, len(selected)), VectorUDT())
+    out = df.drop(out_col) if out_col in df.columns else df
+    return out.withColumn(out_col, udf(*[F.col(c) for c in feat_cols]))
+
+
 def incident_mask_kernel(get_v2n):
     """The per-row kernel of `mask_prior_cells`: `(features vector, mask) -> mask` with
     every node the patient has PRIOR evidence for (a mapped attestation code of the
@@ -1114,6 +1179,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "over all test patients vs with prior-diagnosis patients set "
                         "aside (mapped own code in the pre-index features). Transforms "
                         "the test split only.")
+    p.add_argument("--raw-baseline", type=int, default=0, metavar="N",
+                   help="Exp 0147: RAW-CODE BASELINE. Skip the θ transform; the heads "
+                        "are fit on the binary presence of the N most frequent train "
+                        "tokens (all domains pooled) with the same solver, l2, readout "
+                        "DAG and stacked arm; outputs tagged 'raw<N>'. With "
+                        "--prev-history the whole-history prevalence check runs on "
+                        "those heads. Do not pass --readout-theta-mass.")
     p.add_argument("--prev-history", action="store_true",
                    help="(--prevalence-check) exp 0145: add the WHOLE-HISTORY prior rule "
                         "from the E4 sidecar (first attestation before the index) beside "
@@ -2169,8 +2241,13 @@ def main(argv=None) -> int:
                 _cprint("[readout]   Pass --bundle-path at the bundle this run was "
                       "actually fit against, or re-fit.", flush=True)
                 return 3
-            train_scored = model.transform(bundle.train_df).cache()
-            test_scored = model.transform(bundle.test_df).cache()
+            if args.raw_baseline:
+                # Exp 0147: no θ needed — the baseline reads the bundle's own BOW.
+                train_scored = bundle.train_df.cache()
+                test_scored = bundle.test_df.cache()
+            else:
+                train_scored = model.transform(bundle.train_df).cache()
+                test_scored = model.transform(bundle.test_df).cache()
 
         # WP-B (spec 2026-10-07 §D1/§D4): a label-set fit is FLAT, and the
         # bundle's closure mask on a flat forest is a full mask (insight 0096:
@@ -2261,6 +2338,29 @@ def main(argv=None) -> int:
                     min_count=min_count)
             return 0
 
+        _manifest_ro = manifest
+        if args.raw_baseline:
+            if args.readout_theta_mass or args.readout_theta_topm:
+                raise SystemExit("[readout] --raw-baseline: the features are binary "
+                                 "codes; drop --readout-theta-mass/--readout-theta-topm")
+            with _phase(f"raw-code baseline features (exp 0147, top {args.raw_baseline})"):
+                _fcols = raw_feature_cols(train_scored)
+                _sel = select_raw_codes(train_scored, args.raw_baseline, _fcols)
+                _tr_r = attach_raw_presence(train_scored, _sel, _fcols).cache()
+                _te_r = attach_raw_presence(test_scored, _sel, _fcols).cache()
+                _by_dom = {}
+                for d, _i in _sel:
+                    _by_dom[d] = _by_dom.get(d, 0) + 1
+                _cprint(f"[readout]   raw baseline: {len(_sel)} tokens by train document "
+                        f"frequency over {_fcols} (per domain {_by_dom}); train docs="
+                        f"{_tr_r.count()} test docs={_te_r.count()}", flush=True)
+                train_scored.unpersist(); test_scored.unpersist()
+                train_scored, test_scored = _tr_r, _te_r
+                _manifest_ro = dict(manifest, K=len(_sel), readout_theta_topm=0,
+                                    readout_theta_mass=0)
+                (run_dir / "raw_baseline_tokens.json").write_text(json.dumps(
+                    {"n": len(_sel), "feat_cols": _fcols,
+                     "tokens": [[int(d), int(i)] for d, i in _sel]}))
         _test_unmasked = test_scored
         if args.readout_incident:
             if _rdag is None:
@@ -2338,6 +2438,8 @@ def main(argv=None) -> int:
                       f"results_readout_{_mtag}.json (record untouched)", flush=True)
             if args.readout_incident:
                 _mtag = "incident" + (f"_{_mtag}" if _mtag else "")
+            if args.raw_baseline:
+                _mtag = f"raw{int(args.raw_baseline)}" + (f"_{_mtag}" if _mtag else "")
             if args.readout_stacked:
                 # Its own tag: the arm re-solves the SAME heads plus a changed
                 # root head, and the record's results/heads files stay the
@@ -2349,11 +2451,12 @@ def main(argv=None) -> int:
                       flush=True)
             _rname = ("results_readout.json" if not _mtag
                       else f"results_readout_{_mtag}.json")
-            run_readout(train_scored, test_scored, manifest, recall_targets=rt,
+            run_readout(train_scored, test_scored, _manifest_ro, recall_targets=rt,
                         fdr_targets=ft, min_count=min_count,
                         readout_mode=args.readout_mode,
                         ab_check=args.readout_ab_check, out_dir=run_dir,
-                        theta_topm=args.readout_theta_topm,
+                        theta_topm=(0 if args.raw_baseline
+                                    else args.readout_theta_topm),
                         readout_max_iter=args.readout_max_iter,
                         elig_col=_elig_col, eval_path=args.eval_path,
                         readout_l2=args.readout_l2, feature_mask=_fmask,
@@ -2362,14 +2465,18 @@ def main(argv=None) -> int:
                         theta_mass=args.readout_theta_mass, C=_C_ro)
             _cprint(f"[readout]   arm results written to {run_dir / _rname}",
                   flush=True)
-            if args.readout_incident and args.readout_stacked:
+            if (args.readout_incident or args.raw_baseline) and args.readout_stacked:
                 # The comparison that matters: these heads vs the record's on the
-                # SAME unmasked test split under the same prior rule (0143: the
-                # record's stacked incident macro AUC 0.702, flat 0.616).
-                with _phase("prevalence check on the incident heads (exp 0144)"):
-                    run_prevalence_check(_test_unmasked, run_dir, C=_C_ro,
-                                         parent_int=_parent_ro, heads_tag=_mtag,
-                                         tag=_mtag)
+                # SAME unmasked test split under the same prior rule (0143/0145: the
+                # record's stacked incident macro AUC 0.702 / 0.694, flat 0.616 /
+                # 0.612).
+                with _phase(f"prevalence check on the {_mtag} heads"):
+                    run_prevalence_check(
+                        _test_unmasked, run_dir, C=_C_ro, parent_int=_parent_ro,
+                        heads_tag=_mtag, tag=_mtag,
+                        history=(dict(readout_int2cid=_rdag.int2cid, parent_adj=_padj,
+                                      sidecar_uri=args.prev_sidecar_uri)
+                                 if args.prev_history and _rdag is not None else None))
                 _test_unmasked.unpersist()
             train_scored.unpersist(); test_scored.unpersist()
 
