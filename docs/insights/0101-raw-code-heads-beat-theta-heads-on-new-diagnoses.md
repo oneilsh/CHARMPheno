@@ -33,3 +33,6 @@ Equal on all patients, raw ahead by ~0.04 on new diagnoses in every prior-share 
   plus codes) is the obvious candidate and is testable without a refit.
 - Gating (0146) and head labels (0144) are ruled out as the lever; this is the first
   result that points at the representation.
+- By disease size the raw advantage is LARGEST for the rarest nodes (+0.05 median for
+  20–50 incident positives, +0.02 for ≥ 1000): θ does not share strength toward the
+  rare end at this K; it blurs it.

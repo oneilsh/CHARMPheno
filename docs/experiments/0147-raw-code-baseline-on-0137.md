@@ -85,3 +85,17 @@ every prior-share band — and the raw heads are under-converged, so +0.04 is a 
 The topic representation, as folded in and read out here, drops new-diagnosis signal
 that a flat code model keeps; the extra all-patient AUC θ shows is prevalent recall.
 Insight 0101.
+
+**By disease size** (incident positives, whole-history rule, 492 shared nodes; mean
+incident AUC θ → raw, median per-node raw − θ, nodes where θ wins):
+
+| incident positives | nodes | stacked θ → raw | median Δ | θ wins | flat θ → raw | median Δ |
+|---|--:|--:|--:|--:|--:|--:|
+| 20–50 | 132 | 0.704 → 0.754 | +0.052 | 25 | 0.623 → 0.662 | +0.029 |
+| 50–100 | 85 | 0.684 → 0.730 | +0.051 | 11 | 0.603 → 0.637 | +0.035 |
+| 100–300 | 115 | 0.700 → 0.739 | +0.037 | 13 | 0.616 → 0.649 | +0.029 |
+| 300–1000 | 103 | 0.701 → 0.727 | +0.026 | 6 | 0.613 → 0.627 | +0.013 |
+| ≥ 1000 | 57 | 0.661 → 0.686 | +0.023 | 1 | 0.593 → 0.605 | +0.010 |
+
+The shared-strength hypothesis (topics help the rare end) is NOT supported: raw codes
+win MOST on the smallest diseases (+0.05) and least on the largest (+0.02).
