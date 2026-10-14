@@ -2305,6 +2305,19 @@ def main(argv=None) -> int:
         if args.prevalence_check:
             if _rdag is None:
                 raise SystemExit("[readout] --prevalence-check needs the Mondo readout DAG")
+            if args.raw_baseline:
+                # Exp 0147 re-check from SAVED raw heads: the exact token list the
+                # solve used (raw_baseline_tokens.json), test split only, no solve.
+                _tj = json.loads((run_dir / "raw_baseline_tokens.json").read_text())
+                if int(_tj["n"]) != int(args.raw_baseline):
+                    raise SystemExit(f"[readout] raw_baseline_tokens.json has n="
+                                     f"{_tj['n']}, not --raw-baseline {args.raw_baseline}")
+                _sel = [(int(d), int(i)) for d, i in _tj["tokens"]]
+                _te_r = attach_raw_presence(test_scored, _sel, _tj["feat_cols"]).cache()
+                _cprint(f"[readout]   raw baseline (saved tokens): {len(_sel)} tokens, "
+                        f"test docs={_te_r.count()}", flush=True)
+                test_scored.unpersist()
+                test_scored = _te_r
             with _phase("prevalence check (insight 0100)"):
                 run_prevalence_check(
                     test_scored, run_dir, C=_C_ro, parent_int=_parent_ro,
