@@ -172,6 +172,10 @@ def test_run_differential_end_to_end_on_a_tiny_run(tmp_path, monkeypatch):
     assert "E1 reasons" in rep and "E3 reasons" in rep
     assert "### Next question" in rep and "| VOI (E3) | 3 |" in rep
     assert "| VOI (E1) | 3 |" in rep
+    for k in ("E5 code head", "E6 θ + codes"):                 # exp 0148
+        assert k in m and m[k]["top1"] > 0.9
+    assert "| VOI (codes) | 3 |" in rep and "code differential:" in rep
+    assert js[next(iter(js))]["nq_code_engine"]["chosen"] in ("E5 codes", "E6 θ + codes")
     assert js[next(iter(js))]["next_question"]["n"] == 60
     reasons = rep.split("E1 reasons")[1].split("###")[0]
     assert "marker one" in reasons and "· node1" not in reasons and ": node1" not in reasons
@@ -266,3 +270,58 @@ def test_next_question_with_the_e1_engine_reports_both_differentials():
     assert "VOI (E1)" in r["strategies"] and r["frac_hidden"] == 0.8
     x = r["by"]["VOI (E1)@1"]
     assert 0.0 <= x["p_true_e1"] <= 1.0 and 0.0 <= x["p_true"] <= 1.0
+
+
+def _marker_bags(n, seed):
+    rng = np.random.default_rng(seed)
+    out = []
+    for _ in range(n):
+        t = int(rng.random() < 0.5)
+        bag = {int(x): 1.0 for x in rng.choice(np.arange(3, V), 5, replace=False)}
+        bag[0 if t == 0 else 1] = 1.0
+        out.append((t, {0: bag}))
+    return out
+
+
+def test_code_head_learns_markers_and_candidates_match_predict():
+    tr = _marker_bags(200, 3)
+    h = df.CodeHead(2, min_df=3).fit([b for _, b in tr], [t for t, _ in tr])
+    te = _marker_bags(60, 4)
+    P = h.predict([b for _, b in te])
+    assert np.allclose(P.sum(axis=1), 1.0)
+    assert np.mean(P.argmax(axis=1) == np.array([t for t, _ in te])) > 0.9
+    # reasons: the marker code carries the call
+    t, b = te[0]
+    r = h.reasons(b, t)
+    assert max(r, key=r.get) == (0, 0 if t == 0 else 1)
+    # a candidate's differential == predict on the record with the code added
+    base = {0: {5: 1.0, 6: 1.0}}
+    cand = [(0, 0), (0, 1), (0, 7)]
+    Q = h.candidates(base, cand)
+    for i, (d, v) in enumerate(cand):
+        bb = {0: dict(base[0])}
+        bb[0][v] = 1.0
+        assert np.allclose(Q[i], h.predict([bb])[0])
+    py = h.p_yes(np.array([1.0, 0.0]), cand)
+    assert py[0] > py[1]                                   # marker of class 0
+
+
+def test_hybrid_code_head_and_next_question_with_codes():
+    eng, head, pats, th = _toy_engine_and_head()
+    tr = _marker_bags(200, 5)
+    thr = []
+    for _, b in tr:
+        g = eng.fold_in([eng.gidx(0, v) for v in b[0]], list(b[0].values()))
+        thr.append(g / g.sum())
+    h6 = df.CodeHead(2, min_df=3, theta_topics=np.arange(4)).fit(
+        [b for _, b in tr], [t for t, _ in tr], np.stack(thr))
+    assert np.allclose(h6.predict([pats[0][1]], th[:1]).sum(), 1.0)
+    for h in (df.CodeHead(2, min_df=3).fit([b for _, b in tr], [t for t, _ in tr]), h6):
+        r = df.evaluate_next_question(eng, head, pats, [(0, v) for v in range(V)], {},
+                                      np.random.default_rng(1), ks=(1, 3), frac=0.5,
+                                      code_head=h)
+        assert "VOI (codes)" in r["strategies"]
+        x = r["by"]["VOI (codes)@1"]
+        assert 0.0 <= x["p_true_c"] <= 1.0 and 0.0 <= x["yield"] <= 1.0
+        assert r["full"]["top1_c"] >= r["visible"]["top1_c"] - 1e-9
+        assert sum(r["recommended_codes"].values()) == 3 * r["n"]
