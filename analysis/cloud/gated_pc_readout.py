@@ -601,7 +601,8 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
                      heads_tag="stacked_mass99", max_patients=600, max_train=2000,
                      thin_frac=0.1, own_top=5, rel_lambda=0.6, rho=0.3, seed=0,
                      tag=None, next_question=False, nq_pool=100, nq_hide=0.2,
-                     train_ever=False, multi=False, crossfit=False, sidecar_uri=None):
+                     train_ever=False, multi=False, crossfit=False, sidecar_uri=None,
+                     fast=False, max_members=None):
     """Framing 1 — DIFFERENTIAL WITH REASONS (spec 2026-10-13 clinician framings,
     R0/R1; `differential.py`). Four engines on the same held-out patients positive on
     exactly one member: E1 presence model with subtype profiles, E2 renormalized
@@ -649,8 +650,14 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
         parent_adj, _nm = load_mondo_parent_adj(
             cm_.get("mondo_version"), cm_.get("mondo_cache_dir") or "data/mondo")
     sets = vt.select_sets(ctx, pattern, adhoc=adhoc)
+    if max_members:
+        # Exp 0150 survey: every Mondo group up to `max_members` label members (the
+        # broad body-system groups are not a differential).
+        sets = [x for x in sets if len(x[2]) <= int(max_members)]
     if not sets:
         raise SystemExit(f"[differential] no candidate set matches {pattern!r}")
+    _cprint(f"[differential]   {len(sets)} candidate set(s)"
+            f"{' (fast: E1/E4 skipped, framing 2 on E5)' if fast else ''}", flush=True)
     L_ = [f"# {run_dir.name} — differential with reasons (framing 1)",
           f"pattern {pattern!r}{' (ad hoc)' if adhoc else ''} · records minus attestation "
           f"codes and {len(measured):,} [measured] tokens · E1 presence subtypes · E2 "
@@ -746,8 +753,11 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
             e5 = dfm.CodeHead(len(members), seed=seed).fit([r[1] for r in tr], ytr)
             e6 = dfm.CodeHead(len(members), theta_topics=feat, seed=seed).fit(
                 [r[1] for r in tr], ytr, th_tr)
-        s1 = [e1.scores(e1.subtype_ll(r[1], r[2])) for r in te]
-        s4, lphi4 = zip(*[e4.elbos(r[3], r[4]) for r in te])
+        if fast:
+            s1 = s4 = lphi4 = None
+        else:
+            s1 = [e1.scores(e1.subtype_ll(r[1], r[2])) for r in te]
+            s4, lphi4 = zip(*[e4.elbos(r[3], r[4]) for r in te])
         # Prior over members from the TRAIN split (soft counts), add-one smoothed: a
         # member absent from the scored-results file (0140 first run) got prior 1e-12
         # and could never be called, and a test-derived prior leaks.
@@ -756,12 +766,14 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
         lp = np.log(pri)
 
         def engine_rows(idx, t1, t4):
-            out = {"prior": [pri for _ in idx],
-                   "E1 presence subtypes": [dfm.posterior_from_scores(lp, s1[i], t1)
-                                            for i in idx],
-                   "E2 stacked heads": [eng.posterior(th_te[i]) for i in idx],
-                   "E4 gated likelihood": [dfm.posterior_from_scores(lp, s4[i], t4)
-                                           for i in idx]}
+            out = {"prior": [pri for _ in idx]}
+            if not fast:
+                out["E1 presence subtypes"] = [dfm.posterior_from_scores(lp, s1[i], t1)
+                                               for i in idx]
+            out["E2 stacked heads"] = [eng.posterior(th_te[i]) for i in idx]
+            if not fast:
+                out["E4 gated likelihood"] = [dfm.posterior_from_scores(lp, s4[i], t4)
+                                              for i in idx]
             if e3 is not None:
                 out["E3 multiclass head"] = list(e3.predict(th_te[idx]))
                 out["E5 code head"] = list(e5.predict([te[i][1] for i in idx]))
@@ -775,8 +787,13 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
             halves.append((halves[0][1], halves[0][0]))
         rows, tv, ev_all, taus = {}, [], [], []
         for fi, ei in halves:
-            t1, _ = dfm.fit_tau_scores(lp, [s1[i] for i in fi], [truths[i] for i in fi])
-            t4, _ = dfm.fit_tau_scores(lp, [s4[i] for i in fi], [truths[i] for i in fi])
+            if fast:
+                t1 = t4 = float("nan")
+            else:
+                t1, _ = dfm.fit_tau_scores(lp, [s1[i] for i in fi],
+                                           [truths[i] for i in fi])
+                t4, _ = dfm.fit_tau_scores(lp, [s4[i] for i in fi],
+                                           [truths[i] for i in fi])
             taus.append((t1, t4))
             for k, v in engine_rows(ei, t1, t4).items():
                 rows.setdefault(k, []).extend(v)
@@ -822,6 +839,8 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
                                for g, x in zip(te[i][3], c3)}))
             if e5 is not None and int(np.argmax(rows["E5 code head"][j])) == t:
                 r5.append((m, e5.reasons(te[i][1], t)))
+            if fast:
+                continue
             if int(np.argmax(rows["E1 presence subtypes"][j])) == t:
                 r1.append((m, e1.reasons(e1.subtype_ll(te[i][1], te[i][2]), m)))
             if int(np.argmax(rows["E4 gated likelihood"][j])) == t:
@@ -861,7 +880,14 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
                     L_.append(f"- {named[m][:40]}: " + " · ".join(
                         ctx.code_name(d, v) for d, v in codes))
         L_.append("")
-        if next_question and e3 is not None:
+        if next_question and e3 is not None and fast:
+            nq = _next_question_block(ctx, eng, None, members, te, ev_i, truths, pri,
+                                      excl, named, nq_pool, seed, frac=nq_hide,
+                                      code_head=e5, code_name="E5 codes",
+                                      codes_only=True)
+            L_.extend(nq["lines"])
+            res["next_question"] = nq["res"]
+        elif next_question and e3 is not None:
             # The code engine for framing 2: E5 or E6, whichever has the lower log loss
             # on the tau-fit half (never the evaluation half).
             def _ll(P, ts):
@@ -885,14 +911,91 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
     stem = "differential" + (f"_{tag}" if tag else "")
     (run_dir / f"{stem}.md").write_text(text)
     (run_dir / f"{stem}.json").write_text(json.dumps(js, indent=1, default=str))
+    if max_members:
+        sv = differential_survey(js, sets, run_dir)
+        (run_dir / f"{stem}_survey.md").write_text(sv)
+        print(sv, flush=True)
     print(text, flush=True)
     _cprint(f"[differential]   wrote {run_dir / (stem + '.md')}", flush=True)
     return js
 
 
+def differential_survey(js, sets, run_dir, *, top=40):
+    """Exp 0150: one row per surveyed Mondo group — framing 1 (balanced top-1 of the
+    prior, E3 θ, E5 codes, E6 θ + codes; the best engine's lift over chance = bal × M;
+    E6 top-3 vs the prior's), framing 2 (E5: P(true) visible -> VOI@5 -> full, and the
+    share of the gap five questions close; VOI vs the population table), framing 3
+    (members' mean new-diagnosis AUC from the whole-history prevalence checks, θ and
+    raw codes, when those files are in the run dir). Pooled per group; groups under
+    the egress floor never reach `js`."""
+    def _load(name):
+        f = Path(run_dir) / name
+        return json.loads(f.read_text()) if f.exists() else None
+    th = _load("prevalence_check_history.json")
+    rw = _load("prevalence_check_stacked_raw2000.json")
+
+    def f3(members, src):
+        if not src or "history_stacked" not in src:
+            return float("nan")
+        pn = src["history_stacked"]["per_node"]
+        v = [pn[str(m)]["auc_incident"] for m in members if str(m) in pn]
+        return float(np.mean(v)) if v else float("nan")
+    mem = {g: m for _n, g, m in sets}
+    rows = []
+    for g, r in js.items():
+        mt = r.get("metrics") or {}
+        if "E6 θ + codes" not in mt:
+            continue
+        M = len(mem.get(g, []))
+        bal = {k: mt[k]["bal_top1"] for k in ("prior", "E3 multiclass head",
+                                              "E5 code head", "E6 θ + codes")}
+        best = max(("E3 multiclass head", "E5 code head", "E6 θ + codes"),
+                   key=lambda k: bal[k])
+        nq = r.get("next_question") or {}
+        if nq:
+            v0, vf = nq["visible"]["p_true"], nq["full"]["p_true"]
+            v5 = nq["by"]["VOI (codes)@5"]["p_true"]
+            t5 = nq["by"]["population table@5"]["p_true"]
+            gap = (v5 - v0) / (vf - v0) if vf > v0 else float("nan")
+        else:
+            v0 = vf = v5 = t5 = gap = float("nan")
+        rows.append({"group": g, "M": M, "n": r["n_eval"], "prior": bal["prior"],
+                     "e3": bal["E3 multiclass head"], "e5": bal["E5 code head"],
+                     "e6": bal["E6 θ + codes"], "best": best.split()[0],
+                     "lift": bal[best] * M, "top3_e6": mt["E6 θ + codes"]["top3"],
+                     "top3_prior": mt["prior"]["top3"], "v0": v0, "v5": v5, "t5": t5,
+                     "vf": vf, "gap": gap, "f3_theta": f3(mem.get(g, []), th),
+                     "f3_raw": f3(mem.get(g, []), rw)})
+    if not rows:
+        return "# differential survey\n(no group scored)\n"
+    rows.sort(key=lambda x: -x["lift"])
+    med = lambda k: float(np.nanmedian([x[k] for x in rows]))
+    win = {e: sum(x["best"] == e for x in rows) for e in ("E3", "E5", "E6")}
+    L = ["# differential survey (exp 0150) — framings 1-3 across Mondo groups", "",
+         f"{len(rows)} groups scored · best engine by balanced top-1: E3 {win['E3']}, "
+         f"E5 {win['E5']}, E6 {win['E6']} · median lift over chance {med('lift'):.2f}× · "
+         f"median E6 − E3 balanced top-1 {float(np.median([x['e6'] - x['e3'] for x in rows])):+.3f}"
+         f" · median share of the visible→full gap 5 questions close "
+         f"{med('gap'):.2f} · median VOI − table P(true)@5 "
+         f"{float(np.nanmedian([x['v5'] - x['t5'] for x in rows])):+.3f}", "",
+         f"Top {min(top, len(rows))} by lift (balanced top-1 of the best engine × members):",
+         "", "| group | M | n | prior | E3 | E5 | E6 | lift | top-3 E6 (prior) | "
+         "F2 P(true) vis → @5 → full | gap closed | VOI − table | F3 AUC θ / raw |",
+         "|---|--:|--:|--:|--:|--:|--:|--:|---|---|--:|--:|---|"]
+    for x in rows[:top]:
+        L.append(f"| {str(x['group'])[:40]} | {x['M']} | {x['n']} | {x['prior']:.2f} | "
+                 f"{x['e3']:.2f} | {x['e5']:.2f} | {x['e6']:.2f} | {x['lift']:.2f} | "
+                 f"{x['top3_e6']:.2f} ({x['top3_prior']:.2f}) | {x['v0']:.2f} → "
+                 f"{x['v5']:.2f} → {x['vf']:.2f} | {x['gap']:.2f} | "
+                 f"{x['v5'] - x['t5']:+.3f} | {x['f3_theta']:.2f} / {x['f3_raw']:.2f} |")
+    L.append("")
+    return "\n".join(L) + "\n"
+
+
 def _next_question_block(ctx, eng, head, members, te, ev_i, truths, pri, excl, named,
                          pool_per_dom, seed, *, frac=0.2, e1=None, e1_lp=None,
-                         e1_tau=1.0, code_head=None, code_name="codes"):
+                         e1_tau=1.0, code_head=None, code_name="codes",
+                         codes_only=False):
     """Framing 2 (spec R2) on the framing-1 evaluation half: the candidate pool is the
     population-EIG table over condition, drug and measurement-result codes (attestation
     and [measured] excluded), the differential is E3's. Candidates whose presence
@@ -924,6 +1027,24 @@ def _next_question_block(ctx, eng, head, members, te, ev_i, truths, pri, excl, n
         flagged[j] = bool(q.max() / q.sum() >= 0.9)
     pats = [(truths[i], te[i][1]) for i in ev_i]
     rng = np.random.default_rng(int(seed))
+    if codes_only:
+        r = dfm.evaluate_next_question_codes(code_head, pats, pool_items, rng, frac=frac)
+        if r["n"] < dfm.EGRESS_FLOOR:
+            return {"lines": lines + ["(fewer than 20 evaluable patients; suppressed)"],
+                    "res": None}
+        v, f = r["visible"], r["full"]
+        lines += [f"{r['n']} patients · pool {len(pool_items)} codes · differential "
+                  f"{code_name}", "", "| strategy | k | yield | P(true) | top-1 |",
+                  "|---|--:|--:|--:|--:|",
+                  f"| visible record ({100 - 100 * frac:.0f}%) | — | — | "
+                  f"{v['p_true']:.3f} | {v['top1']:.3f} |"]
+        for k in r["ks"]:
+            for s_ in tuple(r["strategies"]) + ("random hidden",):
+                x = r["by"][f"{s_}@{k}"]
+                lines.append(f"| {s_} | {k} | {x['yield']:.3f} | {x['p_true']:.3f} | "
+                             f"{x['top1']:.3f} |")
+        lines += [f"| full record | — | — | {f['p_true']:.3f} | {f['top1']:.3f} |", ""]
+        return {"lines": lines, "res": r}
     r = dfm.evaluate_next_question(eng, head, pats, pool_items, flagged, rng, frac=frac,
                                    e1=e1, e1_lp=e1_lp, e1_tau=e1_tau,
                                    code_head=code_head)
@@ -1358,6 +1479,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--diff-multi", action="store_true",
                    help="(--differential) exp 0149: patients coded with 2+ members join "
                         "training as soft targets and are scored apart on test")
+    p.add_argument("--diff-survey", type=int, default=0, metavar="MAX_MEMBERS",
+                   help="(--differential) exp 0150 SURVEY: every Mondo group matching "
+                        "the pattern with 2..MAX_MEMBERS label members, fast engines "
+                        "(E1/E4 skipped; framing 2 on E5), plus <tag>_survey.md")
     p.add_argument("--diff-crossfit", action="store_true",
                    help="(--differential) exp 0149: tempers fit on each half in turn, "
                         "every patient scored once (doubles the scored patients)")
@@ -2364,7 +2489,8 @@ def main(argv=None) -> int:
                     next_question=args.diff_next_question,
                     nq_hide=args.diff_nq_hide, train_ever=args.diff_train_ever,
                     multi=args.diff_multi, crossfit=args.diff_crossfit,
-                    sidecar_uri=args.prev_sidecar_uri)
+                    sidecar_uri=args.prev_sidecar_uri,
+                    fast=bool(args.diff_survey), max_members=(args.diff_survey or None))
             return 0
 
         if args.acquisition:

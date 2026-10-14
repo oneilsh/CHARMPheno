@@ -591,6 +591,74 @@ def question_values(q0, q_after, p_yes):
     return np.asarray(p_yes) * kl_rows(q_after, q0)
 
 
+def evaluate_next_question_codes(code_head, patients, pool_items, rng, *, ks=(1, 3, 5),
+                                frac=0.2):
+    """Framing 2 with the CODE engine alone (exp 0150 survey): no θ, so no fold-in per
+    candidate — the differential after a YES is one forward pass (`CodeHead.candidates`)
+    and P(yes) the head's per-member presence rates. Same protocol and metrics as
+    `evaluate_next_question` (hide `frac`, yield, P(true), top-1), strategies VOI
+    (codes), population table, random, and random hidden. A pure-codes head (E5) is
+    expected: an E6 head would need θ."""
+    ks = tuple(sorted(int(k) for k in ks))
+    strategies = ("VOI (codes)", "population table", "random")
+    acc = {(s_, k): {"yield": [], "p_true": [], "top1": []}
+           for s_ in strategies + ("random hidden",) for k in ks}
+    base, full = {"p_true": [], "top1": []}, {"p_true": [], "top1": []}
+
+    def score(store, q, truth):
+        store["p_true"].append(float(q[truth].sum()))
+        store["top1"].append(int(np.argmax(q)) in truth)
+
+    for truth, fb in patients:
+        sp = hide_split(fb, frac, rng)
+        if sp is None:
+            continue
+        vis, hid = sp
+        q0 = code_head.predict([vis])[0]
+        score(base, q0, truth)
+        allb = {d: dict(b) for d, b in vis.items()}
+        for (d, v), c in hid.items():
+            allb.setdefault(d, {})[v] = c
+        score(full, code_head.predict([allb])[0], truth)
+        cand = np.array([j for j, (d, v) in enumerate(pool_items)
+                         if v not in vis.get(d, {})], dtype=np.int64)
+        if cand.size == 0:
+            continue
+        items = [pool_items[int(j)] for j in cand]
+        qa = code_head.candidates(vis, items)
+        py = code_head.p_yes(q0, items)
+        orders = {"VOI (codes)": cand[np.argsort(-question_values(q0, qa, py),
+                                                 kind="stable")],
+                  "population table": cand,
+                  "random": cand[rng.permutation(cand.size)]}
+        hid_keys = list(hid)
+        for k in ks:
+            for s_ in strategies:
+                picks = [pool_items[int(j)] for j in orders[s_][:k]]
+                got = [it for it in picks if it in hid]
+                b = {d: dict(x) for d, x in vis.items()}
+                for (d, v) in got:
+                    b.setdefault(d, {})[v] = hid[(d, v)]
+                a = acc[(s_, k)]
+                a["yield"].append(len(got) / k)
+                score(a, code_head.predict([b])[0] if got else q0, truth)
+            sel = rng.choice(len(hid_keys), size=min(k, len(hid_keys)), replace=False)
+            b = {d: dict(x) for d, x in vis.items()}
+            for i in sel:
+                d, v = hid_keys[int(i)]
+                b.setdefault(d, {})[v] = hid[(d, v)]
+            a = acc[("random hidden", k)]
+            a["yield"].append(1.0)
+            score(a, code_head.predict([b])[0], truth)
+    mean = lambda x: float(np.mean(x)) if len(x) else float("nan")
+    return {"n": len(base["p_true"]), "ks": list(ks), "frac_hidden": float(frac),
+            "strategies": list(strategies),
+            "visible": {k: mean(v) for k, v in base.items()},
+            "full": {k: mean(v) for k, v in full.items()},
+            "by": {f"{s_}@{k}": {m: mean(v) for m, v in a.items()}
+                   for (s_, k), a in acc.items()}}
+
+
 NQ_STRATEGIES = ("VOI (E3)", "VOI (E1)", "VOI (codes)", "likely present",
                  "population table", "random")
 

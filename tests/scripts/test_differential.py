@@ -186,6 +186,14 @@ def test_run_differential_end_to_end_on_a_tiny_run(tmp_path, monkeypatch):
     assert g2["n_eval"] == 120 and g2["crossfit"] and len(g2["tau_e1"]) == 2
     assert g2["n_train_multi"] == 1 and "E6 θ + codes" in g2["metrics_multi"]
     assert g2["metrics"]["E3 multiclass head"]["top1"] > 0.9
+    # exp 0150 survey mode: fast engines, framing 2 on E5, the survey table
+    js3 = gpr.run_differential("test", "train", tmp_path, "^node1$|^node2$", adhoc=True, tag="t3",
+                               next_question=True, nq_pool=6, fast=True, max_members=5,
+                               crossfit=True)
+    sv = (tmp_path / "differential_t3_survey.md").read_text()
+    assert "differential survey" in sv and "groups scored" in sv
+    g3 = js3[next(iter(js3))]
+    assert "E4 gated likelihood" not in g3["metrics"] and "E6 θ + codes" in g3["metrics"]
 
 
 def test_hide_split_and_question_values():
@@ -338,3 +346,14 @@ def test_soft_targets_spread_weight_over_true_members():
     Y = df.label_matrix([[0, 2], [1]], 3)
     assert np.allclose(Y, [[0.5, 0.0, 0.5], [0.0, 1.0, 0.0]])
     assert np.allclose(df.label_matrix([2, 0], 3), [[0, 0, 1], [1, 0, 0]])
+
+
+def test_next_question_codes_only():
+    tr = _marker_bags(200, 7)
+    h = df.CodeHead(2, min_df=3).fit([b for _, b in tr], [t for t, _ in tr])
+    pats = [([t], b) for t, b in _marker_bags(60, 8)]
+    r = df.evaluate_next_question_codes(h, pats, [(0, v) for v in range(V)],
+                                        np.random.default_rng(0), ks=(1, 3), frac=0.5)
+    assert r["n"] == 60 and r["by"]["random hidden@3"]["yield"] == 1.0
+    assert r["full"]["top1"] >= r["visible"]["top1"]
+    assert r["by"]["VOI (codes)@3"]["p_true"] >= r["by"]["random@3"]["p_true"]
