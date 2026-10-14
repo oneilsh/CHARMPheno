@@ -730,7 +730,8 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
         n_tr_multi = sum(len(r[0]) > 1 for r in tr)
         _cprint(f"[differential]   {gname}: {len(te)} single-positive test patients "
                 f"({n_multi} multi-positive{' scored apart' if multi else ' set aside'}), "
-                f"{len(tr)} train ({n_tr_multi} multi-positive, soft targets"
+                f"{len(tr)} train ("
+                f"{f'{n_tr_multi} multi-positive as soft targets' if multi else 'single-member only'}"
                 f"{'; members ever coded' if train_ever else ''})", flush=True)
         if len(te) < 2 * dfm.EGRESS_FLOOR:
             L_.append(f"## {gname}\n(fewer than {2 * dfm.EGRESS_FLOOR} single-positive "
