@@ -179,6 +179,13 @@ def test_run_differential_end_to_end_on_a_tiny_run(tmp_path, monkeypatch):
     assert js[next(iter(js))]["next_question"]["n"] == 60
     reasons = rep.split("E1 reasons")[1].split("###")[0]
     assert "marker one" in reasons and "· node1" not in reasons and ": node1" not in reasons
+    # exp 0149: multi-positive patients as soft targets + cross-fit over both halves
+    js2 = gpr.run_differential("test", "train", tmp_path, "^node1$|^node2$", adhoc=True,
+                               tag="t2", multi=True, crossfit=True)
+    g2 = js2[next(iter(js2))]
+    assert g2["n_eval"] == 120 and g2["crossfit"] and len(g2["tau_e1"]) == 2
+    assert g2["n_train_multi"] == 1 and "E6 θ + codes" in g2["metrics_multi"]
+    assert g2["metrics"]["E3 multiclass head"]["top1"] > 0.9
 
 
 def test_hide_split_and_question_values():
@@ -325,3 +332,9 @@ def test_hybrid_code_head_and_next_question_with_codes():
         assert 0.0 <= x["p_true_c"] <= 1.0 and 0.0 <= x["yield"] <= 1.0
         assert r["full"]["top1_c"] >= r["visible"]["top1_c"] - 1e-9
         assert sum(r["recommended_codes"].values()) == 3 * r["n"]
+
+
+def test_soft_targets_spread_weight_over_true_members():
+    Y = df.label_matrix([[0, 2], [1]], 3)
+    assert np.allclose(Y, [[0.5, 0.0, 0.5], [0.0, 1.0, 0.0]])
+    assert np.allclose(df.label_matrix([2, 0], 3), [[0, 0, 1], [1, 0, 0]])

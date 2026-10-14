@@ -276,6 +276,40 @@ class GatedLikelihoodEngine:
 # E3 — multiclass head on log θ                                                   #
 # ----------------------------------------------------------------------------- #
 
+def label_matrix(y, M):
+    """(n, M) target rows. `y` is either member indices (one-hot) or truth lists — a
+    patient coded with several members spreads unit weight evenly over them (exp 0149:
+    the multi-positive patients join training as soft targets instead of being set
+    aside; the softmax then reads as "which member, given it is one of these")."""
+    if len(y) and np.ndim(y[0]) == 0:
+        y = np.asarray(y, dtype=np.int64)
+        Y = np.zeros((len(y), M)); Y[np.arange(len(y)), y] = 1.0
+        return Y
+    Y = np.zeros((len(y), M))
+    for i, t in enumerate(y):
+        t = [int(x) for x in t]
+        Y[i, t] = 1.0 / len(t)
+    return Y
+
+
+def _select_and_fit(X, Y, M, lambdas, seed):
+    """λ by log loss on an internal 80/20 split, then the fit on everything."""
+    rng = np.random.default_rng(seed)
+    perm = rng.permutation(len(Y))
+    cut = max(1, int(0.8 * len(Y)))
+    tr, va = perm[:cut], perm[cut:]
+    best, best_ll = lambdas[0], np.inf
+    if len(va) >= 5:
+        for lam in lambdas:
+            W, b = MulticlassHead._fit(X[tr], Y[tr], M, lam)
+            Z = X[va] @ W + b
+            ll = -np.mean((Y[va] * (Z - logsumexp(Z, axis=1, keepdims=True))).sum(axis=1))
+            if ll < best_ll:
+                best, best_ll = lam, ll
+    W, b = MulticlassHead._fit(X, Y, M, best)
+    return best, W, b
+
+
 class MulticlassHead:
     """Softmax regression over the members on standardized log θ restricted to
     `feature_topics`, L2-penalized; λ chosen on an internal 80/20 split by log loss."""
@@ -294,7 +328,7 @@ class MulticlassHead:
     @staticmethod
     def _fit(X, y, M, lam):
         n, p = X.shape
-        Y = np.zeros((n, M)); Y[np.arange(n), y] = 1.0
+        Y = np.asarray(y, dtype=np.float64) if np.ndim(y) == 2 else label_matrix(y, M)
 
         def f(wb):
             W = wb[:p * M].reshape(p, M); b = wb[p * M:]
@@ -307,31 +341,20 @@ class MulticlassHead:
             gb = G.sum(axis=0)
             return loss, np.concatenate([gW.ravel(), gb])
         x0 = np.zeros(p * M + M)
-        prior = np.bincount(y, minlength=M) + 1.0
+        prior = Y.sum(axis=0) + 1.0
         x0[p * M:] = np.log(prior / prior.sum())
         res = minimize(f, x0, jac=True, method="L-BFGS-B", options={"maxiter": 500})
         return res.x[:p * M].reshape(p, M), res.x[p * M:]
 
     def fit(self, theta, y):
-        y = np.asarray(y, dtype=np.int64)
+        """`y`: member indices, or truth lists (soft targets; `label_matrix`)."""
+        Y = label_matrix(y, self.M)
         Xr = np.log(np.clip(np.asarray(theta, dtype=np.float64)[:, self.ft], 1e-12, 1.0))
         self.mu = Xr.mean(axis=0)
         self.sd = Xr.std(axis=0) + 1e-6
         X = (Xr - self.mu) / self.sd
-        rng = np.random.default_rng(self.seed)
-        perm = rng.permutation(len(y))
-        cut = max(1, int(0.8 * len(y)))
-        tr, va = perm[:cut], perm[cut:]
-        best, best_ll = self.lambdas[0], np.inf
-        if len(va) >= 5:
-            for lam in self.lambdas:
-                W, b = self._fit(X[tr], y[tr], self.M, lam)
-                Z = X[va] @ W + b
-                ll = -np.mean(Z[np.arange(len(va)), y[va]] - logsumexp(Z, axis=1))
-                if ll < best_ll:
-                    best, best_ll = lam, ll
-        self.lam = best
-        self.W, self.b = self._fit(X, y, self.M, best)
+        self.lam, self.W, self.b = _select_and_fit(X, Y, self.M, self.lambdas,
+                                                   self.seed)
         return self
 
     def predict(self, theta):
@@ -383,13 +406,14 @@ class CodeHead:
         return (X - self.mu) / self.sd
 
     def fit(self, bags_list, y, thetas=None):
-        y = np.asarray(y, dtype=np.int64)
+        """`y`: member indices, or truth lists (soft targets; `label_matrix`)."""
+        Y = label_matrix(y, self.M)
         df, per = {}, {}
-        n_m = np.bincount(y, minlength=self.M).astype(np.float64)
-        for b, c in zip(bags_list, y):
+        n_m = Y.sum(axis=0)
+        for b, yr in zip(bags_list, Y):
             for it in set(self._items(b)):
                 df[it] = df.get(it, 0) + 1
-                per.setdefault(it, np.zeros(self.M))[c] += 1.0
+                per.setdefault(it, np.zeros(self.M))[:] += yr
         keep = sorted((it for it, n in df.items() if n >= self.min_df),
                       key=lambda it: (-df[it], it))[:self.max_codes]
         self.codes = sorted(keep)
@@ -400,20 +424,8 @@ class CodeHead:
         Xr = self._raw(bags_list, thetas)
         self.mu, self.sd = Xr.mean(axis=0), Xr.std(axis=0) + 1e-6
         X = self._std(Xr)
-        rng = np.random.default_rng(self.seed)
-        perm = rng.permutation(len(y))
-        cut = max(1, int(0.8 * len(y)))
-        tr, va = perm[:cut], perm[cut:]
-        best, best_ll = self.lambdas[0], np.inf
-        if len(va) >= 5:
-            for lam in self.lambdas:
-                W, b = MulticlassHead._fit(X[tr], y[tr], self.M, lam)
-                Z = X[va] @ W + b
-                ll = -np.mean(Z[np.arange(len(va)), y[va]] - logsumexp(Z, axis=1))
-                if ll < best_ll:
-                    best, best_ll = lam, ll
-        self.lam = best
-        self.W, self.b = MulticlassHead._fit(X, y, self.M, best)
+        self.lam, self.W, self.b = _select_and_fit(X, Y, self.M, self.lambdas,
+                                                   self.seed)
         return self
 
     def _softmax(self, Xr):

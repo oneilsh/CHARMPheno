@@ -402,7 +402,7 @@ def run_conditional_from_heads(test_scored, run_dir, tag, *, C, parent_int, int2
 
 
 def collect_set_patients(test_df, members, n_domains, *, max_patients=5000, seed=0,
-                         label_col="label", length="distinct"):
+                         label_col="label", length="distinct", ever_df=None):
     """Test-split persons positive on any of `members` (fit-width label indices):
     `[(truth positions into members, {d: {vocab idx: count}}, {d: length})]`.
 
@@ -410,21 +410,36 @@ def collect_set_patients(test_df, members, n_domains, *, max_patients=5000, seed
     `widen_labels_to_readout` pattern: nothing array-shaped rides a closure); the
     collect carries only the members' label cells and the sparse feature vectors.
     Capped at `max_patients` by a seeded Spark sample. `length` is the record length
-    the presence model gets per domain: `distinct` codes (default) or `tokens`."""
+    the presence model gets per domain: `distinct` codes (default) or `tokens`.
+
+    `ever_df` (exp 0149; `(person_id, __ever: array<int>)` positions into `members`
+    from the E4 sidecar): a person ever coded with a member is collected too, and the
+    truth is the union of label-year and ever-coded members."""
     import json as _json
     from pyspark.sql import functions as F
     lit = F.from_json(F.lit(_json.dumps([int(m) for m in members])), "array<int>")
     lab = F.col(label_col)
     fcols = ([f"features_{d}" for d in range(int(n_domains))]
              if f"features_0" in test_df.columns else ["features"])
-    df = (test_df.where(F.exists(lit, lambda i: lab[i] > 0))
-                 .select(F.transform(lit, lambda i: lab[i]).alias("__y"), *fcols))
+    base = test_df
+    if ever_df is not None:
+        base = base.join(ever_df, "person_id", "left")
+        keep = (F.exists(lit, lambda i: lab[i] > 0)
+                | (F.coalesce(F.size("__ever"), F.lit(0)) > 0))
+    else:
+        base = base.withColumn("__ever", F.array().cast("array<int>"))
+        keep = F.exists(lit, lambda i: lab[i] > 0)
+    df = (base.where(keep)
+              .select(F.transform(lit, lambda i: lab[i]).alias("__y"),
+                      F.coalesce(F.col("__ever"), F.array().cast("array<int>"))
+                       .alias("__ever"), *fcols))
     n = df.count()
     if n > int(max_patients):
         df = df.sample(False, min(1.0, 1.2 * int(max_patients) / n), seed=int(seed))
     out = []
     for row in df.collect()[:int(max_patients)]:
-        truth = [j for j, v in enumerate(row["__y"]) if v and v > 0]
+        truth = sorted({j for j, v in enumerate(row["__y"]) if v and v > 0}
+                       | {int(j) for j in (row["__ever"] or [])})
         bags, lens = {}, {}
         for d, c in enumerate(fcols):
             vec = row[c]
@@ -442,6 +457,33 @@ def collect_set_patients(test_df, members, n_domains, *, max_patients=5000, seed
                        else float(len(idx)))
         out.append((truth, bags, lens))
     return out, n
+
+
+def ever_member_frame(spark, run_dir, members, member_cids, parent_adj, *,
+                      sidecar_uri=None):
+    """`(person_id, __ever: array<int>)`: positions into `members` of every member the
+    person has EVER been coded with (E4 sidecar, whole record — before or after the
+    index; training only), a sidecar Mondo term counting for every member at or above
+    it (`prevalence_check.sidecar_nodes_to_readout`'s is-a roll-up). Exp 0149."""
+    import prevalence_check as pv
+    from pyspark.sql import functions as F
+    from conversion_sidecar import try_load_sidecar
+    wit = json.loads((Path(run_dir) / "conversion_sidecar.json").read_text())
+    uri = sidecar_uri or wit.get("sidecar_uri")
+    first = try_load_sidecar(spark, uri, wit["key"])
+    if first is None:
+        raise SystemExit(f"[differential] sidecar MISS at {uri}/{wit['key']} — rebuild "
+                         "it on this cluster (make build-conversion-sidecar ID=N)")
+    nodes = [int(r[0]) for r in first.select("node_cid").distinct().collect()]
+    # positions shifted by one: the roll-up never targets id 0 (the readout root)
+    pos_of = {i + 1: int(c) for i, c in enumerate(member_cids)}
+    n2p = pv.sidecar_nodes_to_readout(nodes, pos_of, parent_adj, root_cid=-10**9)
+    rows = [(int(n), int(j) - 1) for n, js in n2p.items() for j in js]
+    if not rows:
+        return spark.createDataFrame([], "person_id long, __ever array<int>")
+    mdf = spark.createDataFrame(rows, "node_cid long, __pos int")
+    return (first.join(F.broadcast(mdf), "node_cid").groupBy("person_id")
+            .agg(F.collect_set("__pos").alias("__ever")))
 
 
 def run_acquisition(test_df, run_dir, pattern, *, adhoc=False, prior="population",
@@ -558,7 +600,8 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
                      results_name="results_readout_stacked_mass99.json",
                      heads_tag="stacked_mass99", max_patients=600, max_train=2000,
                      thin_frac=0.1, own_top=5, rel_lambda=0.6, rho=0.3, seed=0,
-                     tag=None, next_question=False, nq_pool=100, nq_hide=0.2):
+                     tag=None, next_question=False, nq_pool=100, nq_hide=0.2,
+                     train_ever=False, multi=False, crossfit=False, sidecar_uri=None):
     """Framing 1 — DIFFERENTIAL WITH REASONS (spec 2026-10-13 clinician framings,
     R0/R1; `differential.py`). Four engines on the same held-out patients positive on
     exactly one member: E1 presence model with subtype profiles, E2 renormalized
@@ -594,6 +637,17 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
         dm = ctx.dom_names.index("measurement")
         measured = {int(v) for v, tok in ctx.inv_maps[dm].items() if int(tok) % 100 == 0}
     ev = np.asarray(ctx.sh["evidence"], dtype=np.float64)
+    member_cid, parent_adj = {}, None
+    if train_ever:
+        # Exp 0149: members' Mondo ids (bundle int2cid) and the Mondo is-a, so the
+        # sidecar's finer terms roll up onto the members.
+        from readout_dag import load_mondo_parent_adj
+        bmj = json.loads(bm.read_text())
+        member_cid = {int(e): int(c) for e, c in bmj["int2cid"].items()}
+        cm_ = (json.loads((run_dir / "manifest.json").read_text())
+               .get("corpus_manifest") or {})
+        parent_adj, _nm = load_mondo_parent_adj(
+            cm_.get("mondo_version"), cm_.get("mondo_cache_dir") or "data/mondo")
     sets = vt.select_sets(ctx, pattern, adhoc=adhoc)
     if not sets:
         raise SystemExit(f"[differential] no candidate set matches {pattern!r}")
@@ -639,24 +693,38 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
                                        members)
         feat = bg + sorted({t for m in members for t in ctx.block[m]})
 
-        def prep(rows):
+        def prep(rows, keep_multi):
             out = []
             for truth, bags, _ in rows:
-                if len(truth) != 1:
+                if not truth or (len(truth) != 1 and not keep_multi):
                     continue
                 fb, lens = dfm.filter_record(bags, excl)
                 gi = [eng.gidx(d, v) for d, b in fb.items() for v in b]
                 gc = [c for d, b in fb.items() for c in b.values()]
                 out.append((truth, fb, lens, gi, gc))
             return out
+        ever = None
+        if train_ever:
+            # Exp 0149 item 1: training members = ever coded (E4 sidecar), not only
+            # coded in the label year. The test truth stays the label year.
+            ever = ever_member_frame(train_df.sparkSession, run_dir, members,
+                                     [member_cid[int(m)] for m in members], parent_adj,
+                                     sidecar_uri=sidecar_uri)
         te_raw, n_te = collect_set_patients(test_df, members, len(ctx.lams),
                                             max_patients=max_patients, seed=seed)
         tr_raw, n_tr = collect_set_patients(train_df, members, len(ctx.lams),
-                                            max_patients=max_train, seed=seed)
+                                            max_patients=max_train, seed=seed,
+                                            ever_df=ever)
         n_multi = sum(len(t) > 1 for t, _, _ in te_raw)
-        te, tr = prep(te_raw), prep(tr_raw)
+        te_all = prep(te_raw, True)
+        te = [r for r in te_all if len(r[0]) == 1]
+        te_multi = [r for r in te_all if len(r[0]) > 1] if multi else []
+        tr = prep(tr_raw, multi)
+        n_tr_multi = sum(len(r[0]) > 1 for r in tr)
         _cprint(f"[differential]   {gname}: {len(te)} single-positive test patients "
-                f"({n_multi} multi-positive set aside), {len(tr)} train", flush=True)
+                f"({n_multi} multi-positive{' scored apart' if multi else ' set aside'}), "
+                f"{len(tr)} train ({n_tr_multi} multi-positive, soft targets"
+                f"{'; members ever coded' if train_ever else ''})", flush=True)
         if len(te) < 2 * dfm.EGRESS_FLOOR:
             L_.append(f"## {gname}\n(fewer than {2 * dfm.EGRESS_FLOOR} single-positive "
                       f"held-out patients; suppressed)")
@@ -668,8 +736,9 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
         gsum_te = [float(eng.alpha.sum() + sum(r[4])) for r in te]
         truths = [r[0] for r in te]
         e3 = e5 = e6 = None
-        ytr = [r[0][0] for r in tr]
-        if len(set(ytr)) >= 2:
+        ytr = [list(r[0]) if multi else r[0][0] for r in tr]
+        Ytr = dfm.label_matrix(ytr, len(members))
+        if int((Ytr.sum(axis=0) > 0).sum()) >= 2:
             th_tr = np.stack([theta(r) for r in tr])
             e3 = dfm.MulticlassHead(feat, len(members), seed=seed).fit(th_tr, ytr)
             # Exp 0148 (insight 0101): the same softmax on the record's CODES (E5) and
@@ -679,38 +748,70 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
                 [r[1] for r in tr], ytr, th_tr)
         s1 = [e1.scores(e1.subtype_ll(r[1], r[2])) for r in te]
         s4, lphi4 = zip(*[e4.elbos(r[3], r[4]) for r in te])
-        # Prior over members from the TRAIN split's single-positive patients, add-one
-        # smoothed: a member absent from the scored-results file (0140 first run) got
-        # prior 1e-12 and could never be called, and a test-derived prior leaks.
-        pri = np.bincount(np.asarray(ytr, dtype=np.int64),
-                          minlength=len(members)).astype(np.float64) + 1.0
+        # Prior over members from the TRAIN split (soft counts), add-one smoothed: a
+        # member absent from the scored-results file (0140 first run) got prior 1e-12
+        # and could never be called, and a test-derived prior leaks.
+        pri = Ytr.sum(axis=0) + 1.0
         pri = pri / pri.sum()
         lp = np.log(pri)
-        fit_i, ev_i = list(range(0, len(te), 2)), list(range(1, len(te), 2))
-        tau1, _ = dfm.fit_tau_scores(lp, [s1[i] for i in fit_i], [truths[i] for i in fit_i])
-        tau4, _ = dfm.fit_tau_scores(lp, [s4[i] for i in fit_i], [truths[i] for i in fit_i])
-        tv = [truths[i] for i in ev_i]
-        res = {"n_eval": len(ev_i), "n_fit": len(fit_i), "n_train": len(tr),
-               "tau_e1": tau1, "tau_e4": tau4,
+
+        def engine_rows(idx, t1, t4):
+            out = {"prior": [pri for _ in idx],
+                   "E1 presence subtypes": [dfm.posterior_from_scores(lp, s1[i], t1)
+                                            for i in idx],
+                   "E2 stacked heads": [eng.posterior(th_te[i]) for i in idx],
+                   "E4 gated likelihood": [dfm.posterior_from_scores(lp, s4[i], t4)
+                                           for i in idx]}
+            if e3 is not None:
+                out["E3 multiclass head"] = list(e3.predict(th_te[idx]))
+                out["E5 code head"] = list(e5.predict([te[i][1] for i in idx]))
+                out["E6 θ + codes"] = list(e6.predict([te[i][1] for i in idx],
+                                                       th_te[idx]))
+            return out
+        # Exp 0149 item 3: CROSS-FIT — tempers fit on one half and every engine scored
+        # on the other, then the halves swap, so every patient is scored once.
+        halves = [(list(range(0, len(te), 2)), list(range(1, len(te), 2)))]
+        if crossfit:
+            halves.append((halves[0][1], halves[0][0]))
+        rows, tv, ev_all, taus = {}, [], [], []
+        for fi, ei in halves:
+            t1, _ = dfm.fit_tau_scores(lp, [s1[i] for i in fi], [truths[i] for i in fi])
+            t4, _ = dfm.fit_tau_scores(lp, [s4[i] for i in fi], [truths[i] for i in fi])
+            taus.append((t1, t4))
+            for k, v in engine_rows(ei, t1, t4).items():
+                rows.setdefault(k, []).extend(v)
+            tv += [truths[i] for i in ei]
+            ev_all += ei
+        fit_i, ev_i = halves[0]
+        tau1, tau4 = taus[0]
+        res = {"n_eval": len(ev_all), "n_fit": len(fit_i), "n_train": len(tr),
+               "n_train_multi": n_tr_multi, "crossfit": bool(crossfit),
+               "train_ever": bool(train_ever),
+               "tau_e1": [t[0] for t in taus], "tau_e4": [t[1] for t in taus],
                "e3_lambda": (e3.lam if e3 is not None else None),
                "e5_lambda": (e5.lam if e5 is not None else None),
                "e6_lambda": (e6.lam if e6 is not None else None),
                "e5_n_codes": (e5.p_codes if e5 is not None else None)}
-        rows = {"prior": [pri for _ in ev_i],
-                "E1 presence subtypes": [dfm.posterior_from_scores(lp, s1[i], tau1)
-                                         for i in ev_i],
-                "E2 stacked heads": [eng.posterior(th_te[i]) for i in ev_i],
-                "E4 gated likelihood": [dfm.posterior_from_scores(lp, s4[i], tau4)
-                                        for i in ev_i]}
-        if e3 is not None:
-            rows["E3 multiclass head"] = list(e3.predict(th_te[ev_i]))
-            rows["E5 code head"] = list(e5.predict([te[i][1] for i in ev_i]))
-            rows["E6 θ + codes"] = list(e6.predict([te[i][1] for i in ev_i],
-                                                    th_te[ev_i]))
         res["metrics"] = {k: dfm.metrics(v, tv) for k, v in rows.items()}
+        if te_multi and e3 is not None:
+            # Exp 0149 item 2: test patients coded with 2+ members, scored apart:
+            # top-1 / top-3 hit ANY true member; all_in_top3 = every true member there.
+            thm = np.stack([theta(r) for r in te_multi])
+            tm = [r[0] for r in te_multi]
+            pm = {"prior": [pri for _ in te_multi],
+                  "E3 multiclass head": list(e3.predict(thm)),
+                  "E5 code head": list(e5.predict([r[1] for r in te_multi])),
+                  "E6 θ + codes": list(e6.predict([r[1] for r in te_multi], thm))}
+            res["metrics_multi"] = {}
+            for k, v in pm.items():
+                mm = dfm.metrics(v, tm)
+                mm["all_in_top3"] = float(np.mean([
+                    set(t) <= set(np.argsort(q)[::-1][:3].tolist())
+                    for q, t in zip(v, tm)]))
+                res["metrics_multi"][k] = mm
         # reasons on correctly called evaluation patients
         r1, r3, r4, r5 = [], [], [], []
-        for j, i in enumerate(ev_i):
+        for j, i in enumerate(ev_all):
             t = truths[i][0]
             m = members[t]
             if e3 is not None and int(np.argmax(rows["E3 multiclass head"][j])) == t \
@@ -731,15 +832,25 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
         res["reasons_e4"] = dfm.pool_reasons(r4)
         res["reasons_e5"] = dfm.pool_reasons(r5)
         named = {m: ctx.rd_names.get(m, str(m)) for m in members}
-        L_.append(f"## {gname} — {len(members)} members · {len(ev_i)} scored patients "
-                  f"(τ fit on {len(fit_i)}) · {len(tr)} train patients for E3 · "
-                  f"τ E1 {tau1:.3g}, E4 {tau4:.3g}")
+        L_.append(f"## {gname} — {len(members)} members · {len(ev_all)} scored patients "
+                  f"({'cross-fit, both halves' if crossfit else f'τ fit on {len(fit_i)}'})"
+                  f" · {len(tr)} train patients ({n_tr_multi} multi-positive"
+                  f"{', members ever coded' if train_ever else ''}) · τ E1 "
+                  f"{tau1:.3g}, E4 {tau4:.3g}")
         L_.append("")
         L_.append("| engine | top-1 | top-3 | bal top-1 | log loss | ECE |")
         L_.append("|---|--:|--:|--:|--:|--:|")
         for k, mtr in res["metrics"].items():
             L_.append(f"| {k} | {mtr['top1']:.3f} | {mtr['top3']:.3f} | "
                       f"{mtr['bal_top1']:.3f} | {mtr['logloss']:.3f} | {mtr['ece']:.3f} |")
+        if res.get("metrics_multi") and len(te_multi) >= dfm.EGRESS_FLOOR:
+            L_ += ["", f"multi-positive test patients ({len(te_multi)}; coded with 2+ "
+                   "members): top-1 / top-3 = any true member, all-in-top-3 = every "
+                   "one", "", "| engine | top-1 | top-3 | all in top-3 | log loss |",
+                   "|---|--:|--:|--:|--:|"]
+            for k, mtr in res["metrics_multi"].items():
+                L_.append(f"| {k} | {mtr['top1']:.3f} | {mtr['top3']:.3f} | "
+                          f"{mtr['all_in_top3']:.3f} | {mtr['logloss']:.3f} |")
         for key, lab in (("reasons_e3", "E3"), ("reasons_e1", "E1"),
                          ("reasons_e4", "E4"), ("reasons_e5", "E5")):
             if res[key]:
@@ -1240,6 +1351,16 @@ def build_parser() -> argparse.ArgumentParser:
                         "check runs on the new heads over the unmasked test split. "
                         "Needs the Mondo readout DAG and <run>/code_map.tsv.")
     p.add_argument("--diff-max-patients", type=int, default=600)
+    p.add_argument("--diff-train-ever", action="store_true",
+                   help="(--differential) exp 0149: training members = ever coded (E4 "
+                        "sidecar, whole record), not only the label year; the test "
+                        "truth stays the label year. Needs <run>/conversion_sidecar.json")
+    p.add_argument("--diff-multi", action="store_true",
+                   help="(--differential) exp 0149: patients coded with 2+ members join "
+                        "training as soft targets and are scored apart on test")
+    p.add_argument("--diff-crossfit", action="store_true",
+                   help="(--differential) exp 0149: tempers fit on each half in turn, "
+                        "every patient scored once (doubles the scored patients)")
     p.add_argument("--diff-max-train", type=int, default=2000)
     p.add_argument("--diff-next-question", action="store_true",
                    help="(--differential) also run framing 2 — the next-question "
@@ -2241,7 +2362,9 @@ def main(argv=None) -> int:
                     max_patients=args.diff_max_patients,
                     max_train=args.diff_max_train, tag=args.acq_tag,
                     next_question=args.diff_next_question,
-                    nq_hide=args.diff_nq_hide)
+                    nq_hide=args.diff_nq_hide, train_ever=args.diff_train_ever,
+                    multi=args.diff_multi, crossfit=args.diff_crossfit,
+                    sidecar_uri=args.prev_sidecar_uri)
             return 0
 
         if args.acquisition:
