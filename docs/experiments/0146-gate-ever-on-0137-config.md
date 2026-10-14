@@ -1,7 +1,7 @@
 ---
 id: 146
 slug: gate-ever-on-0137-config
-status: planned
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -123,4 +123,32 @@ grep -E "gate-ever" "$RUN"/sweep_log.md
 
 ## Run log
 
+**2026-10-13/14 — run.** Bundle MISS as designed (gate post-pass 1,052 s — the
+provider over the full-history condition_era of the train persons), fit 50 iterations
+(ELBO rising, -2.17e8 -> -8.55e7), readout + stacked, whole-history prevalence check.
+The report's `pc-no-op` / STARVED flags are expected: weight_y = 0 (unsupervised gated
+fit, post-hoc heads), as 0137.
+
 ## Results
+
+**Gate receipt.** Train gated (doc, node) cells 722,718 -> 1,857,140 (2.6×); docs with
+any gate 176,479 -> 209,026; median per-node ratio of gated docs **3.51** (387 nodes).
+The gate change was large.
+
+**The read: no change in new-diagnosis AUC.**
+
+| | 0137 (label-year gate) | 0146 (all-ever gate) |
+|---|--:|--:|
+| incident macro AUC, whole-history rule, stacked (492 nodes) | 0.694 | **0.696** |
+| same, flat | 0.612 | **0.612** |
+| incident, lookback rule, stacked (535 nodes) | 0.702 | 0.705 |
+| all-patient macro AUC, stacked (whole-history node set) | 0.822 | 0.825 |
+| within-parent ranking macro AUC (554 nodes) | — | 0.733 |
+| root head AUC | — | 0.836 |
+
+Pre-registered read (> ~0.02 = gating starved the topics): **not met** (+0.002).
+Gating each disease's topics on 3.5× as many training patients leaves the
+new-diagnosis signal where it was. Label-year gating was not what limited 0137 —
+labels are not the lever at this K. Remaining candidates: what the 5-year pre-index
+record carries at all (the raw-code baseline answers this), and representation
+(K, α, the background/private split) — not the gate.

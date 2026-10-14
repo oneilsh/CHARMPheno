@@ -33,6 +33,9 @@
   positives teach the heads what X looks like; dropping them halves the positives and
   starves the ancestor heads the stacked product rests on. Rule: evaluate incident, but
   train heads (and gate topics) on the broadest positive set.
+- Gating topics on all-ever attestation (0146: 3.5× the gated train docs per node)
+  leaves new-diagnosis AUC unchanged (whole-history rule 0.694 -> 0.696 stacked,
+  0.612 flat). The ~0.69 is not a gating artefact.
 - The random index is worth keeping (no anchoring bias between cases and background, one
   index serves every disease); the repair is in the EVALUATION label, per node: the incident arm
   (`preindex_closure`, E1/E2 machinery) masks node X for patients with a prior X
