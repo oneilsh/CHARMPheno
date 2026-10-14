@@ -25,3 +25,8 @@ codes, name-matched concepts and `[measured]` removed; 57–272 scored test pati
 - Levers that could matter: more training patients per member (ever-coded, not only
   label-year), the multi-positive patients now set aside, and features outside the
   current record (procedures, notes, genetic testing results).
+- 0149 (n = 3,478 on connective tissue): E6 θ + codes is genuinely best (+0.028
+  top-1 over θ alone); training on ever-coded and multi-positive members (4× the
+  patients) does not raise balanced top-1 and lowers it on cardiomyopathy and
+  Marfan/EDS — the ever-coded member mix differs from the label-year one (prior ECE
+  0.02 → 0.13). More, differently-distributed training data is not the lever.
