@@ -31,7 +31,7 @@ cd ~/repos/CHARMPheno && git fetch origin claude/dismech-ribbon && git checkout 
 RUN=/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs/0137-dismech-ribbon-record-tpn5-v2codemap
 nohup make -C analysis/cloud gated-pc-readout ID=137 GPR_ARGS="--readout-mode distributed --readout-l2 100 --readout-stacked --raw-baseline 2000 --prev-history" > "$RUN"/raw_baseline_log.md 2>&1 &
 grep -E "raw baseline:|root head alone|ranking \(within" "$RUN"/raw_baseline_log.md | cut -c1-220
-grep -E "^## |^\| 0" "$RUN"/prevalence_check_raw2000_stacked.md | cut -c1-220
+grep -E "^## |^\| 0" "$RUN"/prevalence_check_stacked_raw2000.md | cut -c1-220
 ```
 
 ## Run log
