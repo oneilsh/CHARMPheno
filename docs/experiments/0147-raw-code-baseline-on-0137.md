@@ -1,7 +1,7 @@
 ---
 id: 147
 slug: raw-code-baseline-on-0137
-status: planned
+status: done
 model_class: gated_pc
 # NOT A FIT. The anchor 0.69 never had: the same readout heads on RAW CODES instead of
 # θ. Same bundle, documents, 698-node Mondo readout DAG, distributed solver, l2 100,
@@ -61,3 +61,27 @@ make -C analysis/cloud gated-pc-readout ID=137 GPR_ARGS="--prevalence-check --pr
 
 On the all-patient read the raw-code heads match θ almost exactly, with 2,000 binary
 codes and under-converged heads.
+
+**2026-10-14 — run 2 (incident check from the saved heads).** Sidecar rebuilt on the
+new cluster; containment of lookback prior cells in whole-history ones 1.000 again.
+
+## Results (new diagnoses)
+
+| incident macro AUC | raw codes (0147) | θ, 0137 (0143/0145) | raw − θ |
+|---|--:|--:|--:|
+| whole-history rule, stacked (492 nodes) | **0.733** | 0.694 | **+0.039** |
+| whole-history rule, flat | **0.641** | 0.612 | +0.029 |
+| lookback rule, stacked (535 nodes) | 0.743 | 0.702 | +0.041 |
+| lookback rule, flat | 0.646 | 0.616 | +0.030 |
+| all patients, stacked (lookback node set) | 0.819 | 0.818 | +0.001 |
+
+Raw incident AUC, whole-history rule, stacked, by prior share: 0.1–0.3 0.789 ·
+0.3–0.6 0.747 · 0.6–1.0 0.719 (θ: 0.742 / 0.696 / 0.688). The prevalent-recall gap is
+SMALLER for raw (median +0.084 vs θ's +0.133).
+
+**Read: the pre-registered "raw clearly above" outcome.** On all patients the two are
+identical; on new diagnoses 2,000 binary codes beat θ by ~0.04 stacked, ~0.03 flat, in
+every prior-share band — and the raw heads are under-converged, so +0.04 is a floor.
+The topic representation, as folded in and read out here, drops new-diagnosis signal
+that a flat code model keeps; the extra all-patient AUC θ shows is prevalent recall.
+Insight 0101.
