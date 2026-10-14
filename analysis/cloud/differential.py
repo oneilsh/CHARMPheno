@@ -339,6 +339,124 @@ class MulticlassHead:
         return np.exp(Z - logsumexp(Z, axis=1, keepdims=True))
 
 
+class CodeHead:
+    """E5 / E6 (exp 0148): softmax over the members on the RECORD'S CODES — binary
+    presence of the tokens carried by >= `min_df` training patients (top `max_codes`
+    by document frequency), plus log(1 + distinct codes) — and, for E6, standardized log θ
+    over `theta_topics` as well. Same records (attestation and [measured] removed),
+    same L2 softmax and λ selection as E3; only the input differs. Insight 0101: on new
+    diagnoses 2,000 binary codes beat θ by ~0.04, most for the rarest diseases.
+
+    Why codes make framing 2 exact: asking "is v present?" flips one input, so the
+    differential after a YES is a forward pass, not a re-fold of θ (E6 still re-folds
+    θ through `candidate_thetas`). P(yes) for a candidate is the training patients'
+    smoothed per-member presence rate mixed by the current differential."""
+
+    def __init__(self, n_classes, *, min_df=5, max_codes=3000, theta_topics=None,
+                 lambdas=(1e-2, 1e-1, 1.0, 10.0), seed=0):
+        self.M = int(n_classes)
+        self.min_df, self.max_codes = int(min_df), int(max_codes)
+        self.ft = (None if theta_topics is None
+                   else np.asarray(theta_topics, dtype=np.int64))
+        self.lambdas, self.seed = tuple(lambdas), int(seed)
+
+    @staticmethod
+    def _items(bags):
+        return [(int(d), int(v)) for d, b in bags.items() for v in b]
+
+    def _raw(self, bags_list, thetas=None):
+        X = np.zeros((len(bags_list), self.p_codes + 1 + (0 if self.ft is None
+                                                         else len(self.ft))))
+        for i, b in enumerate(bags_list):
+            its = self._items(b)
+            for it in its:
+                j = self.pos.get(it)
+                if j is not None:
+                    X[i, j] = 1.0
+            X[i, self.p_codes] = np.log1p(len(its))
+        if self.ft is not None:
+            X[:, self.p_codes + 1:] = np.log(np.clip(
+                np.asarray(thetas, dtype=np.float64)[:, self.ft], 1e-12, 1.0))
+        return X
+
+    def _std(self, X):
+        return (X - self.mu) / self.sd
+
+    def fit(self, bags_list, y, thetas=None):
+        y = np.asarray(y, dtype=np.int64)
+        df, per = {}, {}
+        n_m = np.bincount(y, minlength=self.M).astype(np.float64)
+        for b, c in zip(bags_list, y):
+            for it in set(self._items(b)):
+                df[it] = df.get(it, 0) + 1
+                per.setdefault(it, np.zeros(self.M))[c] += 1.0
+        keep = sorted((it for it, n in df.items() if n >= self.min_df),
+                      key=lambda it: (-df[it], it))[:self.max_codes]
+        self.codes = sorted(keep)
+        self.pos = {it: j for j, it in enumerate(self.codes)}
+        self.p_codes = len(self.codes)
+        self.rate = {it: (v + 0.5) / (n_m + 1.0) for it, v in per.items()}
+        self.rate_absent = 0.5 / (n_m + 1.0)
+        Xr = self._raw(bags_list, thetas)
+        self.mu, self.sd = Xr.mean(axis=0), Xr.std(axis=0) + 1e-6
+        X = self._std(Xr)
+        rng = np.random.default_rng(self.seed)
+        perm = rng.permutation(len(y))
+        cut = max(1, int(0.8 * len(y)))
+        tr, va = perm[:cut], perm[cut:]
+        best, best_ll = self.lambdas[0], np.inf
+        if len(va) >= 5:
+            for lam in self.lambdas:
+                W, b = MulticlassHead._fit(X[tr], y[tr], self.M, lam)
+                Z = X[va] @ W + b
+                ll = -np.mean(Z[np.arange(len(va)), y[va]] - logsumexp(Z, axis=1))
+                if ll < best_ll:
+                    best, best_ll = lam, ll
+        self.lam = best
+        self.W, self.b = MulticlassHead._fit(X, y, self.M, best)
+        return self
+
+    def _softmax(self, Xr):
+        Z = self._std(Xr) @ self.W + self.b
+        return np.exp(Z - logsumexp(Z, axis=1, keepdims=True))
+
+    def predict(self, bags_list, thetas=None):
+        return self._softmax(self._raw(bags_list, thetas))
+
+    def candidates(self, bags, cand_items, theta_rows=None):
+        """(n_cand, M): the differential if each candidate were added (present once)."""
+        x0 = self._raw([bags], None if self.ft is None else
+                       np.asarray(theta_rows)[:1])[0]
+        X = np.tile(x0, (len(cand_items), 1))
+        X[:, self.p_codes] = np.log1p(len(self._items(bags)) + 1)
+        for i, it in enumerate(cand_items):
+            j = self.pos.get((int(it[0]), int(it[1])))
+            if j is not None:
+                X[i, j] = 1.0
+        if self.ft is not None:
+            X[:, self.p_codes + 1:] = np.log(np.clip(
+                np.asarray(theta_rows, dtype=np.float64)[:, self.ft], 1e-12, 1.0))
+        return self._softmax(X)
+
+    def p_yes(self, q, cand_items):
+        """P(candidate present) = sum_m q_m P(v | m), training rates add-half smoothed."""
+        R = np.stack([self.rate.get((int(d), int(v)), self.rate_absent)
+                      for d, v in cand_items])
+        return R @ np.asarray(q, dtype=np.float64)
+
+    def reasons(self, bags, member):
+        """{(d, v): contribution of the code's presence to the member's logit relative to
+        the members' mean} — exact for the linear head (presence 0 -> 1 moves the
+        standardized feature by 1/sd)."""
+        out = {}
+        for it in self._items(bags):
+            j = self.pos.get(it)
+            if j is not None:
+                w = self.W[j]
+                out[it] = float((w[member] - w.mean()) / self.sd[j])
+        return out
+
+
 # ----------------------------------------------------------------------------- #
 # tempering, posteriors, metrics                                                 #
 # ----------------------------------------------------------------------------- #
@@ -461,12 +579,13 @@ def question_values(q0, q_after, p_yes):
     return np.asarray(p_yes) * kl_rows(q_after, q0)
 
 
-NQ_STRATEGIES = ("VOI (E3)", "VOI (E1)", "likely present", "population table",
-                 "random")
+NQ_STRATEGIES = ("VOI (E3)", "VOI (E1)", "VOI (codes)", "likely present",
+                 "population table", "random")
 
 
 def evaluate_next_question(eng, head, patients, pool_items, flagged, rng, *,
-                           ks=(1, 3, 5), frac=0.2, e1=None, e1_lp=None, e1_tau=1.0):
+                           ks=(1, 3, 5), frac=0.2, e1=None, e1_lp=None, e1_tau=1.0,
+                           code_head=None):
     """Spec R2.3 — positive-unlabeled-aware evaluation of "what to ask next".
 
     For each patient (`(truth idx list, filtered bags)`), hide a random `frac` of the
@@ -483,19 +602,26 @@ def evaluate_next_question(eng, head, patients, pool_items, flagged, rng, *,
     against revealing k random hidden codes (an oracle that reveals only real facts)
     and all of them (the full record). `flagged` maps pool index -> True for likely
     treatments / diagnostic consequences (R2.2). Pooled numbers only, plus the VOI (E3)
-    top-3 recommendation counts {pool index: n patients}."""
+    top-3 recommendation counts {pool index: n patients}.
+
+    `code_head` (exp 0148; a `CodeHead`, E5 or E6): adds "VOI (codes)" — P(yes) from the
+    head's per-member presence rates, the differential after a YES by flipping that
+    input — and scores every strategy's reveals under the code differential too
+    (`p_true_c`, `top1_c`); its top-3 counts are `recommended_codes`."""
     pool_g = np.array([eng.gidx(d, v) for d, v in pool_items], dtype=np.int64)
     pool_dom = np.array([d for d, _ in pool_items], dtype=np.int64)
     Eb_pool = eng.ebeta_cols(pool_items)
     ks = tuple(sorted(int(k) for k in ks))
-    strategies = NQ_STRATEGIES if e1 is not None else tuple(
-        x for x in NQ_STRATEGIES if x != "VOI (E1)")
-    fields = ("yield", "p_true", "top1", "p_true_e1", "top1_e1")
+    strategies = tuple(x for x in NQ_STRATEGIES
+                       if (x != "VOI (E1)" or e1 is not None)
+                       and (x != "VOI (codes)" or code_head is not None))
+    c_theta = code_head is not None and code_head.ft is not None
+    fields = ("yield", "p_true", "top1", "p_true_e1", "top1_e1", "p_true_c", "top1_c")
     acc = {(s_, k): {f: [] for f in fields}
            for s_ in strategies + ("random hidden",) for k in ks}
     base = {f: [] for f in fields[1:]}
     full = {f: [] for f in fields[1:]}
-    rec, n_flag, n_top = {}, 0, 0
+    rec, rec_c, n_flag, n_top = {}, {}, 0, 0
 
     def post(bags):
         idx = [eng.gidx(d, v) for d, b in bags.items() for v in b]
@@ -509,12 +635,25 @@ def evaluate_next_question(eng, head, patients, pool_items, flagged, rng, *,
         lens = {d: float(len(b)) for d, b in bags.items()}
         return posterior_from_scores(e1_lp, e1.scores(e1.subtype_ll(bags, lens)), e1_tau)
 
-    def score(store, q, q1, truth):
+    def postc(bags, g):
+        if code_head is None:
+            return None
+        th = (g / g.sum())[None, :] if c_theta else None
+        return code_head.predict([bags], th)[0]
+
+    def score(store, q, q1, truth, qc=None):
         store["p_true"].append(float(q[truth].sum()))
         store["top1"].append(int(np.argmax(q)) in truth)
         if q1 is not None:
             store["p_true_e1"].append(float(q1[truth].sum()))
             store["top1_e1"].append(int(np.argmax(q1)) in truth)
+        if qc is not None:
+            store["p_true_c"].append(float(qc[truth].sum()))
+            store["top1_c"].append(int(np.argmax(qc)) in truth)
+
+    def post_all(bags):
+        q, g, _i, _c = post(bags)
+        return q, post1(bags), postc(bags, g)
 
     for truth, fb in patients:
         sp = hide_split(fb, frac, rng)
@@ -523,17 +662,20 @@ def evaluate_next_question(eng, head, patients, pool_items, flagged, rng, *,
         vis, hid = sp
         q0, g0, vidx, vcnt = post(vis)
         q10 = post1(vis)
-        score(base, q0, q10, truth)
+        qc0 = postc(vis, g0)
+        score(base, q0, q10, truth, qc0)
         allb = {d: dict(b) for d, b in vis.items()}
         for (d, v), c in hid.items():
             allb.setdefault(d, {})[v] = c
-        score(full, post(allb)[0], post1(allb), truth)
+        qf, qf1, qfc = post_all(allb)
+        score(full, qf, qf1, truth, qfc)
         cand = np.array([j for j, (d, v) in enumerate(pool_items)
                          if v not in vis.get(d, {})], dtype=np.int64)
         if cand.size == 0:
             continue
         theta0 = g0 / g0.sum()
-        qa = head.predict(eng.candidate_thetas(g0, vidx, vcnt, pool_g[cand]))
+        cth = eng.candidate_thetas(g0, vidx, vcnt, pool_g[cand])
+        qa = head.predict(cth)
         L = np.array([float(len(vis.get(int(d), {}))) + 1.0 for d in pool_dom[cand]])
         p_yes = 1.0 - np.exp(-L * (theta0 @ Eb_pool[:, cand]))
         orders = {"VOI (E3)": cand[np.argsort(-question_values(q0, qa, p_yes),
@@ -550,6 +692,14 @@ def evaluate_next_question(eng, head, patients, pool_items, flagged, rng, *,
             py1 = (Pm * q10[None, :]).sum(axis=1)
             orders["VOI (E1)"] = cand[np.argsort(-question_values(q10, q1a, py1),
                                                  kind="stable")]
+        if code_head is not None:
+            items_c = [pool_items[int(j)] for j in cand]
+            qca = code_head.candidates(vis, items_c, cth if c_theta else None)
+            pyc = code_head.p_yes(qc0, items_c)
+            orders["VOI (codes)"] = cand[np.argsort(-question_values(qc0, qca, pyc),
+                                                    kind="stable")]
+            for j in orders["VOI (codes)"][:3]:
+                rec_c[int(j)] = rec_c.get(int(j), 0) + 1
         for j in orders["VOI (E3)"][:3]:
             rec[int(j)] = rec.get(int(j), 0) + 1
             n_flag += bool(flagged.get(int(j), False))
@@ -562,10 +712,10 @@ def evaluate_next_question(eng, head, patients, pool_items, flagged, rng, *,
                 b = {d: dict(x) for d, x in vis.items()}
                 for (d, v) in got:
                     b.setdefault(d, {})[v] = hid[(d, v)]
-                q, q1 = (post(b)[0], post1(b)) if got else (q0, q10)
+                q, q1, qc = post_all(b) if got else (q0, q10, qc0)
                 a = acc[(s_, k)]
                 a["yield"].append(len(got) / k)
-                score(a, q, q1, truth)
+                score(a, q, q1, truth, qc)
             sel = rng.choice(len(hid_keys), size=min(k, len(hid_keys)), replace=False)
             b = {d: dict(x) for d, x in vis.items()}
             for i in sel:
@@ -573,7 +723,8 @@ def evaluate_next_question(eng, head, patients, pool_items, flagged, rng, *,
                 b.setdefault(d, {})[v] = hid[(d, v)]
             a = acc[("random hidden", k)]
             a["yield"].append(1.0)
-            score(a, post(b)[0], post1(b), truth)
+            q, q1, qc = post_all(b)
+            score(a, q, q1, truth, qc)
     mean = lambda x: float(np.mean(x)) if len(x) else float("nan")
     return {"n": len(base["p_true"]), "ks": list(ks), "frac_hidden": float(frac),
             "strategies": list(strategies),
@@ -582,4 +733,4 @@ def evaluate_next_question(eng, head, patients, pool_items, flagged, rng, *,
             "by": {f"{s_}@{k}": {m: mean(v) for m, v in a.items()}
                    for (s_, k), a in acc.items()},
             "flag_share_top3": (n_flag / n_top) if n_top else float("nan"),
-            "recommended": rec}
+            "recommended": rec, "recommended_codes": rec_c}

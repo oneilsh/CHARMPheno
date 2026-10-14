@@ -667,11 +667,16 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
         th_te = np.stack([theta(r) for r in te])
         gsum_te = [float(eng.alpha.sum() + sum(r[4])) for r in te]
         truths = [r[0] for r in te]
-        e3 = None
+        e3 = e5 = e6 = None
         ytr = [r[0][0] for r in tr]
         if len(set(ytr)) >= 2:
             th_tr = np.stack([theta(r) for r in tr])
             e3 = dfm.MulticlassHead(feat, len(members), seed=seed).fit(th_tr, ytr)
+            # Exp 0148 (insight 0101): the same softmax on the record's CODES (E5) and
+            # on codes + log θ (E6) — same filtered records, same patients.
+            e5 = dfm.CodeHead(len(members), seed=seed).fit([r[1] for r in tr], ytr)
+            e6 = dfm.CodeHead(len(members), theta_topics=feat, seed=seed).fit(
+                [r[1] for r in tr], ytr, th_tr)
         s1 = [e1.scores(e1.subtype_ll(r[1], r[2])) for r in te]
         s4, lphi4 = zip(*[e4.elbos(r[3], r[4]) for r in te])
         # Prior over members from the TRAIN split's single-positive patients, add-one
@@ -687,7 +692,10 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
         tv = [truths[i] for i in ev_i]
         res = {"n_eval": len(ev_i), "n_fit": len(fit_i), "n_train": len(tr),
                "tau_e1": tau1, "tau_e4": tau4,
-               "e3_lambda": (e3.lam if e3 is not None else None)}
+               "e3_lambda": (e3.lam if e3 is not None else None),
+               "e5_lambda": (e5.lam if e5 is not None else None),
+               "e6_lambda": (e6.lam if e6 is not None else None),
+               "e5_n_codes": (e5.p_codes if e5 is not None else None)}
         rows = {"prior": [pri for _ in ev_i],
                 "E1 presence subtypes": [dfm.posterior_from_scores(lp, s1[i], tau1)
                                          for i in ev_i],
@@ -696,9 +704,12 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
                                         for i in ev_i]}
         if e3 is not None:
             rows["E3 multiclass head"] = list(e3.predict(th_te[ev_i]))
+            rows["E5 code head"] = list(e5.predict([te[i][1] for i in ev_i]))
+            rows["E6 θ + codes"] = list(e6.predict([te[i][1] for i in ev_i],
+                                                    th_te[ev_i]))
         res["metrics"] = {k: dfm.metrics(v, tv) for k, v in rows.items()}
         # reasons on correctly called evaluation patients
-        r1, r3, r4 = [], [], []
+        r1, r3, r4, r5 = [], [], [], []
         for j, i in enumerate(ev_i):
             t = truths[i][0]
             m = members[t]
@@ -708,6 +719,8 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
                                     te[i][4], t)
                 r3.append((m, {_split_gidx(eng, g): float(x)
                                for g, x in zip(te[i][3], c3)}))
+            if e5 is not None and int(np.argmax(rows["E5 code head"][j])) == t:
+                r5.append((m, e5.reasons(te[i][1], t)))
             if int(np.argmax(rows["E1 presence subtypes"][j])) == t:
                 r1.append((m, e1.reasons(e1.subtype_ll(te[i][1], te[i][2]), m)))
             if int(np.argmax(rows["E4 gated likelihood"][j])) == t:
@@ -716,6 +729,7 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
         res["reasons_e3"] = dfm.pool_reasons(r3)
         res["reasons_e1"] = dfm.pool_reasons(r1)
         res["reasons_e4"] = dfm.pool_reasons(r4)
+        res["reasons_e5"] = dfm.pool_reasons(r5)
         named = {m: ctx.rd_names.get(m, str(m)) for m in members}
         L_.append(f"## {gname} — {len(members)} members · {len(ev_i)} scored patients "
                   f"(τ fit on {len(fit_i)}) · {len(tr)} train patients for E3 · "
@@ -727,7 +741,7 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
             L_.append(f"| {k} | {mtr['top1']:.3f} | {mtr['top3']:.3f} | "
                       f"{mtr['bal_top1']:.3f} | {mtr['logloss']:.3f} | {mtr['ece']:.3f} |")
         for key, lab in (("reasons_e3", "E3"), ("reasons_e1", "E1"),
-                         ("reasons_e4", "E4")):
+                         ("reasons_e4", "E4"), ("reasons_e5", "E5")):
             if res[key]:
                 L_.append("")
                 L_.append(f"{lab} reasons (top supporting codes, correctly called "
@@ -737,9 +751,21 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
                         ctx.code_name(d, v) for d, v in codes))
         L_.append("")
         if next_question and e3 is not None:
+            # The code engine for framing 2: E5 or E6, whichever has the lower log loss
+            # on the tau-fit half (never the evaluation half).
+            def _ll(P, ts):
+                return float(np.mean([-np.log(max(P[j][t].sum(), 1e-300))
+                                      for j, t in enumerate(ts)]))
+            ts_fit = [truths[i] for i in fit_i]
+            ll5 = _ll(e5.predict([te[i][1] for i in fit_i]), ts_fit)
+            ll6 = _ll(e6.predict([te[i][1] for i in fit_i], th_te[fit_i]), ts_fit)
+            ce, ce_name = (e5, "E5 codes") if ll5 <= ll6 else (e6, "E6 θ + codes")
+            res["nq_code_engine"] = {"chosen": ce_name, "fit_logloss_e5": ll5,
+                                     "fit_logloss_e6": ll6}
             nq = _next_question_block(ctx, eng, e3, members, te, ev_i, truths, pri,
                                       excl, named, nq_pool, seed, frac=nq_hide,
-                                      e1=e1, e1_lp=lp, e1_tau=tau1)
+                                      e1=e1, e1_lp=lp, e1_tau=tau1, code_head=ce,
+                                      code_name=ce_name)
             L_.extend(nq["lines"])
             res["next_question"] = nq["res"]
         _cprint(f"[differential]   {gname}: done in {time.time() - t0:.0f}s", flush=True)
@@ -755,7 +781,7 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
 
 def _next_question_block(ctx, eng, head, members, te, ev_i, truths, pri, excl, named,
                          pool_per_dom, seed, *, frac=0.2, e1=None, e1_lp=None,
-                         e1_tau=1.0):
+                         e1_tau=1.0, code_head=None, code_name="codes"):
     """Framing 2 (spec R2) on the framing-1 evaluation half: the candidate pool is the
     population-EIG table over condition, drug and measurement-result codes (attestation
     and [measured] excluded), the differential is E3's. Candidates whose presence
@@ -788,7 +814,8 @@ def _next_question_block(ctx, eng, head, members, te, ev_i, truths, pri, excl, n
     pats = [(truths[i], te[i][1]) for i in ev_i]
     rng = np.random.default_rng(int(seed))
     r = dfm.evaluate_next_question(eng, head, pats, pool_items, flagged, rng, frac=frac,
-                                   e1=e1, e1_lp=e1_lp, e1_tau=e1_tau)
+                                   e1=e1, e1_lp=e1_lp, e1_tau=e1_tau,
+                                   code_head=code_head)
     if r["n"] < dfm.EGRESS_FLOOR:
         return {"lines": lines + ["(fewer than 20 evaluable patients; suppressed)"],
                 "res": None}
@@ -796,17 +823,22 @@ def _next_question_block(ctx, eng, head, members, te, ev_i, truths, pri, excl, n
     lines += [f"{r['n']} patients · pool {len(pool_items)} codes (condition, drug, "
               f"measurement results) · likely-treatment flags in VOI top 3: "
               f"{100 * r['flag_share_top3']:.0f}%", "",
-              "| strategy | k | yield | P(true) E3 | top-1 E3 | P(true) E1 | top-1 E1 |",
-              "|---|--:|--:|--:|--:|--:|--:|",
+              f"code differential: {code_name}", "",
+              "| strategy | k | yield | P(true) E3 | top-1 E3 | P(true) E1 | top-1 E1 | "
+              "P(true) codes | top-1 codes |",
+              "|---|--:|--:|--:|--:|--:|--:|--:|--:|",
               f"| visible record ({100 - 100 * frac:.0f}%) | — | — | {v['p_true']:.3f} | "
-              f"{v['top1']:.3f} | {v['p_true_e1']:.3f} | {v['top1_e1']:.3f} |"]
+              f"{v['top1']:.3f} | {v['p_true_e1']:.3f} | {v['top1_e1']:.3f} | "
+              f"{v['p_true_c']:.3f} | {v['top1_c']:.3f} |"]
     for k in r["ks"]:
         for s_ in tuple(r["strategies"]) + ("random hidden",):
             x = r["by"][f"{s_}@{k}"]
             lines.append(f"| {s_} | {k} | {x['yield']:.3f} | {x['p_true']:.3f} | "
-                         f"{x['top1']:.3f} | {x['p_true_e1']:.3f} | {x['top1_e1']:.3f} |")
+                         f"{x['top1']:.3f} | {x['p_true_e1']:.3f} | {x['top1_e1']:.3f} | "
+                         f"{x['p_true_c']:.3f} | {x['top1_c']:.3f} |")
     lines.append(f"| full record | — | — | {f['p_true']:.3f} | {f['top1']:.3f} | "
-                 f"{f['p_true_e1']:.3f} | {f['top1_e1']:.3f} |")
+                 f"{f['p_true_e1']:.3f} | {f['top1_e1']:.3f} | {f['p_true_c']:.3f} | "
+                 f"{f['top1_c']:.3f} |")
     top = sorted(((j, c) for j, c in r["recommended"].items()
                   if c >= dfm.EGRESS_FLOOR), key=lambda x: -x[1])[:10]
     if top:
@@ -814,8 +846,15 @@ def _next_question_block(ctx, eng, head, members, te, ev_i, truths, pri, excl, n
                   "treatment / consequence):"]
         lines.append(" · ".join(ctx.code_name(*pool_items[j]) + (" †" if flagged[j] else "")
                                 for j, _ in top))
+    topc = sorted(((j, c) for j, c in r.get("recommended_codes", {}).items()
+                   if c >= dfm.EGRESS_FLOOR), key=lambda x: -x[1])[:10]
+    if topc:
+        lines += ["", f"Most often in the VOI (codes) top 3 (>= 20 patients; † = likely "
+                  "treatment / consequence):"]
+        lines.append(" · ".join(ctx.code_name(*pool_items[j]) + (" †" if flagged[j] else "")
+                                for j, _ in topc))
     lines.append("")
-    res = {k: v for k, v in r.items() if k != "recommended"}
+    res = {k: v for k, v in r.items() if k not in ("recommended", "recommended_codes")}
     return {"lines": lines, "res": res}
 
 
