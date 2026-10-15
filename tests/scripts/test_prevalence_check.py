@@ -233,3 +233,28 @@ def test_ever_member_frame_and_collect_with_ever(spark, tmp_path):
             features_0=Vectors.sparse(5, [0], [1.0])) for i in (1, 2, 3, 4)])
     out, n = gpr.collect_set_patients(df_, [1, 2], 1, ever_df=ever)
     assert sorted(t for t, _, _ in out) == [[0], [0], [1]] and n == 3
+
+
+def test_incident_test_frame_drops_prior_diagnosed_persons(spark, tmp_path):
+    import datetime as dt
+    from pyspark.sql import Row
+    import gated_pc_readout as gpr
+    uri = tmp_path / "sc"
+    spark.createDataFrame([
+        Row(person_id=1, node_cid=1005, first_attested_date=dt.date(2015, 1, 1)),  # prior, under member
+        Row(person_id=2, node_cid=1001, first_attested_date=dt.date(2021, 1, 1)),  # after index
+        Row(person_id=3, node_cid=1009, first_attested_date=dt.date(2015, 1, 1)),  # prior, group node
+        Row(person_id=4, node_cid=7777, first_attested_date=dt.date(2015, 1, 1)),  # unrelated
+    ]).write.parquet(str(uri / "k" / "first_attestation.parquet"))
+    spark.createDataFrame([Row(person_id=i, index_date=dt.date(2020, 1, 1),
+                               observation_period_end_date=dt.date(2023, 1, 1))
+                           for i in (1, 2, 3, 4)]).write.parquet(
+        str(uri / "k" / "index_horizon.parquet"))
+    (tmp_path / "conversion_sidecar.json").write_text(json.dumps(
+        {"key": "k", "sidecar_uri": str(uri)}))
+    test = spark.createDataFrame([Row(person_id=i, x=1) for i in (1, 2, 3, 4)])
+    pp = gpr._test_prior_pairs(test, tmp_path)
+    nodes = [int(r[0]) for r in pp.select("node_cid").distinct().collect()]
+    padj = {"MONDO:0001005": ["MONDO:0001001"], "MONDO:0001001": ["MONDO:0001009"]}
+    out = gpr._incident_test_frame(test, pp, nodes, [1001, 1002, 1009], padj)
+    assert sorted(r.person_id for r in out.collect()) == [2, 4]
