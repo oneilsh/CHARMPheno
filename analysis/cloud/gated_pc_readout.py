@@ -486,6 +486,41 @@ def ever_member_frame(spark, run_dir, members, member_cids, parent_adj, *,
             .agg(F.collect_set("__pos").alias("__ever")))
 
 
+def _test_prior_pairs(test_df, run_dir, sidecar_uri=None):
+    """`(person_id, node_cid)` for test persons: every sidecar Mondo node first attested
+    BEFORE the person's index (index_horizon). Exp 0151."""
+    from pyspark.sql import functions as F
+    from conversion_sidecar import try_load_index_horizon, try_load_sidecar
+    wit = json.loads((Path(run_dir) / "conversion_sidecar.json").read_text())
+    uri = sidecar_uri or wit.get("sidecar_uri")
+    spark = test_df.sparkSession
+    first = try_load_sidecar(spark, uri, wit["key"])
+    hz = try_load_index_horizon(spark, uri, wit["key"])
+    if first is None or hz is None:
+        raise SystemExit(f"[differential] sidecar MISS at {uri}/{wit['key']} — rebuild "
+                         "it on this cluster (make build-conversion-sidecar ID=N)")
+    persons = test_df.select("person_id").distinct()
+    return (first.join(hz.select("person_id", "index_date").join(persons, "person_id"),
+                       "person_id")
+            .where(F.col("first_attested_date") < F.col("index_date"))
+            .select("person_id", "node_cid").distinct())
+
+
+def _incident_test_frame(test_df, prior_pairs, prior_nodes, target_cids, parent_adj):
+    """`test_df` minus the persons with a pre-index attestation of any target Mondo
+    term (a group's members and the group node) or anything under one — the INCIDENT
+    rule of exp 0151 (insight 0103): their pre-index record is pre-diagnosis."""
+    import prevalence_check as pv
+    from pyspark.sql import functions as F
+    tgt = {i + 1: int(c) for i, c in enumerate(target_cids)}
+    hit = pv.sidecar_nodes_to_readout(prior_nodes, tgt, parent_adj, root_cid=-10**9)
+    if not hit:
+        return test_df
+    ndf = test_df.sparkSession.createDataFrame([(int(n),) for n in hit], "node_cid long")
+    prev = prior_pairs.join(F.broadcast(ndf), "node_cid").select("person_id").distinct()
+    return test_df.join(prev, "person_id", "left_anti")
+
+
 def run_acquisition(test_df, run_dir, pattern, *, adhoc=False, prior="population",
                     results_name="results_readout_stacked_mass99.json",
                     domains=("condition", "drug"), pool=150, steps=20,
@@ -602,7 +637,7 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
                      thin_frac=0.1, own_top=5, rel_lambda=0.6, rho=0.3, seed=0,
                      tag=None, next_question=False, nq_pool=100, nq_hide=0.2,
                      train_ever=False, multi=False, crossfit=False, sidecar_uri=None,
-                     fast=False, max_members=None):
+                     fast=False, max_members=None, incident=False):
     """Framing 1 — DIFFERENTIAL WITH REASONS (spec 2026-10-13 clinician framings,
     R0/R1; `differential.py`). Four engines on the same held-out patients positive on
     exactly one member: E1 presence model with subtype profiles, E2 renormalized
@@ -639,7 +674,8 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
         measured = {int(v) for v, tok in ctx.inv_maps[dm].items() if int(tok) % 100 == 0}
     ev = np.asarray(ctx.sh["evidence"], dtype=np.float64)
     member_cid, parent_adj = {}, None
-    if train_ever:
+    prior_pairs, prior_nodes = None, []
+    if train_ever or incident:
         # Exp 0149: members' Mondo ids (bundle int2cid) and the Mondo is-a, so the
         # sidecar's finer terms roll up onto the members.
         from readout_dag import load_mondo_parent_adj
@@ -649,6 +685,16 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
                .get("corpus_manifest") or {})
         parent_adj, _nm = load_mondo_parent_adj(
             cm_.get("mondo_version"), cm_.get("mondo_cache_dir") or "data/mondo")
+        member_cid.update({int(e): int(c) for e, c in
+                           json.loads((run_dir / "readout_dag.json").read_text())
+                           ["int2cid"].items()})
+    if incident:
+        # Exp 0151: (person, Mondo node) first attested BEFORE the person's index, for
+        # the test persons — computed once; each group then drops the persons with
+        # any such node at or under one of its members or the group node itself.
+        prior_pairs = _test_prior_pairs(test_df, run_dir, sidecar_uri).cache()
+        prior_nodes = [int(r[0]) for r in
+                       prior_pairs.select("node_cid").distinct().collect()]
     sets = vt.select_sets(ctx, pattern, adhoc=adhoc)
     if max_members:
         # Exp 0150 survey: every Mondo group up to `max_members` label members (the
@@ -717,7 +763,14 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
             ever = ever_member_frame(train_df.sparkSession, run_dir, members,
                                      [member_cid[int(m)] for m in members], parent_adj,
                                      sidecar_uri=sidecar_uri)
-        te_raw, n_te = collect_set_patients(test_df, members, len(ctx.lams),
+        te_src = test_df
+        if incident:
+            te_src = _incident_test_frame(test_df, prior_pairs, prior_nodes,
+                                          [member_cid[int(m)] for m in members]
+                                          + ([member_cid[int(n)]] if int(n) > 0
+                                             and int(n) in member_cid else []),
+                                          parent_adj)
+        te_raw, n_te = collect_set_patients(te_src, members, len(ctx.lams),
                                             max_patients=max_patients, seed=seed)
         tr_raw, n_tr = collect_set_patients(train_df, members, len(ctx.lams),
                                             max_patients=max_train, seed=seed,
@@ -1484,6 +1537,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="(--differential) exp 0150 SURVEY: every Mondo group matching "
                         "the pattern with 2..MAX_MEMBERS label members, fast engines "
                         "(E1/E4 skipped; framing 2 on E5), plus <tag>_survey.md")
+    p.add_argument("--diff-incident", action="store_true",
+                   help="(--differential) exp 0151: score only test patients with no "
+                        "member or group diagnosis anywhere BEFORE the index (E4 sidecar, "
+                        "Mondo is-a) — a pre-diagnosis record; training unchanged. Needs "
+                        "<run>/conversion_sidecar.json")
     p.add_argument("--diff-crossfit", action="store_true",
                    help="(--differential) exp 0149: tempers fit on each half in turn, "
                         "every patient scored once (doubles the scored patients)")
@@ -2491,7 +2549,8 @@ def main(argv=None) -> int:
                     nq_hide=args.diff_nq_hide, train_ever=args.diff_train_ever,
                     multi=args.diff_multi, crossfit=args.diff_crossfit,
                     sidecar_uri=args.prev_sidecar_uri,
-                    fast=bool(args.diff_survey), max_members=(args.diff_survey or None))
+                    fast=bool(args.diff_survey), max_members=(args.diff_survey or None),
+                    incident=args.diff_incident)
             return 0
 
         if args.acquisition:
