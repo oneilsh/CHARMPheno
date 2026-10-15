@@ -517,8 +517,15 @@ def _incident_test_frame(test_df, prior_pairs, prior_nodes, target_cids, parent_
     if not hit:
         return test_df
     ndf = test_df.sparkSession.createDataFrame([(int(n),) for n in hit], "node_cid long")
-    prev = prior_pairs.join(F.broadcast(ndf), "node_cid").select("person_id").distinct()
-    return test_df.join(prev, "person_id", "left_anti")
+    # The excluded persons are collected and BROADCAST back, so the (large) test frame
+    # is filtered in place, never shuffled (0151 launch 1: ~440 s per group from a
+    # sort-merge anti-join that shuffled every feature vector twice).
+    prev = [int(r[0]) for r in prior_pairs.join(F.broadcast(ndf), "node_cid")
+            .select("person_id").distinct().collect()]
+    if not prev:
+        return test_df
+    pdf = test_df.sparkSession.createDataFrame([(x,) for x in prev], "person_id long")
+    return test_df.join(F.broadcast(pdf), "person_id", "left_anti")
 
 
 def run_acquisition(test_df, run_dir, pattern, *, adhoc=False, prior="population",
@@ -693,8 +700,12 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
         # the test persons — computed once; each group then drops the persons with
         # any such node at or under one of its members or the group node itself.
         prior_pairs = _test_prior_pairs(test_df, run_dir, sidecar_uri).cache()
+        _np = prior_pairs.count()                      # materialize the cache ONCE
         prior_nodes = [int(r[0]) for r in
                        prior_pairs.select("node_cid").distinct().collect()]
+        _cprint(f"[differential]   incident rule: {_np:,} (test person, node) pairs "
+                f"attested before the index over {len(prior_nodes):,} Mondo nodes",
+                flush=True)
     sets = vt.select_sets(ctx, pattern, adhoc=adhoc)
     if max_members:
         # Exp 0150 survey: every Mondo group up to `max_members` label members (the
