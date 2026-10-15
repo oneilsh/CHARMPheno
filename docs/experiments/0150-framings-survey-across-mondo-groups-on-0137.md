@@ -1,7 +1,7 @@
 ---
 id: 150
 slug: framings-survey-across-mondo-groups-on-0137
-status: planned
+status: running
 model_class: gated_pc
 # NOT A FIT. "Expand the Mondo coverage": framings 1-3 across EVERY Mondo group of the
 # 0137 readout DAG with 2..25 label members (the broad body-system groups are not a
@@ -44,4 +44,30 @@ cut -c1-230 "$RUN"/differential_survey_survey.md
 
 ## Run log
 
-## Results
+**2026-10-14/15 — run.** 290 groups scored (2–25 members, >= 40 test patients).
+
+## Results (first read of the survey table)
+
+290 groups: best engine E6 118, E3 93, E5 79; median E6 − E3 balanced top-1 +0.012;
+median lift over chance 1.53×; median share of the visible→full gap closed by five
+questions 0.15.
+
+Strongest groups by balanced top-1 are SMALL ones: viral hepatitis (4 members) 0.70,
+myeloid neoplasm (4) 0.70, adenocarcinoma (5) 0.67, digestive system carcinoma (5)
+0.66, hepatitis (5) 0.63, autosomal genetic disease (7) 0.58, endocrine gland neoplasm
+(6) 0.56. Large groups (19–25 members) sit at 0.15–0.20. VOI − table is positive
+everywhere in the top 40 but mostly +0.01–0.03; readable only in a few small groups
+(autosomal genetic disease +0.067, digestive system carcinoma +0.059, parasitic
+infectious disease +0.055). Framing 3 (members' new-diagnosis AUC): raw ≥ θ in nearly
+every group, as 0147.
+
+Caveats for the read, handled by `survey_analysis.py`: (a) nested Mondo names share
+member sets (lymphoma / lymphoid neoplasm / lymphoid hemopathy are one row three
+times) — dedupe; (b) lift = bal × M favours large M — use chance-corrected kappa =
+(bal − 1/M)/(1 − 1/M); (c) drug codes are not attestation, so a group whose members
+have specific treatments (antivirals, targeted chemotherapy) may be called from the
+treatment — check the E5 reasons.
+
+```bash
+python3 analysis/cloud/survey_analysis.py "$RUN" survey | cut -c1-220
+```
