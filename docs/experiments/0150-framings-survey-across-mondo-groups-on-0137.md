@@ -1,7 +1,7 @@
 ---
 id: 150
 slug: framings-survey-across-mondo-groups-on-0137
-status: running
+status: done
 model_class: gated_pc
 # NOT A FIT. "Expand the Mondo coverage": framings 1-3 across EVERY Mondo group of the
 # 0137 readout DAG with 2..25 label members (the broad body-system groups are not a
@@ -71,3 +71,40 @@ treatment — check the E5 reasons.
 ```bash
 python3 analysis/cloud/survey_analysis.py "$RUN" survey | cut -c1-220
 ```
+
+## Results (survey_analysis.py)
+
+243 distinct member sets (10 duplicate names). Chance-corrected framing-1 skill kappa
+(best engine) quartiles 0.07 / 0.18 / 0.34; 75 groups >= 0.3, 29 >= 0.5. E6 − E3 kappa
+quartiles −0.001 / +0.016 / +0.056.
+
+Spearman with kappa: members −0.26, scored patients −0.29, F2 gap closed **+0.54**, F2
+VOI − table **+0.46**, F3 new-diagnosis AUC θ +0.11 / raw +0.21.
+
+1. **Framings 1 and 2 go together; framing 3 is a different ability.** Where the record
+   can tell the members apart, questions also help; whether the members are FORESEEABLE
+   before diagnosis (framing 3) barely relates.
+2. **The top groups are mostly two-member splits**, several on few patients (48–90
+   scored; familial hyperlipidemia and autosomal recessive disease at kappa 1.00 rest on
+   very small member counts and are not readable).
+3. **The E5 reasons show what carries the high-skill groups — mostly the diagnosis in
+   other words:**
+   - synonym / parent diagnosis codes the code map does not attest to the member:
+     "Viral hepatitis C" for HCV infection, "Opioid abuse" for opiate dependence,
+     "Alcohol abuse" / "Chronic alcoholism in remission" for alcohol dependence,
+     "Secondary polycythemia" for polycythemia vera, "Monoclonal gammopathy" for
+     myeloma, "Primary malignant neoplasm of skin" for melanoma, "Thrombocytosis" for
+     essential thrombocythemia;
+   - confirmatory test results: HBsAg coded-positive, HCV Ab coded-negative, platelet /
+     hematocrit high;
+   - treatments: entecavir, buprenorphine / methadone / naloxone, lenalidomide,
+     thiamine.
+   Genuine clinical features also appear (cystic fibrosis: pancreatic disorder,
+   bronchiectasis; Riley-Day: autonomic disorder, orthostatic hypotension).
+
+**Read.** Framing-1 skill as measured is an upper bound: most test patients are
+prevalent (0145: median 64% of a node's positives already diagnosed before the index),
+so their pre-index record carries the diagnosis's synonyms, confirmatory tests and
+treatments. The honest version of "which member, and what points there" scores only
+patients whose group diagnosis is NEW after the index — their pre-index record is a
+pre-diagnosis record. Insight 0103.
