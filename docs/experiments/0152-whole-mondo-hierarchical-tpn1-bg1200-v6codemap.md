@@ -1,7 +1,7 @@
 ---
 id: 152
 slug: whole-mondo-hierarchical-tpn1-bg1200-v6codemap
-status: planned
+status: running
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -128,5 +128,24 @@ prevalence check; the raw-code baseline is 0147's (same test split) for the shar
 ribbon nodes.
 
 ## Run log
+
+**2026-10-15 — launch 0 never ran** (the queued wait loop's `pgrep` pattern matched its
+own command line; nothing submitted).
+
+**2026-10-16 — launch 1, bundle audit.** Powering: 30,044 standard codes -> 8,883 Mondo
+terms; 6,024 with closure support; **2,962 clear min_positives 100**. Induced Hasse
+2,963 nodes (1,369 multi-parent); splice removed 253 thin-chain + 15 childless ->
+**2,695 nodes** (1,269 multi-parent), so K = 1,200 + 2,695 = 3,895 at tpn 1, as planned.
+Multi-map guard: 3 source codes, 0 ancestor targets dropped. Hierarchy test: 53
+over-broad non-SNOMED targets dropped over 52 terms (Finding of head and neck region,
+Primary malignant neoplasm, Disorder of GI tract, Enzymopathy, …); 12 suspect SNOMED
+xrefs kept for review (eye degenerative disorder, hearing loss, HMSN, …). Attestation:
+30,044 codes -> 2,651 label nodes; 7,352 codes attest >= 2 nodes (4,204 exact-shared,
+3,148 climb-tie) across 1,640 nodes — far more sharing than the ribbon (220 / 4,871),
+as expected on a multi-parent DAG where unpowered terms' codes climb to every nearest
+kept ancestor. Most-attested nodes are broad groupings that collect unpowered rare
+terms' codes (bone disorder 1,128, hereditary disease 974, skin disorder 950, syndromic
+disease 923, arthropathy 817). The ancestor-group code gap of 0141 ("Cardiomyopathy"
+321319) is closed by construction: the group term is a label node here.
 
 ## Results
