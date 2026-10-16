@@ -25,3 +25,9 @@ gain (Spearman +0.54) but hardly with new-diagnosis AUC (+0.11 θ / +0.21 raw).
 - The code-map gap is broader than the HCM / ancestor-group cases (0141): concept-level
   synonyms of the members are common and should be audited (SNOMED descendants and
   name variants of each member's mapped codes).
+- 0151 (incident patients only, pre-diagnosis records): median kappa halves 0.18 ->
+  0.09; groups at kappa >= 0.3 fall 75 -> 32 of ~200. The survivors are carried by
+  precursor findings (Sjogren: tear film insufficiency; thoracic aortic aneurysm: aortic
+  ectasia; melanoma: actinic keratosis; HCV: antibody positive before the coded
+  diagnosis) and base-rate comorbidities; synonym and treatment codes are gone.
+  Patient-specific next questions still equal a population table.
