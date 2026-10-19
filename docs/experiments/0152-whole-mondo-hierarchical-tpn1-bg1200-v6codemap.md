@@ -168,4 +168,12 @@ terms' codes (bone disorder 1,128, hereditary disease 974, skin disorder 950, sy
 disease 923, arthropathy 817). The ancestor-group code gap of 0141 ("Cardiomyopathy"
 321319) is closed by construction: the group term is a label node here.
 
+**2026-10-19 — readout, launch 1.** Readout DAG 2,694 label nodes + 73 ancestor heads ->
+C = 2,768; node subset (ribbon + ancestors + root) keeps 1,080 heads, 1,060 fittable.
+Transient executor losses (exit 143, all nodes RUNNING afterwards). Solve at ~220 s per
+pass after the line-search start; restarted with `--readout-max-iter 100` (half the
+default 200) so it finishes within a cluster's lifetime — a departure from 0137's
+solve, noted for the comparison (unconverged heads at 100 iterations are usually
+ranking-stable).
+
 ## Results
