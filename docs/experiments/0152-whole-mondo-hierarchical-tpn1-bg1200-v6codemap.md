@@ -228,6 +228,34 @@ make -C analysis/cloud inspect-topics ID=152 RESOLVE_NAMES=1 INSPECT_ARGS="--dig
 make -C analysis/cloud inspect-topics ID=137 RESOLVE_NAMES=1 INSPECT_ARGS="--digest --grep '$G'" | cut -c1-220 > "$RUN152"/read3_digest_0137.md
 ```
 
+**Read 3 result (2026-10-19).** 0% of blocks starved; redundancy collapses only 3 of
+836 parents (worst: digestive system neuroendocrine neoplasm, 0.90). So the
+whole-hierarchy fit does not have the duplicate-children problem.
+
+- **Fixed since insight 0094** (v6 code map plus the full hierarchy). These children now
+  carry their own vocabulary:
+  - dilated CM (evidence 1.9e4): "Dilated cardiomyopathy · Chronic systolic heart failure · …".
+  - persistent AF (1.4e4): "Atrial fibrillation · Persistent atrial fibrillation".
+  - intrinsic CM (1.1e4): "Cardiomyopathy · Primary cardiomyopathy · Ventricular
+    tachycardia · Dilated cardiomyopathy".
+  - peripartum CM (303): "Finding related to pregnancy · Postpartum finding · Primary
+    cardiomyopathy".
+- **Still failing:**
+  - Low-evidence children read as junk: non-familial restrictive CM (285) shows raised
+    eosinophil count, Sjögren's and backache; restrictive CM (64) is noise.
+  - Hypertrophic CM (108) reads as breast findings. Its own codes went to the parent
+    instead: the "cardiomyopathy" node reads "Hypertrophic cardiomyopathy · Hypertrophic
+    obstructive cardiomyopathy". The parent claims the child's words, which is the
+    40565500 code-map gap R4.2 already names.
+  - Systolic HF (3.7e3) reads as knee osteoarthritis, junk despite decent evidence.
+    Congestive HF (1.1e4) reads as a comorbidity mix.
+  - Broad nodes are generic symptom strata. Digestive system disorder reads as nausea
+    and abdominal pain; brain disorder reads as anxiety and shortness of breath.
+- **Read:** the hierarchy fixes legibility where the record has the codes and the
+  evidence. It does not fix low evidence (fewer than about 300 gated documents) or
+  missing code-map pairs. With 0152's AUC result, the topics became more legible but no
+  more predictive.
+
 **Read 4 — framings on this fit**: the 0151 protocol (incident patients, fast engines,
 framing 2 on E5) on the SAME group names 0151 scored (`--diff-groups-like`). On the
 nested label space a group's members are its MOST SPECIFIC label descendants
