@@ -288,6 +288,42 @@ done
 make -s -C analysis/cloud inspect-topics ID=152 RESOLVE_NAMES=1 INSPECT_ARGS="--tour 2 --top-topics 0 --top-words 8 --out $RUN152/read3b_tour.md" > /dev/null
 ```
 
+**Read 3b result (2026-10-19).** The areas read were metabolic/endocrine, autoimmune,
+neuro, infectious/rare, and eye/GU/pregnancy, plus the tree tour.
+- **Specific nodes carry their own diagnosis broadly.** A `†` word leads most fed leaves:
+  T1DM, T2DM, gout, SLE, psoriasis, UC, Crohn's, celiac, RA, MS, HIV, sickle cell, CF,
+  sarcoidosis, Marfan, BPH, prostate cancer, glaucoma subtypes, wet AMD, endometriosis.
+  Co-riders are clinically coherent: diabetic nephropathy and neuropathy, the gout
+  comorbidity set, HIV with anal dysplasia, HCV and syphilis. Marfan's aortic
+  aneurysm and dissection carry the HPO `*` mark without any HPO in the init.
+- **The parent-holds-generic, child-holds-specific pattern recurs.** Parents with no `†`
+  word whose children do carry theirs: hypothyroidism (shows thyroid-cancer and
+  post-surgical words), osteoporosis (menopause; the postmenopausal child carries the
+  codes), epilepsy, migraine disorder, cataract, stroke disorder. Most read as related
+  strata. A few borrow a sibling's vocabulary: migraine disorder shows seizure and
+  epilepsy words, and cataract shows COPD. These are the cardiomyopathy pattern again.
+- **The evidence floor is about 300 to 1,000.** Leaves above about 1,000 are legible (MS
+  1.3e3, juvenile RA 1.0e3, Marfan 886, amyloidosis 908). Below about 300 most are
+  junk: Crohn ileitis shows pregnancy words, hemophilia shows diabetic eye disease,
+  cutaneous and drug-induced lupus are a comorbidity mix.
+- **Some shallow nodes are one-code sinks.** Tree-tour support of 1 to 3 words: "human
+  disease" is 98% anxiety disorder, "vascular disorder" 98% essential hypertension,
+  "metabolic disease" 96% pure hypercholesterolemia, "disease by developmental
+  process" 91% mixed hyperlipidemia. Each block absorbed one very common code, not a
+  symptom stratum. Digestive (support 74) and brain disorder (61) are the true strata.
+- **Spectral anchors are outliers the fit abandoned.** With tpn 1 the per-node anchor is
+  an extreme rare word: T2DM ⚓esotropia, T1DM ⚓Parkinson's, gout ⚓corneal abrasion.
+  The same few anchors recur across unrelated nodes. Blocks still recover their
+  diagnosis, so in this fit the gate and the EM carry identity, not the seed.
+  (Digest fix: anchors index the concatenated multi-domain vocab; non-condition ones
+  now print as `[measurement]` or `[drug]`.)
+- **Artifacts.** Pneumococcal vaccine serotype antigens (about 20 ingredient tokens per
+  vaccine) dominate the drug slice of pancreas disorder and brain disorder.
+  `[measured]` tokens fill the measurement slices (the R4.1 filter target).
+- **HPO overlap is thin.** 227 nodes have an HPO-profile concept in the condition vocab.
+  HPO phenotypes mostly map to symptom concepts, while these words are diagnoses, so
+  `*` is rare. Where it fires (T1DM, SLE, BPH, Marfan, Sjögren tear film), it agrees.
+
 **Read 4 — framings on this fit**: the 0151 protocol (incident patients, fast engines,
 framing 2 on E5) on the SAME group names 0151 scored (`--diff-groups-like`). On the
 nested label space a group's members are its MOST SPECIFIC label descendants

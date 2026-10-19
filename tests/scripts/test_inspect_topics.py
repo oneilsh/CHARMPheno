@@ -1053,18 +1053,23 @@ def test_digest_init_line_anchors_and_own_codes(tmp_path):
     (tmp_path / "spectral_anchors.json").write_text(json.dumps(
         {"vocab_domain": 0, "nodes": {
             "1": {"cid": 1001, "anchors": [3], "from_profile": [True]},
-            "2": {"cid": 1002, "anchors": [4], "from_profile": [False]}}}))
+            "2": {"cid": 1002, "anchors": [4], "from_profile": [False]},
+            "3": {"cid": 1003, "anchors": [12], "from_profile": [False]}}}))
     (tmp_path / "code_map.tsv").write_text("std_cid\tnode_cid\n200\t1001\n")
     names = tmp_path / "names.csv"
     names.write_text("concept_id,concept_name\n"
-                     + "".join(f"{200 + i},w{i}\n" for i in range(10)))
+                     + "".join(f"{200 + i},w{i}\n" for i in range(10))
+                     + "".join(f"{300 + i},d{i}\n" for i in range(10)))
     dig = it.build_digest(tmp_path, exemplars=6, t_words=10,
                           bundle_meta_path=tmp_path / "meta.json",
                           names_path=str(names),
                           own_codes_path=str(tmp_path / "code_map.tsv"))
     init = next(ln for ln in dig.splitlines() if ln.startswith("init:"))
     assert "spectral" in init and "spectral_d=768" in init
-    assert "HPO: 1/2 nodes have a profile anchor" in init
+    assert "HPO: 1/3 nodes have a profile anchor" in init
+    # concatenated-vocab anchor 12 = domain 1 (drug) local index 2
+    n3 = next(ln for ln in dig.splitlines() if ln.strip().startswith("node3 "))
+    assert "⚓[drug] d2" in n3
     n1 = next(ln for ln in dig.splitlines() if ln.strip().startswith("node1 "))
     assert "⚓w3*" in n1 and "w0†" in n1
     n2 = next(ln for ln in dig.splitlines() if ln.strip().startswith("node2 "))

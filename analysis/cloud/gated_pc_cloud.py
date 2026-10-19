@@ -5313,7 +5313,13 @@ def main() -> int:
                 Path(out).mkdir(parents=True, exist_ok=True)   # out = the run dir
                 _ap = Path(out) / "spectral_anchors.json"
                 with open(_ap, "w") as _fh:
-                    json.dump({"vocab_domain": 0, "nodes": _payload}, _fh)
+                    # Anchor ids index the seed's vocabulary: for a multi-domain
+                    # fit the CONCATENATED [domain 0; domain 1; ...] space.
+                    json.dump({"vocab_domain": 0,
+                               "vocab_space": ("concat" if len(vocab_maps) > 1
+                                               else "domain0"),
+                               "domain_vocab_sizes": [len(vm) for vm in vocab_maps],
+                               "nodes": _payload}, _fh)
                 _cprint(f"[driver]   wrote spectral anchors for {len(_payload)} node(s) "
                         f"-> {_ap}", flush=True)
             # EARLY SAVE, before any readout work touches the cluster: the fit is
