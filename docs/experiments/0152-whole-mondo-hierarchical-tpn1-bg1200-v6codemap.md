@@ -214,3 +214,29 @@ limit is structural to how θ is read (normalized, mass-dominated by frequent to
 not to labels, gating, hierarchy or the code map. Insight 0101 updated. Read (3) (block
 legibility at the same-vocabulary children) and read (4) (framings on this fit) remain —
 they belong to the characterization side, which is now the main line.
+
+## Reads 3 and 4 (run 2026-10-19)
+
+**Read 3 — block legibility** (readout-free; the saved fit + bundle meta). The four
+same-vocabulary children of insight 0094, their parents, and the redundancy section;
+0137 alongside for the ribbon nodes:
+
+```bash
+cd ~/repos/CHARMPheno && git fetch origin claude/dismech-ribbon && git checkout claude/dismech-ribbon && git pull --ff-only
+G='dilated cardiomyopathy|intrinsic cardiomyopathy|persistent atrial fibrillation|restrictive cardiomyopathy|^cardiomyopathy|heart failure|peripartum|hypertrophic cardiomyopathy'
+make -C analysis/cloud inspect-topics ID=152 RESOLVE_NAMES=1 INSPECT_ARGS="--digest --redundancy 30 --grep '$G'" | tee "$RUN152"/read3_digest.md | cut -c1-220
+make -C analysis/cloud inspect-topics ID=137 RESOLVE_NAMES=1 INSPECT_ARGS="--digest --grep '$G'" | cut -c1-220 > "$RUN152"/read3_digest_0137.md
+```
+
+**Read 4 — framings on this fit**: the 0151 protocol (incident patients, fast engines,
+framing 2 on E5) on the SAME group names 0151 scored (`--diff-groups-like`). On the
+nested label space a group's members are its MOST SPECIFIC label descendants
+(`most_specific_members`, automatic when the fit has no label set); every label node
+in the group's subtree still counts as attestation. Bundle rebuilds on a fresh cluster
+(cache MISS, ~35 min); the sidecar for this run must be on the cluster.
+
+```bash
+R137=/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs/0137-dismech-ribbon-record-tpn5-v2codemap
+nohup make -C analysis/cloud gated-pc-readout ID=152 GPR_SPARK_CONF=spark.eventLog.enabled=false GPR_ARGS="--differential . --diff-survey 25 --diff-incident --diff-groups-like $R137/differential_survey_inc.json --acq-heads stacked_nodes_mass99 --diff-max-patients 1500 --diff-crossfit --diff-next-question --diff-nq-hide 0.8 --acq-tag survey_inc" > "$RUN152"/survey_inc_log.md 2>&1 &
+python3 analysis/cloud/survey_analysis.py "$RUN152" survey_inc | cut -c1-220
+```

@@ -239,6 +239,26 @@ def observe_root_everywhere(df, C, mask_col="labelMask"):
     return df.withColumn(mask_col, F.concat(F.array(F.lit(1.0)), tail))
 
 
+def most_specific_members(members, parent_int):
+    """Members that are not an ancestor of another member. On a NESTED label space
+    (exp 0152's whole-Mondo fit) a group's label descendants include intermediate
+    terms whose labels are the closure of their children's, so "which member" needs the
+    most specific ones; a patient coded only at an intermediate level has no member
+    truth and is not scored. `parent_int` is the readout DAG (int or str keys)."""
+    mem = [int(m) for m in members]
+    anc = set()
+    for m in mem:
+        stack, seen = list(parent_int.get(m, parent_int.get(str(m), []))), set()
+        while stack:
+            a = int(stack.pop())
+            if a in seen:
+                continue
+            seen.add(a)
+            stack.extend(parent_int.get(a, parent_int.get(str(a), [])))
+        anc |= seen
+    return [m for m in mem if m not in anc]
+
+
 def readout_node_keep(parent_int, int2cid, keep_cids, C):
     """(C,) bool: readout nodes whose Mondo cid is in `keep_cids`, every transitive
     ancestor of one (the stacked product needs the whole closure), and the root.
@@ -674,7 +694,8 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
                      thin_frac=0.1, own_top=5, rel_lambda=0.6, rho=0.3, seed=0,
                      tag=None, next_question=False, nq_pool=100, nq_hide=0.2,
                      train_ever=False, multi=False, crossfit=False, sidecar_uri=None,
-                     fast=False, max_members=None, incident=False):
+                     fast=False, max_members=None, incident=False,
+                     most_specific=None, groups_like=None):
     """Framing 1 — DIFFERENTIAL WITH REASONS (spec 2026-10-13 clinician framings,
     R0/R1; `differential.py`). Four engines on the same held-out patients positive on
     exactly one member: E1 presence model with subtype profiles, E2 renormalized
@@ -737,6 +758,24 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
                 f"attested before the index over {len(prior_nodes):,} Mondo nodes",
                 flush=True)
     sets = vt.select_sets(ctx, pattern, adhoc=adhoc)
+    if most_specific is None:
+        # Exp 0152: nested label space (no label set) -> most-specific members.
+        _mf = json.loads((run_dir / "manifest.json").read_text())
+        most_specific = not bool((_mf.get("corpus_manifest") or {}).get("label_set"))
+    all_members = {}
+    if most_specific:
+        _pi = ctx.rdag["parent_int"]
+        _s2 = []
+        for n_, g_, m_ in sets:
+            ms = most_specific_members(m_, _pi)
+            all_members[g_] = list(m_)
+            if len(ms) >= 2:
+                _s2.append((n_, g_, ms))
+        sets = _s2
+    if groups_like:
+        # Exp 0152 read 4: the groups a previous survey scored, matched by name.
+        _names = set(json.loads(Path(groups_like).read_text()))
+        sets = [x for x in sets if x[1] in _names]
     if max_members:
         # Exp 0150 survey: every Mondo group up to `max_members` label members (the
         # broad body-system groups are not a differential).
@@ -754,11 +793,12 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
     eng = None
     for n, gname, members in sets:
         t0 = time.time()
-        excl = {0: vt.set_exclusions(ctx, n, members)}
+        sub = all_members.get(gname, members)        # every label node in the group
+        excl = {0: vt.set_exclusions(ctx, n, sub)}
         # Name-matched attestation (0141): a condition concept whose name IS a member's
         # or the group's name ("Hypertrophic cardiomyopathy" 40565500, "Cardiomyopathy")
         # but which the code map missed is attestation too, not a finding.
-        nm_targets = {str(ctx.rd_names.get(m, "")).strip().lower() for m in members}
+        nm_targets = {str(ctx.rd_names.get(m, "")).strip().lower() for m in sub}
         nm_targets.add(str(gname).strip().lower())
         if ctx.names and ctx.inv_maps:
             for v, cid in ctx.inv_maps[0].items():
@@ -807,7 +847,7 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
         te_src = test_df
         if incident:
             te_src = _incident_test_frame(test_df, prior_pairs, prior_nodes,
-                                          [member_cid[int(m)] for m in members]
+                                          [member_cid[int(m)] for m in sub]
                                           + ([member_cid[int(n)]] if int(n) > 0
                                              and int(n) in member_cid else []),
                                           parent_adj)
@@ -1587,6 +1627,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="(--differential) exp 0150 SURVEY: every Mondo group matching "
                         "the pattern with 2..MAX_MEMBERS label members, fast engines "
                         "(E1/E4 skipped; framing 2 on E5), plus <tag>_survey.md")
+    p.add_argument("--diff-groups-like", default=None, metavar="JSON",
+                   help="(--differential) exp 0152: score only the groups whose names are "
+                        "keys of this JSON (e.g. a previous run's differential_<tag>.json)")
     p.add_argument("--diff-incident", action="store_true",
                    help="(--differential) exp 0151: score only test patients with no "
                         "member or group diagnosis anywhere BEFORE the index (E4 sidecar, "
@@ -2600,7 +2643,7 @@ def main(argv=None) -> int:
                     multi=args.diff_multi, crossfit=args.diff_crossfit,
                     sidecar_uri=args.prev_sidecar_uri,
                     fast=bool(args.diff_survey), max_members=(args.diff_survey or None),
-                    incident=args.diff_incident)
+                    incident=args.diff_incident, groups_like=args.diff_groups_like)
             return 0
 
         if args.acquisition:
