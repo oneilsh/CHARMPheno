@@ -961,13 +961,24 @@ def load_spectral_anchors(run_dir):
             for e, r in doc.get("nodes", {}).items()}
 
 
-def _anchor_word(idx, from_profile, cond_inv, names, name_by_id, maxlen=28):
-    cid = cond_inv.get(int(idx)) if cond_inv else None
+def _anchor_word(idx, from_profile, inv_maps, names, name_by_id, dom_names,
+                 maxlen=28):
+    """Name one spectral anchor. A multi-domain seed runs over the CONCATENATED
+    vocabulary [domain 0; domain 1; ...] (gated_lda `_domain_bounds`), so an
+    anchor index past domain 0 is a measurement or drug token: split it by the
+    per-domain sizes and tag the non-condition domain."""
+    i, d = int(idx), 0
+    while inv_maps and d < len(inv_maps) - 1 and i >= len(inv_maps[d]):
+        i -= len(inv_maps[d])
+        d += 1
+    cid = inv_maps[d].get(i) if inv_maps else None
     if cid is None:
         nm = f"idx:{idx}"
     else:
         nm = ((names or {}).get(cid) or (name_by_id or {}).get(cid)
               or f"cid:{cid}")
+        if d > 0:
+            nm = f"[{(dom_names[d] if d < len(dom_names) else d)}] {nm}"
     return _trunc(nm, maxlen) + ("*" if from_profile else "")
 
 
@@ -1097,7 +1108,6 @@ def build_digest(run_dir, *, exemplars=8, t_words=6, bundle_meta_path=None,
         own_idx = own_code_vocab_idx(load_code_map(own_codes_path), i2c, vm0i)
 
     anchors = load_spectral_anchors(run_dir)
-    cond_inv = inv_maps[0] if inv_maps else None
 
     def words(t):
         eng = topic2engine[t]
@@ -1114,7 +1124,7 @@ def build_digest(run_dir, *, exemplars=8, t_words=6, bundle_meta_path=None,
         if not rec:
             return ""
         return " ⚓" + "·".join(
-            _anchor_word(i, f, cond_inv, names, name_by_id)
+            _anchor_word(i, f, inv_maps, names, name_by_id, dom_names)
             for i, f in list(zip(rec["anchors"], rec["from_profile"]))[:3])
 
     def line(t):
