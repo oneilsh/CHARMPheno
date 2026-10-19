@@ -1,7 +1,7 @@
 ---
 id: 152
 slug: whole-mondo-hierarchical-tpn1-bg1200-v6codemap
-status: running
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -176,4 +176,41 @@ default 200) so it finishes within a cluster's lifetime — a departure from 013
 solve, noted for the comparison (unconverged heads at 100 iterations are usually
 ranking-stable).
 
+**2026-10-19 — readout result.** 100 iterations, 192/1,060 heads at gtol (293 passes,
+3.6 h); within-cohort macro AUC 0.724 over 906 nodes (not comparable to 0137: different
+nodes and nested cohorts); the de-novo all-docs lines include the 1,688 masked
+constant heads and are not read. Whole-history prevalence check on the 827 kept nodes:
+stacked all 0.809 -> incident 0.693, flat 0.713 -> 0.597, median prior share 0.58.
+
 ## Results
+
+**On the 492 ribbon nodes shared with 0137 (whole-history new-diagnosis AUC, matched by
+Mondo id; `compare_incident_runs.py`):**
+
+| | 0137 θ (flat ribbon) | **0152 θ (whole-Mondo hierarchy)** | raw codes (0147) |
+|---|--:|--:|--:|
+| stacked macro | 0.694 | **0.700** (median +0.007, wins 294/492) | 0.733 (raw − 0152 median +0.030) |
+| flat macro | 0.612 | 0.604 (median −0.005, wins 222/492) | 0.641 |
+
+By incident positives (stacked, 0137 → 0152, raw): 20–50 0.704 → 0.712 (0.754) · 50–100
+0.684 → 0.700 (0.730) · 100–300 0.700 → 0.707 (0.739) · 300–1000 0.701 → 0.697 (0.727)
+· ≥ 1000 0.661 → 0.658 (0.686).
+
+1. **Read (1): not met.** +0.006 stacked (median +0.007), below the +0.02 bar; the
+   flat heads are slightly WORSE (−0.005). What little the hierarchy adds comes through
+   the stacked product (more and better-specified ancestor heads), not through the
+   topics.
+2. **Read (2): the rare end is not rescued.** The small gains sit at 50–300 incident
+   positives (+0.01–0.02); raw codes still lead by ~0.03–0.04 in every band, most at the
+   smallest.
+3. Caveat: heads under-converged (100 iterations). The gap to raw codes (+0.03) is far
+   larger than what more iterations typically move; the 0137 comparison (+0.006) is
+   within that margin, so read it as "no change".
+
+**Read.** Across every topic-side change tried — label-year vs all-ever gating (0146),
+flat ribbon vs whole-Mondo hierarchy with the repaired code map (0152) — new-diagnosis
+AUC from θ stays at ~0.69–0.70, ~0.03–0.04 below 2,000 binary codes. The representation
+limit is structural to how θ is read (normalized, mass-dominated by frequent tokens),
+not to labels, gating, hierarchy or the code map. Insight 0101 updated. Read (3) (block
+legibility at the same-vocabulary children) and read (4) (framings on this fit) remain —
+they belong to the characterization side, which is now the main line.
