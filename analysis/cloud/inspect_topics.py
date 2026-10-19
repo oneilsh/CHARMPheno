@@ -1628,8 +1628,10 @@ def _profile_vocab_sets(profile_file, manifest, vocab_map0):
             s = str(parts[mi])
             if not (s.startswith("MONDO:") and s[len("MONDO:"):].isdigit()):
                 continue
-            idx = vocab_map0.get(str(parts[ci])) or vocab_map0.get(
-                int(parts[ci]) if str(parts[ci]).isdigit() else -1)
+            idx = vocab_map0.get(str(parts[ci]))
+            if idx is None:          # not `or`: vocab index 0 is a real index
+                idx = vocab_map0.get(
+                    int(parts[ci]) if str(parts[ci]).isdigit() else -1)
             if idx is not None:
                 rows.setdefault(int(s[len("MONDO:"):]), set()).add(int(idx))
     _, int2cid = node_order(manifest)
