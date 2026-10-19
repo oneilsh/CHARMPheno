@@ -258,3 +258,18 @@ def test_incident_test_frame_drops_prior_diagnosed_persons(spark, tmp_path):
     padj = {"MONDO:0001005": ["MONDO:0001001"], "MONDO:0001001": ["MONDO:0001009"]}
     out = gpr._incident_test_frame(test, pp, nodes, [1001, 1002, 1009], padj)
     assert sorted(r.person_id for r in out.collect()) == [2, 4]
+
+
+def test_readout_node_keep_takes_ancestors_and_root():
+    import gated_pc_readout as gpr
+    parent = {1: [0], 2: [1], 3: [0], 4: [3]}
+    int2cid = {0: -1, 1: 100, 2: 200, 3: 300, 4: 400}
+    assert gpr.readout_node_keep(parent, int2cid, [200], 5) == [True, True, True, False, False]
+
+
+def test_mask_to_nodes(spark):
+    from pyspark.sql import Row
+    import gated_pc_readout as gpr
+    df = spark.createDataFrame([Row(person_id=1, labelMask=[1.0, 1.0, 0.0, 1.0])])
+    got = gpr.mask_to_nodes(df, [True, False, True, True]).collect()[0].labelMask
+    assert got == [1.0, 0.0, 0.0, 1.0]

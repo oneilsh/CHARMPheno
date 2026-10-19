@@ -239,6 +239,36 @@ def observe_root_everywhere(df, C, mask_col="labelMask"):
     return df.withColumn(mask_col, F.concat(F.array(F.lit(1.0)), tail))
 
 
+def readout_node_keep(parent_int, int2cid, keep_cids, C):
+    """(C,) bool: readout nodes whose Mondo cid is in `keep_cids`, every transitive
+    ancestor of one (the stacked product needs the whole closure), and the root.
+    Exp 0152: solve the ribbon's heads on a whole-Mondo fit at ribbon cost."""
+    keep_cids = {int(c) for c in keep_cids}
+    keep = [False] * int(C)
+    keep[0] = True
+    stack = [int(n) for n, c in int2cid.items() if int(c) in keep_cids and int(n) < C]
+    while stack:
+        n = stack.pop()
+        if keep[n]:
+            continue
+        keep[n] = True
+        stack.extend(int(p) for p in parent_int.get(n, parent_int.get(str(n), [])))
+    return keep
+
+
+def mask_to_nodes(df, keep, *, mask_col="labelMask"):
+    """Zero `mask_col` outside `keep`: an unkept node observes no cell, so the batched
+    solve treats it as degenerate (constant fallback, converged at iteration 1) and
+    every pass carries only the kept heads. Column arithmetic over a JSON literal
+    (the `widen_labels_to_readout` pattern), no UDF."""
+    import json as _json
+    from pyspark.sql import functions as F
+    lit = F.from_json(F.lit(_json.dumps([1.0 if k else 0.0 for k in keep])),
+                      "array<double>")
+    return df.withColumn(mask_col, F.transform(F.col(mask_col),
+                                               lambda x, i: x * lit[i]))
+
+
 def raw_feature_cols(df):
     """The per-domain BOW columns of a bundle frame, in domain order."""
     cols = sorted((c for c in df.columns if c.startswith("features_")),
@@ -1358,7 +1388,7 @@ def _whole_history_prior(test_scored, keys, run_dir, *, C, readout_int2cid,
 
 def run_prevalence_check(test_scored, run_dir, *, C, parent_int,
                          heads_tag="stacked_mass99", tag=None, top=15,
-                         history=None):
+                         history=None, node_subset=None):
     """How much of the case-finding AUC is prevalent recall? (insight 0100;
     `prevalence_check.py`). Scores the test split with the saved heads (no solve), flags
     each (patient, node) with a mapped attestation code of the node or a label
@@ -1401,6 +1431,9 @@ def run_prevalence_check(test_scored, run_dir, *, C, parent_int,
     v2n = pv.vocab_to_nodes(ctx.own_idx, ctx.rdag["pos_sources"])
     prior = pv.prior_matrix([int(k) for k in keys], codes, v2n, int(C))
     nodes = list(range(1, int(C)))
+    if node_subset is not None:
+        # Exp 0152: only the solved heads — masked heads are constants (AUC 0.5).
+        nodes = [n for n in nodes if node_subset[n]]
     res = {}
     L_ = [f"# {run_dir.name} — prevalence check: AUC with prior-diagnosis patients set "
           f"aside", f"heads {hp.name} · {len(keys):,} test patients · LOOKBACK prior = a "
@@ -1528,6 +1561,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "the 5-year lookback rule. Needs <run>/conversion_sidecar.json.")
     p.add_argument("--prev-sidecar-uri", default=None,
                    help="(--prev-history) sidecar root; default the witness's")
+    p.add_argument("--readout-nodes", default="", metavar="TSV",
+                   help="Exp 0152: solve only the heads of the Mondo terms in this "
+                        "label-set TSV (e.g. the DisMech ribbon) and their readout "
+                        "ancestors; every other head is masked to a constant. Outputs "
+                        "tagged 'nodes_…'; with --readout-stacked --prev-history the "
+                        "whole-history prevalence check follows on those heads.")
     p.add_argument("--readout-incident", action="store_true",
                    help="Exp 0144 (insight 0100): INCIDENT heads on the saved fit — "
                         "every (patient, node) cell with prior evidence for the node "
@@ -2734,6 +2773,19 @@ def main(argv=None) -> int:
                     {"n": len(_sel), "feat_cols": _fcols,
                      "tokens": [[int(d), int(i)] for d, i in _sel]}))
         _test_unmasked = test_scored
+        if args.readout_nodes:
+            if _rdag is None:
+                raise SystemExit("[readout] --readout-nodes needs the Mondo readout DAG "
+                                 "(--readout-hierarchy mondo)")
+            from dismech_ribbon import load_label_set
+            _ids, _ident, _rb = load_label_set(args.readout_nodes)
+            _cids = [int(str(x).split(":", 1)[1]) for x in _ids]
+            _keep = readout_node_keep(_rdag.parent_int, _rdag.int2cid, _cids, _C_ro)
+            _cprint(f"[readout]   node subset {_ident}: {len(_ids)} terms -> "
+                    f"{sum(_keep)} of {_C_ro} readout heads kept (with ancestors and "
+                    f"root); the rest masked to constants", flush=True)
+            train_scored = mask_to_nodes(train_scored, _keep)
+            test_scored = mask_to_nodes(test_scored, _keep)
         if args.readout_incident:
             if _rdag is None:
                 raise SystemExit("[readout] --readout-incident needs the Mondo readout DAG")
@@ -2812,6 +2864,8 @@ def main(argv=None) -> int:
                 _mtag = "incident" + (f"_{_mtag}" if _mtag else "")
             if args.raw_baseline:
                 _mtag = f"raw{int(args.raw_baseline)}" + (f"_{_mtag}" if _mtag else "")
+            if args.readout_nodes:
+                _mtag = "nodes" + (f"_{_mtag}" if _mtag else "")
             if args.readout_stacked:
                 # Its own tag: the arm re-solves the SAME heads plus a changed
                 # root head, and the record's results/heads files stay the
@@ -2837,7 +2891,8 @@ def main(argv=None) -> int:
                         theta_mass=args.readout_theta_mass, C=_C_ro)
             _cprint(f"[readout]   arm results written to {run_dir / _rname}",
                   flush=True)
-            if (args.readout_incident or args.raw_baseline) and args.readout_stacked:
+            if ((args.readout_incident or args.raw_baseline or args.readout_nodes)
+                    and args.readout_stacked):
                 # The comparison that matters: these heads vs the record's on the
                 # SAME unmasked test split under the same prior rule (0143/0145: the
                 # record's stacked incident macro AUC 0.702 / 0.694, flat 0.616 /
@@ -2846,6 +2901,7 @@ def main(argv=None) -> int:
                     run_prevalence_check(
                         _test_unmasked, run_dir, C=_C_ro, parent_int=_parent_ro,
                         heads_tag=_mtag, tag=_mtag,
+                        node_subset=(_keep if args.readout_nodes else None),
                         history=(dict(readout_int2cid=_rdag.int2cid, parent_adj=_padj,
                                       sidecar_uri=args.prev_sidecar_uri)
                                  if args.prev_history and _rdag is not None else None))

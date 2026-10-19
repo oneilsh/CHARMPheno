@@ -75,3 +75,26 @@ def test_raw_features_run_through_the_distributed_stacked_readout(spark, tmp_pat
     assert "gated_pc_stacked" in got and got["gated_pc_stacked"]
     z = np.load(tmp_path / "readout_heads_gated_pc_raw6_stacked.npz")
     assert z["V"].shape == (C, len(sel))
+
+
+def test_masked_heads_drop_out_of_the_distributed_solve(spark, tmp_path, capsys):
+    import numpy as np
+    from pyspark.ml.linalg import Vectors
+    from pyspark.sql import Row
+    rng = np.random.default_rng(1)
+
+    def frame(n, off):
+        rows = []
+        for i in range(n):
+            th = rng.dirichlet(np.ones(4))
+            y = [1.0, float(th[0] > 0.3), float(th[1] > 0.3)]
+            rows.append(Row(person_id=off + i, label=y, labelMask=[1.0, 1.0, 1.0],
+                            topicDistribution=Vectors.dense(th)))
+        return gpr.mask_to_nodes(spark.createDataFrame(rows), [True, True, False])
+    gpr.run_readout(frame(300, 0), frame(150, 10_000),
+                    {"C": 3, "K": 4, "weight_y": 0.0}, recall_targets=[0.5],
+                    fdr_targets=[0.5], min_count=0, readout_mode="distributed",
+                    theta_topm=0, out_dir=tmp_path, mask_tag="nodes_stacked",
+                    stacked=True, parent_int={0: [], 1: [0], 2: [0]}, readout_l2=1.0)
+    z = np.load(tmp_path / "readout_heads_gated_pc_nodes_stacked.npz")
+    assert bool(z["degenerate"][2]) and not bool(z["degenerate"][1])

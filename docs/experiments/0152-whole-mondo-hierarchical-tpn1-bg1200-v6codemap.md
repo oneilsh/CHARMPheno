@@ -122,10 +122,30 @@ nohup make -C analysis/cloud exp ID=152 GPR_SPARK_CONF="spark.eventLog.enabled=f
 grep -E "powering:|multi-map guard|attestation audit|gate-ever|corpus: V=" "$RUN"/sweep_log.md | cut -c1-250
 ```
 
-Step 2 — readouts (after the fit lands; commands written once C and K are known):
-stacked readout at mass 0.99; sidecar for this run's code map; whole-history
-prevalence check; the raw-code baseline is 0147's (same test split) for the shared
-ribbon nodes.
+Step 2 — readout on the RIBBON nodes (and their readout ancestors) only. A full
+readout of ~2,700+ heads at K = 3,894 is several times 0137's solve (a day-plus); the
+pre-registered reads are on the ribbon nodes shared with 0137, so every other head is
+masked to a constant (`--readout-nodes`, it drops out of the solve at iteration 1). The
+sidecar is rebuilt for this run's code map first. A solve that dies with the cluster
+resumes from its checkpoint when the same command is rerun.
+
+```bash
+cd ~/repos/CHARMPheno && git fetch origin claude/dismech-ribbon && git checkout claude/dismech-ribbon && git pull --ff-only
+RUN152=/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs/0152-whole-mondo-hierarchical-tpn1-bg1200-v6codemap
+RIBBON=$HOME/repos/CHARMPheno/analysis/cloud/anchor_selection_data/dismech_ribbon.tsv
+nohup bash -c "
+  make -C analysis/cloud build-conversion-sidecar ID=152 || exit 1
+  make -C analysis/cloud gated-pc-readout ID=152 GPR_SPARK_CONF=spark.eventLog.enabled=false GPR_ARGS='--readout-mode distributed --readout-l2 100 --readout-theta-mass 0.99 --readout-stacked --readout-hierarchy mondo --readout-nodes $RIBBON --prev-history'
+" > "$RUN152"/readout_sweep_log.md 2>&1 &
+grep -E "node subset|fittable nodes|batched L-BFGS iter" "$RUN152"/readout_sweep_log.md | tail -3 | cut -c1-200
+```
+
+Step 3 — compare with 0137 (θ) and 0147 (raw codes), nodes matched by Mondo id:
+
+```bash
+R137=/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs/0137-dismech-ribbon-record-tpn5-v2codemap
+python3 analysis/cloud/compare_incident_runs.py "$R137" prevalence_check_history.json "$RUN152" prevalence_check_stacked_nodes_mass99.json prevalence_check_stacked_raw2000.json
+```
 
 ## Run log
 
