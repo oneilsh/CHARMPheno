@@ -5219,6 +5219,17 @@ def main() -> int:
         # Guided-anchor provenance (spec 2026-10-05): a FIT parameter recorded
         # in the manifest; added ONLY when set (byte-identical manifests
         # otherwise). The seed-side pooled counts are appended after the fit.
+        # Init provenance: the spectral seed's settings, so `inspect_topics
+        # --digest` can say how a block was seeded without the experiment doc.
+        # Added ONLY for spectral fits (random-init manifests stay byte-identical).
+        if str(getattr(args, "init", "random")) == "spectral":
+            manifest_fields["init"] = {
+                "init": "spectral",
+                "spectral_method": str(getattr(args, "spectral_method", "auto")),
+                "spectral_d": int(getattr(args, "spectral_d", 0)),
+                "anchor_scope": str(getattr(args, "anchor_scope", "closure")),
+                "spectral_topo_order": str(getattr(args, "spectral_topo_order",
+                                                   "forward"))}
         if int(getattr(args, "spectral_bg_anchors", 0) or 0) > 0:
             manifest_fields["spectral_bg_anchors"] = int(args.spectral_bg_anchors)
         if getattr(args, "spectral_anchor_profile", ""):

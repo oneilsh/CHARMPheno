@@ -256,6 +256,37 @@ whole-hierarchy fit does not have the duplicate-children problem.
   missing code-map pairs. With 0152's AUC result, the topics became more legible but no
   more predictive.
 
+**Read 3b — broader legibility, with init and HPO provenance.** Eight areas outside the
+cardiac branch, 25 best-fed matches each, plus a two-per-depth tree tour. The digest now
+carries how each block was seeded and what it is made of:
+- an `init:` line. For 0152 it reads spectral (scalable, d 768, closure anchors,
+  forward order, 8 bg anchors). HPO was not used: no guided anchors, no profile-eta prior.
+- `⚓word` per node: its spectral anchor from `spectral_anchors.json`.
+- `†` on the node's own attesting codes from `code_map.tsv`. This is the mapping read: a
+  fed block with no `†` word is not carrying its own diagnosis.
+- `*` on HPO-profile matches among the shown top-N words, whether or not the init used
+  them. This needs a whole-Mondo profile table for this run's vocabulary: stage 1 is
+  offline (public ontology), stage 2 needs the 0152 bundle as a cache HIT.
+
+```bash
+cd ~/repos/CHARMPheno && git fetch origin claude/dismech-ribbon && git checkout claude/dismech-ribbon && git pull --ff-only
+make -C analysis/cloud hpoa-profile-survey HPOA_BRANCH=MONDO:0000001 HPOA_OUT="$RUN152"/hpoa_all HPOA_ARGS="--emit-codes $RUN152/profile_codes_all.tsv"
+make -C analysis/cloud hpoa-stage2-probe ID=152 HPOA_PROFILE_CODES="$RUN152"/profile_codes_all.tsv GPR_ARGS="--emit-eta $RUN152/profile_eta_all.tsv"
+OUT="$RUN152"/read3b_areas.md; : > "$OUT"
+for G in \
+  'diabetes mellitus|thyroid|hyperlipid|obesity|gout|osteoporosis' \
+  'rheumatoid|lupus|psoria|ankylosing|sj.gren|crohn|ulcerative colitis|celiac|multiple sclerosis' \
+  'parkinson|alzheimer|dementia|epilep|migraine|neuropathy|stroke' \
+  'depress|bipolar|schizo|anxiety|attention deficit|autism|alcohol|substance' \
+  'carcinoma|lymphoma|leukemia|melanoma|myeloma' \
+  'asthma|chronic obstructive|pulmonary fibrosis|sleep apnea|kidney|cirrhosis|hepatitis|pancrea' \
+  'HIV|tuberculosis|sickle|cystic fibrosis|hemophilia|ehlers|marfan|amyloid|sarcoid' \
+  'pregnan|endometriosis|polycystic ovary|infertility|prostat|glaucoma|cataract|macular' ; do
+  make -s -C analysis/cloud inspect-topics ID=152 RESOLVE_NAMES=1 CREDITED="$RUN152"/profile_eta_all.tsv INSPECT_ARGS="--digest --digest-exemplars 0 --top-words 10 --grep '$G'" | sed -n "/^init:/p;/^\`/p;/^grep '/,/^\$/p" | cut -c1-260 >> "$OUT"
+done
+make -s -C analysis/cloud inspect-topics ID=152 RESOLVE_NAMES=1 INSPECT_ARGS="--tour 2 --top-topics 0 --top-words 8 --out $RUN152/read3b_tour.md" > /dev/null
+```
+
 **Read 4 — framings on this fit**: the 0151 protocol (incident patients, fast engines,
 framing 2 on E5) on the SAME group names 0151 scored (`--diff-groups-like`). On the
 nested label space a group's members are its MOST SPECIFIC label descendants
