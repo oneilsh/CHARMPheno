@@ -357,3 +357,10 @@ def test_next_question_codes_only():
     assert r["n"] == 60 and r["by"]["random hidden@3"]["yield"] == 1.0
     assert r["full"]["top1"] >= r["visible"]["top1"]
     assert r["by"]["VOI (codes)@3"]["p_true"] >= r["by"]["random@3"]["p_true"]
+
+
+def test_most_specific_members_drops_ancestors():
+    import gated_pc_readout as gpr
+    pi = {"1": [0], "2": [1], "3": [1], "4": [0]}
+    assert gpr.most_specific_members([1, 2, 3, 4], pi) == [2, 3, 4]
+    assert gpr.most_specific_members([2, 4], pi) == [2, 4]
