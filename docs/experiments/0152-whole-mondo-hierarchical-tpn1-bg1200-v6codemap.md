@@ -265,13 +265,14 @@ carries how each block was seeded and what it is made of:
 - `†` on the node's own attesting codes from `code_map.tsv`. This is the mapping read: a
   fed block with no `†` word is not carrying its own diagnosis.
 - `*` on HPO-profile matches among the shown top-N words, whether or not the init used
-  them. This needs a whole-Mondo profile table for this run's vocabulary: stage 1 is
-  offline (public ontology), stage 2 needs the 0152 bundle as a cache HIT.
+  them. This needs a whole-Mondo profile table: stage 1 is offline (public ontology),
+  then `hpo_profile_marks.py` maps the SNOMED codes to standard concepts with a plain
+  `bq query`. No Spark and no bundle; the digest applies vocabulary membership itself.
 
 ```bash
 cd ~/repos/CHARMPheno && git fetch origin claude/dismech-ribbon && git checkout claude/dismech-ribbon && git pull --ff-only
 make -C analysis/cloud hpoa-profile-survey HPOA_BRANCH=MONDO:0000001 HPOA_OUT="$RUN152"/hpoa_all HPOA_ARGS="--emit-codes $RUN152/profile_codes_all.tsv"
-make -C analysis/cloud hpoa-stage2-probe ID=152 HPOA_PROFILE_CODES="$RUN152"/profile_codes_all.tsv GPR_ARGS="--emit-eta $RUN152/profile_eta_all.tsv"
+python3 analysis/cloud/hpo_profile_marks.py --run-dir "$RUN152" --profile-codes "$RUN152"/profile_codes_all.tsv --out "$RUN152"/profile_marks.tsv
 OUT="$RUN152"/read3b_areas.md; : > "$OUT"
 for G in \
   'diabetes mellitus|thyroid|hyperlipid|obesity|gout|osteoporosis' \
@@ -282,7 +283,7 @@ for G in \
   'asthma|chronic obstructive|pulmonary fibrosis|sleep apnea|kidney|cirrhosis|hepatitis|pancrea' \
   'HIV|tuberculosis|sickle|cystic fibrosis|hemophilia|ehlers|marfan|amyloid|sarcoid' \
   'pregnan|endometriosis|polycystic ovary|infertility|prostat|glaucoma|cataract|macular' ; do
-  make -s -C analysis/cloud inspect-topics ID=152 RESOLVE_NAMES=1 CREDITED="$RUN152"/profile_eta_all.tsv INSPECT_ARGS="--digest --digest-exemplars 0 --top-words 10 --grep '$G'" | sed -n "/^init:/p;/^\`/p;/^grep '/,/^\$/p" | cut -c1-260 >> "$OUT"
+  make -s -C analysis/cloud inspect-topics ID=152 RESOLVE_NAMES=1 CREDITED="$RUN152"/profile_marks.tsv INSPECT_ARGS="--digest --digest-exemplars 0 --top-words 10 --grep '$G'" | sed -n "/^init:/p;/^\`/p;/^grep '/,/^\$/p" | cut -c1-260 >> "$OUT"
 done
 make -s -C analysis/cloud inspect-topics ID=152 RESOLVE_NAMES=1 INSPECT_ARGS="--tour 2 --top-topics 0 --top-words 8 --out $RUN152/read3b_tour.md" > /dev/null
 ```
