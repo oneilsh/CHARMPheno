@@ -21,6 +21,10 @@ Schedule mechanics (prototype; nothing in spark-vi changes):
 - `allowed_set` keeps only closure nodes of height <= the current level;
 - a closed block's lambda is FROZEN (its zero sufficient statistics would
   otherwise pull it to the flat prior every step);
+- `+seed`: a block is seeded the moment it opens with the word distribution of
+  its subtree's documents, scaled to a typical open node topic's mass (an
+  unseeded late block opens flat onto sharp competitors, wins no
+  responsibility, and decays to the prior: dead on arrival);
 - `--block-clock`: each open topic's Robbins-Monro step counts from when it
   opened, rho_k = (tau0 + t - t_open_k + 1)^-kappa, so a block opened late is
   not stuck with the global schedule's already-small step.
@@ -103,11 +107,16 @@ class StagedGated(GatedOnlineLDA):
     tau0 / kappa are only used by the per-block clock."""
 
     def __init__(self, lay, vocab_size, *, schedule, block_clock=False,
-                 tau0=64.0, kappa=0.51, **kw):
+                 tau0=64.0, kappa=0.51, open_seed=None, **kw):
         super().__init__(lay, vocab_size, **kw)
         self.schedule = list(schedule)
         self.block_clock = bool(block_clock)
         self.tau0, self.kappa = float(tau0), float(kappa)
+        # {topic k: (V,) word distribution} to seed a block the moment it opens
+        # (None = keep its init). A block opened onto already-sharp children and
+        # background starts flat, wins no responsibility and decays to the
+        # prior; a seed gives it a competitive start.
+        self.open_seed = open_seed
 
     def _level(self, t):
         return self.schedule[t] if t < len(self.schedule) else None
@@ -143,7 +152,18 @@ class StagedGated(GatedOnlineLDA):
         lam = np.where(open_now[:, None], lam, lam_old)        # freeze closed blocks
         open_at = global_params["gate_open_at"].copy()
         nxt = self._open_mask(self._level(t + 1))
-        open_at[nxt & (open_at < 0)] = t + 1
+        newly = nxt & (open_at < 0)
+        open_at[newly] = t + 1
+        if self.open_seed is not None and newly.any():
+            # Seed at the mass of a typical open node topic, so the new block
+            # competes on equal footing (scale-free otherwise).
+            node_open = open_now.copy()
+            node_open[:self.lay.n_bg] = False
+            mass = float(lam[node_open].sum(axis=1).mean()) if node_open.any() \
+                else float(lam.sum(axis=1).mean())
+            lam = lam.copy()
+            for k in np.flatnonzero(newly):
+                lam[k] = self.eta + mass * self.open_seed[k]
         new.update({"lambda": lam, "gate_iter": np.array(t + 1),
                     "gate_open_at": open_at})
         return new
@@ -215,12 +235,29 @@ def schedule_for(lay, total, mode, warm):
     return (out + [None] * total)[:total]
 
 
+def subtree_seed(docs, lay):
+    """{topic k: normalized word frequency over the documents in node u's
+    subtree} for each node block — the empirical distribution the block's
+    gate admits, available from one pass (the same per-node closure counts the
+    spectral seed already gathers)."""
+    sub = {u: lay.subtree(u) for u in lay.nodes}
+    out = {}
+    for u in lay.nodes:
+        acc = np.zeros(V)
+        for d in docs:
+            if any(f in sub[u] for f in d.frontier):
+                acc[d.indices] += d.counts
+        out[lay.block[u][0]] = acc / max(acc.sum(), 1.0)
+    return out
+
+
 def fit(sc, docs, mode, *, seed, total, warm, frac, tau0, kappa, block_clock,
-        n_bg, full_batch):
+        n_bg, full_batch, open_seed=False):
     from spark_vi.core import VIConfig, VIRunner
     lay = StagedLayout(PARENT, n_bg=n_bg, tpn=1)
     m = StagedGated(lay, V, schedule=schedule_for(lay, total, mode, warm),
                     block_clock=block_clock, tau0=tau0, kappa=kappa,
+                    open_seed=subtree_seed(docs, lay) if open_seed else None,
                     alpha=0.1, eta=0.02, random_seed=seed)
     np.random.seed(seed)
     cfg = VIConfig(max_iterations=total, learning_rate_tau0=tau0,
@@ -246,6 +283,8 @@ def main(argv=None):
     ap.add_argument("--n-docs", type=int, default=4000)
     ap.add_argument("--parent-share", type=float, default=0.35)
     ap.add_argument("--n-bg", type=int, default=2)
+    ap.add_argument("--block-clock", action="store_true",
+                    help="add a leaves+seed arm with per-block step clocks")
     ap.add_argument("--full-batch", action="store_true",
                     help="also run full-batch EM arms (comparison only)")
     args = ap.parse_args(argv)
@@ -256,24 +295,30 @@ def main(argv=None):
              .config("spark.sql.shuffle.partitions", "4").getOrCreate())
     spark.sparkContext.setLogLevel("ERROR")
 
-    arms = [("single", False, False), ("leaves", False, False),
-            ("leaves", True, False)]
+    # (mode, block_clock, full_batch, open_seed)
+    arms = [("single", False, False, False), ("leaves", False, False, False),
+            ("leaves", False, False, True)]
+    if args.block_clock:
+        arms.append(("leaves", True, False, True))
     if args.full_batch:
-        arms += [("single", False, True), ("leaves", False, True)]
+        arms += [("single", False, True, False), ("leaves", False, True, True)]
     res = {}
+
+    def label(m, c, fb, sd):
+        return m + ("+seed" if sd else "") + ("+clock" if c else "") + (" FB" if fb else "")
     try:
         for s in range(args.seeds):
             docs, sigs, comorb = plant(s, n_docs=args.n_docs,
                                        parent_share=args.parent_share)
-            for mode, clock, fb in arms:
+            for arm in arms:
+                mode, clock, fb, seeded = arm
                 lam, lay = fit(spark.sparkContext, docs, mode, seed=s,
                                total=args.total, warm=args.warm, frac=args.frac,
                                tau0=args.tau0, kappa=args.kappa, block_clock=clock,
-                               n_bg=args.n_bg, full_batch=fb)
+                               n_bg=args.n_bg, full_batch=fb, open_seed=seeded)
                 for u, r in block_metrics(lam, lay, sigs, comorb).items():
-                    res.setdefault((mode, clock, fb), {}).setdefault(u, []).append(r)
-                print(f"[sim] seed {s} {mode}{'+clock' if clock else ''}"
-                      f"{' full-batch' if fb else ''} done", flush=True)
+                    res.setdefault(arm, {}).setdefault(u, []).append(r)
+                print(f"[sim] seed {s} {label(*arm)} done", flush=True)
     finally:
         spark.stop()
 
@@ -284,7 +329,6 @@ def main(argv=None):
     print("mean over seeds, per cell: own · kids · comorb (mass on own signature · "
           "children's signatures · comorbidity clusters)")
     lay = StagedLayout(PARENT, n_bg=2, tpn=1)
-    label = lambda m, c, fb: m + ("+clock" if c else "") + (" FB" if fb else "")  # noqa: E731
     print(f"{'node':<16} h " + "".join(f"| {label(*a):<17}" for a in arms))
     for u in lay.nodes:
         cells = []
