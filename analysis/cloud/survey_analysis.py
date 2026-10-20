@@ -107,6 +107,8 @@ def kappa_by_group(run, tag):
     out = {}
     for g, r in js.items():
         mt = r.get("metrics") or {}
+        if r.get("members"):                      # recorded by the survey itself
+            mem[g] = tuple(sorted(r["members"]))
         if "E6 θ + codes" not in mt or g not in mem:
             continue
         M = len(mem[g])
@@ -179,6 +181,8 @@ def main(argv):
     rows, seen = [], {}
     for g, r in js.items():
         mt = r.get("metrics") or {}
+        if r.get("members"):                      # recorded by the survey itself
+            mem[g] = tuple(sorted(r["members"]))
         if "E6 θ + codes" not in mt or g not in mem:
             continue
         key = mem[g]

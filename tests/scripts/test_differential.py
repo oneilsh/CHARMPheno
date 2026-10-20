@@ -364,3 +364,11 @@ def test_most_specific_members_drops_ancestors():
     pi = {"1": [0], "2": [1], "3": [1], "4": [0]}
     assert gpr.most_specific_members([1, 2, 3, 4], pi) == [2, 3, 4]
     assert gpr.most_specific_members([2, 4], pi) == [2, 4]
+
+
+def test_top_members_rolls_up_subtypes_and_drops_the_group():
+    import gated_pc_readout as gpr
+    # group 5 -> {1 (hep C), 4 (hep A)}; 1 -> {2 (chronic), 3 (acute)}
+    pi = {"1": [5], "2": [1], "3": [1], "4": [5], "5": [0]}
+    assert gpr.top_members([1, 2, 3, 4, 5], pi, group=5) == [1, 4]
+    assert gpr.top_members([2, 3, 4], pi, group=5) == [2, 3, 4]

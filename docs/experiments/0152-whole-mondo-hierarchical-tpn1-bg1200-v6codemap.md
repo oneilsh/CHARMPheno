@@ -147,6 +147,40 @@ R137=/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-t
 python3 analysis/cloud/compare_incident_runs.py "$R137" prevalence_check_history.json "$RUN152" prevalence_check_stacked_nodes_mass99.json prevalence_check_stacked_raw2000.json
 ```
 
+**Read 4 result (2026-10-20): confounded by the member rule.** The 0151 protocol on the
+same group names: 184 candidate groups, 163 scored, about 4.5 h.
+- **Overall:** kappa quartiles 0.03 / 0.10 / 0.16 against 0137's 0.04 / 0.11 / 0.24 on
+  the 162 shared groups. 9 groups reach kappa ≥ 0.3 against 30. Paired, 0152 − 0137 has
+  median −0.035 and 0152 is better in 55 of 162.
+- **Same member count:** only 25 of 162 groups have it. On those the median is −0.046
+  and 0152 is better in 7 of 25.
+- **The cause is the member rule, not the representation.** On the nested label space
+  read 4 scored each group's MOST SPECIFIC members, which drops every patient coded at an
+  intermediate term. Viral hepatitis lost hepatitis C, its bulk, because hepatitis C has
+  subtypes. In most groups only one member reached the 20-patient floor for reasons.
+  Skill fell with patient count (Spearman −0.45).
+- **The E5 code head ignores θ,** so its losses (Sjögren's, cor pulmonale, viral
+  hepatitis) reflect different members and patients, not DAG against flat. E6 − E3 was
+  only +0.03.
+- **Gains were real but small-sample:** cirrhosis 0.00 → 0.63 on 45 patients; narcolepsy,
+  heart septal defect and migraine on the same two members each.
+- **Fix:** `--diff-members top`, now the nested default. A group's members are its
+  top-level label terms, and each rolls up its subtypes, since a nested label is the
+  closure of its descendants'. The survey JSON now records each group's members and the
+  rule used.
+
+**Read 4b (re-run with top-level members).** A fresh cluster needs the sidecar and
+rebuilds the bundle (about 35 min).
+
+```bash
+cd ~/repos/CHARMPheno && git fetch origin claude/dismech-ribbon && git checkout claude/dismech-ribbon && git pull --ff-only
+RUNS=/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs
+RUN152=$(ls -d $RUNS/0152-*); R137=$RUNS/0137-dismech-ribbon-record-tpn5-v2codemap
+make -C analysis/cloud build-conversion-sidecar ID=152 > "$RUN152"/sidecar_log.md 2>&1
+nohup make -C analysis/cloud gated-pc-readout ID=152 GPR_SPARK_CONF=spark.eventLog.enabled=false GPR_ARGS="--differential . --diff-survey 25 --diff-members top --diff-incident --diff-groups-like $R137/differential_survey_inc.json --acq-heads stacked_nodes_mass99 --diff-max-patients 1500 --diff-crossfit --diff-next-question --diff-nq-hide 0.8 --acq-tag survey_inc_top" > "$RUN152"/survey_inc_top_log.md 2>&1 &
+python3 analysis/cloud/survey_analysis.py "$RUN152" survey_inc_top "$R137" survey_inc | cut -c1-220
+```
+
 ## Run log
 
 **2026-10-15 — launch 0 never ran** (the queued wait loop's `pgrep` pattern matched its
