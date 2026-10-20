@@ -2975,8 +2975,10 @@ def main(argv=None) -> int:
                         theta_mass=args.readout_theta_mass, C=_C_ro)
             _cprint(f"[readout]   arm results written to {run_dir / _rname}",
                   flush=True)
-            if ((args.readout_incident or args.raw_baseline or args.readout_nodes)
-                    and args.readout_stacked):
+            if ((args.readout_incident or args.raw_baseline or args.readout_nodes
+                    or args.prev_history) and args.readout_stacked):
+                # --prev-history alone asks for the new-diagnosis check too (exp 0153:
+                # a plain readout with it silently skipped the check).
                 # The comparison that matters: these heads vs the record's on the
                 # SAME unmasked test split under the same prior rule (0143/0145: the
                 # record's stacked incident macro AUC 0.702 / 0.694, flat 0.616 /
