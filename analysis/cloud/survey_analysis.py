@@ -140,8 +140,10 @@ def kappa_by_group(run, tag):
         if "E6 θ + codes" not in mt or g not in mem:
             continue
         M = len(mem[g])
-        out[g] = (M, max(kappa(mt[k]["bal_top1"], M) for k in
-                         ("E3 multiclass head", "E5 code head", "E6 θ + codes")))
+        ks = {e: kappa(mt[k]["bal_top1"], M) for e, k in
+              (("E3", "E3 multiclass head"), ("E5", "E5 code head"),
+               ("E6", "E6 θ + codes"))}
+        out[g] = (M, max(ks.values()), ks)
     return out
 
 
@@ -163,6 +165,15 @@ def paired(run_a, tag_a, run_b, tag_b):
     print("A − B quartiles: " + " / ".join(f"{v:+.3f}" for v in np.percentile(d, [25, 50, 75]))
           + f" · A better in {int((d > 0).sum())} of {len(d)}; "
           f"kappa >= 0.3 A {int((ka >= 0.3).sum())} / B {int((kb >= 0.3).sum())}")
+    # Per engine: E5 reads raw codes only, so it is the same machine in both runs;
+    # E3 (θ only) and E6 (θ + codes) are where the representation enters.
+    for e, lab in (("E3", "θ only"), ("E5", "codes only"), ("E6", "θ + codes")):
+        de = np.array([a[g][2][e] - b[g][2][e] for g in shared])
+        print(f"  {e} ({lab}): A − B quartiles "
+              + " / ".join(f"{v:+.3f}" for v in np.percentile(de, [25, 50, 75]))
+              + f" · A better in {int((de > 0).sum())} of {len(de)} · median kappa A "
+              f"{np.median([a[g][2][e] for g in shared]):.2f} / B "
+              f"{np.median([b[g][2][e] for g in shared]):.2f}")
     same = [g for g in shared if a[g][0] == b[g][0]]
     print(f"same member count M in {len(same)} of {len(shared)} groups")
     if len(same) >= 4:
@@ -170,13 +181,14 @@ def paired(run_a, tag_a, run_b, tag_b):
         print("  same-M groups only: A − B quartiles "
               + " / ".join(f"{v:+.3f}" for v in np.percentile(ds, [25, 50, 75]))
               + f" · A better in {int((ds > 0).sum())} of {len(ds)}")
-    print("\n| group | M A/B | kappa A | kappa B | A − B |")
-    print("|---|--:|--:|--:|--:|")
+    print("\n| group | M A/B | kappa A | kappa B | A − B | E3 A/B | E6 A/B |")
+    print("|---|--:|--:|--:|--:|--:|--:|")
     order = sorted(shared, key=lambda g: -(a[g][1] - b[g][1]))
     show = order if len(order) <= 24 else order[:12] + order[-12:]
     for g in show:
         print(f"| {g[:38]} | {a[g][0]}/{b[g][0]} | {a[g][1]:.2f} | {b[g][1]:.2f} | "
-              f"{a[g][1] - b[g][1]:+.2f} |")
+              f"{a[g][1] - b[g][1]:+.2f} | {a[g][2]['E3']:.2f}/{b[g][2]['E3']:.2f} | "
+              f"{a[g][2]['E6']:.2f}/{b[g][2]['E6']:.2f} |")
 
 
 def main(argv):
