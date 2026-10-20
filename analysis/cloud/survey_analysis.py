@@ -55,7 +55,29 @@ def most_specific(members, parent_int):
     return tuple(m for m in members if m not in anc)
 
 
-def group_members(run_dir):
+def top_level(members, parent_int, group):
+    """Members with no proper ancestor among the others, the group node excluded —
+    `gated_pc_readout.top_members` (the nested default from exp 0152 read 4b)."""
+    mem = [m for m in members if m != group]
+    ms = set(mem)
+    out = []
+    for m in mem:
+        stack, seen, hit = list(parent_int.get(str(m), [])), set(), False
+        while stack and not hit:
+            a = int(stack.pop())
+            if a not in seen:
+                seen.add(a)
+                hit = a in ms
+                stack.extend(parent_int.get(str(a), []))
+        if not hit:
+            out.append(m)
+    return tuple(out)
+
+
+def group_members(run_dir, rule="legacy", with_cids=False):
+    """{group name: member readout ids}. `rule`: "legacy" = what a survey without
+    recorded members used (all on a label set, most-specific when nested); "top" /
+    "most-specific" / "all" force one. `with_cids` also returns {readout id: cid}."""
     run_dir = Path(run_dir)
     rd = json.loads((run_dir / "readout_dag.json").read_text())
     mf = run_dir / "manifest.json"
@@ -70,16 +92,22 @@ def group_members(run_dir):
                          or fallback.get(str(c)) or f"cid:{c}")
     C_fit = int(rd["C_fit"])
     nested = mf.exists() and not cm.get("label_set")
+    if rule == "legacy":
+        rule = "most-specific" if nested else "all"
     pi = {str(k): v for k, v in rd.get("parent_int", {}).items()}
     out = {}
     for n, srcs in enumerate(rd["pos_sources"]):
         if n == 0:
             continue
         mem = tuple(sorted({int(e) for e in srcs if 0 < int(e) < C_fit}))
-        if nested:
+        if rule == "most-specific":
             mem = most_specific(mem, pi)
+        elif rule == "top":
+            mem = top_level(mem, pi, n)
         if len(mem) >= 2:
             out.setdefault(names.get(n, str(n)), mem)
+    if with_cids:
+        return out, {int(r): int(c) for r, c in rd["int2cid"].items()}
     return out
 
 
