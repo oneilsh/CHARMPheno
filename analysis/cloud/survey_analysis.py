@@ -58,13 +58,18 @@ def most_specific(members, parent_int):
 def group_members(run_dir):
     run_dir = Path(run_dir)
     rd = json.loads((run_dir / "readout_dag.json").read_text())
+    mf = run_dir / "manifest.json"
+    cm = (json.loads(mf.read_text()).get("corpus_manifest") or {}) if mf.exists() else {}
+    # Names as the survey resolves them (`voi_tables.load_voi_context`): the readout
+    # DAG's own name, else the fit manifest's. On a whole-Mondo fit most readout
+    # nodes are named only in the manifest, and a bare cid never matches the survey.
+    fallback = cm.get("name_by_id") or {}
     names = {}
     for r, c in rd["int2cid"].items():
-        names[int(r)] = rd["name_by_id"].get(str(c), str(c))
+        names[int(r)] = ((rd.get("name_by_id") or {}).get(str(c))
+                         or fallback.get(str(c)) or f"cid:{c}")
     C_fit = int(rd["C_fit"])
-    mf = run_dir / "manifest.json"
-    nested = (mf.exists() and not (json.loads(mf.read_text()).get("corpus_manifest")
-                                   or {}).get("label_set"))
+    nested = mf.exists() and not cm.get("label_set")
     pi = {str(k): v for k, v in rd.get("parent_int", {}).items()}
     out = {}
     for n, srcs in enumerate(rd["pos_sources"]):
@@ -132,8 +137,9 @@ def paired(run_a, tag_a, run_b, tag_b):
     print(f"same member count M in {same_m} of {len(shared)} groups")
     print("\n| group | M A/B | kappa A | kappa B | A − B |")
     print("|---|--:|--:|--:|--:|")
-    for g in sorted(shared, key=lambda g: -(a[g][1] - b[g][1]))[:12] + \
-            sorted(shared, key=lambda g: a[g][1] - b[g][1])[:12]:
+    order = sorted(shared, key=lambda g: -(a[g][1] - b[g][1]))
+    show = order if len(order) <= 24 else order[:12] + order[-12:]
+    for g in show:
         print(f"| {g[:38]} | {a[g][0]}/{b[g][0]} | {a[g][1]:.2f} | {b[g][1]:.2f} | "
               f"{a[g][1] - b[g][1]:+.2f} |")
 
@@ -149,7 +155,15 @@ def main(argv):
     md = (run / f"differential_{tag}.md").read_text()
     mem = group_members(run)
     load = lambda f: json.loads((run / f).read_text()) if (run / f).exists() else None
-    th, rw = load("prevalence_check_history.json"), load("prevalence_check_stacked_raw2000.json")
+    # θ framing-3 source: the whole-history check, else the stacked one a node-subset
+    # readout writes (0152: prevalence_check_stacked_nodes_mass99.json).
+    th = load("prevalence_check_history.json")
+    if th is None:
+        for f in sorted(run.glob("prevalence_check_stacked*.json")):
+            if "raw" not in f.name:
+                th = json.loads(f.read_text())
+                break
+    rw = load("prevalence_check_stacked_raw2000.json")
 
     def f3(members, src):
         if not src:

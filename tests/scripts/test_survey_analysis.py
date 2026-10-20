@@ -56,6 +56,16 @@ def test_nested_label_space_uses_most_specific_members(tmp_path):
     assert abs(sa.kappa_by_group(tmp_path, "s")["group A"][1] - sa.kappa(0.6, 3)) < 1e-9
 
 
+def test_names_fall_back_to_the_fit_manifest(tmp_path):
+    _nested_run(tmp_path, 0.6)
+    rd = json.loads((tmp_path / "readout_dag.json").read_text())
+    rd["name_by_id"] = {}
+    (tmp_path / "readout_dag.json").write_text(json.dumps(rd))
+    (tmp_path / "manifest.json").write_text(json.dumps(
+        {"corpus_manifest": {"name_by_id": {"15": "group A"}}}))
+    assert "group A" in sa.group_members(tmp_path)
+
+
 def test_paired_by_group_name(tmp_path, capsys):
     a, b = tmp_path / "a", tmp_path / "b"
     a.mkdir(); b.mkdir()
