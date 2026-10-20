@@ -1,7 +1,7 @@
 ---
 id: 154
 slug: cm-subtree-leaves-first-seeded-bg200-tpn1
-status: planned
+status: running
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -113,3 +113,25 @@ heights, the iteration where the full gate starts, and that the seed is ON.
 The digest pair in 0153.
 
 ## Run log
+
+**2026-10-20 — both fits done; digest pair (read 1).** K = 217 (200 bg + 17 nodes), 0%
+starved in both. Per node, 0153 single round → 0154 leaves-first + seed:
+- **Wins.**
+  - cardiomyopathy (the subtree root): ischemic heart disease plus hypertrophic
+    obstructive CM (a child's vocabulary), with no own code → Cardiomyopathy† and
+    Primary cardiomyopathy† plus heart failure, its own stratum. Evidence 1.2e4 → 3.3e4.
+  - myocarditis: fracture, osteoporosis, DVT (junk) → myocarditis†, pericarditis,
+    pericardial effusion.
+- **Losses.**
+  - intrinsic cardiomyopathy: generic symptoms plus HF drugs → HOCM and HCM words. The
+    parent-holds-child leak moved down from the root to this node.
+  - restrictive CM: sarcoidosis, primary CM and VT (clinically plausible: cardiac
+    sarcoid) → generic junk, evidence 1.5e3 → 297.
+  - acute myocarditis (evidence about 150 in both): myocarditis first → junk.
+- **Same in both:** DCM (own code, HF-led), HCM (clean in both, so the HCM fix over 0152
+  comes from the narrower fit, not the schedule), peripartum (clean), non-familial
+  restrictive (junk in both; in 0153 it absorbed asthma at evidence 7.6e3, in 0154 it sits
+  near the floor at 151).
+- **Read:** the targeted failure is fixed at the top node, and myocarditis is rescued.
+  The leak reappears one level down, and two low-evidence nodes lose their words. One
+  seed per arm. Readouts next.
