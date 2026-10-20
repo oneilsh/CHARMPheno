@@ -34,6 +34,7 @@ class DagLayout:
                       for i, u in enumerate(self.nodes)}
         self.K = n_bg + len(self.nodes) * tpn
         self._depth = {}
+        self._height = {}
 
     def depth(self, v, _stack=()):
         """Longest path length from root to v (root = 0). Memoized; cycle-guarded.
@@ -48,6 +49,20 @@ class DagLayout:
         d = 0 if not ps else 1 + max(self.depth(p, _stack + (v,)) for p in ps)
         self._depth[v] = d
         return d
+
+    def height(self, v, _stack=()):
+        """Longest path DOWN from v to a leaf (leaves = 0). Memoized; cycle-guarded.
+
+        The clock of the leaves-first gate schedule (`GatedOnlineLDA.set_gate_schedule`):
+        by height, not depth, because leaves sit at very different depths, and a node's
+        height is strictly greater than every child's, so on a multi-parent DAG every
+        child — a shared one included — opens before any of its parents."""
+        if v in self._height:
+            return self._height[v]
+        ch = [c for c in self.children.get(v, []) if c != v and c not in _stack]
+        h = 0 if not ch else 1 + max(self.height(c, _stack + (v,)) for c in ch)
+        self._height[v] = h
+        return h
 
     def closure(self, v):
         """All ancestors of v plus v, as a list sorted by (depth, id) so root comes first. For a
@@ -205,12 +220,15 @@ class DagLayout:
         lines.append("=" * 74)
         return d, "\n".join(lines)
 
-    def allowed_set(self, frontier):
-        """Background ∪ blocks over the union of closures of the frontier nodes (set-valued gate)."""
+    def allowed_set(self, frontier, max_height=None):
+        """Background ∪ blocks over the union of closures of the frontier nodes (set-valued gate).
+
+        `max_height` (None = no cap, the production gate) keeps only closure nodes of
+        height <= max_height: a round of the leaves-first schedule."""
         al = set(range(self.n_bg))
         for f in frontier:
             for u in self.closure(f):
-                if u != 0:
+                if u != 0 and (max_height is None or self.height(u) <= max_height):
                     al.update(self.block[u])
         return np.array(sorted(al), dtype=int)
 

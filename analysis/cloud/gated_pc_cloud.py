@@ -3115,6 +3115,10 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
         headStandardize=bool(getattr(args, "head_standardize", False)),
         optimizeDocConcentration=args.optimize_doc_concentration,
         frontierCol="frontier", gateNBg=args.n_bg, gateTpn=args.tpn,
+        # Leaves-first gate schedule (report 2026-10-19; exp 0153/0154): 0 = the
+        # single-round gate, byte-identical. Fit-only — no cache key moves.
+        gateWarm=int(getattr(args, "gate_warm", 0) or 0),
+        gateOpenSeed=not bool(getattr(args, "gate_no_open_seed", False)),
         localizeHead=bool(getattr(args, "localize_head", False)),
         headSupport=str(getattr(args, "head_support", "siblings")),
         # Spectral (anchor-word) lambda seed for the gated engine (insight 0079
@@ -4451,6 +4455,15 @@ def parse_args(argv=None):
     # driver post-pass; the gate mode (`gateNd`) folds into the bundle cache key, so
     # a gated bundle is a distinct artifact from the un-gated one. 0 (default) keeps
     # the 365-day frontier as the gate, so every existing key stays byte-identical.
+    p.add_argument("--gate-warm", type=int, default=0, metavar="N",
+                   help="Leaves-first gate schedule: fit in rounds by node height, N "
+                        "iterations per level (leaves first), then the full gate. 0 "
+                        "(default) = single round. Each block is seeded when it opens "
+                        "(see --gate-no-open-seed). Fit-only: bundle/corpus caches "
+                        "unaffected. Report 2026-10-19-leaves-first-gate-sim.")
+    p.add_argument("--gate-no-open-seed", action="store_true",
+                   help="With --gate-warm: do NOT seed blocks when they open (they die "
+                        "on arrival in simulation; ablation only).")
     p.add_argument("--gate-attestation", choices=("label", "ever"), default="label",
                    help="Label redesign R2 (spec 2026-10-13): which attestations GATE a "
                         "TRAIN document's topic blocks. 'label' (default, unchanged): X "
@@ -5230,6 +5243,11 @@ def main() -> int:
                 "anchor_scope": str(getattr(args, "anchor_scope", "closure")),
                 "spectral_topo_order": str(getattr(args, "spectral_topo_order",
                                                    "forward"))}
+        if int(getattr(args, "gate_warm", 0) or 0) > 0:
+            # Fit parameter; added only when set (byte-identical manifests otherwise).
+            manifest_fields["gate_schedule"] = {
+                "warm": int(args.gate_warm),
+                "open_seed": not bool(getattr(args, "gate_no_open_seed", False))}
         if int(getattr(args, "spectral_bg_anchors", 0) or 0) > 0:
             manifest_fields["spectral_bg_anchors"] = int(args.spectral_bg_anchors)
         if getattr(args, "spectral_anchor_profile", ""):

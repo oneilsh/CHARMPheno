@@ -964,6 +964,12 @@ def build_gated_pc_args(
     # every bundle key byte-identical.
     if effective.get("gate_attestation") and str(effective["gate_attestation"]) != "label":
         args.extend(["--gate-attestation", str(effective["gate_attestation"])])
+    # Leaves-first gate schedule (exp 0153/0154). Emitted only when set, so every
+    # existing arg string stays byte-identical.
+    if int(effective.get("gate_warm", 0) or 0) > 0:
+        args.extend(["--gate-warm", str(int(effective["gate_warm"]))])
+        if effective.get("gate_open_seed") is False:
+            args.append("--gate-no-open-seed")
     if effective.get("readout_sample_frac") is not None:
         args.extend(["--readout-sample-frac", str(effective["readout_sample_frac"])])
     if effective.get("readout_mode"):

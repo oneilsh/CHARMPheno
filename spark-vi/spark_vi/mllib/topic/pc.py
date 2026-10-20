@@ -397,6 +397,20 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         "gateParent is set. Default 1.",
         typeConverter=TypeConverters.toInt,
     )
+    gateWarm = Param(
+        Params._dummy(), "gateWarm",
+        "leaves-first gate schedule (requires gateParent): iterations per node-height "
+        "level before the next level opens; 0 (default) = the single-round gate. See "
+        "GatedOnlineLDA.set_gate_schedule.",
+        typeConverter=TypeConverters.toInt,
+    )
+    gateOpenSeed = Param(
+        Params._dummy(), "gateOpenSeed",
+        "with gateWarm > 0: seed each block the moment it opens with the word counts "
+        "of the documents its gate admits (one pass before the fit). Default True; "
+        "False leaves late blocks at their init (they die on arrival in simulation).",
+        typeConverter=TypeConverters.toBoolean,
+    )
     localizeHead = Param(
         Params._dummy(), "localizeHead",
         "LOCALIZED head (requires gateParent): each label c's logistic reads ONLY its "
@@ -851,7 +865,8 @@ _ONLINE_PCLDA_DEFAULTS = dict(
     headHistoryReset=True, headLr=0.05, headNewtonRidge=0.01,
     headL2=1e-3, headIntercept=False, headStandardize=False,
     closureParents="", warmStartFrom="",
-    gateParent="", etaBoost="", gateNBg=2, gateTpn=1, localizeHead=False,
+    gateParent="", etaBoost="", gateNBg=2, gateTpn=1, gateWarm=0, gateOpenSeed=True,
+    localizeHead=False,
     headSupport="siblings",
     frontierCol="frontier",
     init="random", spectralMaxVocab=8000, spectralMethod="auto", spectralD=0,
@@ -930,6 +945,8 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         etaBoost: str = "",
         gateNBg: int = 2,
         gateTpn: int = 1,
+        gateWarm: int = 0,
+        gateOpenSeed: bool = True,
         localizeHead: bool = False,
         headSupport: str = "siblings",
         frontierCol: str = "frontier",
@@ -1246,6 +1263,25 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
                     "n_bg_anchors": int(self.getOrDefault("spectralBgAnchors")),
                 }
                 data_summary.update(_random_bg_rows(lay, self.getOrDefault("spectralBgAnchors")))
+
+        # Leaves-first gate schedule (exp 0153/0154; report 2026-10-19). Fit-only:
+        # nothing about the corpus or the bundle changes. The open-time seed is one
+        # pass over the cached document RDD, kept driver-side on the engine.
+        _gw = int(self.getOrDefault("gateWarm"))
+        if _gw > 0:
+            if not gated:
+                raise ValueError("gateWarm requires gateParent: the schedule opens the "
+                                 "gate's per-node blocks by height.")
+            _lay = model_obj._lda.lay
+            _seed = None
+            if bool(self.getOrDefault("gateOpenSeed")):
+                from spark_vi.models.topic.gated_init import gate_open_seed_counts
+                _seed = gate_open_seed_counts(pc_rdd, _lay, vocab_size)
+            model_obj._lda.set_gate_schedule(_gw, open_seed=_seed)
+            _H = model_obj._lda._gate_H
+            print(f"[pc] leaves-first gate: {_gw} iters/level over heights 0..{_H} "
+                  f"(full gate from iter {_gw * _H}); open-time seed "
+                  f"{'ON' if _seed is not None else 'off'}", flush=True)
 
         # Alpha policy for the GATED engine (exp 0121; insight 0090 correction).
         # The estimator's optimizeDocConcentration never reached an INJECTED topic

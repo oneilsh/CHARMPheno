@@ -1040,3 +1040,62 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
 
     beta = beta + 1e-9                                   # strictly positive λ
     return beta * float(scale)
+
+
+def gate_open_seed_counts(rdd, lay, V: int):
+    """The leaves-first schedule's open-time seed: a (K, V) array whose rows for each
+    LATE-OPENING block (node height >= 1) hold the summed word counts of the
+    documents whose gate admits that block — u in closure(frontier), i.e. a frontier
+    node in u's subtree, following every child edge on a multi-parent DAG — and
+    zeros elsewhere (leaves and background open at iteration 0 and need no seed).
+
+    Why counts, not a fit: the seed only has to make a block competitive when it
+    opens (`GatedOnlineLDA.set_gate_schedule`); the gated EM then strips what the
+    already-sharp children and background explain. The cost is one pass of the
+    E-step's own sparse scatter without CAVI. ADR 0047: the layout rides a broadcast,
+    per-partition accumulators are allocated executor-side, the reduction identity is
+    a None sentinel, and the broadcast is destroyed after the pass.
+    `rdd` items carry `.indices`, `.counts`, `.frontier` (GatedPCDocument /
+    GatedBOWDocument)."""
+    late = [u for u in lay.nodes if lay.height(u) >= 1]
+    row_of = {u: i for i, u in enumerate(late)}
+    out = np.zeros((lay.K, V), dtype=np.float64)
+    if not late:
+        return out
+    lay_b = rdd.context.broadcast(lay)
+    rows_b = rdd.context.broadcast(row_of)
+
+    def _part(docs, _lay=lay_b, _rows=rows_b):
+        L, R = _lay.value, _rows.value
+        acc = None
+        for d in docs:
+            if not d.frontier:
+                continue
+            us = {u for f in d.frontier for u in L.closure(f) if u in R}
+            if not us:
+                continue
+            if acc is None:
+                acc = np.zeros((len(R), V), dtype=np.float64)
+            idx = np.asarray(d.indices, dtype=np.int64)
+            cnt = np.asarray(d.counts, dtype=np.float64)
+            for u in us:
+                acc[R[u], idx] += cnt
+        yield acc
+
+    def _comb(a, b):
+        if a is None:
+            return b
+        if b is None:
+            return a
+        a += b
+        return a
+
+    try:
+        tot = rdd.mapPartitions(_part).treeReduce(_comb, depth=2)
+    finally:
+        _destroy_broadcast(lay_b)
+        _destroy_broadcast(rows_b)
+    if tot is not None:
+        for u, i in row_of.items():
+            out[lay.block[u]] = tot[i]
+    return out

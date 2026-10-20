@@ -438,8 +438,73 @@ class GatedOnlineLDA(OnlineLDA):
         for i, u in enumerate(lay.nodes, start=1):
             for k in lay.block[u]:
                 self._topic_to_tied[k] = i
+        # Leaves-first gate schedule (off by default; see set_gate_schedule).
+        self.gate_warm = 0
+        self._gate_H = 0
+        self._topic_height = None
+        self._open_seed = None
+
+    def set_gate_schedule(self, warm: int, open_seed: np.ndarray | None = None) -> None:
+        """Fit in ROUNDS by node height: leaves first, then each level up.
+
+        Exp 0152 read 3b: in a single-round gated fit a parent block can hold its
+        dominant child's vocabulary while a minor child fills with comorbidity. The
+        schedule lets every child claim its own words before its parent's block
+        exists: for the first `warm` iterations a document's gate admits only
+        closure nodes of height 0 (leaves), the next `warm` height <= 1, and so on;
+        after `warm * max_height` iterations the gate is the production gate. A
+        node's height is strictly above its children's, so on a multi-parent DAG
+        every child opens before any parent.
+
+        A CLOSED block's lambda is frozen (its zero sufficient statistics would pull
+        it to the flat prior every step). A block opened late onto already-sharp
+        competitors starts flat, wins no responsibility and decays — dead on arrival
+        (report 2026-10-19-leaves-first-gate-sim) — so `open_seed`, a (K, V) array
+        over the concatenated vocabulary, gives each block a start the moment it
+        opens: its row is the word counts of the documents whose gate admits the
+        block (`gated_init.gate_open_seed_counts`), normalized and scaled to a typical
+        open node topic's mass. The seed is the cluster MEAN, not an extreme word:
+        competition with the sharp children and background strips what they
+        already explain, leaving the parent its shared stratum.
+
+        The state rides global_params (`gate_iter`, `gate_open_at`), so executors see
+        the round every iteration; the seed is driver-only (`__getstate__` drops it).
+        `warm=0` (the default) is the production gate, byte-identical."""
+        self.gate_warm = int(warm)
+        if self.gate_warm <= 0:
+            self.gate_warm, self._gate_H, self._topic_height, self._open_seed = 0, 0, None, None
+            return
+        self._topic_height = np.full(self.K, -1, dtype=np.int64)   # bg: always open
+        for u in self.lay.nodes:
+            self._topic_height[self.lay.block[u]] = self.lay.height(u)
+        self._gate_H = int(self._topic_height.max()) if self.lay.nodes else 0
+        if open_seed is not None:
+            open_seed = np.asarray(open_seed, dtype=np.float64)
+            if open_seed.shape != (self.K, self.V):
+                raise ValueError(f"open_seed must be (K, V) = ({self.K}, {self.V}), "
+                                 f"got {open_seed.shape}")
+        self._open_seed = open_seed
+
+    def _gate_level(self, t: int):
+        """Max open height at iteration t, or None (everything open)."""
+        if self.gate_warm <= 0 or t >= self.gate_warm * self._gate_H:
+            return None
+        return t // self.gate_warm
+
+    def _gate_open_mask(self, level) -> np.ndarray:
+        if level is None:
+            return np.ones(self.K, dtype=bool)
+        return self._topic_height <= level
 
     def initialize_global(self, data_summary: Any | None) -> dict[str, np.ndarray]:
+        gp = self._initialize_global_base(data_summary)
+        if self.gate_warm > 0:
+            gp["gate_iter"] = np.array(0, dtype=np.int64)
+            gp["gate_open_at"] = np.where(self._gate_open_mask(self._gate_level(0)),
+                                          0, -1).astype(np.int64)
+        return gp
+
+    def _initialize_global_base(self, data_summary: Any | None) -> dict[str, np.ndarray]:
         """Random Gamma lambda (default), or a pluggable init strategy's lambda.
 
         "random": inherited OnlineLDA Gamma init — the validated default (the gate already
@@ -670,6 +735,9 @@ class GatedOnlineLDA(OnlineLDA):
         the constructing (driver) instance."""
         state = dict(self.__dict__)
         state["_eta_boost"] = None
+        # The gate-open seed is (K, V) and driver-only (update_global applies it):
+        # same closure clause.
+        state["_open_seed"] = None
         return state
 
     def _resolve_omega(self, omega) -> np.ndarray | None:
@@ -823,6 +891,9 @@ class GatedOnlineLDA(OnlineLDA):
         single-domain stats dict is unchanged)."""
         lam = global_params["lambda"]
         alpha = global_params["alpha"]
+        # Leaves-first schedule round (None = the production gate).
+        gate_level = (self._gate_level(int(global_params["gate_iter"]))
+                      if "gate_iter" in global_params else None)
         if self.domains is None:
             expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
             lambda_stats = np.zeros_like(lam)
@@ -861,7 +932,7 @@ class GatedOnlineLDA(OnlineLDA):
             # the same gate the Gibbs oracle and the gated STM apply. (Deployment /
             # transform is a separate, deliberately ungated full-K path; see
             # GatedLDAModel._transform in the mllib shim.)
-            allowed = self.lay.allowed_set(doc.frontier)
+            allowed = self.lay.allowed_set(doc.frontier, max_height=gate_level)
             # v2 SEAM, resolved ONCE per doc and shared by both per-token consumers:
             # the omega gamma-weight and the per-domain theta-contribution below.
             # domains=None has no domain axis, and omega then cannot be set either
@@ -1006,7 +1077,56 @@ class GatedOnlineLDA(OnlineLDA):
         new_alpha = alpha
         if self.optimize_alpha:
             new_alpha = self._gated_alpha_update(alpha, target_stats, learning_rate)
-        return {"lambda": new_lam, "alpha": new_alpha, "eta": eta}
+        out = {"lambda": new_lam, "alpha": new_alpha, "eta": eta}
+        if "gate_iter" in global_params:
+            out.update(self._gate_step(global_params, new_lam))
+        return out
+
+    def _gate_step(self, global_params, new_lam):
+        """Freeze closed blocks, advance the round, seed the blocks that open next
+        (see set_gate_schedule). Returns the updated lambda + gate keys."""
+        t = int(global_params["gate_iter"])
+        open_at = np.asarray(global_params["gate_open_at"], dtype=np.int64).copy()
+        closed = open_at < 0
+        old = global_params["lambda"]
+        nxt = self._gate_open_mask(self._gate_level(t + 1))
+        newly = nxt & closed
+        open_at[newly] = t + 1
+        node_open = (~closed).copy()
+        node_open[:self.lay.n_bg] = False
+
+        def apply(lam_new, lam_old, seed_rows, eta_m):
+            lam_new = np.array(lam_new, dtype=np.float64, copy=True)
+            lam_new[closed] = lam_old[closed]
+            if seed_rows is not None and newly.any():
+                ref = node_open if node_open.any() else ~closed
+                mass = float(lam_new[ref].sum(axis=1).mean())
+                rows = np.flatnonzero(newly)
+                sd = seed_rows[rows]
+                tot = sd.sum(axis=1, keepdims=True)
+                sd = np.divide(sd, tot, out=np.full_like(sd, 1.0 / sd.shape[1]),
+                               where=tot > 0)
+                # Deterministic multiplicative jitter breaks the tie between the
+                # topics of one block (tpn > 1 would otherwise seed them identically).
+                rng = np.random.default_rng(
+                    (int(self.random_seed or 0) * 1_000_003 + t) % (2 ** 32))
+                jit = rng.gamma(100.0, 1.0 / 100.0, size=sd.shape)
+                lam_new[rows] = eta_m + mass * sd * jit
+            return lam_new
+
+        seed = self._open_seed
+        if self.domains is None:
+            lam = apply(new_lam, old, seed, float(self.eta))
+        else:
+            b = self._domain_bounds
+            lam = {}
+            for m in range(len(self.domains)):
+                eta_m = (float(self._eta_domains[m]) if self._eta_domains is not None
+                         else float(self.eta))
+                lam[m] = apply(new_lam[m], old[m],
+                               None if seed is None else seed[:, b[m]:b[m + 1]], eta_m)
+        return {"lambda": lam, "gate_iter": np.array(t + 1, dtype=np.int64),
+                "gate_open_at": open_at}
 
     def set_alpha_policy(self, frontier_histogram, *, optimize, init="uniform"):
         """Attach the static frontier histogram and choose the INITIAL alpha after
