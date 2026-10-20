@@ -188,9 +188,15 @@ members are the SAME Mondo terms as 0137's (`select_survey_groups.py`).
   exact ties. Both runs have 5 groups at kappa ≥ 0.3.
 - The fix took effect: viral hepatitis 0.17 → 0.43, Sjögren's 0.00 → 0.61 (equal to
   0137's).
-- **Open:** the best engine is often E5 (raw codes, the same machine in both runs). The
-  representation comparison is E3 / E6, and the paired per-engine split is now printed.
-  Nine groups is too few to separate −0.03 from zero.
+- **Per engine.** E5 (codes only) is even: median 0.00, kappa 0.33 against 0.29. Same
+  patients, same records, so the sanity check passes. E3 (θ only) is worse in all 9:
+  quartiles −0.082 / −0.053 / −0.034, median kappa 0.02 against 0.10. E6 (θ + codes) is
+  mostly equal (median 0.00, lower quartile −0.105). On 0152 it rarely beats E5, so θ adds
+  little on top of the codes.
+- **Read:** on identical questions the hierarchical tpn-1 topics carry less
+  sibling-discriminating signal than the flat tpn-5 ribbon. The engines that carry
+  framing 1, E5 and E6, are about even. This is confounded with tpn: 0137 has 5 topics per
+  member, 0152 has 1, so the θ-only gap may be capacity, not the DAG. Nine groups.
 
 ## Run log
 
