@@ -259,6 +259,31 @@ def most_specific_members(members, parent_int):
     return [m for m in mem if m not in anc]
 
 
+def top_members(members, parent_int, group=None):
+    """Members with no proper ancestor among the other members, the group node itself
+    excluded: the group's TOP-LEVEL label terms. On a nested label space a term's label
+    is the closure of its descendants', so a top-level member rolls up its subtypes (a
+    patient coded at chronic hepatitis C is a hepatitis C patient). This is the
+    natural differential; `most_specific_members` instead scores only the leaves and
+    drops every patient coded at an intermediate term (exp 0152 read 4: viral
+    hepatitis lost hepatitis C, its bulk). `parent_int` is the readout DAG."""
+    mem = [int(m) for m in members if group is None or int(m) != int(group)]
+    ms = set(mem)
+    out = []
+    for m in mem:
+        stack, seen, hit = list(parent_int.get(m, parent_int.get(str(m), []))), set(), False
+        while stack and not hit:
+            a = int(stack.pop())
+            if a in seen:
+                continue
+            seen.add(a)
+            hit = a in ms
+            stack.extend(parent_int.get(a, parent_int.get(str(a), [])))
+        if not hit:
+            out.append(m)
+    return out
+
+
 def readout_node_keep(parent_int, int2cid, keep_cids, C):
     """(C,) bool: readout nodes whose Mondo cid is in `keep_cids`, every transitive
     ancestor of one (the stacked product needs the whole closure), and the root.
@@ -695,7 +720,7 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
                      tag=None, next_question=False, nq_pool=100, nq_hide=0.2,
                      train_ever=False, multi=False, crossfit=False, sidecar_uri=None,
                      fast=False, max_members=None, incident=False,
-                     most_specific=None, groups_like=None):
+                     most_specific=None, groups_like=None, member_rule="auto"):
     """Framing 1 — DIFFERENTIAL WITH REASONS (spec 2026-10-13 clinician framings,
     R0/R1; `differential.py`). Four engines on the same held-out patients positive on
     exactly one member: E1 presence model with subtype profiles, E2 renormalized
@@ -758,16 +783,22 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
                 f"attested before the index over {len(prior_nodes):,} Mondo nodes",
                 flush=True)
     sets = vt.select_sets(ctx, pattern, adhoc=adhoc)
-    if most_specific is None:
-        # Exp 0152: nested label space (no label set) -> most-specific members.
+    # Member rule. A flat label set scores every label member ("all"). On a nested
+    # label space (no label set: exp 0152) "top" scores the group's top-level label
+    # terms, each rolling up its subtypes; "most-specific" scores the leaves only.
+    if most_specific is not None:                     # legacy keyword
+        member_rule = "most-specific" if most_specific else "all"
+    if member_rule == "auto":
         _mf = json.loads((run_dir / "manifest.json").read_text())
-        most_specific = not bool((_mf.get("corpus_manifest") or {}).get("label_set"))
+        member_rule = ("all" if (_mf.get("corpus_manifest") or {}).get("label_set")
+                       else "top")
     all_members = {}
-    if most_specific:
+    if member_rule != "all":
         _pi = ctx.rdag["parent_int"]
         _s2 = []
         for n_, g_, m_ in sets:
-            ms = most_specific_members(m_, _pi)
+            ms = (most_specific_members(m_, _pi) if member_rule == "most-specific"
+                  else top_members(m_, _pi, group=n_))
             all_members[g_] = list(m_)
             if len(ms) >= 2:
                 _s2.append((n_, g_, ms))
@@ -782,6 +813,7 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
         sets = [x for x in sets if len(x[2]) <= int(max_members)]
     if not sets:
         raise SystemExit(f"[differential] no candidate set matches {pattern!r}")
+    _cprint(f"[differential]   member rule: {member_rule}", flush=True)
     _cprint(f"[differential]   {len(sets)} candidate set(s)"
             f"{' (fast: E1/E4 skipped, framing 2 on E5)' if fast else ''}", flush=True)
     L_ = [f"# {run_dir.name} — differential with reasons (framing 1)",
@@ -936,7 +968,8 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
             ev_all += ei
         fit_i, ev_i = halves[0]
         tau1, tau4 = taus[0]
-        res = {"n_eval": len(ev_all), "n_fit": len(fit_i), "n_train": len(tr),
+        res = {"members": [int(m) for m in members], "member_rule": member_rule,
+               "n_eval": len(ev_all), "n_fit": len(fit_i), "n_train": len(tr),
                "n_train_multi": n_tr_multi, "crossfit": bool(crossfit),
                "train_ever": bool(train_ever),
                "tau_e1": [t[0] for t in taus], "tau_e4": [t[1] for t in taus],
@@ -1630,6 +1663,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--diff-groups-like", default=None, metavar="JSON",
                    help="(--differential) exp 0152: score only the groups whose names are "
                         "keys of this JSON (e.g. a previous run's differential_<tag>.json)")
+    p.add_argument("--diff-members", default="auto",
+                   choices=("auto", "all", "top", "most-specific"),
+                   help="(--differential) which label terms are a group's members: all "
+                        "(flat label set), top (nested: top-level terms, each rolling up "
+                        "its subtypes), most-specific (nested: leaves only — drops "
+                        "patients coded at intermediate terms). auto = all with a label "
+                        "set, else top")
     p.add_argument("--diff-incident", action="store_true",
                    help="(--differential) exp 0151: score only test patients with no "
                         "member or group diagnosis anywhere BEFORE the index (E4 sidecar, "
@@ -2643,7 +2683,8 @@ def main(argv=None) -> int:
                     multi=args.diff_multi, crossfit=args.diff_crossfit,
                     sidecar_uri=args.prev_sidecar_uri,
                     fast=bool(args.diff_survey), max_members=(args.diff_survey or None),
-                    incident=args.diff_incident, groups_like=args.diff_groups_like)
+                    incident=args.diff_incident, groups_like=args.diff_groups_like,
+                    member_rule=args.diff_members)
             return 0
 
         if args.acquisition:
