@@ -8,6 +8,10 @@ AUC), and (4) the E5 reasons of the top groups by skill, so it is visible whethe
 call rests on treatments (drug codes are not attestation and stay in the record).
 
     python3 analysis/cloud/survey_analysis.py <run dir> [tag]
+    python3 analysis/cloud/survey_analysis.py <run A> <tag A> <run B> [tag B]   # paired
+
+On a nested label space (no label set in the manifest: exp 0152) a group's members
+are its MOST SPECIFIC label descendants, as the survey scored them.
 
 Pooled, per-group numbers only (each group's metrics already rest on >= 40 patients and
 reasons on members with >= 20)."""
@@ -35,17 +39,40 @@ def spearman(x, y):
     return float(np.corrcoef(rx, ry)[0, 1]), int(ok.sum())
 
 
+def most_specific(members, parent_int):
+    """Members that are not an ancestor of another member — the survey's own rule on
+    a NESTED label space (`gated_pc_readout.most_specific_members`, exp 0152), copied
+    here so this reader needs no Spark import."""
+    anc = set()
+    for m in members:
+        stack, seen = list(parent_int.get(str(m), [])), set()
+        while stack:
+            a = int(stack.pop())
+            if a not in seen:
+                seen.add(a)
+                stack.extend(parent_int.get(str(a), []))
+        anc |= seen
+    return tuple(m for m in members if m not in anc)
+
+
 def group_members(run_dir):
-    rd = json.loads((Path(run_dir) / "readout_dag.json").read_text())
+    run_dir = Path(run_dir)
+    rd = json.loads((run_dir / "readout_dag.json").read_text())
     names = {}
     for r, c in rd["int2cid"].items():
         names[int(r)] = rd["name_by_id"].get(str(c), str(c))
     C_fit = int(rd["C_fit"])
+    mf = run_dir / "manifest.json"
+    nested = (mf.exists() and not (json.loads(mf.read_text()).get("corpus_manifest")
+                                   or {}).get("label_set"))
+    pi = {str(k): v for k, v in rd.get("parent_int", {}).items()}
     out = {}
     for n, srcs in enumerate(rd["pos_sources"]):
         if n == 0:
             continue
         mem = tuple(sorted({int(e) for e in srcs if 0 < int(e) < C_fit}))
+        if nested:
+            mem = most_specific(mem, pi)
         if len(mem) >= 2:
             out.setdefault(names.get(n, str(n)), mem)
     return out
@@ -68,9 +95,56 @@ def reasons_by_group(md_text):
     return out
 
 
+def kappa_by_group(run, tag):
+    """{group name: (M, kappa of the best engine)} — for the paired comparison."""
+    js = json.loads((Path(run) / f"differential_{tag}.json").read_text())
+    mem = group_members(run)
+    out = {}
+    for g, r in js.items():
+        mt = r.get("metrics") or {}
+        if "E6 θ + codes" not in mt or g not in mem:
+            continue
+        M = len(mem[g])
+        out[g] = (M, max(kappa(mt[k]["bal_top1"], M) for k in
+                         ("E3 multiclass head", "E5 code head", "E6 θ + codes")))
+    return out
+
+
+def paired(run_a, tag_a, run_b, tag_b):
+    """Same group NAME scored in both runs (read 4 uses --diff-groups-like): the
+    member sets can differ (a nested fit scores most-specific members), so M is
+    printed too and kappa — chance-corrected — is the comparable number."""
+    a, b = kappa_by_group(run_a, tag_a), kappa_by_group(run_b, tag_b)
+    shared = sorted(set(a) & set(b))
+    print(f"\n# paired by group name: {Path(run_a).name} vs {Path(run_b).name} — "
+          f"{len(shared)} shared groups ({len(a)} / {len(b)} scored)")
+    if not shared:
+        return
+    d = np.array([a[g][1] - b[g][1] for g in shared])
+    ka = np.array([a[g][1] for g in shared])
+    kb = np.array([b[g][1] for g in shared])
+    print("kappa quartiles A: " + " / ".join(f"{v:.2f}" for v in np.percentile(ka, [25, 50, 75]))
+          + " · B: " + " / ".join(f"{v:.2f}" for v in np.percentile(kb, [25, 50, 75])))
+    print("A − B quartiles: " + " / ".join(f"{v:+.3f}" for v in np.percentile(d, [25, 50, 75]))
+          + f" · A better in {int((d > 0).sum())} of {len(d)}; "
+          f"kappa >= 0.3 A {int((ka >= 0.3).sum())} / B {int((kb >= 0.3).sum())}")
+    same_m = sum(a[g][0] == b[g][0] for g in shared)
+    print(f"same member count M in {same_m} of {len(shared)} groups")
+    print("\n| group | M A/B | kappa A | kappa B | A − B |")
+    print("|---|--:|--:|--:|--:|")
+    for g in sorted(shared, key=lambda g: -(a[g][1] - b[g][1]))[:12] + \
+            sorted(shared, key=lambda g: a[g][1] - b[g][1])[:12]:
+        print(f"| {g[:38]} | {a[g][0]}/{b[g][0]} | {a[g][1]:.2f} | {b[g][1]:.2f} | "
+              f"{a[g][1] - b[g][1]:+.2f} |")
+
+
 def main(argv):
     run = Path(argv[1])
     tag = argv[2] if len(argv) > 2 else "survey"
+    if len(argv) > 3:
+        # Paired mode: <run A> <tag A> <run B> [tag B]
+        paired(run, tag, Path(argv[3]), argv[4] if len(argv) > 4 else tag)
+        return 0
     js = json.loads((run / f"differential_{tag}.json").read_text())
     md = (run / f"differential_{tag}.md").read_text()
     mem = group_members(run)
