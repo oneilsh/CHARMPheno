@@ -133,8 +133,13 @@ def paired(run_a, tag_a, run_b, tag_b):
     print("A − B quartiles: " + " / ".join(f"{v:+.3f}" for v in np.percentile(d, [25, 50, 75]))
           + f" · A better in {int((d > 0).sum())} of {len(d)}; "
           f"kappa >= 0.3 A {int((ka >= 0.3).sum())} / B {int((kb >= 0.3).sum())}")
-    same_m = sum(a[g][0] == b[g][0] for g in shared)
-    print(f"same member count M in {same_m} of {len(shared)} groups")
+    same = [g for g in shared if a[g][0] == b[g][0]]
+    print(f"same member count M in {len(same)} of {len(shared)} groups")
+    if len(same) >= 4:
+        ds = np.array([a[g][1] - b[g][1] for g in same])
+        print("  same-M groups only: A − B quartiles "
+              + " / ".join(f"{v:+.3f}" for v in np.percentile(ds, [25, 50, 75]))
+              + f" · A better in {int((ds > 0).sum())} of {len(ds)}")
     print("\n| group | M A/B | kappa A | kappa B | A − B |")
     print("|---|--:|--:|--:|--:|")
     order = sorted(shared, key=lambda g: -(a[g][1] - b[g][1]))
