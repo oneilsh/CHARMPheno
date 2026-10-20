@@ -135,3 +135,21 @@ starved in both. Per node, 0153 single round → 0154 leaves-first + seed:
 - **Read:** the targeted failure is fixed at the top node, and myocarditis is rescued.
   The leak reappears one level down, and two low-evidence nodes lose their words. One
   seed per arm. Readouts next.
+
+**2026-10-20 — readouts and the new-diagnosis check (read 2).** Same readout recipe on
+both fits: stacked, Mondo readout DAG, l2 100, mass 0.99, whole-history prior. 54,753
+test patients; 14 scored nodes, most with 20 to 50 new-diagnosis positives.
+- **0153 alone:** stacked macro AUC 0.871 over all patients → 0.806 new-diagnosis only;
+  flat 0.704 → 0.636. The largest prevalence gaps are HCM (0.900 → 0.731; 76% of
+  positives already diagnosed) and the subtree root, cardiomyopathy (0.886 → 0.760).
+- **0154 − 0153 (the schedule's effect):** stacked new-diagnosis 0.806 → 0.825, median
+  +0.016, 0154 better on 12 of 14 nodes. Flat 0.636 → 0.648, median −0.002, 6 of 14:
+  no change.
+- **0154 − 0152 (subtree fit against whole-Mondo, 13 shared nodes):** stacked 0.734 →
+  0.823, median +0.079, 0154 better on 13 of 13. Flat 0.607 → 0.654. This is not a
+  schedule effect. The subtree fit and its readout DAG are narrower: its root head is
+  cardiomyopathy against everyone, where whole-Mondo multiplies a long chain of
+  ancestor heads above it.
+- **Read:** the leaves-first schedule with seeded opening gives a small, consistent gain
+  in the stacked new-diagnosis read (+0.016, 12 of 14), with mixed node-level
+  legibility (read 1). One seed per arm; a second seed pair would size the noise.
