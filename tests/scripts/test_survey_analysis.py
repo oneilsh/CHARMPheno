@@ -35,3 +35,32 @@ def test_kappa_dedupe_and_reasons(tmp_path, capsys):
     assert abs(sa.kappa(0.55, 4) - 0.4) < 1e-9
     assert "| group A (+1) | 4 | 100 | E6 | 0.40 | 0.25 | +0.010 |" in out
     assert "- m1: aspirin · x" in out
+
+
+def _nested_run(d, b6):
+    # 1 is the parent of 2 (nested): group 5 = {1, 2, 3, 4} -> most specific {2, 3, 4}
+    (d / "readout_dag.json").write_text(json.dumps({
+        "C_fit": 5, "int2cid": {"0": -1, "1": 11, "2": 12, "3": 13, "4": 14, "5": 15},
+        "name_by_id": {"15": "group A"},
+        "parent_int": {"1": [5], "2": [1], "3": [5], "4": [5], "5": [0]},
+        "pos_sources": [[0], [1], [2], [3], [4], [1, 2, 3, 4]]}))
+    (d / "manifest.json").write_text(json.dumps({"corpus_manifest": {}}))
+    (d / "differential_s.json").write_text(json.dumps(
+        {"group A": {"metrics": _metrics(0.4, 0.5, b6), "n_eval": 100}}))
+    (d / "differential_s.md").write_text("")
+
+
+def test_nested_label_space_uses_most_specific_members(tmp_path):
+    _nested_run(tmp_path, 0.6)
+    assert sa.group_members(tmp_path)["group A"] == (2, 3, 4)
+    assert abs(sa.kappa_by_group(tmp_path, "s")["group A"][1] - sa.kappa(0.6, 3)) < 1e-9
+
+
+def test_paired_by_group_name(tmp_path, capsys):
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir(); b.mkdir()
+    _nested_run(a, 0.6)
+    _nested_run(b, 0.5)
+    assert sa.main(["x", str(a), "s", str(b), "s"]) == 0
+    out = capsys.readouterr().out
+    assert "1 shared groups" in out and "A better in 1 of 1" in out
