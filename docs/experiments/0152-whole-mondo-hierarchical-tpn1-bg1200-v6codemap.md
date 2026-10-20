@@ -181,6 +181,17 @@ nohup make -C analysis/cloud gated-pc-readout ID=152 GPR_SPARK_CONF=spark.eventL
 python3 analysis/cloud/survey_analysis.py "$RUN152" survey_inc_top "$R137" survey_inc | cut -c1-220
 ```
 
+**Read 4b result (2026-10-20).** `--diff-members top`, on the 9 groups whose top-level
+members are the SAME Mondo terms as 0137's (`select_survey_groups.py`).
+- Best-engine kappa quartiles 0.07 / 0.33 / 0.43 against 0137's 0.00 / 0.35 / 0.57.
+  Paired 0152 − 0137 quartiles −0.078 / −0.027 / +0.000; 0152 better in 1 of 9, with 3
+  exact ties. Both runs have 5 groups at kappa ≥ 0.3.
+- The fix took effect: viral hepatitis 0.17 → 0.43, Sjögren's 0.00 → 0.61 (equal to
+  0137's).
+- **Open:** the best engine is often E5 (raw codes, the same machine in both runs). The
+  representation comparison is E3 / E6, and the paired per-engine split is now printed.
+  Nine groups is too few to separate −0.03 from zero.
+
 ## Run log
 
 **2026-10-15 — launch 0 never ran** (the queued wait loop's `pgrep` pattern matched its
