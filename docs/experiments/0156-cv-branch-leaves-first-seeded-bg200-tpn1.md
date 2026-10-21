@@ -1,7 +1,7 @@
 ---
 id: 156
 slug: cv-branch-leaves-first-seeded-bg200-tpn1
-status: running
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -136,3 +136,10 @@ full-gate iterations followed the schedule. On the whole-history prior, 237 node
   and the 200 background topics to go to, so some leaves keep it.
 - **Next:** a quantitative legibility read (profile census with the own-code rule:
   signature against stratum share by depth) instead of eyeballing the top 25.
+
+**2026-10-21 — profile census with the own-code rule (read 1b, all 294 nodes).**
+Signature blocks 206 → 245 (70% → 83%). Own-code-decidable nodes with an own-code
+identity 86/172 → 126/172 (50% → 73%). Stratum share by depth, 0155 → 0156: d2 75 → 25%,
+d3 36 → 21%, d4 34 → 14%, d5 23 → 14%, d6 26 → 16%, d7 29 → 21%, d8 25 → 0% (the root is a
+stratum in both). A clear legibility win at every depth; the leaf sinks in read 1 are a
+minority. Insight 0104.

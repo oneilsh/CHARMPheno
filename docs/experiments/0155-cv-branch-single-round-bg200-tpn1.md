@@ -1,7 +1,7 @@
 ---
 id: 155
 slug: cv-branch-single-round-bg200-tpn1
-status: planned
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
