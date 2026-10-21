@@ -1,7 +1,7 @@
 ---
 id: 156
 slug: cv-branch-leaves-first-seeded-bg200-tpn1
-status: planned
+status: running
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -94,3 +94,14 @@ recurs here.
 The run, read and comparison commands are in 0155 (one background job runs both).
 
 ## Run log
+
+**2026-10-21 — pair done; new-diagnosis comparison (read 2).** 0156 log: `[pc] leaves-first
+gate: 3 iters/level over heights 0..7 (full gate from iter 21); open-time seed ON`, so 39
+full-gate iterations followed the schedule. On the whole-history prior, 237 nodes shared:
+- **Stacked:** 0.7805 → 0.7863, median +0.0067, 0156 better on 172 of 237 (one-sided sign
+  test p ≈ 1e-12). The gain is flat across size bands, +0.004 to +0.008 from 20–50 to
+  1000+ incident positives.
+- **Flat:** 0.6644 → 0.6640, median −0.0006, 113 of 237 better. No change.
+- **Read:** this is the 0153/0154 pattern at about 14× the nodes (0154: +0.016, 12 of 14
+  stacked; flat unchanged). The schedule gives a small, robust gain to the stacked
+  product and nothing to the per-node heads. Topic legibility (read 1) still to come.
