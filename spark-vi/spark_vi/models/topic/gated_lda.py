@@ -443,8 +443,10 @@ class GatedOnlineLDA(OnlineLDA):
         self._gate_H = 0
         self._topic_height = None
         self._open_seed = None
+        self._init_seed = None
 
-    def set_gate_schedule(self, warm: int, open_seed: np.ndarray | None = None) -> None:
+    def set_gate_schedule(self, warm: int, open_seed: np.ndarray | None = None,
+                          init_seed: np.ndarray | None = None) -> None:
         """Fit in ROUNDS by node height: leaves first, then each level up.
 
         Exp 0152 read 3b: in a single-round gated fit a parent block can hold its
@@ -467,10 +469,17 @@ class GatedOnlineLDA(OnlineLDA):
         competition with the sharp children and background strips what they
         already explain, leaving the parent its shared stratum.
 
+        `init_seed` (K, V), optional: rows applied at iteration 0 to the blocks that
+        are open from the start (the leaves), e.g. an external phenotype profile
+        (HPO) where one exists. In either seed a row with no mass in a domain leaves
+        that domain's lambda as it was, so a profile that covers only the condition
+        domain replaces only the condition-domain start.
+
         The state rides global_params (`gate_iter`, `gate_open_at`), so executors see
-        the round every iteration; the seed is driver-only (`__getstate__` drops it).
-        `warm=0` (the default) is the production gate, byte-identical."""
+        the round every iteration; the seeds are driver-only (`__getstate__` drops
+        them). `warm=0` (the default) is the production gate, byte-identical."""
         self.gate_warm = int(warm)
+        self._init_seed = None
         if self.gate_warm <= 0:
             self.gate_warm, self._gate_H, self._topic_height, self._open_seed = 0, 0, None, None
             return
@@ -484,6 +493,12 @@ class GatedOnlineLDA(OnlineLDA):
                 raise ValueError(f"open_seed must be (K, V) = ({self.K}, {self.V}), "
                                  f"got {open_seed.shape}")
         self._open_seed = open_seed
+        if init_seed is not None:
+            init_seed = np.asarray(init_seed, dtype=np.float64)
+            if init_seed.shape != (self.K, self.V):
+                raise ValueError(f"init_seed must be (K, V) = ({self.K}, {self.V}), "
+                                 f"got {init_seed.shape}")
+        self._init_seed = init_seed
 
     def _gate_level(self, t: int):
         """Max open height at iteration t, or None (everything open)."""
@@ -500,9 +515,48 @@ class GatedOnlineLDA(OnlineLDA):
         gp = self._initialize_global_base(data_summary)
         if self.gate_warm > 0:
             gp["gate_iter"] = np.array(0, dtype=np.int64)
-            gp["gate_open_at"] = np.where(self._gate_open_mask(self._gate_level(0)),
-                                          0, -1).astype(np.int64)
+            open0 = self._gate_open_mask(self._gate_level(0))
+            gp["gate_open_at"] = np.where(open0, 0, -1).astype(np.int64)
+            if self._init_seed is not None:
+                rows = open0.copy()
+                rows[:self.lay.n_bg] = False
+                gp["lambda"] = self._seed_rows(gp["lambda"], rows, self._init_seed,
+                                               ref=rows, t=-1)
         return gp
+
+    def _seed_rows(self, lam, rows, seed, *, ref, t):
+        """Replace `rows` of lambda (array or per-domain dict) with `seed`, per domain,
+        at the mean row mass of the `ref` rows. A seed row with no mass in a domain
+        leaves that domain's row unchanged. A deterministic multiplicative jitter
+        breaks ties between the topics of one block (tpn > 1)."""
+        def one(lam_m, seed_m, eta_m):
+            lam_m = np.array(lam_m, dtype=np.float64, copy=True)
+            idx = np.flatnonzero(rows)
+            if idx.size == 0 or seed_m is None:
+                return lam_m
+            sd = seed_m[idx]
+            tot = sd.sum(axis=1, keepdims=True)
+            has = tot[:, 0] > 0
+            if not has.any():
+                return lam_m
+            r = ref if ref.any() else np.ones(len(ref), bool)
+            mass = float(lam_m[r].sum(axis=1).mean())
+            rng = np.random.default_rng(
+                (int(self.random_seed or 0) * 1_000_003 + t + 7) % (2 ** 32))
+            jit = rng.gamma(100.0, 1.0 / 100.0, size=sd.shape)
+            new = eta_m + mass * (sd / np.where(tot > 0, tot, 1.0)) * jit
+            lam_m[idx[has]] = new[has]
+            return lam_m
+
+        if self.domains is None:
+            return one(lam, seed, float(self.eta))
+        b = self._domain_bounds
+        out = {}
+        for m in range(len(self.domains)):
+            eta_m = (float(self._eta_domains[m]) if self._eta_domains is not None
+                     else float(self.eta))
+            out[m] = one(lam[m], None if seed is None else seed[:, b[m]:b[m + 1]], eta_m)
+        return out
 
     def _initialize_global_base(self, data_summary: Any | None) -> dict[str, np.ndarray]:
         """Random Gamma lambda (default), or a pluggable init strategy's lambda.
@@ -738,6 +792,7 @@ class GatedOnlineLDA(OnlineLDA):
         # The gate-open seed is (K, V) and driver-only (update_global applies it):
         # same closure clause.
         state["_open_seed"] = None
+        state["_init_seed"] = None
         return state
 
     def _resolve_omega(self, omega) -> np.ndarray | None:
@@ -1094,37 +1149,18 @@ class GatedOnlineLDA(OnlineLDA):
         open_at[newly] = t + 1
         node_open = (~closed).copy()
         node_open[:self.lay.n_bg] = False
-
-        def apply(lam_new, lam_old, seed_rows, eta_m):
-            lam_new = np.array(lam_new, dtype=np.float64, copy=True)
-            lam_new[closed] = lam_old[closed]
-            if seed_rows is not None and newly.any():
-                ref = node_open if node_open.any() else ~closed
-                mass = float(lam_new[ref].sum(axis=1).mean())
-                rows = np.flatnonzero(newly)
-                sd = seed_rows[rows]
-                tot = sd.sum(axis=1, keepdims=True)
-                sd = np.divide(sd, tot, out=np.full_like(sd, 1.0 / sd.shape[1]),
-                               where=tot > 0)
-                # Deterministic multiplicative jitter breaks the tie between the
-                # topics of one block (tpn > 1 would otherwise seed them identically).
-                rng = np.random.default_rng(
-                    (int(self.random_seed or 0) * 1_000_003 + t) % (2 ** 32))
-                jit = rng.gamma(100.0, 1.0 / 100.0, size=sd.shape)
-                lam_new[rows] = eta_m + mass * sd * jit
-            return lam_new
-
-        seed = self._open_seed
+        # Freeze closed blocks, then seed the ones that open next iteration.
         if self.domains is None:
-            lam = apply(new_lam, old, seed, float(self.eta))
+            lam = np.array(new_lam, dtype=np.float64, copy=True)
+            lam[closed] = old[closed]
         else:
-            b = self._domain_bounds
             lam = {}
             for m in range(len(self.domains)):
-                eta_m = (float(self._eta_domains[m]) if self._eta_domains is not None
-                         else float(self.eta))
-                lam[m] = apply(new_lam[m], old[m],
-                               None if seed is None else seed[:, b[m]:b[m + 1]], eta_m)
+                lam[m] = np.array(new_lam[m], dtype=np.float64, copy=True)
+                lam[m][closed] = old[m][closed]
+        if self._open_seed is not None and newly.any():
+            lam = self._seed_rows(lam, newly, self._open_seed,
+                                  ref=(node_open if node_open.any() else ~closed), t=t)
         return {"lambda": lam, "gate_iter": np.array(t + 1, dtype=np.int64),
                 "gate_open_at": open_at}
 

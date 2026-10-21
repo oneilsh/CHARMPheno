@@ -3172,6 +3172,9 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
         cands = getattr(args, "_anchor_candidates", None)
         if cands:
             est.setSpectralAnchorCandidates(cands)
+        gsp = getattr(args, "_gate_seed_profile", None)
+        if gsp:
+            est.setGateSeedProfile(gsp)
     if closure_parents is not None:
         est.setClosureParents(closure_parents)
     return est
@@ -4461,6 +4464,12 @@ def parse_args(argv=None):
                         "(default) = single round. Each block is seeded when it opens "
                         "(see --gate-no-open-seed). Fit-only: bundle/corpus caches "
                         "unaffected. Report 2026-10-19-leaves-first-gate-sim.")
+    p.add_argument("--gate-seed-profile", default="", metavar="TSV",
+                   help="With --gate-warm: an external phenotype profile table "
+                        "(mondo_id, concept_id, neg; e.g. hpo_profile_marks.py output) "
+                        "that REPLACES a profiled node's condition-domain seed (leaves "
+                        "at iteration 0, later blocks at opening); unprofiled nodes "
+                        "keep the histogram seed. Fit-only.")
     p.add_argument("--gate-no-open-seed", action="store_true",
                    help="With --gate-warm: do NOT seed blocks when they open (they die "
                         "on arrival in simulation; ablation only).")
@@ -4891,6 +4900,35 @@ def main() -> int:
                 args._anchor_candidate_stats = ap_stats
                 _cprint(f"[driver]   anchor guide: {json.dumps(ap_stats)}",
                         flush=True)
+        # Profile seed for the leaves-first schedule (exp 0157/0158): an external
+        # phenotype profile (the marks TSV from hpo_profile_marks.py) replaces a
+        # profiled node's condition-domain seed. Fit-only; counts-only stats.
+        args._gate_seed_profile = None
+        if getattr(args, "gate_seed_profile", ""):
+            if int(getattr(args, "gate_warm", 0) or 0) <= 0:
+                raise ValueError("--gate-seed-profile requires --gate-warm > 0")
+            with _phase("build the profile seed (driver-side)"):
+                import pandas as pd
+                from mondo_native_dag import mondo_cid
+                from profile_eta import build_profile_seed
+                gs_df = pd.read_csv(args.gate_seed_profile, sep="\t")
+                gs_eid = {}
+                for mid in gs_df["mondo_id"].astype(str).unique():
+                    try:
+                        eid = bundle.cid2int.get(mondo_cid(mid))
+                    except ValueError:
+                        eid = None
+                    if eid is not None:
+                        gs_eid[str(mid)] = int(eid)
+                gs, gs_stats = build_profile_seed(
+                    gs_df, eid_by_mondo=gs_eid, vocab_index_by_concept=vocab_maps[0])
+                if not gs:
+                    raise ValueError("--gate-seed-profile seeded NO node (none of the "
+                                     "profiled nodes has a specific profile concept "
+                                     "in this run's vocabulary) — check the TSV")
+                args._gate_seed_profile = gs
+                args._gate_seed_profile_stats = gs_stats
+                _cprint(f"[driver]   profile seed: {json.dumps(gs_stats)}", flush=True)
         v_desc = " + ".join(f"{n}:{len(vm)}"
                             for n, vm in zip(args._domain_names, vocab_maps))
         _cprint(f"[driver]   corpus: V=({v_desc}) vocab, "
@@ -5248,6 +5286,10 @@ def main() -> int:
             manifest_fields["gate_schedule"] = {
                 "warm": int(args.gate_warm),
                 "open_seed": not bool(getattr(args, "gate_no_open_seed", False))}
+            if getattr(args, "_gate_seed_profile", None):
+                manifest_fields["gate_schedule"]["seed_profile"] = {
+                    "path": args.gate_seed_profile,
+                    **getattr(args, "_gate_seed_profile_stats", {})}
         if int(getattr(args, "spectral_bg_anchors", 0) or 0) > 0:
             manifest_fields["spectral_bg_anchors"] = int(args.spectral_bg_anchors)
         if getattr(args, "spectral_anchor_profile", ""):

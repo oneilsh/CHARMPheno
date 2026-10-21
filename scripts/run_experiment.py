@@ -970,6 +970,8 @@ def build_gated_pc_args(
         args.extend(["--gate-warm", str(int(effective["gate_warm"]))])
         if effective.get("gate_open_seed") is False:
             args.append("--gate-no-open-seed")
+        if effective.get("gate_seed_profile"):
+            args.extend(["--gate-seed-profile", str(effective["gate_seed_profile"])])
     if effective.get("readout_sample_frac") is not None:
         args.extend(["--readout-sample-frac", str(effective["readout_sample_frac"])])
     if effective.get("readout_mode"):
