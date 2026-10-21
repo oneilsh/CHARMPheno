@@ -105,3 +105,34 @@ full-gate iterations followed the schedule. On the whole-history prior, 237 node
 - **Read:** this is the 0153/0154 pattern at about 14× the nodes (0154: +0.016, 12 of 14
   stacked; flat unchanged). The schedule gives a small, robust gain to the stacked
   product and nothing to the per-node heads. Topic legibility (read 1) still to come.
+
+**2026-10-21 — digest pair (read 1), top 25 matched nodes by evidence.**
+- **Wins (0155 → 0156):**
+  - atrial fibrillation: knee osteoarthritis and actinic keratosis → AF†, chronic AF†,
+    paroxysmal AF.
+  - congestive heart failure: distress, rales, thyromegaly → CHF†, systolic HF.
+  - coronary artery disorder (d4): generic inpatient symptoms → coronary
+    arteriosclerosis†, atherosclerosis, grafts.
+  - essential hypertension: T2DM words → essential hypertension†.
+  - heart failure (d3) no longer leads with its child CHF's words; it now leads with
+    heart failure†, left heart failure† and hypertensive heart failure†.
+  - hypertensive disorder (d4) stops leading with its child's code (essential
+    hypertension) and reads as an obesity / sleep-apnea stratum.
+- **Losses:**
+  - abdominal aortic aneurysm: AAA† first → generic inpatient symptoms.
+  - benign essential hypertension and rheumatic mitral disease: own code pushed down
+    by symptoms.
+  - aortic valve stenosis and pregnancy-induced hypertension carry the generic
+    inpatient stratum in 0156 (pain, nausea, vomiting, shortness of breath; sodium
+    chloride, fentanyl): aortic valve stenosis at evidence 1.8e5.
+- **Same in both:** MI, persistent AF, intermediate coronary syndrome, ocular
+  hypertension, hypertensive urgency, DCM and mitral valve disorder are legible.
+  Diastolic HF and secondary hypertension read as T2DM. Coronary atherosclerosis reads
+  as a COPD / smoking stratum.
+- **Mechanism, from the depth medians:** evidence moves down the tree. 0155 → 0156 by
+  depth: d1 3.7e5 → 4.0e4, d2 1.2e5 → 1.9e4, d3 1.6e4 → 5.1e3; d7 1.3e3 → 2.0e3, d8 163
+  → 743. Parents end up thinner and own-code-led. During the leaf rounds, though, the
+  documents' shared generic content (the inpatient-encounter stratum) has only leaves
+  and the 200 background topics to go to, so some leaves keep it.
+- **Next:** a quantitative legibility read (profile census with the own-code rule:
+  signature against stratum share by depth) instead of eyeballing the top 25.
