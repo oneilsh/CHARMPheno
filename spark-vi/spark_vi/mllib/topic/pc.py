@@ -411,6 +411,14 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         "False leaves late blocks at their init (they die on arrival in simulation).",
         typeConverter=TypeConverters.toBoolean,
     )
+    gateSeedProfile = Param(
+        Params._dummy(), "gateSeedProfile",
+        "with gateWarm > 0: JSON {engine node id: {condition-domain vocab idx: weight}} "
+        "— an external phenotype profile (e.g. HPO) that REPLACES a profiled node's "
+        "condition-domain seed: leaves at iteration 0, later blocks when they open. "
+        "Unprofiled nodes keep the histogram seed. Empty (default) = histogram only.",
+        typeConverter=TypeConverters.toString,
+    )
     localizeHead = Param(
         Params._dummy(), "localizeHead",
         "LOCALIZED head (requires gateParent): each label c's logistic reads ONLY its "
@@ -646,6 +654,24 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
              for k, v in cands.items() if v})
         return self._set(spectralAnchorCandidates=encoded)
 
+    def setGateSeedProfile(self, prof) -> "OnlinePCLDAEstimator":
+        """{engine node id: {vocab idx: weight}} (or a pre-encoded JSON string);
+        empty/None clears it."""
+        if prof is None or prof == "" or prof == {}:
+            return self._set(gateSeedProfile="")
+        encoded = prof if isinstance(prof, str) else json.dumps(
+            {int(operator.index(k)): {int(operator.index(i)): float(w)
+                                      for i, w in v.items() if float(w) > 0}
+             for k, v in prof.items() if v})
+        return self._set(gateSeedProfile=encoded)
+
+    def getGateSeedProfile(self) -> dict:
+        raw = str(self.getOrDefault(self.gateSeedProfile))
+        if not raw:
+            return {}
+        return {int(k): {int(i): float(w) for i, w in v.items()}
+                for k, v in json.loads(raw).items()}
+
     def getSpectralAnchorCandidates(self) -> dict:
         """Decoded {int node id: [int vocab idx, ...]}; {} when unguided."""
         raw = str(self.getOrDefault(self.spectralAnchorCandidates))
@@ -865,7 +891,7 @@ _ONLINE_PCLDA_DEFAULTS = dict(
     headHistoryReset=True, headLr=0.05, headNewtonRidge=0.01,
     headL2=1e-3, headIntercept=False, headStandardize=False,
     closureParents="", warmStartFrom="",
-    gateParent="", etaBoost="", gateNBg=2, gateTpn=1, gateWarm=0, gateOpenSeed=True,
+    gateParent="", etaBoost="", gateNBg=2, gateTpn=1, gateWarm=0, gateOpenSeed=True, gateSeedProfile="",
     localizeHead=False,
     headSupport="siblings",
     frontierCol="frontier",
@@ -947,6 +973,7 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         gateTpn: int = 1,
         gateWarm: int = 0,
         gateOpenSeed: bool = True,
+        gateSeedProfile: str = "",
         localizeHead: bool = False,
         headSupport: str = "siblings",
         frontierCol: str = "frontier",
@@ -1277,11 +1304,41 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
             if bool(self.getOrDefault("gateOpenSeed")):
                 from spark_vi.models.topic.gated_init import gate_open_seed_counts
                 _seed = gate_open_seed_counts(pc_rdd, _lay, vocab_size)
-            model_obj._lda.set_gate_schedule(_gw, open_seed=_seed)
+            _init = None
+            _prof = self.getGateSeedProfile()
+            _np_leaf = _np_late = 0
+            if _prof:
+                # Profile rows replace the CONDITION-domain slice (domain 0 opens the
+                # concatenation); the other domains keep their histogram / init.
+                _V0 = int(domain_sizes[0]) if domain_sizes else int(vocab_size)
+                _init = np.zeros((_lay.K, vocab_size), dtype=np.float64)
+                for _u, _w in _prof.items():
+                    if _u not in _lay.block:
+                        continue
+                    _row = np.zeros(_V0)
+                    for _i, _x in _w.items():
+                        if 0 <= _i < _V0:
+                            _row[_i] = _x
+                    if not _row.any():
+                        continue
+                    for _k in _lay.block[_u]:
+                        if _lay.height(_u) == 0:
+                            _init[_k, :_V0] = _row
+                            _np_leaf += 1
+                        else:
+                            if _seed is None:
+                                _seed = np.zeros((_lay.K, vocab_size), dtype=np.float64)
+                            _seed[_k, :_V0] = _row
+                            _np_late += 1
+                if not _np_leaf:
+                    _init = None
+            model_obj._lda.set_gate_schedule(_gw, open_seed=_seed, init_seed=_init)
             _H = model_obj._lda._gate_H
             print(f"[pc] leaves-first gate: {_gw} iters/level over heights 0..{_H} "
                   f"(full gate from iter {_gw * _H}); open-time seed "
-                  f"{'ON' if _seed is not None else 'off'}", flush=True)
+                  f"{'ON' if _seed is not None else 'off'}"
+                  + (f"; profile seed on {_np_leaf} leaf + {_np_late} later topic(s), "
+                     f"histogram elsewhere" if _prof else ""), flush=True)
 
         # Alpha policy for the GATED engine (exp 0121; insight 0090 correction).
         # The estimator's optimizeDocConcentration never reached an INJECTED topic

@@ -113,3 +113,21 @@ def test_gate_open_seed_counts_sums_admitted_documents(spark):
     assert out[k1].tolist() == [2.0, 4.0, 0, 0, 0, 1.0, 0, 0]
     assert out[k2].tolist() == [2.0, 0, 0, 0, 0, 1.0, 0, 0]
     assert not out[k3].any() and not out[0].any()     # leaves, background: no seed
+
+
+def test_init_seed_replaces_only_the_domain_it_covers():
+    lay = DagLayout(PARENT, n_bg=1, tpn=1)
+    m = GatedOnlineLDA(lay, 12, domains=[8, 4], alpha=0.1, eta=0.02, random_seed=0)
+    init = np.zeros((lay.K, 12))
+    k3 = lay.block[3][0]                               # leaf, open at iteration 0
+    init[k3, 2] = 1.0                                  # condition domain only
+    m.set_gate_schedule(2, init_seed=init)
+    base = GatedOnlineLDA(lay, 12, domains=[8, 4], alpha=0.1, eta=0.02, random_seed=0)
+    base.set_gate_schedule(2)
+    np.random.seed(0); gp = m.initialize_global(None)
+    np.random.seed(0); gb = base.initialize_global(None)
+    row = gp["lambda"][0][k3]
+    assert np.argmax(row) == 2 and row[2] > 0.9 * row.sum()
+    assert np.array_equal(gp["lambda"][1][k3], gb["lambda"][1][k3])   # other domain kept
+    k1 = lay.block[1][0]                               # closed parent: untouched
+    assert np.array_equal(gp["lambda"][0][k1], gb["lambda"][0][k1])

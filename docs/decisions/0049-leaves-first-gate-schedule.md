@@ -28,6 +28,11 @@ both failures.
   gate admits (`gated_init.gate_open_seed_counts`: one pass, the E-step's scatter without
   CAVI), scaled to a typical open topic's mass per domain. The seed is driver-only:
   `__getstate__` drops it (ADR 0047).
+- **Profile seed, optional** (`--gate-seed-profile TSV`, `gateSeedProfile`; added
+  2026-10-21): a node with an external phenotype profile (HPO) in the vocabulary has its
+  condition-domain seed replaced by the profile concepts, IDF-weighted over the run's
+  profiled nodes (`profile_eta.build_profile_seed`). Leaves get it at iteration 0, later
+  blocks at opening; other nodes and other domains keep the histogram seed or the init.
 - **Default off.** `warm = 0` is byte-identical. It is a fit parameter: no corpus or
   bundle cache key moves.
 
