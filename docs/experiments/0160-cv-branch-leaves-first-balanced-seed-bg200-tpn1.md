@@ -1,7 +1,7 @@
 ---
 id: 160
 slug: cv-branch-leaves-first-balanced-seed-bg200-tpn1
-status: planned
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -144,3 +144,19 @@ In the fit log, check `[driver]   balanced seed: own codes ... for N node(s)` an
 - **0159:** NPMI for every pair listed there.
 
 ## Run log
+
+**2026-10-22 — done; 0156 → 0160 (subtree-mean seed → child-balanced seed, one change).**
+The fit log reports own codes in the condition vocabulary for 172 nodes (465 codes),
+removed from their ancestors' seeds; the gate line reads `open-time seed ON (balanced)`.
+- **Census, own-code rule:** signature 245 → 254 (83% → 86%). Own-code identity
+  126 → 133 of 172 (73% → 77%). Stratum share by depth: d2 25 → 25%, d3 21 → 18%,
+  d4 14 → 10%, d5 14 → 10%, d6 16 → 15%, d7 21 → 21%, d8 0 → 0%.
+- **New diagnoses (237 nodes):** stacked 0.786 → 0.785, median −0.0015, 0160 better on
+  100 of 237 (sign test, lower tail p ≈ 0.01). Flat +0.0014, 126 of 237. Both
+  differences are a thousandth of AUC.
+- **NPMI (0159's measure):** unchanged. Medians 0.000 for conditions gated and −0.0002
+  for drugs gated; depth 3 conditions −0.015 (10 of 36).
+- **Read:** the balanced seed adds a further legibility gain on top of leaves-first,
+  mostly at depths 3–5 (stratum share down 3–4 points). Prediction and coherence are
+  unchanged within noise. Leaves-first + balanced seed + 200 background topics is now
+  the best configuration.
