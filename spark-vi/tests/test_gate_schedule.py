@@ -151,3 +151,25 @@ def test_balanced_seed_weights_children_equally_and_drops_their_codes(spark):
     row = bal[k1] / bal[k1].sum()
     assert row[0] == 0 and row[1] == 0                       # children's codes removed
     assert abs(row[5] - 1.0) < 1e-12                         # the shared word remains
+
+
+@pytest.mark.slow
+def test_leaf_rows_seeded_from_their_own_documents(spark):
+    from spark_vi.models.topic.gated_init import gate_open_seed_counts
+    lay = DagLayout({1: 0, 2: 1, 3: 1, 4: 0}, n_bg=1, tpn=1)   # 4: top-level leaf
+    docs = [GatedBOWDocument(np.array([0, 5], np.int32), np.ones(2), 2,
+                             frontier=frozenset({2})),
+            GatedBOWDocument(np.array([1], np.int32), np.ones(1), 1,
+                             frontier=frozenset({3})),
+            GatedBOWDocument(np.array([6], np.int32), np.ones(1), 1,
+                             frontier=frozenset({4}))]
+    rdd = spark.sparkContext.parallelize(docs, 2)
+    for mode in ("subtree", "balanced"):
+        off = gate_open_seed_counts(rdd, lay, 8, mode=mode, own_idx={2: [0], 3: [1]})
+        on = gate_open_seed_counts(rdd, lay, 8, mode=mode, own_idx={2: [0], 3: [1]},
+                                   leaves=True)
+        k1, k2, k4 = lay.block[1][0], lay.block[2][0], lay.block[4][0]
+        assert not off[k2].any() and not off[k4].any()
+        assert on[k2].tolist() == [1, 0, 0, 0, 0, 1, 0, 0]       # own code kept for a leaf
+        assert on[k4].tolist() == [0, 0, 0, 0, 0, 0, 1, 0]       # top-level leaf too
+        assert np.allclose(on[k1], off[k1])                      # parents unchanged

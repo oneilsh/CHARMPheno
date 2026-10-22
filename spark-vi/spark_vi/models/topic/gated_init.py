@@ -1050,7 +1050,7 @@ def _seed_reduce_depth(n_rows: int, V: int) -> int:
 
 
 def gate_open_seed_counts(rdd, lay, V: int, *, mode: str = "subtree",
-                          own_idx: dict | None = None):
+                          own_idx: dict | None = None, leaves: bool = False):
     """The leaves-first schedule's open-time seed: a (K, V) array whose rows for each
     LATE-OPENING block (node height >= 1) hold the summed word counts of the
     documents whose gate admits that block — u in closure(frontier), i.e. a frontier
@@ -1076,12 +1076,18 @@ def gate_open_seed_counts(rdd, lay, V: int, *, mode: str = "subtree",
     proper descendant's own codes from the parent's row before normalization. This
     accumulates float32 (rows, V) arrays per partition — the late nodes' children and
     the late nodes only — with a deeper reduction tree when they are large, so a
-    whole-Mondo pass stays at about 200 MB a task and well under 1 GB on the driver."""
+    whole-Mondo pass stays at about 200 MB a task and well under 1 GB on the driver.
+
+    `leaves=True` (exp 0162) also fills the LEAF rows (height 0) with the word counts
+    of the documents each leaf's gate admits, its own patients, for the estimator to
+    apply at iteration 0. With every node block seeded from its own documents, the
+    spectral init has nothing left to do under the schedule (`init: random`), and its
+    per-node batched scans (hours at whole-Mondo) are skipped."""
     if mode not in ("subtree", "balanced"):
         raise ValueError(f"unknown seed mode {mode!r}")
     if mode == "balanced":
-        return _balanced_seed(rdd, lay, V, own_idx or {})
-    late = [u for u in lay.nodes if lay.height(u) >= 1]
+        return _balanced_seed(rdd, lay, V, own_idx or {}, leaves=leaves)
+    late = [u for u in lay.nodes if lay.height(u) >= 1 or leaves]
     row_of = {u: i for i, u in enumerate(late)}
     out = np.zeros((lay.K, V), dtype=np.float64)
     if not late:
@@ -1126,18 +1132,21 @@ def gate_open_seed_counts(rdd, lay, V: int, *, mode: str = "subtree",
     return out
 
 
-def _balanced_seed(rdd, lay, V: int, own_idx: dict):
+def _balanced_seed(rdd, lay, V: int, own_idx: dict, *, leaves: bool = False):
     """`gate_open_seed_counts(mode="balanced")`: one pass accumulating, per node, the
     word counts of its subtree's documents (S) and of the documents coded at the node
     itself (O); the driver combines them child-balanced. Same ADR 0047 discipline."""
     nodes = list(lay.nodes)
     out = np.zeros((lay.K, V), dtype=np.float64)
     late = [u for u in nodes if lay.height(u) >= 1]
-    if not late:
+    leaf = [u for u in nodes if lay.height(u) == 0] if leaves else []
+    if not late and not leaf:
         return out
     # Only the rows the seed reads: S (subtree counts) for the children of late
-    # nodes, O (own coded documents) for the late nodes. float32 accumulators.
-    kids = sorted({c for u in late for c in lay.children.get(u, []) if c != 0})
+    # nodes (and every leaf when `leaves`), O (own coded documents) for the late
+    # nodes. float32 accumulators.
+    kids = sorted({c for u in late for c in lay.children.get(u, []) if c != 0}
+                  | set(leaf))
     row_of = {u: i for i, u in enumerate(kids)}           # S rows
     orow_of = {u: i for i, u in enumerate(late)}          # O rows
     lay_b = rdd.context.broadcast(lay)
@@ -1204,4 +1213,8 @@ def _balanced_seed(rdd, lay, V: int, own_idx: dict):
             shares.append(n)
         if shares:
             out[lay.block[u]] = np.mean(shares, axis=0)
+    for u in leaf:
+        v = S[row_of[u]]
+        if v.sum() > 0:
+            out[lay.block[u]] = v
     return out

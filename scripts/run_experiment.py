@@ -970,6 +970,8 @@ def build_gated_pc_args(
         args.extend(["--gate-warm", str(int(effective["gate_warm"]))])
         if effective.get("gate_open_seed") is False:
             args.append("--gate-no-open-seed")
+        if effective.get("gate_seed_leaves"):
+            args.append("--gate-seed-leaves")
         if str(effective.get("gate_seed_mode", "subtree")) != "subtree":
             args.extend(["--gate-seed-mode", str(effective["gate_seed_mode"])])
         if effective.get("gate_seed_profile"):
