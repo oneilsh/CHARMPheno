@@ -411,6 +411,20 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         "False leaves late blocks at their init (they die on arrival in simulation).",
         typeConverter=TypeConverters.toBoolean,
     )
+    gateSeedMode = Param(
+        Params._dummy(), "gateSeedMode",
+        "with gateWarm > 0: the open-time seed — 'subtree' (default: the word counts "
+        "of the documents a block admits) or 'balanced' (each child's subtree share "
+        "equally plus the parent's own coded documents, descendants' own codes "
+        "removed via gateSeedOwnCodes).",
+        typeConverter=TypeConverters.toString,
+    )
+    gateSeedOwnCodes = Param(
+        Params._dummy(), "gateSeedOwnCodes",
+        "with gateSeedMode='balanced': JSON {engine node id: [condition-domain vocab "
+        "idx]} of each node's own attesting codes; removed from its ancestors' seeds.",
+        typeConverter=TypeConverters.toString,
+    )
     gateSeedProfile = Param(
         Params._dummy(), "gateSeedProfile",
         "with gateWarm > 0: JSON {engine node id: {condition-domain vocab idx: weight}} "
@@ -665,6 +679,21 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
              for k, v in prof.items() if v})
         return self._set(gateSeedProfile=encoded)
 
+    def setGateSeedOwnCodes(self, own) -> "OnlinePCLDAEstimator":
+        """{engine node id: [vocab idx]} (or pre-encoded JSON); empty clears it."""
+        if own is None or own == "" or own == {}:
+            return self._set(gateSeedOwnCodes="")
+        encoded = own if isinstance(own, str) else json.dumps(
+            {int(operator.index(k)): sorted({operator.index(i) for i in v})
+             for k, v in own.items() if v})
+        return self._set(gateSeedOwnCodes=encoded)
+
+    def getGateSeedOwnCodes(self) -> dict:
+        raw = str(self.getOrDefault(self.gateSeedOwnCodes))
+        if not raw:
+            return {}
+        return {int(k): [int(i) for i in v] for k, v in json.loads(raw).items()}
+
     def getGateSeedProfile(self) -> dict:
         raw = str(self.getOrDefault(self.gateSeedProfile))
         if not raw:
@@ -891,7 +920,8 @@ _ONLINE_PCLDA_DEFAULTS = dict(
     headHistoryReset=True, headLr=0.05, headNewtonRidge=0.01,
     headL2=1e-3, headIntercept=False, headStandardize=False,
     closureParents="", warmStartFrom="",
-    gateParent="", etaBoost="", gateNBg=2, gateTpn=1, gateWarm=0, gateOpenSeed=True, gateSeedProfile="",
+    gateParent="", etaBoost="", gateNBg=2, gateTpn=1, gateWarm=0, gateOpenSeed=True, gateSeedProfile="", gateSeedMode="subtree",
+    gateSeedOwnCodes="",
     localizeHead=False,
     headSupport="siblings",
     frontierCol="frontier",
@@ -974,6 +1004,8 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         gateWarm: int = 0,
         gateOpenSeed: bool = True,
         gateSeedProfile: str = "",
+        gateSeedMode: str = "subtree",
+        gateSeedOwnCodes: str = "",
         localizeHead: bool = False,
         headSupport: str = "siblings",
         frontierCol: str = "frontier",
@@ -1303,7 +1335,10 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
             _seed = None
             if bool(self.getOrDefault("gateOpenSeed")):
                 from spark_vi.models.topic.gated_init import gate_open_seed_counts
-                _seed = gate_open_seed_counts(pc_rdd, _lay, vocab_size)
+                _smode = str(self.getOrDefault("gateSeedMode"))
+                _seed = gate_open_seed_counts(
+                    pc_rdd, _lay, vocab_size, mode=_smode,
+                    own_idx=(self.getGateSeedOwnCodes() if _smode == "balanced" else None))
             _init = None
             _prof = self.getGateSeedProfile()
             _np_leaf = _np_late = 0
@@ -1336,7 +1371,7 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
             _H = model_obj._lda._gate_H
             print(f"[pc] leaves-first gate: {_gw} iters/level over heights 0..{_H} "
                   f"(full gate from iter {_gw * _H}); open-time seed "
-                  f"{'ON' if _seed is not None else 'off'}"
+                  f"{'ON (' + str(self.getOrDefault('gateSeedMode')) + ')' if _seed is not None else 'off'}"
                   + (f"; profile seed on {_np_leaf} leaf + {_np_late} later topic(s), "
                      f"histogram elsewhere" if _prof else ""), flush=True)
 

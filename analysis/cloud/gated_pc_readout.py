@@ -1663,6 +1663,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--diff-groups-like", default=None, metavar="JSON",
                    help="(--differential) exp 0152: score only the groups whose names are "
                         "keys of this JSON (e.g. a previous run's differential_<tag>.json)")
+    p.add_argument("--npmi", action="store_true",
+                   help="Exp 0159: GATED NPMI of every topic from the saved fit — each "
+                        "node block scored on the documents its gate admits, and on all "
+                        "documents for comparison. No transform, no heads. Writes "
+                        "npmi[_<acq-tag>].md (pooled) and .json (workspace-internal).")
+    p.add_argument("--npmi-top", type=int, default=10, help="(--npmi) top-N words")
+    p.add_argument("--npmi-split", choices=("train", "test"), default="train",
+                   help="(--npmi) reference documents: the split the fit trained on "
+                        "(default) or the held-out test split")
+    p.add_argument("--npmi-domains", default="0",
+                   help="(--npmi) comma-separated domain indices (0 = conditions)")
     p.add_argument("--diff-members", default="auto",
                    choices=("auto", "all", "top", "most-specific"),
                    help="(--differential) which label terms are a group's members: all "
@@ -2670,6 +2681,29 @@ def main(argv=None) -> int:
                 _cmp = write_code_map(run_dir, _ncm)
                 _cprint(f"[readout]   wrote native code map ({len(_ncm)} pairs) -> "
                       f"{_cmp}", flush=True)
+
+        if args.npmi:
+            # Exp 0159: gated NPMI from the saved topics + the bundle's documents;
+            # no transform, no heads.
+            with _phase("gated NPMI"):
+                from spark_vi.models.topic.dag_placement import DagLayout
+                from topic_npmi import run_npmi
+                _npz = np.load(run_dir / "gated_pc_result.npz")
+                _lk = sorted((k for k in _npz.files if k.startswith("lambda_")),
+                             key=lambda k: int(k.split("_", 1)[1]))
+                _lams = [_npz[k] for k in _lk] if _lk else [_npz["lambda"]]
+                _cm = manifest.get("corpus_manifest") or {}
+                _lay = DagLayout({int(c): [int(p) for p in ps] for c, ps in
+                                  bundle.parent_int.items()},
+                                 n_bg=int(manifest["n_bg"]), tpn=int(manifest["tpn"]))
+                run_npmi(bundle.train_df, bundle.test_df, run_dir, lay=_lay, lams=_lams,
+                         n_bg=int(manifest["n_bg"]),
+                         int2cid={int(k): int(v) for k, v in _cm.get("int2cid", {}).items()},
+                         names={int(k): v for k, v in _cm.get("name_by_id", {}).items()},
+                         split=args.npmi_split, top_n=args.npmi_top,
+                         domains=[int(x) for x in str(args.npmi_domains).split(",")],
+                         tag=args.acq_tag)
+            return 0
 
         if args.differential:
             with _phase("differential with reasons (framing 1)"):

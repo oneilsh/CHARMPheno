@@ -131,3 +131,23 @@ def test_init_seed_replaces_only_the_domain_it_covers():
     assert np.array_equal(gp["lambda"][1][k3], gb["lambda"][1][k3])   # other domain kept
     k1 = lay.block[1][0]                               # closed parent: untouched
     assert np.array_equal(gp["lambda"][0][k1], gb["lambda"][0][k1])
+
+
+@pytest.mark.slow
+def test_balanced_seed_weights_children_equally_and_drops_their_codes(spark):
+    from spark_vi.models.topic.gated_init import gate_open_seed_counts
+    lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=1, tpn=1)     # 1 -> {2, 3}
+    docs = []
+    for _ in range(9):     # dominant child 2: own code 0 + shared word 5
+        docs.append(GatedBOWDocument(np.array([0, 5], np.int32), np.ones(2), 2,
+                                     frontier=frozenset({2})))
+    docs.append(GatedBOWDocument(np.array([1, 5], np.int32), np.ones(2), 2,
+                                 frontier=frozenset({3})))   # minor child 3: code 1
+    rdd = spark.sparkContext.parallelize(docs, 2)
+    sub = gate_open_seed_counts(rdd, lay, 8)
+    bal = gate_open_seed_counts(rdd, lay, 8, mode="balanced", own_idx={2: [0], 3: [1]})
+    k1 = lay.block[1][0]
+    assert sub[k1, 0] == 9 and sub[k1, 1] == 1               # size-weighted
+    row = bal[k1] / bal[k1].sum()
+    assert row[0] == 0 and row[1] == 0                       # children's codes removed
+    assert abs(row[5] - 1.0) < 1e-12                         # the shared word remains
