@@ -70,3 +70,42 @@ def test_compare_pairs_by_mondo_id(tmp_path, capsys):
     tn.compare(tmp_path / "a", tmp_path / "b")
     out = capsys.readouterr().out
     assert "median B−A +0.2000" in out and "B better on 1/1" in out
+
+
+def test_own_code_exclusions_cover_descendants():
+    lay = DagLayout(PARENT, n_bg=1, tpn=1)
+    ex = tn.own_code_exclusions(lay, {1: [7], 2: [5]})
+    assert ex[lay.block[1][0]] == [5, 7] and ex[lay.block[2][0]] == [5]
+    tops = tn.top_words(np.array([[1, 1, 1, 1, 1, 9, 1, 1]] * 4, float), 2,
+                        exclude={lay.block[2][0]: [5]})
+    assert tops[0][0] == 5 and 5 not in tops[lay.block[2][0]]
+
+
+@pytest.mark.slow
+def test_local_mode_matches_the_spark_pass(spark, tmp_path):
+    from pyspark.ml.linalg import Vectors
+    lay = DagLayout(PARENT, n_bg=1, tpn=1)
+    rows = [(Vectors.sparse(8, [4, 5], [1.0, 1.0]), [2]) for _ in range(30)]
+    rows += [(Vectors.sparse(8, [0, 1], [1.0, 1.0]), []) for _ in range(10)]
+    df = spark.createDataFrame(rows, ["features_0", "frontier"])
+    df.write.parquet(str(tmp_path / "train.parquet"))
+    lam = np.full((4, 8), 0.01)
+    lam[0, [0, 1]] = 5; lam[1, [2, 3]] = 5; lam[2, [4, 5]] = 5; lam[3, [6, 7]] = 5
+    run = tmp_path / "run"
+    run.mkdir()
+    np.savez(run / "gated_pc_result.npz", **{"lambda_0": lam})
+    (run / "manifest.json").write_text(json.dumps({"n_bg": 1, "tpn": 1}))
+    (run / "bundle_meta.json").write_text(json.dumps({
+        "parent_int": {"1": [0], "2": [1], "3": [1]},
+        "int2cid": {"0": 100, "1": 101, "2": 102, "3": 103},
+        "name_by_id": {"102": "node two"},
+        "vocab_maps": [{str(500 + i): i for i in range(8)}]}))
+    (run / "code_map.tsv").write_text("std_cid\tnode_cid\n504\t102\n")
+    tn.run_local(run, tmp_path / "train.parquet", top_n=2, tag="t")
+    out = json.loads((run / "npmi_t.json").read_text())["rows"]
+    two = next(r for r in out if r["node"] == 2)
+    assert two["n_ref"] == 30 and abs(two["npmi_gated"] - 1.0) < 1e-9
+    tn.run_local(run, tmp_path / "train.parquet", top_n=2, tag="x", exclude_own=True)
+    two_x = next(r for r in json.loads((run / "npmi_x.json").read_text())["rows"]
+                 if r["node"] == 2)
+    assert two_x["pairs_gated"] == 0          # word 4 excluded: no co-occurring pair left
