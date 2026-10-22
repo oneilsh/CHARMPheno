@@ -1042,6 +1042,13 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
     return beta * float(scale)
 
 
+def _seed_reduce_depth(n_rows: int, V: int) -> int:
+    """treeReduce depth for a (n_rows, V) float32 accumulator: the driver receives
+    about P^(1/depth) partials, so a whole-Mondo-sized array (hundreds of MB) needs a
+    deeper tree than a branch's few MB."""
+    return 4 if n_rows * V * 4 > 50_000_000 else 2
+
+
 def gate_open_seed_counts(rdd, lay, V: int, *, mode: str = "subtree",
                           own_idx: dict | None = None):
     """The leaves-first schedule's open-time seed: a (K, V) array whose rows for each
@@ -1067,8 +1074,9 @@ def gate_open_seed_counts(rdd, lay, V: int, *, mode: str = "subtree",
     1/(children + 1) and a word all children share keeps full weight. `own_idx`
     ({node: [vocab idx]}, the native code map's attesting codes) removes every
     proper descendant's own codes from the parent's row before normalization. This
-    accumulates a (nodes, V) array per partition: fine at branch scale, heavy at
-    whole-Mondo (~250 MB a partition)."""
+    accumulates float32 (rows, V) arrays per partition — the late nodes' children and
+    the late nodes only — with a deeper reduction tree when they are large, so a
+    whole-Mondo pass stays at about 200 MB a task and well under 1 GB on the driver."""
     if mode not in ("subtree", "balanced"):
         raise ValueError(f"unknown seed mode {mode!r}")
     if mode == "balanced":
@@ -1091,9 +1099,9 @@ def gate_open_seed_counts(rdd, lay, V: int, *, mode: str = "subtree",
             if not us:
                 continue
             if acc is None:
-                acc = np.zeros((len(R), V), dtype=np.float64)
+                acc = np.zeros((len(R), V), dtype=np.float32)
             idx = np.asarray(d.indices, dtype=np.int64)
-            cnt = np.asarray(d.counts, dtype=np.float64)
+            cnt = np.asarray(d.counts, dtype=np.float32)
             for u in us:
                 acc[R[u], idx] += cnt
         yield acc
@@ -1107,7 +1115,8 @@ def gate_open_seed_counts(rdd, lay, V: int, *, mode: str = "subtree",
         return a
 
     try:
-        tot = rdd.mapPartitions(_part).treeReduce(_comb, depth=2)
+        tot = rdd.mapPartitions(_part).treeReduce(
+            _comb, depth=_seed_reduce_depth(len(late), V))
     finally:
         _destroy_broadcast(lay_b)
         _destroy_broadcast(rows_b)
@@ -1122,30 +1131,34 @@ def _balanced_seed(rdd, lay, V: int, own_idx: dict):
     word counts of its subtree's documents (S) and of the documents coded at the node
     itself (O); the driver combines them child-balanced. Same ADR 0047 discipline."""
     nodes = list(lay.nodes)
-    row_of = {u: i for i, u in enumerate(nodes)}
     out = np.zeros((lay.K, V), dtype=np.float64)
     late = [u for u in nodes if lay.height(u) >= 1]
     if not late:
         return out
+    # Only the rows the seed reads: S (subtree counts) for the children of late
+    # nodes, O (own coded documents) for the late nodes. float32 accumulators.
+    kids = sorted({c for u in late for c in lay.children.get(u, []) if c != 0})
+    row_of = {u: i for i, u in enumerate(kids)}           # S rows
+    orow_of = {u: i for i, u in enumerate(late)}          # O rows
     lay_b = rdd.context.broadcast(lay)
-    rows_b = rdd.context.broadcast(row_of)
+    rows_b = rdd.context.broadcast((row_of, orow_of))
 
     def _part(docs, _lay=lay_b, _rows=rows_b):
-        L, R = _lay.value, _rows.value
+        L, (R, Ro) = _lay.value, _rows.value
         acc = None
         for d in docs:
             if not d.frontier:
                 continue
             if acc is None:
-                acc = (np.zeros((len(R), V), dtype=np.float64),
-                       np.zeros((len(R), V), dtype=np.float64))
+                acc = (np.zeros((len(R), V), dtype=np.float32),
+                       np.zeros((len(Ro), V), dtype=np.float32))
             idx = np.asarray(d.indices, dtype=np.int64)
-            cnt = np.asarray(d.counts, dtype=np.float64)
+            cnt = np.asarray(d.counts, dtype=np.float32)
             for u in {u for f in d.frontier for u in L.closure(f) if u in R}:
                 acc[0][R[u], idx] += cnt
             for f in d.frontier:
-                if f in R:
-                    acc[1][R[f], idx] += cnt
+                if f in Ro:
+                    acc[1][Ro[f], idx] += cnt
         yield acc
 
     def _comb(a, b):
@@ -1158,13 +1171,14 @@ def _balanced_seed(rdd, lay, V: int, own_idx: dict):
         return a
 
     try:
-        tot = rdd.mapPartitions(_part).treeReduce(_comb, depth=2)
+        tot = rdd.mapPartitions(_part).treeReduce(
+            _comb, depth=_seed_reduce_depth(len(kids) + len(late), V))
     finally:
         _destroy_broadcast(lay_b)
         _destroy_broadcast(rows_b)
     if tot is None:
         return out
-    S, O = tot
+    S, O = (t.astype(np.float64) for t in tot)
 
     def norm(v):
         t = v.sum()
@@ -1183,7 +1197,7 @@ def _balanced_seed(rdd, lay, V: int, own_idx: dict):
                 n = norm(v)
                 if n is not None:
                     shares.append(n)
-        v = O[row_of[u]].copy()
+        v = O[orow_of[u]].copy()
         v[drop] = 0.0
         n = norm(v)
         if n is not None:
