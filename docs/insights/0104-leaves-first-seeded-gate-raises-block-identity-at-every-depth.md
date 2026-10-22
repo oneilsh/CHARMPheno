@@ -37,5 +37,12 @@ subtree-mean seed weights children by size.
 keep 200. An HPO profile seed (35 of 294 nodes profiled) gives +0.003 stacked (147 of 237)
 and slightly lower own-code identity (73% → 70%).
 
+**Balanced seed (exp 0160).** Seeding a late block with each child's subtree share
+weighted equally, plus the node's own coded documents, with descendants' own codes
+removed, lifts own-code identity further, 73% → 77% (signature 83% → 86%; stratum share
+at depths 3–5 down 3–4 points). New-diagnosis AUC (−0.0015 stacked) and NPMI are
+unchanged. Best configuration so far: leaves-first + balanced seed + 200 background
+topics.
+
 **Open.** A shorter warm-up against the leaf sink; the child-balanced, own-code-excluded
 seed against the dominant-child start; a second seed of the 0155 / 0156 pair.
