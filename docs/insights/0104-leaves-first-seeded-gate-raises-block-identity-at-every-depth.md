@@ -32,5 +32,10 @@ leaves and the background to go to, and a few leaves keep it (aortic valve steno
 abdominal aortic aneurysm in 0156). Intrinsic cardiomyopathy took HCM's words in 0154: the
 subtree-mean seed weights children by size.
 
-**Open.** Background width (1200) or a shorter warm-up against the leaf sink;
-child-balanced, own-code-excluded seed against the dominant-child start; a second seed.
+**Follow-ups (exps 0157 / 0158).** A 1,200-topic background does NOT fix the leaf sink
+(census unchanged) and costs about 0.03 new-diagnosis AUC (0157 better on 6 of 237 nodes):
+keep 200. An HPO profile seed (35 of 294 nodes profiled) gives +0.003 stacked (147 of 237)
+and slightly lower own-code identity (73% → 70%).
+
+**Open.** A shorter warm-up against the leaf sink; the child-balanced, own-code-excluded
+seed against the dominant-child start; a second seed of the 0155 / 0156 pair.

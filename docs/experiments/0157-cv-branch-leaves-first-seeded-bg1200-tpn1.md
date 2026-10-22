@@ -1,7 +1,7 @@
 ---
 id: 157
 slug: cv-branch-leaves-first-seeded-bg1200-tpn1
-status: planned
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -140,3 +140,14 @@ seeded from the profile.
   profiled leaf may start symptom-led.
 
 ## Run log
+
+**2026-10-22 — done; 0156 → 0157 (background 200 → 1,200, everything else equal).**
+- **New-diagnosis, whole-history prior, 237 nodes:** stacked 0.786 → 0.749, median
+  −0.033, 0157 better on only 6 of 237. Flat 0.664 → 0.633, median −0.026, 43 of 237.
+  Worse in every size band, most at the small end (−0.04 at 20–300 positives).
+- **Census, own-code rule:** essentially unchanged. Signature 83% both; own-code identity
+  125 against 126 of 172. Stratum share at depths 5–8: 13 / 16 / 18 / 0% against 0156's
+  14 / 16 / 21 / 0%. Depths 2–3 are slightly worse: 50 / 26% against 25 / 21%.
+- **Read:** the wider background does not remove the leaf sink and costs about 0.03 AUC
+  on new diagnoses. The background absorbs disease signal the node blocks and heads
+  would otherwise carry (the 0134 caution). 200 stays the width for branch fits.
