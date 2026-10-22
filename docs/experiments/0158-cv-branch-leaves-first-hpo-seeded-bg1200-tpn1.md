@@ -1,7 +1,7 @@
 ---
 id: 158
 slug: cv-branch-leaves-first-hpo-seeded-bg1200-tpn1
-status: planned
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -96,3 +96,17 @@ Everything else as 0157.
 The run, read and comparison commands are in 0157 (one background job runs both).
 
 ## Run log
+
+**2026-10-22 — done; 0157 → 0158 (HPO profile seed, at 1,200 background).**
+- **Profile seed:** 35 of 294 branch nodes have an HPO profile in the vocabulary, all
+  seeded (29 leaves, 6 later blocks); median 48 profile concepts per node; 5,553 profile
+  rows had no concept in the vocabulary.
+- **New-diagnosis:** stacked 0.749 → 0.754, median +0.003, 147 of 237 better (sign test
+  p ≈ 1e-4). Flat +0.0025, 132 of 237 (p ≈ 0.05). The gain sits at 20–300 positives.
+- **Census:** slightly worse. Signature 83% → 81%; own-code identity 125 → 120 of 172.
+  Stratum share up at depths 4–7: 14 → 17, 13 → 17, 16 → 23, 18 → 21%. The root becomes a
+  signature (n = 1).
+- **Read:** the HPO start buys a small prediction gain and costs a little legibility.
+  Profiled leaves start symptom-led and do not all move to their diagnosis codes. Only
+  about 12% of nodes are profiled, so the effect is small in either direction. Measured
+  at 1,200 background topics, whose baseline is itself 0.03 below 0156.
