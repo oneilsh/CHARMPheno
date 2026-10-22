@@ -1042,7 +1042,8 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
     return beta * float(scale)
 
 
-def gate_open_seed_counts(rdd, lay, V: int):
+def gate_open_seed_counts(rdd, lay, V: int, *, mode: str = "subtree",
+                          own_idx: dict | None = None):
     """The leaves-first schedule's open-time seed: a (K, V) array whose rows for each
     LATE-OPENING block (node height >= 1) hold the summed word counts of the
     documents whose gate admits that block — u in closure(frontier), i.e. a frontier
@@ -1056,7 +1057,22 @@ def gate_open_seed_counts(rdd, lay, V: int):
     per-partition accumulators are allocated executor-side, the reduction identity is
     a None sentinel, and the broadcast is destroyed after the pass.
     `rdd` items carry `.indices`, `.counts`, `.frontier` (GatedPCDocument /
-    GatedBOWDocument)."""
+    GatedBOWDocument).
+
+    `mode="balanced"` (exp 0160): a parent with one dominant child would otherwise
+    open looking like that child (exp 0154: intrinsic cardiomyopathy took HCM's
+    words). The row is instead the EQUAL-weight mean of each child's normalized
+    subtree word distribution plus one share for the documents coded at the parent
+    itself (frontier contains it), so a word specific to one child weighs about
+    1/(children + 1) and a word all children share keeps full weight. `own_idx`
+    ({node: [vocab idx]}, the native code map's attesting codes) removes every
+    proper descendant's own codes from the parent's row before normalization. This
+    accumulates a (nodes, V) array per partition: fine at branch scale, heavy at
+    whole-Mondo (~250 MB a partition)."""
+    if mode not in ("subtree", "balanced"):
+        raise ValueError(f"unknown seed mode {mode!r}")
+    if mode == "balanced":
+        return _balanced_seed(rdd, lay, V, own_idx or {})
     late = [u for u in lay.nodes if lay.height(u) >= 1]
     row_of = {u: i for i, u in enumerate(late)}
     out = np.zeros((lay.K, V), dtype=np.float64)
@@ -1098,4 +1114,80 @@ def gate_open_seed_counts(rdd, lay, V: int):
     if tot is not None:
         for u, i in row_of.items():
             out[lay.block[u]] = tot[i]
+    return out
+
+
+def _balanced_seed(rdd, lay, V: int, own_idx: dict):
+    """`gate_open_seed_counts(mode="balanced")`: one pass accumulating, per node, the
+    word counts of its subtree's documents (S) and of the documents coded at the node
+    itself (O); the driver combines them child-balanced. Same ADR 0047 discipline."""
+    nodes = list(lay.nodes)
+    row_of = {u: i for i, u in enumerate(nodes)}
+    out = np.zeros((lay.K, V), dtype=np.float64)
+    late = [u for u in nodes if lay.height(u) >= 1]
+    if not late:
+        return out
+    lay_b = rdd.context.broadcast(lay)
+    rows_b = rdd.context.broadcast(row_of)
+
+    def _part(docs, _lay=lay_b, _rows=rows_b):
+        L, R = _lay.value, _rows.value
+        acc = None
+        for d in docs:
+            if not d.frontier:
+                continue
+            if acc is None:
+                acc = (np.zeros((len(R), V), dtype=np.float64),
+                       np.zeros((len(R), V), dtype=np.float64))
+            idx = np.asarray(d.indices, dtype=np.int64)
+            cnt = np.asarray(d.counts, dtype=np.float64)
+            for u in {u for f in d.frontier for u in L.closure(f) if u in R}:
+                acc[0][R[u], idx] += cnt
+            for f in d.frontier:
+                if f in R:
+                    acc[1][R[f], idx] += cnt
+        yield acc
+
+    def _comb(a, b):
+        if a is None:
+            return b
+        if b is None:
+            return a
+        a[0][:] += b[0]
+        a[1][:] += b[1]
+        return a
+
+    try:
+        tot = rdd.mapPartitions(_part).treeReduce(_comb, depth=2)
+    finally:
+        _destroy_broadcast(lay_b)
+        _destroy_broadcast(rows_b)
+    if tot is None:
+        return out
+    S, O = tot
+
+    def norm(v):
+        t = v.sum()
+        return v / t if t > 0 else None
+
+    for u in late:
+        drop = set()
+        for c in lay.descendants(u):
+            drop.update(int(i) for i in own_idx.get(c, ()))
+        drop = np.asarray(sorted(i for i in drop if 0 <= i < V), dtype=np.int64)
+        shares = []
+        for c in lay.children.get(u, []):
+            if c in row_of:
+                v = S[row_of[c]].copy()
+                v[drop] = 0.0
+                n = norm(v)
+                if n is not None:
+                    shares.append(n)
+        v = O[row_of[u]].copy()
+        v[drop] = 0.0
+        n = norm(v)
+        if n is not None:
+            shares.append(n)
+        if shares:
+            out[lay.block[u]] = np.mean(shares, axis=0)
     return out

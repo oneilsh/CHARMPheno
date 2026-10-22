@@ -33,6 +33,12 @@ both failures.
   condition-domain seed replaced by the profile concepts, IDF-weighted over the run's
   profiled nodes (`profile_eta.build_profile_seed`). Leaves get it at iteration 0, later
   blocks at opening; other nodes and other domains keep the histogram seed or the init.
+- **Balanced seed, optional** (`--gate-seed-mode balanced`, `gateSeedMode`; added
+  2026-10-22): a late block's seed is the equal-weight mean of each child's normalized
+  subtree distribution plus one share for the documents coded at the node itself, with
+  every proper descendant's own attesting codes removed (`gateSeedOwnCodes`, from the
+  native code map). It targets the dominant-child start. One pass, (nodes, V) per
+  partition: branch-scale.
 - **Default off.** `warm = 0` is byte-identical. It is a fit parameter: no corpus or
   bundle cache key moves.
 

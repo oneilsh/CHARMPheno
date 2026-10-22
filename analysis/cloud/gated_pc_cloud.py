@@ -3175,6 +3175,9 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
         gsp = getattr(args, "_gate_seed_profile", None)
         if gsp:
             est.setGateSeedProfile(gsp)
+        if str(getattr(args, "gate_seed_mode", "subtree")) == "balanced":
+            est.setParams(gateSeedMode="balanced")
+            est.setGateSeedOwnCodes(getattr(args, "_gate_seed_own", None) or {})
     if closure_parents is not None:
         est.setClosureParents(closure_parents)
     return est
@@ -4464,6 +4467,12 @@ def parse_args(argv=None):
                         "(default) = single round. Each block is seeded when it opens "
                         "(see --gate-no-open-seed). Fit-only: bundle/corpus caches "
                         "unaffected. Report 2026-10-19-leaves-first-gate-sim.")
+    p.add_argument("--gate-seed-mode", choices=("subtree", "balanced"),
+                   default="subtree",
+                   help="With --gate-warm: the open-time seed. 'subtree' (default) = "
+                        "the word counts of the documents a block admits; 'balanced' = "
+                        "each child's subtree share equally plus the parent's own coded "
+                        "documents, descendants' own codes removed (exp 0160).")
     p.add_argument("--gate-seed-profile", default="", metavar="TSV",
                    help="With --gate-warm: an external phenotype profile table "
                         "(mondo_id, concept_id, neg; e.g. hpo_profile_marks.py output) "
@@ -4929,6 +4938,25 @@ def main() -> int:
                 args._gate_seed_profile = gs
                 args._gate_seed_profile_stats = gs_stats
                 _cprint(f"[driver]   profile seed: {json.dumps(gs_stats)}", flush=True)
+        # Balanced open-time seed (exp 0160): each node's own attesting codes in the
+        # condition vocab, removed from its ancestors' seeds. From the native code
+        # map (std_cid, node_cid) pairs; ids only.
+        args._gate_seed_own = None
+        if str(getattr(args, "gate_seed_mode", "subtree")) == "balanced":
+            if int(getattr(args, "gate_warm", 0) or 0) <= 0:
+                raise ValueError("--gate-seed-mode balanced requires --gate-warm > 0")
+            _ncm = getattr(bundle, "native_code_map", None) or []
+            _vm0 = vocab_maps[0]
+            own = {}
+            for std, node in _ncm:
+                eid = bundle.cid2int.get(int(node))
+                vi = _vm0.get(int(std), _vm0.get(str(int(std))))
+                if eid is not None and vi is not None:
+                    own.setdefault(int(eid), set()).add(int(vi))
+            args._gate_seed_own = {k: sorted(v) for k, v in own.items()}
+            _cprint(f"[driver]   balanced seed: own codes in the condition vocab for "
+                    f"{len(own)} node(s) ({sum(len(v) for v in own.values())} codes)",
+                    flush=True)
         v_desc = " + ".join(f"{n}:{len(vm)}"
                             for n, vm in zip(args._domain_names, vocab_maps))
         _cprint(f"[driver]   corpus: V=({v_desc}) vocab, "
@@ -5286,6 +5314,8 @@ def main() -> int:
             manifest_fields["gate_schedule"] = {
                 "warm": int(args.gate_warm),
                 "open_seed": not bool(getattr(args, "gate_no_open_seed", False))}
+            manifest_fields["gate_schedule"]["seed_mode"] = str(
+                getattr(args, "gate_seed_mode", "subtree"))
             if getattr(args, "_gate_seed_profile", None):
                 manifest_fields["gate_schedule"]["seed_profile"] = {
                     "path": args.gate_seed_profile,
