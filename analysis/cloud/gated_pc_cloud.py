@@ -3175,6 +3175,8 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
         gsp = getattr(args, "_gate_seed_profile", None)
         if gsp:
             est.setGateSeedProfile(gsp)
+        if bool(getattr(args, "gate_seed_leaves", False)):
+            est.setParams(gateSeedLeaves=True)
         if str(getattr(args, "gate_seed_mode", "subtree")) == "balanced":
             est.setParams(gateSeedMode="balanced")
             est.setGateSeedOwnCodes(getattr(args, "_gate_seed_own", None) or {})
@@ -4473,6 +4475,11 @@ def parse_args(argv=None):
                         "the word counts of the documents a block admits; 'balanced' = "
                         "each child's subtree share equally plus the parent's own coded "
                         "documents, descendants' own codes removed (exp 0160).")
+    p.add_argument("--gate-seed-leaves", action="store_true",
+                   help="With --gate-warm: seed every leaf block at iteration 0 from "
+                        "its own documents' word counts (exp 0162). With every node "
+                        "block data-seeded, use --init random: the spectral seed's "
+                        "per-node scans are then pure cost.")
     p.add_argument("--gate-seed-profile", default="", metavar="TSV",
                    help="With --gate-warm: an external phenotype profile table "
                         "(mondo_id, concept_id, neg; e.g. hpo_profile_marks.py output) "
@@ -5316,6 +5323,8 @@ def main() -> int:
                 "open_seed": not bool(getattr(args, "gate_no_open_seed", False))}
             manifest_fields["gate_schedule"]["seed_mode"] = str(
                 getattr(args, "gate_seed_mode", "subtree"))
+            manifest_fields["gate_schedule"]["seed_leaves"] = bool(
+                getattr(args, "gate_seed_leaves", False))
             if getattr(args, "_gate_seed_profile", None):
                 manifest_fields["gate_schedule"]["seed_profile"] = {
                     "path": args.gate_seed_profile,

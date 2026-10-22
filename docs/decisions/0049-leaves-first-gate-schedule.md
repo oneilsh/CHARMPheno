@@ -39,6 +39,10 @@ both failures.
   every proper descendant's own attesting codes removed (`gateSeedOwnCodes`, from the
   native code map). It targets the dominant-child start. One pass, (nodes, V) per
   partition: branch-scale.
+- **Leaf seed, optional** (`--gate-seed-leaves`, `gateSeedLeaves`; added 2026-10-23):
+  every leaf block starts at iteration 0 from the word counts of its own documents, in
+  the same pass. With every node block data-seeded, the spectral init is pure cost under
+  the schedule (hours of per-node scans at whole-Mondo), so it pairs with `init: random`.
 - **Default off.** `warm = 0` is byte-identical. It is a fit parameter: no corpus or
   bundle cache key moves.
 
