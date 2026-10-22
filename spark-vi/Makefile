@@ -49,7 +49,9 @@ build:
 	@poetry run python -c "import build" 2>/dev/null || poetry run pip install build
 	poetry run python -m build
 
-zip: clean build
+# The --py-files archive is the flat source tree; it needs no wheel, so it does
+# not depend on `build` (poetry), which a fresh Dataproc cluster does not have.
+zip: clean
 	mkdir -p dist
 	zip -r dist/spark_vi.zip spark_vi -x "*.pyc" -x "*/__pycache__/*" -x "*.egg-info/*"
 	@echo "Wrote dist/spark_vi.zip"
