@@ -44,5 +44,10 @@ at depths 3–5 down 3–4 points). New-diagnosis AUC (−0.0015 stacked) and NP
 unchanged. Best configuration so far: leaves-first + balanced seed + 200 background
 topics.
 
+**Coherence (exp 0159).** Gated NPMI (each block on the documents its gate admits) is
+flat across the schedule, with or without the blocks' own codes in the top words; only
+the parents' drug coherence rises. The schedule changes which words lead a block, not
+how well the rest co-occur.
+
 **Open.** A shorter warm-up against the leaf sink; the child-balanced, own-code-excluded
 seed against the dominant-child start; a second seed of the 0155 / 0156 pair.
