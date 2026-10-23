@@ -2,6 +2,11 @@
 
 This log records code-walkthrough and refactor sessions after initial structuring and test implementations.
 
+**An entry here means the maintainer was walked through the code and approved it**
+(`docs/META_process.md` §4). Agents do not add entries on their own after building,
+testing or self-reviewing; those records belong in experiment docs, reports or commit
+messages. Entries marked *agent-recorded* below are not sign-offs.
+
 This is a **living document** in the same sense as `docs/architecture/`: append
 each new review session as its own dated `##` section at the top of the log
 (newest first). Each session entry briefly notes which areas were reviewed,
@@ -13,6 +18,8 @@ elsewhere.
 ---
 
 ## 2026-08-27 — Mondo bundle-cache wiring + recovery-tool completion
+
+*Agent-recorded build note, not a maintainer walkthrough (annotated 2026-10-23): the code it describes has not been signed off. Last walkthrough: 2026-08-12.*
 
 Attempt 6 of the 0104 smoke (fit rescued by the early save; readout killed by spot-VM
 churn — `task.maxFailures=8` + `excludeOnFailure` now in every submit) exposed that the
@@ -34,6 +41,8 @@ dropped). 110+141+191 tests green across the three suites.
 ---
 
 ## 2026-08-22 — Whole-Mondo hardening arc: what the first K≈3,827 runs taught the readout
+
+*Agent-recorded build note, not a maintainer walkthrough (annotated 2026-10-23): the code it describes has not been signed off. Last walkthrough: 2026-08-12.*
 
 The exp 0104 smokes stress-tested every ADR 0046 component at 8.6× scale; each failure
 produced a measured fix, all on `claude/gated-conditional-voi`. Shipped, in causal order:
@@ -58,6 +67,8 @@ the whole-Mondo record run itself.
 ---
 
 ## 2026-08-20 — Distributed readout build (ADR 0046): batched L-BFGS multi-head + lean eval collect
+
+*Agent-recorded build note, not a maintainer walkthrough (annotated 2026-10-23): the code it describes has not been signed off. Last walkthrough: 2026-08-12.*
 
 Three-package build replacing the readout's driver collect (θ (D,K) + dense (D,C)
 label/mask — the whole-Mondo wall sized in the 2026-08-20 distributed-readout plan) with

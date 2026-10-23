@@ -251,10 +251,14 @@ Every non-obvious choice or observation leaves a durable, numbered artifact in
 - [`docs/architecture/`](docs/architecture/) — the living architectural vision
   (above). If a change contradicts these, update the section in the same commit
   or write an ADR recording the departure. Never silently diverge.
-- [`docs/REVIEW_LOG.md`](docs/REVIEW_LOG.md) — a running log of code-walkthrough
-  and refactor sessions. After a substantive review or refactor, append a dated
-  entry at the top: areas reviewed, what shipped, pre-existing issues caught,
-  open threads parked. Impersonal and project-scoped.
+- [`docs/REVIEW_LOG.md`](docs/REVIEW_LOG.md) — the audit trail of **human sign-off**:
+  one dated entry (newest first) per walkthrough in which an agent walks the
+  maintainer through the code and the maintainer approves it (`docs/META_process.md`
+  §4). **An agent never adds an entry on its own** — not after building, testing,
+  self-reviewing or running review sub-agents; those records belong in the experiment
+  doc, a report, or the commit message. Write an entry only during or at the end of a
+  maintainer-led walkthrough: areas reviewed, what shipped as in-line detours,
+  pre-existing issues caught, threads parked. Impersonal and project-scoped.
 
 ## Testing expectations
 
