@@ -49,5 +49,12 @@ flat across the schedule, with or without the blocks' own codes in the top words
 the parents' drug coherence rises. The schedule changes which words lead a block, not
 how well the rest co-occur.
 
+**Whole Mondo (exp 0161).** The central configuration (leaves-first at 2 iterations per
+level, balanced seed, 200 background topics) on all 2,694 nodes, against 0152: own-code
+identity 54% → 78%, stratum share down at every depth from 2 to 13, stacked
+new-diagnosis AUC +0.016 on 827 ribbon nodes (707 better), drug NPMI +0.019, framings
+unchanged within noise. The parent-holds-child failures of 0152 (diabetes, heart failure,
+cardiomyopathy, IBD, breast carcinoma) are gone in the named-node read.
+
 **Open.** A shorter warm-up against the leaf sink; the child-balanced, own-code-excluded
 seed against the dominant-child start; a second seed of the 0155 / 0156 pair.
