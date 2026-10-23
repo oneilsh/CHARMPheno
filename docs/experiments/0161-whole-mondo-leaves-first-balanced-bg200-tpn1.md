@@ -1,7 +1,7 @@
 ---
 id: 161
 slug: whole-mondo-leaves-first-balanced-bg200-tpn1
-status: planned
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -156,3 +156,46 @@ In the fit log, check the `[pc] leaves-first gate` line (heights and the iterati
 gate starts) and `[driver]   balanced seed: own codes ... for N node(s)`.
 
 ## Run log
+
+**2026-10-23 — done (about 24 h: ~6.5 h spectral seed, ~1 h fit, the rest the ribbon
+readout and the evaluations).** Whole Mondo is 15 levels high (heights 0..15); the full
+gate opened at iteration 30 of 60. Against 0152 (single round, subtree-less init, 1,200
+background topics). Three changes at once, so this reads as "does the central
+configuration transfer", not as an attribution.
+
+- **Own-code census:** signature blocks 75% → 88%; own-code identity 777 → 1,123 of
+  1,442 decidable nodes (54% → 78%). Stratum share falls at every depth from 2 to 13:
+  depths 3–7 53 → 41%, 40 → 14%, 32 → 14%, 26 → 12%, 22 → 10%. Starved blocks 3 → 15
+  (1%).
+- **New diagnoses, 827 DisMech ribbon nodes:** stacked 0.693 → 0.712, median +0.016,
+  0161 better on 707 of 827; largest for the smallest nodes (+0.028 at 20–50 new
+  cases). Flat 0.597 → 0.606, +0.009, 575 of 827. The largest new-diagnosis gain in
+  this line of work.
+- **NPMI:** conditions gated unchanged (+0.0002, 1,218 of 2,420); all-documents +0.012.
+  Drugs gated +0.019 (1,485 of 2,453). The branch pattern.
+- **Framings, 9 same-question groups:** unchanged within noise (median kappa change
+  0.000; ≥ 0.3 in 4 against 5). Sjögren's (exocrine) fell 0.61 → 0.18 including its
+  codes-only engine, which does not use θ, so the two survey runs scored different
+  patients; likely the 1,500-patient sampling over a rebuilt bundle. The framing
+  harness is noisy at these group sizes.
+- **Topics up and down the DAG** (16 named nodes, 0152 → 0161):
+  - *Parent-holds-child leaks fixed:* diabetes mellitus (T2DM words → its own
+    "diabetes mellitus without complication"), heart failure (congestive heart failure
+    first → heart failure†, hypertensive HF†), cardiomyopathy (HCM / HOCM words →
+    cardiomyopathy†, primary cardiomyopathy†), inflammatory bowel disease (Crohn's
+    first → IBD†, ulcerative colitis), breast carcinoma (the child's malignant-neoplasm
+    codes → carcinoma of breast† with its presentation: palpable mass, nipple
+    discharge).
+  - *Junk fixed:* epilepsy (altered mental status, drug abuse → epilepsy†, seizure,
+    status epilepticus†, levetiracetam); chronic kidney disease (osteoarthritis and
+    pain → CKD stages 2 / 3†, CKD due to T2DM†).
+  - *Unchanged and good:* asthma, type 1 diabetes, dilated cardiomyopathy, Crohn's,
+    focal and generalized epilepsy, breast carcinoma in situ.
+  - *Still generic:* human disease (now the inpatient-symptom stratum), nervous system
+    disorder and cardiovascular disorder (comorbidity strata in both runs).
+  - *HCM:* breast findings at evidence 108 → primary cardiomyopathy, arrhythmia and
+    lipids at evidence 993; still no own code (the 40565500 code-map gap).
+  - Redundancy: 5 collapsed parents against 3 (worst biliary tract neoplasm, 0.98).
+- **Read:** the central configuration transfers to whole Mondo. Legibility gains match
+  the branch's, the parent-holds-child failures from reads 3 / 3b are largely gone, and
+  new-diagnosis AUC rises more than it did on the branch.
