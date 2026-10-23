@@ -1,7 +1,7 @@
 ---
 id: 162
 slug: cv-branch-leaves-first-balanced-leafseed-random-init-bg200-tpn1
-status: planned
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -134,3 +134,37 @@ Against 0160: own-code census by depth (the leaves, depths 5–8, are where the 
 changed), new-diagnosis stacked and flat, gated NPMI. Fit wall time against 0160's too.
 
 ## Run log
+
+- 2026-10-23: fit, readout, NPMI, census and comparisons ran as one nohup job (above).
+
+## Results
+
+Against 0160 (identical except the leaves' starting point). Pooled figures only.
+
+**Own-code census** (`--profile-census --own-codes --own-top 10`):
+
+| | 0160 (spectral leaves) | 0162 (leaf seed, random init) |
+|---|---|---|
+| signature | 86% | 270/294 (92%) |
+| own-code identity | 77% | 155/172 (90%) |
+
+Stratum share by depth, 0160 → 0162: d2 25 → 50% (one node of four), d3 18 → 18%,
+d4 10 → 7%, d5 10 → 7%, d6 15 → 3%, d7 21 → 7%, d8 0 → 0%. The gain sits where the
+start changed: the leaf-heavy depths 6–7.
+
+**New diagnoses** (prevalence check, mass 0.99): stacked 0.7851 → 0.7842, median per-node
+delta −0.0001 (0162 better on 118 of 237); flat median −0.0007 (112 of 237). Unchanged.
+
+**Gated NPMI** (top 10): conditions gated +0.0033 (137 of 262), all-docs +0.0157 (175 of
+281); drugs gated −0.0047 (122 of 268), all-docs −0.0013. Flat apart from a small rise in
+condition coherence on all documents.
+
+## Conclusion
+
+Seeding the leaves from their own documents is at least as good as the spectral init on
+prediction and coherence and clearly better on legibility (identity 77% → 90%), and it
+removes the spectral seeding entirely (about 6.5 h of 0161's wall time on whole Mondo).
+The central configuration becomes leaves-first + balanced seed + leaf seed + random init
++ 200 background topics. The spectral init stays available as an option (cleanup report
+2026-10-23). Fit wall time against 0160 was not collected.
+

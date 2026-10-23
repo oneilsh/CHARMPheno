@@ -56,5 +56,12 @@ new-diagnosis AUC +0.016 on 827 ribbon nodes (707 better), drug NPMI +0.019, fra
 unchanged within noise. The parent-holds-child failures of 0152 (diabetes, heart failure,
 cardiomyopathy, IBD, breast carcinoma) are gone in the named-node read.
 
-**Open.** A shorter warm-up against the leaf sink; the child-balanced, own-code-excluded
+**Leaf seed, random init (exp 0162).** Starting every leaf block from its own documents'
+word counts, with no spectral init, raises own-code identity on the cardiovascular branch
+77% → 90% (signature 86% → 92%; stratum share at depths 6–7 from 15–21% to 3–7%), leaves
+new-diagnosis AUC unchanged (stacked −0.0001) and condition NPMI flat to slightly up. It
+also drops the spectral seeding, about 6.5 h of a whole-Mondo fit. Central configuration:
+leaves-first + balanced seed + leaf seed + random init + 200 background topics.
+
+**Open.** Whole Mondo with the leaf seed; a shorter warm-up against the leaf sink; the child-balanced, own-code-excluded
 seed against the dominant-child start; a second seed of the 0155 / 0156 pair.
