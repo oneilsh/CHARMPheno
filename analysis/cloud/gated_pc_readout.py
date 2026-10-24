@@ -66,7 +66,8 @@ from disk_telemetry import start_disk_telemetry
 from gated_pc_cloud import (
     _DRIVER_READOUT_MAX_C, _MONDO_DAG_SOURCES, _collect_head_proba,
     _collect_lean_proba, _collect_theta_labels, _dump_partial_results,
-    _fit_readout_heads, _write_readout_heads, distributed_ranking_readout,
+    _fit_readout_heads, _read_readout_heads, _write_readout_heads,
+    distributed_ranking_readout,
     distributed_score_arm, format_arm_readout, format_incident_readout,
     format_stacked_readout, incident_readout, multidomain_cache_key,
     multidomain_load_or_build, readout_ab_report, readout_from_proba,
@@ -1837,6 +1838,11 @@ def build_parser() -> argparse.ArgumentParser:
                         f"field fall back to {_LEGACY_READOUT_MAX_ITER} (the "
                         "record-run budget); recovering a DEV smoke from one of "
                         "those still needs an explicit 60.")
+    p.add_argument("--readout-warm-from", default=None, metavar="TAG",
+                   help="Start the pc_topics_lr solve from this run's saved heads "
+                        "readout_heads_gated_pc_<TAG>.npz (e.g. stacked_nodes_mass99) "
+                        "to continue an iteration-capped solve. Outputs get a "
+                        "'_warm' tag suffix, so the record is untouched.")
     p.add_argument("--readout-l2", type=float, default=None,
                    help="OVERRIDE the ridge strength of the per-node readout "
                         "heads (SUMMED log-loss; 1.0 == sklearn C=1.0). Default: "
@@ -2248,7 +2254,7 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
                 theta_topm=None, readout_max_iter=None, elig_col=None,
                 eval_path="driver", readout_l2=None, feature_mask=None,
                 mask_tag=None, stacked=False, parent_int=None, theta_mass=None,
-                C=None):
+                C=None, warm_start=None):
     """Score both gated_pc arms off two already-TRANSFORMED splits. No argparse.
 
     The whole body of this tool that is worth testing: given the frames a finished
@@ -2295,7 +2301,11 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
 
     `C` (WP-B) overrides the manifest's label width when the frames have been
     widened to the READOUT node space (`readout_dag.widen_labels_to_readout`);
-    `parent_int` is then the readout DAG. None = the fit's own C."""
+    `parent_int` is then the readout DAG. None = the fit's own C.
+
+    `warm_start=(V, b_raw)` (`--readout-warm-from`) starts the pc_topics_lr solve
+    from saved heads of the same problem, to continue an iteration-capped solve
+    rather than re-run it; the L-BFGS curvature history is not carried."""
     C = int(manifest["C"] if C is None else C)
     mode = resolve_readout_mode(readout_mode, C)
     K = int(manifest.get("K") or 0)
@@ -2421,7 +2431,8 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
             _V, _b, _const, _deg, _info = _fit_readout_heads(
                 train_scored, C, K, label=arm, max_iter=readout_max_iter,
                 l2=readout_l2, theta_topm=theta_topm, checkpoint_path=_ck,
-                checkpoint_every=10, feature_mask=feature_mask)
+                checkpoint_every=10, feature_mask=feature_mask,
+                warm_start=warm_start)
             if out_dir:
                 _write_readout_heads(out_dir, arm, _V, _b, _const, _deg,
                                      C, K, theta_topm, W_std=_info.get("W_std"))
@@ -2437,6 +2448,7 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
                 fdr_targets=fdr_targets, min_count=min_count, label=arm,
                 feature_mask=feature_mask,
                 theta_topm=theta_topm, max_iter=readout_max_iter, l2=readout_l2,
+                warm_start=warm_start,
                 # Same dir as `results_readout.json`, and for the same reason one
                 # step earlier in the pipeline: this tool IS the recovery path, and
                 # its solve is the multi-hour part. A death mid-solve (the 08-28
@@ -2993,6 +3005,29 @@ def main(argv=None) -> int:
                       f"results_readout_{_mtag}.json, heads -> "
                       f"readout_heads_gated_pc_{_mtag}.npz (record untouched)",
                       flush=True)
+            # A re-solve with a different budget or start is a convergence check,
+            # not the record: tag it so the record's results/heads stay put. An
+            # explicit cap EQUAL to the manifest's (a recovery) keeps the record's
+            # name, as before.
+            _warm = None
+            if args.readout_warm_from:
+                _wl = f"gated_pc_{args.readout_warm_from}"
+                _wh = _read_readout_heads(run_dir, _wl, C=_C_ro,
+                                          K=int(_manifest_ro["K"]))
+                if _wh is None:
+                    raise SystemExit(f"[readout] --readout-warm-from: no usable "
+                                     f"readout_heads_{_wl}.npz in {run_dir}")
+                _warm = (_wh[0], _wh[1])
+                _mtag = (f"{_mtag}_" if _mtag else "") + "warm"
+            if args.readout_max_iter is not None:
+                _rec_mi = resolve_readout_max_iter(None, _manifest_ro)[0]
+                if int(args.readout_max_iter) != _rec_mi or _warm is not None:
+                    _mtag = (f"{_mtag}_" if _mtag else "") + f"it{int(args.readout_max_iter)}"
+            if _warm is not None or args.readout_max_iter is not None:
+                _cprint(f"[readout]   convergence re-solve: "
+                      f"{'warm from ' + args.readout_warm_from if _warm else 'cold'}, "
+                      f"max_iter={args.readout_max_iter or 'manifest'} -> tag {_mtag}",
+                      flush=True)
             _rname = ("results_readout.json" if not _mtag
                       else f"results_readout_{_mtag}.json")
             run_readout(train_scored, test_scored, _manifest_ro, recall_targets=rt,
@@ -3006,7 +3041,8 @@ def main(argv=None) -> int:
                         readout_l2=args.readout_l2, feature_mask=_fmask,
                         mask_tag=_mtag, stacked=bool(args.readout_stacked),
                         parent_int=_parent_ro,
-                        theta_mass=args.readout_theta_mass, C=_C_ro)
+                        theta_mass=args.readout_theta_mass, C=_C_ro,
+                        warm_start=_warm)
             _cprint(f"[readout]   arm results written to {run_dir / _rname}",
                   flush=True)
             if ((args.readout_incident or args.raw_baseline or args.readout_nodes
