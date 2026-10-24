@@ -63,5 +63,12 @@ new-diagnosis AUC unchanged (stacked −0.0001) and condition NPMI flat to sligh
 also drops the spectral seeding, about 6.5 h of a whole-Mondo fit. Central configuration:
 leaves-first + balanced seed + leaf seed + random init + 200 background topics.
 
-**Open.** Whole Mondo with the leaf seed; a shorter warm-up against the leaf sink; the child-balanced, own-code-excluded
+**Whole Mondo with the leaf seed (exp 0163).** Against 0161: own-code identity 78% → 96%,
+stratum blocks 12% → 5%, starved 15 → 0; NPMI flat (condition all-documents +0.005);
+new-diagnosis AUC unchanged (stacked −0.0003 on 827 ribbon nodes); framings identical.
+The job drops from about 24 h to about 7 h (no spectral seed; the readout was also faster,
+unexplained). Leaf identity is partly by construction, since a leaf starts from its own
+documents.
+
+**Open.** A shorter warm-up against the leaf sink; the child-balanced, own-code-excluded
 seed against the dominant-child start; a second seed of the 0155 / 0156 pair.

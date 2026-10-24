@@ -1,7 +1,7 @@
 ---
 id: 163
 slug: whole-mondo-leaves-first-balanced-leafseed-random-init-bg200-tpn1
-status: planned
+status: done
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -139,3 +139,31 @@ iteration 0 from their own documents`, and no `scalable_block_aligned_lambda` li
 should appear. Record the fit's wall time against 0161's (~1 h fit after ~6.5 h seed).
 
 ## Run log
+
+**2026-10-24 — done (about 7 h end to end against 0161's ~24 h).** One job; the gate line
+confirmed the leaf seed and no spectral seeding ran. Against 0161, pooled figures only.
+
+- **Wall time** (file mtimes, approximate): code map to fitted model about 1.1 h against
+  0161's 7.75 h (the spectral seed). The ribbon readout also ran in 5.5 h against 0161's
+  14.6 h; not explained yet (fewer topics carrying θ mass, or fewer L-BFGS iterations, would
+  both do it), worth checking in the readout logs before relying on it.
+- **Own-code census:** signature 88% → 95%; stratum 12% → 5%; starved 15 → 0. Own-code
+  identity 1,123 → 1,379 of 1,442 decidable nodes (78% → 96%). Stratum share at depths 5–14
+  falls from 8–25% to 0–5%; depths 1–4 unchanged (depth 3 41 → 44%, one node of 32).
+  Caveat: a leaf now starts from its own documents, which carry its own code, so leaf
+  identity is partly by construction; that it holds through 60 iterations is the finding,
+  and NPMI and prediction are the independent checks.
+- **NPMI (top 10):** conditions gated unchanged (median 0.000, 1,180 of 2,416; mean
+  0.183 → 0.186), all-documents up (median +0.005, 1,428 of 2,581; mean 0.220 → 0.237).
+  Drugs unchanged (gated median 0.000, 1,129 of 2,464). The root (depth 1, one node)
+  drops 0.47 on conditions; depth-3 drug coherence falls (median −0.04, 5 of 32).
+- **New diagnoses, 827 ribbon nodes:** stacked 0.7124 → 0.7104, median −0.0003, 0163
+  better on 406; the 20–300 new-case strata are −0.002 to −0.004. Flat 0.6064 → 0.6059,
+  median +0.0004, 419 better. Unchanged to within about 0.003.
+- **Framings, 9 same-question groups:** identical within noise (median kappa change
+  0.000; 0163 better in 3 of 9; kappa ≥ 0.3 in 4 against 4; E5 codes-only identical, so
+  this time both surveys scored the same patients).
+- **Read:** the branch result transfers. The leaf seed with random init matches 0161 on
+  prediction, coherence and framings, makes the topics markedly more legible, and cuts the
+  job from about 24 h to about 7 h. It is the central configuration from here.
+
