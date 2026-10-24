@@ -167,3 +167,13 @@ confirmed the leaf seed and no spectral seeding ran. Against 0161, pooled figure
   prediction, coherence and framings, makes the topics markedly more legible, and cuts the
   job from about 24 h to about 7 h. It is the central configuration from here.
 
+
+**2026-10-24 — readout speed and convergence.** The 0161/0163 readouts solved the same
+problem (C 2,768, K 2,894, 1,060 fittable nodes, full-K θ in both) with the same work
+(791 / 882 passes, 198,911 / 205,198 node-passes), but 0161 took 65 s per pass and 0163
+22 s, uniformly from iteration 1 (no climb, so not progressive cache eviction) and with no
+other run overlapping 0161's readout. The speedup is per-pass throughput, not less work;
+its cause (cluster state, or θ recompute cost) is not pinned down. Both solves hit the
+200-iteration cap with about 45% of nodes converged (gtol or stall), about 140 line-search
+failures. A warm-started continuation (`--readout-warm-from stacked_nodes_mass99
+--readout-max-iter 400`, outputs tagged `..._warm_it400`) checks whether the AUCs move.
