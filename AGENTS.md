@@ -59,13 +59,28 @@ move does not orphan the sidecar"). The raw Mondo ontology download
 the bundle/corpus/covariates but leaves the expensive sidecar a HIT.
 
 **Treat as source-hashed / do-not-edit-casually:**
-`charmpheno/charmpheno/omop/{cohorts,multi_domain,case_finding_assembly}.py`;
-`analysis/cloud/{mondo_dag,mondo_native_dag,mondo_usage_core,mondo_collapse,
-mondo_to_omop_mapping,condition_dag,preindex_closure}.py`. The **authoritative
-check** is that tripwire suite passing byte-identical.
+`charmpheno/charmpheno/omop/{cohorts,multi_domain,case_finding_assembly,condition_dag}.py`;
+`analysis/cloud/{mondo_dag,mondo_native_dag,mondo_usage_core,mondo_collapse}.py`
+(`mondo_dag.py` is folded into every Mondo key, native included, though only the
+removed anchor path ran it). `preindex_closure.py` is folded only into keys that
+asked for the column (last exp 0110), and `mondo_to_omop_mapping.py` is not hashed
+but is imported by the hashed DAG builders. The **authoritative check** is that
+tripwire suite passing byte-identical.
+
+**The opposite hazard: corpus-shaping modules that are NOT hashed.**
+`charmpheno/charmpheno/omop/{bigquery,measurement_tokens,topic_prep}.py`
+change the corpus without moving the key, so an edit there serves a stale bundle
+under an unchanged key until they are folded in (audit 2026-10-26 §6).
+
+**Cost, in practice:** caches live on HDFS and clusters are recreated near-daily,
+so a key move costs little beyond the rebuild a fresh cluster pays anyway. The
+discipline that matters is correctness: re-pin the tripwires in the same commit,
+and after a refactor-only hashed edit check that a `--bundle-only` rebuild
+reproduces the corpus counts in the previous run's `bundle_meta.json`.
 
 - **Driver-owned files are free to edit:** `analysis/cloud/{gated_pc_cloud,
-  gated_pc_readout,distributed_readout,readout_dag,conversion_*,diag_*,episode_index}.py`,
+  gated_pc_readout,distributed_readout,readout_dag,conversion_sidecar,prevalence_check,
+  topic_npmi,inspect_topics}.py`,
   `scripts/run_experiment.py`, the `Makefile`, tests. Prefer solving at a driver
   **seam** (the `attested_provider` / injection-parameter pattern) over editing
   a hashed module.
@@ -105,7 +120,7 @@ Cluster runs happen on the user's Dataproc cluster, checked out at
 
    ```bash
    cd ~/repos/CHARMPheno && git fetch origin claude/dismech-ribbon && git checkout claude/dismech-ribbon && git pull --ff-only
-   make -C analysis/cloud diag-episode-probe ID=110 GPR_ARGS="--gap-days 90"
+   make -C analysis/cloud inspect-topics ID=163 RESOLVE_NAMES=1 INSPECT_ARGS="--profile-census --own-codes"
    ```
 
    - The active development branch is currently **`claude/dismech-ribbon`**.
