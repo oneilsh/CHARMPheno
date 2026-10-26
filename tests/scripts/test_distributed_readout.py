@@ -823,8 +823,6 @@ class TestLocalSparkRoundTrip:
                 stats_fn(W, b, node_mask=np.ones(C - 1, dtype=bool))
 
 
-    @pytest.mark.parametrize("engine", ["rdd", "pandas"])
-
     def test_theta_topm_coverage_matches_the_kernel(self, spark):
         """The measurement's Spark shell: one treeAggregate, same numbers as the
         in-memory accumulators (this is the line the fit prints before deciding
