@@ -46,6 +46,7 @@ os.environ["PYTHONPATH"] = os.pathsep.join(
 import _case_finding_cache as ccache  # noqa: E402
 import gated_pc_cloud as gpc  # noqa: E402
 import gated_pc_readout as gpr  # noqa: E402
+from mondo_native_dag import MONDO_NATIVE_VERSION  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -143,18 +144,6 @@ def test_dag_collapse_does_not_leak_into_the_snomed_key():
              dag_collapse_version="splice-fixpoint-v1") == _SNOMED_KEY
 
 
-def test_multidomain_cache_key_threads_dag_collapse_from_the_spec():
-    """The spec -> key_extra -> compute_bundle_cache_key path (what the fit and the
-    re-readout both call), not just the raw key function."""
-    base = dict(_MONDO_SPEC)
-    off = gpc.multidomain_cache_key(base)
-    on = gpc.multidomain_cache_key(dict(base, dag_collapse=True))
-    assert off == gpc.multidomain_cache_key(dict(base, dag_collapse=False))
-    assert off != on
-    # a spec that predates the field behaves exactly like collapse OFF
-    legacy = {k_: v for k_, v in base.items() if k_ != "dag_collapse"}
-    assert gpc.multidomain_cache_key(legacy) == off
-
 
 # --------------------------------------------------------------------------- #
 # exp 0110: the NATIVE Mondo label space is its own corpus, and folds only when  #
@@ -202,10 +191,15 @@ def test_mondo_native_key_threads_from_the_spec():
     native_spec = dict(_MONDO_SPEC, dag_source="mondo_native")
     assert gpr.spec_is_multidomain(native_spec)
     key = gpc.multidomain_cache_key(native_spec)
-    assert key != gpc.multidomain_cache_key(_MONDO_SPEC)
-    # and it is stable under the flag exp 0109 owns, which the native path pins off
+    # and it is stable under the flag exp 0109 owned, which the native path pins off
     assert key == gpc.multidomain_cache_key(
         dict(native_spec, dag_collapse=False))
+    # the removed sources/options are refused, never keyed as if absent (2026-10)
+    for over in ({"dag_source": "mondo"}, {"dag_source": "snomed"},
+                 {"dag_collapse": True}, {"preindex_closure": True},
+                 {"label_set": "ribbon@x"}, {"index_mode": "external"}):
+        with pytest.raises(ValueError, match="removed in the 2026-10 cleanup"):
+            gpc.multidomain_cache_key(dict(native_spec, **over))
 
 
 def test_mondo_native_folds_its_own_module_sources():
@@ -387,42 +381,7 @@ def test_preindex_closure_folds_its_module_source():
         ccache._module_source_hash = real
 
 
-def test_preindex_closure_threads_from_the_spec():
-    """spec -> key_extra -> compute_bundle_cache_key, the path the fit and the
-    re-readout both take; and a spec predating the field behaves exactly like off."""
-    base = dict(_MONDO_SPEC, dag_source="mondo_native")
-    off = gpc.multidomain_cache_key(base)
-    on = gpc.multidomain_cache_key(dict(base, preindex_closure=True))
-    assert off == gpc.multidomain_cache_key(dict(base, preindex_closure=False))
-    assert off != on
-    legacy = {k_: v for k_, v in base.items() if k_ != "preindex_closure"}
-    assert gpc.multidomain_cache_key(legacy) == off
 
-
-def test_readout_reads_preindex_closure_from_the_manifest_and_lets_the_cli_win():
-    """The recovery half of the thread, same tri-state shape as `dag_collapse`: a
-    wrong value MISSES the cache (and would rebuild a different bundle) rather
-    than silently scoring against a corpus without the column."""
-    m = _mondo_manifest()
-    m["dag_source"] = m["corpus_manifest"]["dag_source"] = "mondo_native"
-    m["corpus_manifest"]["preindex_closure"] = True
-    assert gpr.corpus_spec_from_manifest(m)["preindex_closure"] is True
-    assert gpr.corpus_spec_from_manifest(
-        m, preindex_closure=False)["preindex_closure"] is False
-    old = _mondo_manifest()
-    old["dag_source"] = old["corpus_manifest"]["dag_source"] = "mondo_native"
-    assert gpr.corpus_spec_from_manifest(old)["preindex_closure"] is False
-    assert gpr.corpus_spec_from_manifest(
-        old, preindex_closure=True)["preindex_closure"] is True
-    assert gpr.bundle_key_from_manifest(m) != gpr.bundle_key_from_manifest(old)
-
-
-def test_readout_parses_the_preindex_closure_flag():
-    a = gpr.build_parser().parse_args(["--run-dir", "/runs/0110-x"])
-    assert a.preindex_closure is None               # tri-state: defer to manifest
-    b = gpr.build_parser().parse_args(
-        ["--run-dir", "/runs/0110-x", "--preindex-closure", "on"])
-    assert b.preindex_closure == "on"
 
 
 # --------------------------------------------------------------------------- #
@@ -634,7 +593,7 @@ def test_restore_meta_reads_a_legacy_single_vocab_map():
 # The seam: load-or-build for the Mondo path.                                  #
 # --------------------------------------------------------------------------- #
 _MONDO_SPEC = {
-    "dag_source": "mondo", "disease": "rare6", "cdr": "p.d", "billing": "bp",
+    "dag_source": "mondo_native", "disease": "rare6", "cdr": "p.d", "billing": "bp",
     "source_table": "condition_era", "extra_domains": ["drug"],
     "index_mode": "population", "person_mod": 1, "vocab_size": 5000, "min_df": 20,
     "min_patient_count": 20, "doc_min_length": 10, "min_n": 0, "holdout_frac": 0.2,
@@ -655,14 +614,22 @@ class _FakeDag:
 
 
 def _fake_build_inputs(spark, **kw):
-    """Stands in for build_mondo_fit_inputs — the ~5 minutes of BigQuery whose
+    """Stands in for build_mondo_native_fit_inputs — the minutes of BigQuery whose
     whole point here is that a cache HIT never reaches it."""
     return _FakeDag(), object(), {1001, 1002}, {1001: 400, 1002: 250}, {
-        "n_classes": 1}
+        "n_final_nodes": 3, "n_coded_kept": 2}
+
+
+@pytest.fixture
+def _quiet_native_reports(monkeypatch):
+    import mondo_native_dag as mnd
+    monkeypatch.setattr(mnd, "format_native_build_report", lambda s: "build")
+    monkeypatch.setattr(mnd, "format_native_powering_report", lambda s: "power")
 
 
 @pytest.mark.slow
-def test_mondo_load_or_build_misses_once_then_hits(spark, tmp_path, capsys):
+def test_mondo_load_or_build_misses_once_then_hits(spark, tmp_path, capsys,
+                                                  _quiet_native_reports):
     """The behaviour the mondo path never had: build once, reload forever.
 
     The DAG build lives INSIDE the assemble seam, so the HIT must not reach it —
@@ -710,53 +677,6 @@ def test_mondo_load_or_build_misses_once_then_hits(spark, tmp_path, capsys):
         {r["person_id"] for r in built.train_df.collect()}
 
 
-@pytest.mark.parametrize("flag,expected", [(True, 1), (False, 0)])
-def test_the_assemble_seam_runs_the_preindex_post_pass_only_when_asked(
-        monkeypatch, flag, expected):
-    """R1.1's placement: the pre-index column is a DRIVER-LEVEL post-pass applied
-    between the assembler's return and the cache write — the `dag_collapse` seam,
-    for the same reason (editing `multi_domain`/`case_finding_assembly` would move
-    their source hashes and orphan every cached bundle in the repo). So the seam
-    must call it after `assemble`, with the corpus's own window/sample, and must
-    not call it at all when the flag is off."""
-    import mondo_native_dag as mnd
-    import preindex_closure as pic
-
-    built = object()
-    seen = {}
-
-    def _fake_attach(spark_, bundle, **kw):
-        seen.update(kw)
-        seen["bundle"] = bundle
-        return bundle
-
-    monkeypatch.setattr(pic, "attach_preindex_closure_to_bundle", _fake_attach)
-    monkeypatch.setattr(pic, "format_preindex_report", lambda b, **kw: "ok")
-    monkeypatch.setattr(mnd, "format_native_build_report", lambda s: "build")
-    monkeypatch.setattr(mnd, "format_native_powering_report", lambda s: "power")
-
-    spec = dict(_MONDO_SPEC, dag_source="mondo_native", preindex_closure=flag)
-    assembly, _ = gpc._multidomain_params(spec)
-    fn = gpc.mondo_assemble_fn(
-        spec, _build_inputs=lambda spark_, **kw: (_FakeDag(), object(), set(), {},
-                                                  {"n_final_nodes": 1,
-                                                   "n_coded_kept": 1}),
-        _assemble=lambda spark_, **kw: built)
-    out = fn(None, **assembly)
-
-    assert out is built
-    if expected:
-        # every window/sample input comes from the corpus's OWN assembly kwargs,
-        # so the re-derived index cannot drift from the one the corpus was built on
-        assert seen["bundle"] is built
-        assert seen["person_mod"] == spec["person_mod"]
-        assert seen["lookback_days"] == spec["lookback_days"]
-        assert seen["label_window_days"] == spec["label_window_days"]
-        assert seen["n_bg"] == spec["n_bg"] and seen["tpn"] == spec["tpn"]
-        assert seen["index_mode"] == "population"
-    else:
-        assert seen == {}
-
 
 def test_head_starvation_probe_degrades_without_the_power_counts():
     """A cache HIT skips the Mondo power-count, so the diag-only probe has no
@@ -785,7 +705,7 @@ def _mondo_manifest(**over):
     cm["name_by_id"] = {str(c): n for c, n in _NAME_BY_ID.items()}
     cm["domain_vocab_sizes"] = [len(vm) for vm in _VOCAB_MAPS]
     m = {"model_class": "gated_pc", "C": 3, "K": 5, "weight_y": 1.0,
-         "max_iter": 4, "min_label_count": 0, "dag_source": "mondo",
+         "max_iter": 4, "min_label_count": 0, "dag_source": "mondo_native",
          "extra_domains": ["drug"], "disease": "rare6", "min_n": 50,
          "strip_mode": "test_only", "label_mask_mode": "full",
          "window_mode": "lookback", "lookback_days": 365, "label_window_days": 365,
@@ -807,7 +727,8 @@ def test_readout_key_for_a_mondo_manifest_matches_the_fit_key():
         tpn=1, cdr="p.d", strip_mode="test_only", lookback_days=365,
         label_window_days=365, emit_labels=True, label_mask_mode="full",
         multidomain=True, extra_domains=("drug",), index_mode="population",
-        mondo=True, mondo_version="2026-06-02", mondo_branch="", min_positives=100)
+        mondo=True, mondo_version="2026-06-02", mondo_branch="", min_positives=100,
+        mondo_native=True, mondo_native_version=MONDO_NATIVE_VERSION)
 
 
 def test_readout_key_for_a_mondo_manifest_is_not_the_snomed_key():
@@ -844,55 +765,17 @@ def test_readout_cli_overrides_supply_a_missing_mondo_spec():
         gpr.bundle_key_from_manifest(_mondo_manifest())
 
 
-def test_dag_source_override_recovers_a_manifest_that_predates_the_field():
-    """A mondo run written before the manifest recorded `dag_source` looks like an
-    extra-domains SNOMED run — which would key (and REBUILD) as the wrong corpus.
-    `--dag-source mondo` is what makes such a run recoverable; without it the
-    rebuilt DAG would differ and the drift gate would refuse to score it."""
-    old = _mondo_manifest()
-    del old["dag_source"]
-    del old["corpus_manifest"]["dag_source"]
-    del old["corpus_manifest"]["index_mode"]
-    del old["corpus_manifest"]["min_n"]
-    assert gpr.corpus_spec_from_manifest(old)["dag_source"] == "snomed"
-    assert gpr.bundle_key_from_manifest(old) != gpr.bundle_key_from_manifest(
-        _mondo_manifest())
-    fixed = gpr.corpus_spec_from_manifest(old, dag_source="mondo")
-    assert fixed["index_mode"] == "population" and fixed["min_n"] == 0
-    assert gpr.bundle_key_from_manifest(old, dag_source="mondo") == \
-        gpr.bundle_key_from_manifest(_mondo_manifest())
-
 
 def test_readout_parses_the_rebuild_flags():
     a = gpr.build_parser().parse_args(["--run-dir", "/runs/0104-x"])
     assert a.no_rebuild is False and a.dag_source is None and a.billing is None
     assert a.cache_write == "on"
-    assert a.dag_collapse is None                  # tri-state: defer to the manifest
     b = gpr.build_parser().parse_args(
-        ["--run-dir", "/runs/0104-x", "--no-rebuild", "--dag-source", "mondo",
-         "--billing", "proj", "--min-positives", "100", "--dag-collapse", "on"])
-    assert b.no_rebuild is True and b.dag_source == "mondo"
+        ["--run-dir", "/runs/0104-x", "--no-rebuild", "--dag-source", "mondo_native",
+         "--billing", "proj", "--min-positives", "100"])
+    assert b.no_rebuild is True and b.dag_source == "mondo_native"
     assert b.billing == "proj" and b.min_positives == 100
-    assert b.dag_collapse == "on"
 
-
-def test_readout_reads_dag_collapse_from_the_manifest_and_lets_the_cli_win():
-    """Same manifest-default + CLI-override shape as every other Mondo build input:
-    a 0109 fit records `dag_collapse: true` and the re-readout rebuilds the SAME
-    collapsed DAG; a manifest predating the field means off."""
-    m = _mondo_manifest()
-    m["corpus_manifest"]["dag_collapse"] = True
-    assert gpr.corpus_spec_from_manifest(m)["dag_collapse"] is True
-    # the CLI override wins in both directions (a fit whose manifest lies/omits)
-    assert gpr.corpus_spec_from_manifest(m, dag_collapse=False)["dag_collapse"] is False
-    old = _mondo_manifest()
-    del old["corpus_manifest"]["dag_collapse"]
-    assert gpr.corpus_spec_from_manifest(old)["dag_collapse"] is False
-    assert gpr.corpus_spec_from_manifest(old, dag_collapse=True)["dag_collapse"] is True
-    # ...and it lands in the key, so a wrong value MISSES rather than mis-scores.
-    assert gpr.bundle_key_from_manifest(m) != gpr.bundle_key_from_manifest(old)
-    assert gpr.bundle_key_from_manifest(old) == gpr.bundle_key_from_manifest(
-        _mondo_manifest())
 
 
 def test_snomed_manifest_still_takes_the_single_domain_path():
@@ -1010,9 +893,8 @@ def test_readout_fails_fast_on_a_miss_with_no_rebuild(patched_spark, tmp_path,
 
 
 @pytest.mark.slow
-def test_readout_rebuilds_on_a_miss_writes_through_and_scores(patched_spark,
-                                                              tmp_path, capsys,
-                                                              monkeypatch):
+def test_readout_rebuilds_on_a_miss_writes_through_and_scores(
+        patched_spark, tmp_path, capsys, monkeypatch, _quiet_native_reports):
     """The recovery path end to end: an EMPTY cache, a saved fit, and a manifest.
 
     The rebuild goes through the fit's own seam, so the bundle lands under the key
@@ -1031,7 +913,7 @@ def test_readout_rebuilds_on_a_miss_writes_through_and_scores(patched_spark,
 
     def _rebuild(spark_, spec, *, cache_uri=None):
         # the real rebuild_bundle, with the BigQuery assembler stubbed out
-        assert spec["dag_source"] == "mondo"
+        assert spec["dag_source"] == "mondo_native"
         return gpc.multidomain_load_or_build(
             spark_, spec, cache_uri=cache_uri, _build_inputs=_fake_build_inputs,
             _assemble=_assemble)
@@ -1043,7 +925,7 @@ def test_readout_rebuilds_on_a_miss_writes_through_and_scores(patched_spark,
     assert rc == 0, out
     assert calls["n"] == 1
     assert "cache MISS — rebuilding bundle from manifest params" in out
-    assert "dag_source=mondo" in out
+    assert "dag_source=mondo_native" in out
     assert (run / "results_readout.json").exists()
 
     # written through under the key the readout computed: the next run is a HIT,

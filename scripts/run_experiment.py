@@ -747,7 +747,6 @@ def build_gated_pc_args(
         "--label-window-days", str(effective.get("label_window_days", 365)),
         "--disease", str(effective.get("disease", "rare6")),
         "--extra-domains", str(effective.get("extra_domains", "")),
-        "--min-n", str(effective["min_n"]),
         "--holdout-frac", str(effective.get("holdout_frac", 0.2)),
         "--strip-mode", str(effective.get("strip_mode", "test_only")),
         "--label-mask-mode", str(effective.get("label_mask_mode", "full")),
@@ -818,23 +817,6 @@ def build_gated_pc_args(
     if int(effective.get("spectral_bg_anchors", 0) or 0) > 0:
         # exp 0134: anchor only the first N background topics (0 = all, omitted).
         args.extend(["--spectral-bg-anchors", str(int(effective["spectral_bg_anchors"]))])
-    if effective.get("spectral_anchor_profile"):
-        args.extend(["--spectral-anchor-profile",
-                     str(effective["spectral_anchor_profile"])])
-    # Profile-eta word-side prior (plan 2026-09-06, exp 0116). Emitted ONLY when
-    # `profile_eta` is set — the driver defaults to '' (no prior), so omitting
-    # the flags keeps every existing gated_pc run's arg string byte-identical
-    # (the spectral-init emission pattern above). A profile-eta run rides its
-    # knobs alongside.
-    if effective.get("profile_eta"):
-        args.extend([
-            "--profile-eta", str(effective["profile_eta"]),
-            "--profile-eta-strength",
-            str(effective.get("profile_eta_strength", 1.0)),
-            "--profile-eta-topics", str(effective.get("profile_eta_topics", 1)),
-            "--profile-eta-min-coverage",
-            str(effective.get("profile_eta_min_coverage", 0.0)),
-        ])
     if effective.get("doc_concentration") is not None:
         args.extend(["--doc-concentration", str(effective["doc_concentration"])])
     if effective.get("dag_source"):
@@ -843,50 +825,10 @@ def build_gated_pc_args(
         args.extend(["--mondo-branch", str(effective["mondo_branch"])])
     if effective.get("min_positives") is not None:
         args.extend(["--min-positives", str(effective["min_positives"])])
-    # Spec 2026-10-07 §D1: `label_set: <tsv>` in front matter selects the DisMech
-    # ribbon on the native path. A relative path is resolved against the repo root
-    # (the committed TSV lives under analysis/cloud/anchor_selection_data/), so the
-    # doc reads the same on a laptop and on the cluster checkout.
-    if effective.get("label_set"):
-        ls = Path(str(effective["label_set"]))
-        if not ls.is_absolute():
-            ls = REPO_ROOT / ls
-        args.extend(["--label-set", str(ls)])
     if effective.get("mondo_version"):
         args.extend(["--mondo-version", str(effective["mondo_version"])])
     if effective.get("mondo_cache_dir"):
         args.extend(["--mondo-cache-dir", str(effective["mondo_cache_dir"])])
-    if effective.get("dag_collapse"):
-        args.append("--dag-collapse")
-    if effective.get("preindex_closure"):
-        args.append("--preindex-closure")
-    # exp 0111 (WP-D2): episode-anchored / matched-random index arms. `index_arm`
-    # in front matter switches the Mondo corpus onto the driver-built external
-    # index; the sampling knobs default to the probe's settled values, so a bare
-    # `index_arm: episode` is enough. episode_sidecar_uri points the sidecar load
-    # at a persistent bucket (defaults to <cache_uri>/conversion_sidecar).
-    if effective.get("index_arm"):
-        args.extend(["--index-arm", str(effective["index_arm"])])
-    if effective.get("episode_gap_days") is not None:
-        args.extend(["--episode-gap-days", str(effective["episode_gap_days"])])
-    if effective.get("episode_cap") is not None:
-        args.extend(["--episode-cap", str(effective["episode_cap"])])
-    if effective.get("episode_salt") is not None:
-        args.extend(["--episode-salt", str(effective["episode_salt"])])
-    if effective.get("episode_prior_obs_days") is not None:
-        args.extend(["--episode-prior-obs-days",
-                     str(effective["episode_prior_obs_days"])])
-    if effective.get("episode_window_days") is not None:
-        args.extend(["--episode-window-days",
-                     str(effective["episode_window_days"])])
-    if effective.get("episode_sidecar_uri"):
-        args.extend(["--episode-sidecar-uri", str(effective["episode_sidecar_uri"])])
-    # exp 0111 (WP-D3 / D13): the gate/label separation. > 0 swaps each document's
-    # 90-day presentation frontier in as the gate while the 365-day outcome label
-    # stays put. Off (0) by default so a non-D13 run keys byte-identically.
-    if effective.get("gate_frontier_days") is not None:
-        args.extend(["--gate-frontier-days",
-                     str(effective["gate_frontier_days"])])
     # Label redesign R2 (spec 2026-10-13): all-ever topic gate. Absent/'label' keeps
     # every bundle key byte-identical.
     if effective.get("gate_attestation") and str(effective["gate_attestation"]) != "label":
@@ -895,8 +837,6 @@ def build_gated_pc_args(
     # existing arg string stays byte-identical.
     if int(effective.get("gate_warm", 0) or 0) > 0:
         args.extend(["--gate-warm", str(int(effective["gate_warm"]))])
-        if effective.get("gate_open_seed") is False:
-            args.append("--gate-no-open-seed")
         if effective.get("gate_seed_leaves"):
             args.append("--gate-seed-leaves")
         if str(effective.get("gate_seed_mode", "subtree")) != "subtree":

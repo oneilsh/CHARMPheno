@@ -23,8 +23,6 @@ def test_gate_warm_front_matter_is_emitted_only_when_set(monkeypatch):
     assert "--gate-warm" not in plain and "--gate-no-open-seed" not in plain
     on = rex.build_gated_pc_args(dict(BASE, gate_warm=5), "/tmp/out")
     assert on[on.index("--gate-warm") + 1] == "5" and "--gate-no-open-seed" not in on
-    off = rex.build_gated_pc_args(dict(BASE, gate_warm=5, gate_open_seed=False), "/tmp/out")
-    assert "--gate-no-open-seed" in off
 
 
 def test_driver_flags_reach_the_estimator():
