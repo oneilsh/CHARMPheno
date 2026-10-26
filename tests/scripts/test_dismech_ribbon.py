@@ -209,65 +209,7 @@ def test_label_set_folds_only_on_the_native_path_and_only_when_set():
     assert k(**_SNOMED_BASE, label_set="dismech:x:1:y") == _SNOMED_KEY
 
 
-def test_spec_threads_label_set_to_the_key_and_the_readout_recovers_it():
-    native = dict(_MONDO_SPEC, dag_source="mondo_native")
-    off = gpc.multidomain_cache_key(native)
-    assert gpc.multidomain_cache_key(dict(native, label_set="")) == off
-    on_spec = dict(native, label_set="dismech:71cd04523580:3218:abc",
-                   label_set_path="analysis/cloud/anchor_selection_data/x.tsv")
-    on = gpc.multidomain_cache_key(on_spec)
-    assert on != off
-    # the path is a rebuild input, never a key input
-    assert gpc.multidomain_cache_key(dict(on_spec, label_set_path="/moved.tsv")) == on
-    # manifest -> spec -> key, the re-readout's path
-    m = _mondo_manifest()
-    m["dag_source"] = m["corpus_manifest"]["dag_source"] = "mondo_native"
-    m["corpus_manifest"]["label_set"] = on_spec["label_set"]
-    m["corpus_manifest"]["label_set_path"] = on_spec["label_set_path"]
-    spec = gpr.corpus_spec_from_manifest(m)
-    assert spec["label_set"] == on_spec["label_set"]
-    assert spec["label_set_path"] == on_spec["label_set_path"]
-    assert gpc.multidomain_cache_key(spec) == on
-    # the CLI may move the path but never the identity
-    spec2 = gpr.corpus_spec_from_manifest(m, label_set_path="/elsewhere.tsv")
-    assert spec2["label_set_path"] == "/elsewhere.tsv"
-    assert gpc.multidomain_cache_key(spec2) == on
-    # a manifest from before the field existed means ''
-    legacy = _mondo_manifest()
-    legacy["dag_source"] = legacy["corpus_manifest"]["dag_source"] = "mondo_native"
-    assert gpr.corpus_spec_from_manifest(legacy)["label_set"] == ""
 
-
-def test_label_set_is_refused_off_the_native_path(tmp_path):
-    class A:
-        dag_source = "mondo"
-        label_set = str(tmp_path / "r.tsv")
-    with pytest.raises(ValueError, match="mondo_native"):
-        gpc._label_set_spec_fields(A())
-
-    class B:
-        dag_source = "mondo_native"
-        label_set = ""
-    assert gpc._label_set_spec_fields(B()) == {"label_set": "", "label_set_path": ""}
-
-
-def test_run_experiment_passes_label_set_through_repo_relative(monkeypatch):
-    """Front matter `label_set:` -> `--label-set <abs path>` (repo-root-relative,
-    so the doc reads the same on a laptop and the cluster checkout); absent, the
-    argv is byte-identical to before the key existed."""
-    sys.path.insert(0, str(REPO_ROOT / "scripts"))
-    import run_experiment as rex
-    monkeypatch.setenv("WORKSPACE_CDR", "cdr")
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
-    base = {"source_table": "t", "person_mod": 1, "vocab_size": 5000, "min_df": 20,
-            "min_patient_count": 20, "doc_min_length": 10, "max_iter": 100,
-            "min_n": 0, "n_bg": 8, "tpn": 1, "seed": 0, "dag_source": "mondo_native",
-            "readout_mode": "distributed"}
-    rel = "analysis/cloud/anchor_selection_data/dismech_ribbon.tsv"
-    argv = rex.build_gated_pc_args(dict(base, label_set=rel), "/tmp/out")
-    got = argv[argv.index("--label-set") + 1]
-    assert got == str(REPO_ROOT / rel) and Path(got).is_absolute()
-    assert "--label-set" not in rex.build_gated_pc_args(dict(base), "/tmp/out")
 
 
 def test_the_committed_ribbon_loads_and_matches_the_spec_pin():

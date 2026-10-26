@@ -1,15 +1,67 @@
 """Label redesign R2 (spec 2026-10-13): the all-ever topic gate
 (`gated_pc_cloud._attach_gate_ever`, `--gate-attestation ever`)."""
+import os
 import sys
+import types
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_gate_frontier_d3 import (_BUNDLE_SCHEMA, _StubBundle, _args, _toy,  # noqa: F401
-                                   gpc)
-from charmpheno.omop.case_finding_assembly import (doc_frontier_engine_ids,
-                                                   frontier_to_label)
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CLOUD = REPO_ROOT / "analysis" / "cloud"
+for _p in (str(REPO_ROOT), str(CLOUD), str(REPO_ROOT / "charmpheno"),
+           str(REPO_ROOT / "spark-vi")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+os.environ["PYTHONPATH"] = os.pathsep.join(
+    p for p in (str(REPO_ROOT), str(CLOUD), str(REPO_ROOT / "charmpheno"),
+                str(REPO_ROOT / "spark-vi"), os.environ.get("PYTHONPATH", ""))
+    if p)
+
+import gated_pc_cloud as gpc  # noqa: E402
+from charmpheno.omop.case_finding_assembly import (  # noqa: E402
+    doc_frontier_engine_ids, frontier_to_label)
+from charmpheno.omop.condition_dag import ConditionDag  # noqa: E402
+from spark_vi.models.topic.dag_placement import DagLayout  # noqa: E402
+
+# A toy label DAG: concept ids 100/200/300/400 under the forest root -1, with
+# 300 under 100 and 400 under 200 (two incomparable frontier nodes).
+_PARENTS = {100: [-1], 200: [-1], 300: [100], 400: [200]}
+
+
+def _toy():
+    dag = ConditionDag(_PARENTS, -1, {c: f"n{c}" for c in (-1, 100, 200, 300, 400)})
+    parent_int, int2cid, cid2int = dag.to_engine()
+    lay = DagLayout(parent_int, n_bg=2, tpn=1)
+    return dag, parent_int, int2cid, cid2int, lay
+
+
+class _StubBundle:
+    """The post-prune fields the gate post-pass reads, plus the two frames."""
+
+    def __init__(self, parent_int, cid2int, train_df, test_df):
+        self.parent_int = parent_int
+        self.cid2int = cid2int
+        self.train_df = train_df
+        self.test_df = test_df
+
+
+_BUNDLE_SCHEMA = ("person_id long, doc_id string, frontier array<bigint>, "
+                  "label array<double>, labelMask array<double>, "
+                  "features string, episode_no long")
+
+
+def _args(**over):
+    base = dict(
+        dag_source="mondo_native", disease="rare6", cdr="p.d", billing="proj",
+        source_table="condition_era", person_mod=10, vocab_size=5000, min_df=20,
+        min_patient_count=20, doc_min_length=0, holdout_frac=0.2,
+        n_bg=2, tpn=1, strip_mode="test_only", lookback_days=365,
+        label_window_days=365, label_mask_mode="full", window_mode="lookback",
+        prior_obs_days=365, window_days=365, mondo_version="2026-06-02",
+        mondo_branch="", min_positives=100, mondo_cache_dir="data/mondo")
+    base.update(over)
+    return types.SimpleNamespace(**base)
 
 
 def test_gate_attestation_moves_the_key_only_when_ever():

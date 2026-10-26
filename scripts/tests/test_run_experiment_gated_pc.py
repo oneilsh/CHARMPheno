@@ -1,6 +1,8 @@
 """run_experiment wiring for model_class=gated_pc (Step B: Gated-PC case-finding)."""
 import importlib
 import sys
+
+import pytest
 from pathlib import Path
 
 
@@ -133,76 +135,7 @@ def test_anchor_select_route(monkeypatch):
     assert args[args.index("--seed-tsv") + 1].endswith("priority_seed.tsv")
 
 
-def test_mondo_dag_source_flags_thread(monkeypatch):
-    """dag_source=mondo + mondo_branch/min_positives frontmatter -> the mondo CLI
-    flags -> the driver parses them (the whole-Mondo / template-branch fit path)."""
-    mod = _run_exp(monkeypatch)
-    eff = {**_base_eff(), "dag_source": "mondo",
-           "mondo_branch": "MONDO:0004995", "min_positives": 100,
-           "extra_domains": "measurement,drug", "window_mode": "lookback",
-           "label_mask_mode": "closure", "localize_head": True}
-    args = mod.build_gated_pc_args(eff, "/out")
-    assert args[args.index("--dag-source") + 1] == "mondo"
-    assert args[args.index("--mondo-branch") + 1] == "MONDO:0004995"
-    assert args[args.index("--min-positives") + 1] == "100"
 
-    # defaults omit the mondo flags (SNOMED path unchanged).
-    base = mod.build_gated_pc_args(_base_eff(), "/out")
-    assert "--dag-source" not in base and "--mondo-branch" not in base
-
-    cloud = str(Path(mod.__file__).resolve().parent.parent / "analysis" / "cloud")
-    if cloud not in sys.path:
-        sys.path.insert(0, cloud)
-    import gated_pc_cloud
-    parsed = gated_pc_cloud.parse_args(args)
-    assert parsed.dag_source == "mondo"
-    assert parsed.mondo_branch == "MONDO:0004995"
-    assert parsed.min_positives == 100
-
-
-def test_dag_collapse_flag_threads(monkeypatch):
-    """exp 0109: `dag_collapse: true` front matter -> --dag-collapse -> the driver
-    parses it -> the corpus spec carries it (which is what forks the cache key).
-    Absent/false front matter must not emit the flag at all: exp 0104's record run
-    has to reproduce byte-identically."""
-    mod = _run_exp(monkeypatch)
-    eff = {**_base_eff(), "dag_source": "mondo", "min_positives": 100,
-           "window_mode": "lookback", "dag_collapse": True}
-    args = mod.build_gated_pc_args(eff, "/out")
-    assert "--dag-collapse" in args
-
-    assert "--dag-collapse" not in mod.build_gated_pc_args(_base_eff(), "/out")
-    assert "--dag-collapse" not in mod.build_gated_pc_args(
-        {**eff, "dag_collapse": False}, "/out")
-
-    cloud = str(Path(mod.__file__).resolve().parent.parent / "analysis" / "cloud")
-    if cloud not in sys.path:
-        sys.path.insert(0, cloud)
-    import gated_pc_cloud
-    parsed = gated_pc_cloud.parse_args(args)
-    assert parsed.dag_collapse is True
-    spec = gated_pc_cloud.multidomain_corpus_spec(parsed, ("drug",))
-    assert spec["dag_collapse"] is True
-    # ...and the default driver invocation still says off, on both DAG sources.
-    off = gated_pc_cloud.parse_args(mod.build_gated_pc_args(
-        {**eff, "dag_collapse": False}, "/out"))
-    assert off.dag_collapse is False
-    assert gated_pc_cloud.multidomain_corpus_spec(off, ("drug",))["dag_collapse"] \
-        is False
-
-
-def test_dag_collapse_is_mondo_only_in_the_spec(monkeypatch):
-    """The reduction names Mondo CLASS nodes; on the SNOMED path the spec pins it
-    False so a stray flag cannot split that cache."""
-    mod = _run_exp(monkeypatch)
-    cloud = str(Path(mod.__file__).resolve().parent.parent / "analysis" / "cloud")
-    if cloud not in sys.path:
-        sys.path.insert(0, cloud)
-    import gated_pc_cloud
-    parsed = gated_pc_cloud.parse_args(mod.build_gated_pc_args(
-        {**_base_eff(), "window_mode": "lookback", "dag_collapse": True}, "/out"))
-    assert parsed.dag_source == "snomed" and parsed.dag_collapse is True
-    assert gated_pc_cloud.multidomain_corpus_spec(parsed, ())["dag_collapse"] is False
 
 
 def test_mondo_native_dag_source_threads_end_to_end(monkeypatch):
@@ -230,12 +163,8 @@ def test_mondo_native_dag_source_threads_end_to_end(monkeypatch):
     assert spec["min_positives"] == 100 and spec["mondo_version"] == "2026-06-02"
     assert spec["dag_collapse"] is False
 
-    # ...even when the flag is explicitly asked for: it is not an option here.
-    with_flag = gated_pc_cloud.parse_args(mod.build_gated_pc_args(
-        {**eff, "dag_collapse": True}, "/out"))
-    assert with_flag.dag_collapse is True
-    assert gated_pc_cloud.multidomain_corpus_spec(
-        with_flag, ("drug",))["dag_collapse"] is False
+    with pytest.raises(SystemExit):            # the flag is gone (2026-10 cleanup)
+        gated_pc_cloud.parse_args(args + ["--dag-collapse"])
 
 
 def test_mondo_native_selects_the_native_assembler(monkeypatch):
@@ -299,120 +228,7 @@ def test_localize_head_flag_threads(monkeypatch):
     assert parsed.localize_head is True
 
 
-def test_preindex_closure_flag_threads(monkeypatch):
-    """E1: `preindex_closure: true` front matter -> --preindex-closure -> the
-    driver parses it -> the corpus spec carries it (which is what forks the cache
-    key, so a bundle WITH the column can never be served for one without).
 
-    Absent/false front matter must not emit the flag at all: every existing
-    experiment, 0104's and 0109's record runs included, has to keep reproducing
-    byte-identically."""
-    mod = _run_exp(monkeypatch)
-    eff = {**_base_eff(), "dag_source": "mondo_native", "min_positives": 100,
-           "window_mode": "lookback", "preindex_closure": True}
-    args = mod.build_gated_pc_args(eff, "/out")
-    assert "--preindex-closure" in args
-
-    assert "--preindex-closure" not in mod.build_gated_pc_args(_base_eff(), "/out")
-    assert "--preindex-closure" not in mod.build_gated_pc_args(
-        {**eff, "preindex_closure": False}, "/out")
-
-    cloud = str(Path(mod.__file__).resolve().parent.parent / "analysis" / "cloud")
-    if cloud not in sys.path:
-        sys.path.insert(0, cloud)
-    import gated_pc_cloud
-    parsed = gated_pc_cloud.parse_args(args)
-    assert parsed.preindex_closure is True
-    spec = gated_pc_cloud.multidomain_corpus_spec(parsed, ("drug",))
-    assert spec["preindex_closure"] is True
-    # ...and it lands in the KEY, which is the whole point of the fork.
-    off_spec = dict(spec, preindex_closure=False)
-    assert (gated_pc_cloud.multidomain_cache_key(spec)
-            != gated_pc_cloud.multidomain_cache_key(off_spec))
-
-    off = gated_pc_cloud.parse_args(mod.build_gated_pc_args(
-        {**eff, "preindex_closure": False}, "/out"))
-    assert off.preindex_closure is False
-    assert gated_pc_cloud.multidomain_corpus_spec(
-        off, ("drug",))["preindex_closure"] is False
-
-
-def test_preindex_closure_is_mondo_only_in_the_spec(monkeypatch):
-    """The column is built by re-running the MONDO attestation provider over the
-    feature window, and only the Mondo paths construct one driver-side — so on the
-    SNOMED path the spec pins it False and a stray flag cannot split that cache."""
-    mod = _run_exp(monkeypatch)
-    cloud = str(Path(mod.__file__).resolve().parent.parent / "analysis" / "cloud")
-    if cloud not in sys.path:
-        sys.path.insert(0, cloud)
-    import gated_pc_cloud
-    parsed = gated_pc_cloud.parse_args(mod.build_gated_pc_args(
-        {**_base_eff(), "window_mode": "lookback", "preindex_closure": True},
-        "/out"))
-    assert parsed.dag_source == "snomed" and parsed.preindex_closure is True
-    assert gated_pc_cloud.multidomain_corpus_spec(
-        parsed, ())["preindex_closure"] is False
-
-
-def test_profile_eta_flags_thread_and_absent_keys_emit_nothing(monkeypatch):
-    """Profile-eta wiring (plan 2026-09-06 WP-3), the spectral-emission pattern:
-    `profile_eta` front matter -> the four CLI flags -> the driver parses them ->
-    the shim estimator carries the four provenance Params AND the driver-built
-    boost lands via setEtaBoost. Absent front matter emits NOTHING, so every
-    existing gated_pc run's arg string stays byte-identical."""
-    mod = _run_exp(monkeypatch)
-    eff = {**_base_eff(), "profile_eta": "data/ontology/profile_eta.tsv",
-           "profile_eta_strength": 3.0, "profile_eta_topics": 2,
-           "profile_eta_min_coverage": 0.25}
-    args = mod.build_gated_pc_args(eff, "/out")
-    assert args[args.index("--profile-eta") + 1] == "data/ontology/profile_eta.tsv"
-    assert args[args.index("--profile-eta-strength") + 1] == "3.0"
-    assert args[args.index("--profile-eta-topics") + 1] == "2"
-    assert args[args.index("--profile-eta-min-coverage") + 1] == "0.25"
-    # a bare profile_eta key rides the knob DEFAULTS alongside (like spectral)
-    bare = mod.build_gated_pc_args(
-        {**_base_eff(), "profile_eta": "x.tsv"}, "/out")
-    assert bare[bare.index("--profile-eta-strength") + 1] == "1.0"
-    assert bare[bare.index("--profile-eta-topics") + 1] == "1"
-    assert bare[bare.index("--profile-eta-min-coverage") + 1] == "0.0"
-
-    # absent (or empty) key: none of the four flags appear at all
-    plain = mod.build_gated_pc_args(_base_eff(), "/out")
-    empty = mod.build_gated_pc_args({**_base_eff(), "profile_eta": ""}, "/out")
-    assert plain == empty
-    for flag in ("--profile-eta", "--profile-eta-strength",
-                 "--profile-eta-topics", "--profile-eta-min-coverage"):
-        assert flag not in plain
-
-    cloud = str(Path(mod.__file__).resolve().parent.parent / "analysis" / "cloud")
-    if cloud not in sys.path:
-        sys.path.insert(0, cloud)
-    import json
-
-    import gated_pc_cloud
-    parsed = gated_pc_cloud.parse_args(args)
-    assert parsed.profile_eta == "data/ontology/profile_eta.tsv"
-    assert parsed.profile_eta_strength == 3.0
-    assert parsed.profile_eta_topics == 2
-    assert parsed.profile_eta_min_coverage == 0.25
-    # ... and the driver defaults are off (byte-identical old behavior)
-    off = gated_pc_cloud.parse_args(plain)
-    assert off.profile_eta == "" and off.profile_eta_strength == 1.0
-    assert off.profile_eta_topics == 1 and off.profile_eta_min_coverage == 0.0
-
-    # estimator threading: the four provenance Params + the pre-built boost
-    parsed._C = 3
-    parsed._parent_int = {1: 0, 2: 0}
-    parsed._profile_eta_boost = {2: ([0, 1], [0.5, -0.05])}
-    est = gated_pc_cloud._build_pc_estimator(parsed, weight_y=0.0, gated=True)
-    assert est.getOrDefault("profileEta") == "data/ontology/profile_eta.tsv"
-    assert est.getOrDefault("profileEtaStrength") == 3.0
-    assert est.getOrDefault("profileEtaTopics") == 2
-    assert est.getOrDefault("profileEtaMinCoverage") == 0.25
-    assert json.loads(est.getOrDefault("etaBoost")) == {"2": [[0, 1], [0.5, -0.05]]}
-    # ungated arm (dag_head): provenance Params ride, the boost does NOT
-    dh = gated_pc_cloud._build_pc_estimator(parsed, weight_y=0.0, gated=False)
-    assert dh.getOrDefault("etaBoost") == ""
 
 
 def test_the_0110_front_matter_asks_for_the_preindex_column():

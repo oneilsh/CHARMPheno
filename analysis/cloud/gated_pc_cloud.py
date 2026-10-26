@@ -3072,7 +3072,7 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
         # Leaves-first gate schedule (report 2026-10-19; exp 0153/0154): 0 = the
         # single-round gate, byte-identical. Fit-only — no cache key moves.
         gateWarm=int(getattr(args, "gate_warm", 0) or 0),
-        gateOpenSeed=not bool(getattr(args, "gate_no_open_seed", False)),
+        gateOpenSeed=True,
         localizeHead=bool(getattr(args, "localize_head", False)),
         headSupport=str(getattr(args, "head_support", "siblings")),
         # Spectral (anchor-word) lambda seed for the gated engine (insight 0079
@@ -3116,16 +3116,6 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
         est._set(docConcentration=[float(dc)])
     if gated:
         est.setGateParent(args._parent_int)      # JSON-encodes the DAG map
-        # The built profile-eta boost (main stashes it on args after the
-        # bundle/layout exist). Gated arms only — the boost is a per-NODE-TOPIC
-        # prior over the gate layout's blocks; the ungated dag_head arm has no
-        # blocks (and _build_model_and_config would reject etaBoost there).
-        pe_boost = getattr(args, "_profile_eta_boost", None)
-        if pe_boost:
-            est.setEtaBoost(pe_boost)
-        cands = getattr(args, "_anchor_candidates", None)
-        if cands:
-            est.setSpectralAnchorCandidates(cands)
         gsp = getattr(args, "_gate_seed_profile", None)
         if gsp:
             est.setGateSeedProfile(gsp)
@@ -3142,26 +3132,10 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
 # --------------------------------------------------------------------------- #
 # Multi-domain / Mondo corpus seam (shared by the fit and gated_pc_readout).   #
 # --------------------------------------------------------------------------- #
-# The `dag_source` values that route through the Mondo branch of the multi-domain
-# assembler: a POPULATION index, `min_n=0` (the DAG arrives already powered) and
-# the Mondo build inputs folded into the key. `mondo` is exp 0088/0104's powered
-# ANCHOR hierarchy (`mondo_dag`, OMOP-concept-id nodes); `mondo_native` is exp
-# 0110's native Mondo label space (`mondo_native_dag`, Mondo-term-id nodes).
-# `gated_pc_readout` imports this rather than re-listing it, so the fit's routing
-# and the re-readout's key routing cannot drift apart.
+# The `dag_source` values a manifest may carry. Only `mondo_native` is built since
+# the 2026-10 cleanup (`_refuse_removed_spec_options`); `gated_pc_readout` imports
+# this to recognize a Mondo run's manifest.
 _MONDO_DAG_SOURCES = ("mondo", "mondo_native")
-
-# exp 0111 WP-D2. `EpisodeDocSpec().name` read once, so the driver's episode wiring
-# and the cache key agree on the doc-unit token without importing the class at
-# module import time (the assembler modules stay lazy-imported). The literal
-# tagged onto every episode/random document's `source_cohort` — the two arms are
-# whole-population single-cohort corpora, so one tag (not the population index's
-# cancer/general split) is the honest label, applied IDENTICALLY to both arms so
-# they differ only in index location (D12). The doc_id becomes
-# "episode:{person}:{index_date}" on both arms; the arm identity rides the cache
-# key (episode_sampling.arm), not the doc_id.
-_EPISODE_DOC_SPEC_NAME = "episode"
-_EPISODE_SOURCE_COHORT = "episode"
 
 # The multi-domain assembler's kwargs, derived from a corpus SPEC — the dict the
 # fit writes into `manifest["corpus_manifest"]` and the re-readout reads back out.
@@ -3202,210 +3176,92 @@ def doc_spec_identity() -> str:
     return PatientCohortDocSpec().name
 
 
-def _label_set_spec_fields(args) -> dict:
-    """`{label_set, label_set_path}` for the corpus spec from `--label-set <tsv>`.
-
-    Reads the TSV once here (local, cheap) so the key identity is computed at
-    spec-build time and recorded in the manifest; the assemble closure re-reads
-    the same path for the ids on a cache MISS. Only the native path takes a label
-    set — on the anchor hierarchy the kept set is terminals + class covers, which
-    an explicit disease list does not describe."""
-    path = str(getattr(args, "label_set", "") or "")
-    if not path:
-        return {"label_set": "", "label_set_path": ""}
-    if str(args.dag_source) != "mondo_native":
-        raise ValueError(
-            f"--label-set is defined only on --dag-source mondo_native (the kept "
-            f"set is Mondo terms there); got --dag-source {args.dag_source}.")
-    from dismech_ribbon import load_label_set
-    _ids, identity, _rb = load_label_set(path)
-    return {"label_set": identity, "label_set_path": path}
-
-
 def multidomain_corpus_spec(args, extra_domains) -> dict:
-    """The corpus_manifest block for a multi-domain / Mondo fit.
+    """The corpus_manifest block for a native-Mondo multi-domain fit.
 
     Everything the bundle's cache key needs AND everything re-assembling it from
     scratch needs, in one dict — including `billing` and the Mondo build inputs,
-    which a post-hoc rebuild cannot invent. `min_n` is the EFFECTIVE value handed
-    to the assembler (0 on the Mondo path: that DAG is already powered), not the
-    CLI default, because the key folds what was used.
+    which a post-hoc rebuild cannot invent. `min_n` is 0 and `index_mode` is
+    `population` (the DAG arrives already powered; there is no single disease).
 
-    `dag_source` has two Mondo flavours and they share every build input
-    (`mondo_version` / `mondo_branch` / `min_positives` / `mondo_cache_dir`) and
-    every assembler setting (population index, min_n=0 because the DAG arrives
-    already powered):
-      `mondo`         exp 0088/0104's powered ANCHOR hierarchy (mondo_dag), keyed
-                      on OMOP concept ids, optionally spliced by `dag_collapse`;
-      `mondo_native`  exp 0110's native label space (mondo_native_dag), keyed on
-                      Mondo term ids, with the splice intrinsic to the build.
-    `dag_collapse` is pinned False on the native path: its reduction is not an
-    option there, it is part of the construction, so exposing the flag would only
-    let a run ask for it twice."""
-    mondo = args.dag_source in _MONDO_DAG_SOURCES
-    # exp 0111 WP-D2: when an --index-arm is chosen the Mondo corpus is assembled
-    # on a driver-built EXTERNAL episode/random index (see mondo_assemble_fn), not
-    # the population/disease index. index_mode="external" is what routes the
-    # assembler onto the injection seam, and the doc unit becomes EpisodeDocSpec
-    # (doc_id = cohort:person:index) so a person's several documents stay distinct.
-    episode_arm = str(getattr(args, "index_arm", "") or "")
-    if episode_arm and not mondo:
-        raise ValueError(
-            f"--index-arm {episode_arm!r} is the exp-0111 episode/random index and "
-            "is defined only on the Mondo path (--dag-source mondo/mondo_native); "
-            f"got --dag-source {args.dag_source}.")
-    if episode_arm:
-        base_index_mode = "external"
-    else:
-        base_index_mode = "population" if mondo else "disease"
+    The removed options keep their OFF values in the spec (`dag_collapse`,
+    `label_set`, `preindex_closure`), so a new spec has the same shape — and the
+    same cache key — as every native spec written before the 2026-10 cleanup."""
     return {
         "dag_source": args.dag_source,
         "disease": args.disease, "cdr": args.cdr, "billing": args.billing,
         "source_table": args.source_table,
         "extra_domains": list(extra_domains),
-        "index_mode": base_index_mode,
+        "index_mode": "population",
         "person_mod": args.person_mod, "vocab_size": args.vocab_size,
         "min_df": args.min_df, "min_patient_count": args.min_patient_count,
         "doc_min_length": args.doc_min_length,
-        "min_n": 0 if mondo else args.min_n,
+        "min_n": 0,
         "holdout_frac": args.holdout_frac, "n_bg": args.n_bg, "tpn": args.tpn,
         "strip_mode": args.strip_mode, "lookback_days": args.lookback_days,
         "label_window_days": args.label_window_days,
         "label_mask_mode": args.label_mask_mode, "emit_labels": True,
         "window_mode": args.window_mode,
         "prior_obs_days": args.prior_obs_days, "window_days": args.window_days,
-        "mondo_version": args.mondo_version if mondo else "",
-        "mondo_branch": (args.mondo_branch or "") if mondo else "",
-        "min_positives": args.min_positives if mondo else 0,
-        "mondo_cache_dir": args.mondo_cache_dir if mondo else "",
-        # Spec 2026-10-07 §D1: an explicit label set (the DisMech ribbon) on the
-        # NATIVE path. `label_set` is the cache-key identity (commit + member
-        # digest, `dismech_ribbon.label_set_identity`); `label_set_path` is the
-        # rebuild input (where the TSV lives). Both '' when unused, so every
-        # existing native spec — and its key — is byte-identical.
-        **_label_set_spec_fields(args),
-        # exp 0109's splice-to-fixpoint DAG reduction. Mondo-only (it names class
-        # nodes of the Mondo hierarchy) and OFF by default, so an existing
-        # experiment's spec — and therefore its bundle key — is unchanged.
-        "dag_collapse": bool(args.dag_collapse)
-                        if args.dag_source == "mondo" else False,
-        # The doc unit this corpus is assembled under — a cache-key input as of
-        # R5.3, recorded in the spec (and hence the manifest) so a re-readout
-        # recomputes the fit's own key. On the episode/random arms it is
-        # EpisodeDocSpec (doc_id = cohort:person:index), which moves the key
-        # naturally; otherwise it is today's constant (PatientCohortDocSpec).
-        "doc_spec": (_EPISODE_DOC_SPEC_NAME if episode_arm
-                     else doc_spec_identity()),
-        # exp 0111 WP-D2: the external-index identity. Present ONLY on an episode/
-        # random arm, so every population/disease/mondo spec keys byte-identically
-        # to before. `arm` is what distinguishes the two arms' bundles; the rest are
-        # the gate/cap/salt parameters that determine which index rows exist.
-        # `sidecar_uri` is deliberately OUTSIDE this dict — the sidecar is keyed
-        # independently and is not corpus identity for the bundle (it never enters
-        # the key), it only tells the MISS closure where to load/build it.
-        **({"episode_sampling": {
-                "arm": episode_arm,
-                "gap_days": int(args.episode_gap_days),
-                "cap": int(args.episode_cap),
-                "salt": str(args.episode_salt),
-                "prior_obs_days": int(args.episode_prior_obs_days),
-                "window_days": int(args.episode_window_days)},
-            "episode_sidecar_uri": str(getattr(args, "episode_sidecar_uri", "")
-                                       or "")}
-           if episode_arm else {}),
-        # exp 0111 WP-D3 (D13): the gate/label SEPARATION identity. Present ONLY on
-        # an episode/random arm WITH a positive gate width (`--gate-frontier-days`),
-        # so an un-gated episode bundle and every non-episode bundle key byte-
-        # identically to before. A D13-gated bundle carries the SAME 365-day
-        # `label`/`labelMask` but a 90-day `frontier`, so it is a DISTINCT artifact —
-        # the mode token (`gate90d`) is what splits its cache key from the un-gated
-        # one. Kept as a SIBLING of `episode_sampling` (not folded into that dict) so
-        # WP-D2's pinned sampling-dict shape is unchanged.
-        **({"gate_frontier_mode": _gate_frontier_mode(
-                int(getattr(args, "gate_frontier_days", 0) or 0))}
-           if (episode_arm
-               and int(getattr(args, "gate_frontier_days", 0) or 0) > 0) else {}),
-        # Label redesign R2 (spec 2026-10-13, exp 0146): the topic GATE read from
-        # ALL-EVER attestation instead of the label year. Present ONLY when asked, so
-        # every other bundle keys byte-identically to before; an `ever`-gated bundle
-        # carries the SAME label/labelMask and a different train `frontier`, so it is
-        # a distinct cached artifact.
+        "mondo_version": args.mondo_version,
+        "mondo_branch": args.mondo_branch or "",
+        "min_positives": args.min_positives,
+        "mondo_cache_dir": args.mondo_cache_dir,
+        "label_set": "", "label_set_path": "",
+        "dag_collapse": False,
+        # The doc unit (R5.3), a cache-key input.
+        "doc_spec": doc_spec_identity(),
+        # Label redesign R2 (exp 0146): the topic GATE read from all-ever
+        # attestation. Present ONLY when asked, so a label-year bundle keys
+        # byte-identically to before.
         **({"gate_attestation": "ever"}
-           if (mondo and str(getattr(args, "gate_attestation", "label")) == "ever")
-           else {}),
-        # E1's pre-index closure column. Mondo-only — it is built by re-running
-        # the SAME attestation provider on the feature window, and only the Mondo
-        # paths construct one driver-side — and OFF by default, so an existing
-        # experiment's spec (and therefore its bundle key) is unchanged.
-        "preindex_closure": (bool(getattr(args, "preindex_closure", False))
-                             if mondo else False),
+           if str(getattr(args, "gate_attestation", "label")) == "ever" else {}),
+        "preindex_closure": False,
     }
 
 
+# Spec options the 2026-10 cleanup removed (commit fff7bf4067 has them). A spec
+# that asks for one is refused rather than keyed as if it had not: silently
+# dropping a key fold would let a different corpus land under this key.
+def _refuse_removed_spec_options(spec):
+    removed = []
+    if str(spec.get("dag_source", "snomed")) != "mondo_native":
+        removed.append(f"dag_source={spec.get('dag_source', 'snomed')!r}")
+    if str(spec.get("index_mode")) == "external" or spec.get("episode_sampling"):
+        removed.append("an episode/random index arm")
+    if spec.get("gate_frontier_mode"):
+        removed.append("gate_frontier_mode")
+    for opt in ("dag_collapse", "label_set", "preindex_closure"):
+        if spec.get(opt):
+            removed.append(opt)
+    if removed:
+        raise ValueError(
+            "corpus spec asks for options removed in the 2026-10 cleanup ("
+            + ", ".join(removed) + "); re-read this run from commit fff7bf4067")
+
+
 def _multidomain_params(spec):
-    """`(assembly_params, key_extra)` for one corpus spec.
+    """`(assembly_params, key_extra)` for one native-Mondo corpus spec.
 
     `key_extra` carries the identity markers that are NOT assembler kwargs — the
-    `multidomain` / `mondo` flags and the Mondo build inputs — which is what folds
-    them into the cache key without changing any SNOMED key.
-
-    Both Mondo flavours fold the same build inputs; `mondo_native` additionally
-    folds its own marker + version, and (in `compute_bundle_cache_key`) the source
-    hashes of the two NEW modules it is built from. Everything native is folded
-    ONLY when it is selected, so a `dag_source=mondo` key — exp 0104's and 0109's
-    — is byte-identical to what it was before exp 0110 existed."""
-    dag_source = str(spec.get("dag_source", "snomed"))
-    mondo = dag_source in _MONDO_DAG_SOURCES
+    `multidomain` / `mondo` / `mondo_native` flags, the Mondo build inputs, the doc
+    unit and the gate attestation — which is what folds them into the cache key."""
+    _refuse_removed_spec_options(spec)
     assembly = {k: spec[k] for k in _SPEC_ASSEMBLY_KEYS}
     assembly["extra_domains"] = tuple(spec.get("extra_domains") or ())
     assembly["emit_labels"] = True
     # `doc_spec` is a key-only identity (the assembler builds its own spec and
-    # takes no such kwarg), so it rides key_extra. A spec written before the field
-    # existed defaults to today's constant and therefore keys byte-identically.
+    # takes no such kwarg), so it rides key_extra.
     key_extra = {"multidomain": True,
                  "doc_spec": str(spec.get("doc_spec") or doc_spec_identity())}
-    # exp 0111 WP-D2: fold the external-index identity ONLY on the external path,
-    # so every population/disease/mondo key stays byte-identical (the `dag_collapse`
-    # discipline). `index_mode` itself already rides `assembly` (and hence the key)
-    # via _SPEC_ASSEMBLY_KEYS; this adds the arm + gate/cap/salt parameters that
-    # `index_mode="external"` alone does not name.
-    if str(spec.get("index_mode")) == "external" and spec.get("episode_sampling"):
-        key_extra["episode_sampling"] = dict(spec["episode_sampling"])
-    # exp 0111 WP-D3 (D13): fold the gate/label-separation identity ONLY on the
-    # external path and ONLY when a gate is requested, so an un-gated episode bundle
-    # (and every non-episode bundle) keys byte-identically. A gated bundle carries a
-    # 90-day `frontier` under the same 365-day label, so it is a distinct artifact.
-    if (str(spec.get("index_mode")) == "external"
-            and spec.get("gate_frontier_mode")):
-        key_extra["gate_frontier_mode"] = str(spec["gate_frontier_mode"])
     # Label redesign R2: the all-ever train gate, folded only when on.
     if spec.get("gate_attestation") and str(spec["gate_attestation"]) != "label":
         key_extra["gate_attestation"] = str(spec["gate_attestation"])
-    if mondo:
-        key_extra.update(mondo=True, mondo_version=spec["mondo_version"],
-                         mondo_branch=spec.get("mondo_branch") or "",
-                         min_positives=spec["min_positives"])
-        # Folded ONLY when on: a collapse-OFF Mondo spec must key byte-identically
-        # to one written before exp 0109 existed (0104's cached bundle).
-        if spec.get("dag_collapse"):
-            from mondo_collapse import DAG_COLLAPSE_VERSION
-            key_extra.update(dag_collapse=True,
-                             dag_collapse_version=DAG_COLLAPSE_VERSION)
-        if dag_source == "mondo_native":
-            from mondo_native_dag import MONDO_NATIVE_VERSION
-            key_extra.update(mondo_native=True,
-                             mondo_native_version=MONDO_NATIVE_VERSION)
-            # Folded ONLY when set (spec 2026-10-07 §D1): a whole-powered-set
-            # native spec keys byte-identically to one written before the ribbon.
-            if spec.get("label_set"):
-                key_extra["label_set"] = str(spec["label_set"])
-        # E1. Folded ONLY when on (R1.2): a bundle carrying the pre-index column
-        # is a different artifact, but a spec that does not ask for it must key
-        # byte-identically to one written before this existed.
-        if spec.get("preindex_closure"):
-            from preindex_closure import PREINDEX_CLOSURE_VERSION
-            key_extra.update(preindex_closure=True,
-                             preindex_closure_version=PREINDEX_CLOSURE_VERSION)
+    from mondo_native_dag import MONDO_NATIVE_VERSION
+    key_extra.update(mondo=True, mondo_version=spec["mondo_version"],
+                     mondo_branch=spec.get("mondo_branch") or "",
+                     min_positives=spec["min_positives"])
+    key_extra.update(mondo_native=True, mondo_native_version=MONDO_NATIVE_VERSION)
     return assembly, key_extra
 
 
@@ -3416,329 +3272,6 @@ def multidomain_cache_key(spec) -> str:
     key_params = {k: assembly[k] for k in _KEY_PARAM_NAMES if k in assembly}
     key_params.update(key_extra)
     return compute_bundle_cache_key(**key_params)
-
-
-# --------------------------------------------------------------------------- #
-# exp 0111 WP-D2: the episode / matched-random EXTERNAL index seam.            #
-# --------------------------------------------------------------------------- #
-# Everything here runs ONLY inside the Mondo assemble closure, i.e. ONLY on a
-# bundle cache MISS — a HIT reloads the baked bundle and pays for none of the
-# sidecar load or the index build. The index frame is handed VERBATIM to
-# multi_domain's `index_mode="external"` seam (WP-C), so no episode logic lands in
-# any source-hashed module; this driver owns all of it.
-
-
-def _resolve_episode_sidecar_uri(spec, cache_uri):
-    """Where the first-attestation sidecar the episode index reads lives.
-
-    Explicit `--episode-sidecar-uri` wins; otherwise the same default
-    `build-conversion-sidecar` uses — a `conversion_sidecar` sibling of the bundle
-    cache. The sidecar is keyed INDEPENDENTLY of the bundle (its own
-    `conversion_sidecar_key`), so a bundle-key move never orphans it and it belongs
-    beside, never inside, a bundle key's dir."""
-    uri = str(spec.get("episode_sidecar_uri") or "").rstrip("/")
-    if uri:
-        return uri
-    if cache_uri:
-        return f"{str(cache_uri).rstrip('/')}/conversion_sidecar"
-    raise ValueError(
-        "exp 0111 episode index needs a sidecar location on a cache MISS: pass "
-        "--episode-sidecar-uri (a persistent in-boundary bucket) or --cache-uri "
-        "(the sidecar defaults to <cache-uri>/conversion_sidecar).")
-
-
-def _load_or_build_first_attestation(spark, spec, *, sidecar_uri, code_map_norm,
-                                     code_map_identity, dag_source):
-    """The E4 first-attestation frame `(person_id, node_cid, first_attested_date)`.
-
-    Load the sidecar at its own key; on a MISS build just the first-attestation
-    half from the code map already in hand (the DAG build is happening in this same
-    closure) and save it. The horizon half (`build_and_save`'s second parquet) is
-    index-dependent and unused here, so it is deliberately NOT built — a later
-    conversion analysis rebuilds it under the same key if it needs it. Runs only on
-    a bundle cache MISS, and the sidecar itself is usually a HIT (the probe or a
-    prior fit built it), so the full-history scan is paid at most once per cluster."""
-    from conversion_sidecar import (build_conversion_sidecar,
-                                     conversion_sidecar_key, save_sidecar,
-                                     try_load_sidecar)
-    key = conversion_sidecar_key(
-        cdr=spec["cdr"], person_mod=int(spec["person_mod"]),
-        dag_source=dag_source, mondo_version=spec.get("mondo_version") or "",
-        mondo_branch=spec.get("mondo_branch") or "",
-        min_positives=int(spec.get("min_positives") or 0),
-        code_map_identity=code_map_identity)
-    first = try_load_sidecar(spark, sidecar_uri, key)
-    if first is not None:
-        _cprint(f"[episode]   sidecar HIT ({sidecar_uri})", flush=True)
-        return first
-    _cprint(f"[episode]   sidecar MISS — building first-attestation once "
-          f"({sidecar_uri})", flush=True)
-    from charmpheno.omop import load_omop_bigquery
-    cond = load_omop_bigquery(
-        spark=spark, cdr_dataset=spec["cdr"], billing_project=spec["billing"],
-        person_sample_mod=int(spec["person_mod"]), source_table="condition_era")
-    first = build_conversion_sidecar(cond, code_map_norm)
-    try:
-        save_sidecar(first, sidecar_uri, key)
-    except Exception as exc:                                    # noqa: BLE001
-        _cprint(f"[episode]   WARNING: sidecar write to {sidecar_uri} failed "
-              f"({type(exc).__name__}: {exc}); proceeding with the in-memory "
-              "frame (next MISS rebuilds it).", flush=True)
-    return first
-
-
-def _build_external_index_df(spark, spec, *, code_map_norm, code_map_identity,
-                             dag_source, cache_uri):
-    """`(index_df, ordinal_df)` for the episode / matched-random arm (WP-D2).
-
-    `index_df` = `(person_id, index_date, source_cohort)` — exactly the shape
-    multi_domain's external seam consumes; `source_cohort` is a single literal (both
-    arms are whole-population single-cohort corpora). `ordinal_df` =
-    `(person_id, index_date, episode_ordinal)` for the episode arm — WP-D1's
-    UNBOUNDED chronological ordinal, carried for the R7.5 drop-rate diagnostic and
-    joined onto the bundle by `_attach_bounded_doc_index`; `None` for the random arm
-    (a uniform draw has no episode ordinal). `first_attestation` (the E4
-    `(person_id, node_cid, first_attested_date)` sidecar frame) is returned so the
-    WP-D3 gate-frontier post-pass reuses it WITHOUT reloading the sidecar — it is
-    already loaded here, and the load is the expensive part.
-
-    D12 MATCHED: the random arm is drawn over the EPISODE arm's surviving persons and
-    shares every gate/cap/salt, so the two arms differ only in index location."""
-    from pyspark.sql import functions as F
-
-    from episode_index import (INDEX_COL, PERSON_COL, EPISODE_COL,
-                               episode_index_frame, random_index_frame)
-    samp = spec["episode_sampling"]
-    arm = str(samp["arm"])
-    sidecar_uri = _resolve_episode_sidecar_uri(spec, cache_uri)
-    first = _load_or_build_first_attestation(
-        spark, spec, sidecar_uri=sidecar_uri, code_map_norm=code_map_norm,
-        code_map_identity=code_map_identity, dag_source=dag_source)
-    from conversion_sidecar import load_observation_period
-    obs = load_observation_period(spark, cdr=spec["cdr"], billing=spec["billing"])
-
-    common = dict(prior_obs_days=int(samp["prior_obs_days"]),
-                  window_days=int(samp["window_days"]),
-                  cap=int(samp["cap"]), salt=str(samp["salt"]))
-    episode = episode_index_frame(first, obs, gap_days=int(samp["gap_days"]),
-                                  **common)
-    if arm == "episode":
-        index = episode.select(PERSON_COL, INDEX_COL)
-        ordinal_df = episode.select(
-            PERSON_COL, INDEX_COL,
-            F.col(EPISODE_COL).alias("episode_ordinal"))
-    elif arm == "random":
-        # The episode arm's SURVIVING persons (post-gate) define the matched
-        # population; the random draw shares the gates and cap.
-        persons = episode.select(PERSON_COL).distinct()
-        index = random_index_frame(obs, persons=persons, **common)
-        ordinal_df = None
-    else:
-        raise ValueError(f"episode_sampling.arm must be 'episode' or 'random', "
-                         f"got {arm!r}")
-    index_df = index.withColumn(
-        "source_cohort", F.lit(_EPISODE_SOURCE_COHORT))
-    return index_df, ordinal_df, first
-
-
-def _attach_bounded_doc_index(bundle, *, ordinal_df=None):
-    """Bake the BOUNDED within-corpus document index onto the bundle's frames (WP-D2).
-
-    `_doc_key_column` (WP-A1) reads a column literally named `episode_no` and REQUIRES
-    it in `[0, RADIX=64)` — it is the low bits of `doc_key = person_id*64 + episode_no`.
-    WP-D1's `episode_no` is the UNBOUNDED chronological ordinal (a chronic patient's
-    70th episode carries 70) and must NEVER reach the doc key. So here, at the one
-    point the whole corpus is in hand, we synthesize a DENSE per-person
-    `row_number()-1` (0-based) over each person's KEPT documents ordered by index_date,
-    and write THAT as `episode_no`. cap <= 3 << 64, so the bound holds; the
-    `episode_no < 64` guard in `_doc_key_column` and `_assert_unique_doc_keys` are the
-    tripwires if the raw ordinal ever leaked through instead.
-
-    WHY DERIVE FROM THE BUNDLE, NOT CARRY THE INDEX FRAME'S ORDINAL
-    ---------------------------------------------------------------
-    The bounded index must be reconstructible AT READOUT from what the bundle carries.
-    The bundle carries `doc_id = "episode:{person}:{index_date}"` (EpisodeDocSpec), so
-    a dense rank over the parsed `index_date` within `person_id` reconstructs the exact
-    same 0-based index the fit used — no fit-only state, no drift. Baking it as a real
-    column means every readout collect (which transforms these frames) sees it with no
-    readout edit, and it survives the parquet save/reload byte-for-byte.
-
-    Person-keyed split (all of a person's documents land on one side), so the dense
-    rank computed independently within train and within test equals the within-person
-    rank globally.
-
-    `ordinal_df` (episode arm only): WP-D1's UNBOUNDED ordinal `(person_id, index_date,
-    episode_ordinal)`, left-joined so R7.5's drop-rate-by-ordinal diagnostic can read
-    it. When absent (random arm), `episode_ordinal` mirrors the bounded index — a
-    uniform draw has no chronological episode number."""
-    from pyspark.sql import Window
-    from pyspark.sql import functions as F
-
-    def _with_index(df):
-        # doc_id = "episode:{person}:{index_date}"; the index_date is the LAST
-        # component (EpisodeDocSpec APPENDS it), recovered by splitting on ':'.
-        idx_str = F.element_at(F.split(F.col("doc_id"), ":"), -1)
-        df = df.withColumn("_idx_str", idx_str)
-        w = Window.partitionBy("person_id").orderBy(
-            F.col("_idx_str").asc(), F.col("doc_id").asc())
-        df = df.withColumn("episode_no",
-                           (F.row_number().over(w) - F.lit(1)).cast("long"))
-        if ordinal_df is not None:
-            ordj = ordinal_df.select(
-                F.col("person_id"),
-                F.col("index_date").cast("string").alias("_idx_str"),
-                F.col("episode_ordinal").cast("long").alias("episode_ordinal"))
-            df = df.join(F.broadcast(ordj), on=["person_id", "_idx_str"],
-                         how="left")
-        else:
-            df = df.withColumn("episode_ordinal",
-                               F.col("episode_no") + F.lit(1))
-        return df.drop("_idx_str")
-
-    bundle.train_df = _with_index(bundle.train_df)
-    bundle.test_df = _with_index(bundle.test_df)
-    return bundle
-
-
-# --------------------------------------------------------------------------- #
-# exp 0111 WP-D3 (D13): separate the estimator's GATE from the outcome LABEL.  #
-# --------------------------------------------------------------------------- #
-# The gate an episode document reads (`frontierCol="frontier"`) becomes its
-# 90-day PRESENTATION window [index, index+90d); the outcome the PC head reads
-# (`labelCol="label"`) stays the full 365-day forward frame. `none` is the
-# byte-identical default everywhere (no separation — the 365-day frontier the
-# assembler baked stands); a positive width W is `gateWd`, the token that both
-# moves the bundle cache key (a gated bundle is a DISTINCT artifact) and drives
-# the MISS-only post-pass window.
-
-_GATE_FRONTIER_NONE = "none"
-
-
-def _gate_frontier_mode(gate_days) -> str:
-    """The gate-frontier identity token for a forward-window width (days).
-
-    0 (or off) -> 'none'; a positive W -> 'gateWd' (e.g. 'gate90d'). The token is
-    the cache-key identity — it is what makes a D13-gated episode bundle a distinct
-    cached artifact from the un-gated (365-day-frontier) one — and, parsed back by
-    `_gate_frontier_days`, the driver of the post-pass gate window."""
-    d = int(gate_days or 0)
-    return _GATE_FRONTIER_NONE if d <= 0 else f"gate{d}d"
-
-
-def _gate_frontier_days(mode) -> int:
-    """Inverse of `_gate_frontier_mode`: the width (days) a mode token names, or 0
-    for 'none'/absent. A malformed token RAISES rather than silently disabling the
-    gate — a wrong-results hazard, never a quiet no-op."""
-    import re
-    m = str(mode or "").strip()
-    if not m or m == _GATE_FRONTIER_NONE:
-        return 0
-    match = re.fullmatch(r"gate(\d+)d", m)
-    if not match:
-        raise ValueError(f"unrecognized gate_frontier_mode {mode!r}; expected "
-                         "'none' or 'gate<days>d' (e.g. 'gate90d').")
-    return int(match.group(1))
-
-
-def _attach_gate_frontier(spark, bundle, *, first_attestation, before_dag,
-                          gate_days, n_bg, tpn):
-    """exp 0111 WP-D3 (D13): overwrite each document's GATE with its 90-day
-    presentation window, leaving the 365-day outcome LABEL untouched.
-
-    WHY A MISS-ONLY DRIVER POST-PASS, NOT A HIT-TIME TRANSFORM
-    ---------------------------------------------------------
-    The gate frontier is the roll-up of a document's in-window attested nodes onto
-    the label DAG's SURVIVORS, and that roll-up walks the PRE-PRUNE DAG
-    (`before_dag`) exactly as `attach_frontiers` does at assembly. `before_dag` is a
-    build by-product that lives ONLY inside the assemble closure — it is never
-    serialized into a loaded HIT bundle — so the swap MUST run here, before the
-    bundle is cached; a later HIT then reloads a bundle whose `frontier` is ALREADY
-    the gate. `assemble(emit_labels=True)` baked `label`/`labelMask` from the
-    365-day frontier BEFORE it returned (case_finding_assembly.py:461-466), so those
-    columns are already frozen at 365 days; this pass overwrites ONLY `frontier` —
-    that is the whole of the D13 separation.
-
-    THE GATE = [index, index + gate_days). For each document (doc_id =
-    "episode:{person}:{index_date}") the gate's attested node set is the sidecar
-    `node_cid`s whose FIRST attestation lands in the half-open forward window
-    [index, index+gate_days) — the SAME join `diag_episode_probe.gate_occupancy`
-    (WP-B2) measures. Half-open matches the label window's own convention (a code
-    exactly at index+gate_days is OUTSIDE the gate). An empty gate yields `[]`, a
-    valid background-only frontier the gated LDA accepts — the document is NEVER
-    dropped.
-
-    ROLL-UP BY CALLING `attach_frontiers` (never editing it). Concept-id
-    attestations climb to engine-id survivors through the identical
-    `attach_frontiers(attested_df, before_dag, keep, cid2int, lay)` the ordinary
-    frontier path uses; only the INPUT differs (the 90-day attested set rather than
-    the 365-day one), so the gate frontier is the ordinary frontier over a narrower
-    window.
-
-    KEEP == the survivor set (proven, not assumed). At assembly `keep =
-    after_dag.nodes()` and `(parent_int, int2cid, cid2int) = after_dag.to_engine()`;
-    `to_engine` maps the anchor to 0 and EVERY other node of `after_dag.nodes()` to
-    1..N, so `set(cid2int) == after_dag.nodes() == keep`. We therefore read the
-    survivor set straight off the bundle as `set(bundle.cid2int)` and reconstruct
-    `lay = DagLayout(bundle.parent_int, n_bg, tpn)` identically to the fit
-    (gated_pc_cloud.py's fit path), so the gate frontier lives in the SAME engine-id
-    node space as the label — the head's C rows and the gate's blocks stay aligned.
-
-    JOIN INTEGRITY, LOUD. Every bundle document must receive EXACTLY ONE new
-    frontier. The per-document gate frame is asserted unique on (person_id, doc_id);
-    the overwrite is a LEFT join (so a document with no gate row surfaces as a NULL
-    we catch, not a vanished row) that must not change the document count and must
-    leave NO document without a gate. A missing / duplicate / mismatched join RAISES
-    — it never silently falls back to an empty or stale frontier. (An EMPTY gate is
-    a present `[]`, distinct from an ABSENT document's null, so the null check
-    separates the two.)
-    """
-    from spark_vi.models.topic.dag_placement import DagLayout
-    from charmpheno.omop.case_finding_assembly import attach_frontiers
-
-    keep = set(bundle.cid2int)               # == after_dag.nodes() (proven above)
-    cid2int = bundle.cid2int
-    lay = DagLayout(bundle.parent_int, n_bg=n_bg, tpn=tpn)
-
-    def _gate(df):
-        attested = _gate_attested_frame(df, first_attestation, gate_days=gate_days)
-        gate_fr = attach_frontiers(attested, before_dag, keep, cid2int, lay)
-        return _overwrite_frontier(df, gate_fr)
-
-    bundle.train_df = _gate(bundle.train_df)
-    bundle.test_df = _gate(bundle.test_df)
-    return bundle
-
-
-def _gate_attested_frame(df, first_attestation, *, gate_days):
-    """Per document, the CONCEPT-id node set attested inside its 90-day gate.
-
-    Returns `(person_id, doc_id, attested_cids: array<bigint>)` — the shape
-    `attach_frontiers` consumes. For each document (doc_id =
-    "episode:{person}:{index_date}") the set is the `first_attestation` `node_cid`s
-    whose FIRST attestation lands in the half-open forward window
-    [index, index+gate_days) — the SAME join `diag_episode_probe.gate_occupancy`
-    (WP-B2) measures. A LEFT join keyed on `person_id` plus a `when(in_win, node_cid)`
-    keeps a document with NO in-window attestation as a present row with an EMPTY
-    `attested_cids` (collect_set drops the off-window nulls), never dropping it —
-    an empty gate is a valid background-only frontier."""
-    from pyspark.sql import functions as F
-
-    fa = first_attestation.select(
-        F.col("person_id").cast("long").alias("person_id"),
-        F.col("node_cid").cast("long").alias("node_cid"),
-        F.col("first_attested_date").cast("date").alias("first_attested_date"))
-    # index_date is the LAST ':' component (EpisodeDocSpec appends it) — the same
-    # parse `_attach_bounded_doc_index` uses; cast to a real date for the window.
-    docs = (df.select("person_id", "doc_id").distinct()
-            .withColumn("_idx",
-                        F.to_date(F.element_at(F.split(F.col("doc_id"), ":"), -1))))
-    in_win = ((F.col("first_attested_date") >= F.col("_idx"))
-              & (F.col("first_attested_date")
-                 < F.date_add(F.col("_idx"), int(gate_days))))
-    return (docs.join(fa, on="person_id", how="left")
-            .groupBy("person_id", "doc_id")
-            .agg(F.collect_set(F.when(in_win, F.col("node_cid")))
-                 .alias("attested_cids")))
 
 
 def _gate_ever_attested(docs, events, provider):
@@ -3868,284 +3401,79 @@ def _overwrite_frontier(df, gate_frontier):
 
 def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=None,
                       cache_uri=None):
-    """A MISS-ONLY assembler for the Mondo corpus: build the DAG + climb, THEN assemble.
+    """A MISS-ONLY assembler for the native Mondo corpus: build the DAG, THEN assemble.
 
-    The Mondo hierarchy costs a whole-Mondo -> OMOP mapping, a power-count over
-    every anchor and a concept_ancestor climb — minutes of BigQuery — and the fit
-    consumes NONE of it directly: the DagLayout comes from `bundle.parent_int`, and
-    the frontier the climb produced is already baked into the cached
-    `frontier`/`label` columns. So the build lives inside the assemble seam, where
-    `load_or_build_case_finding_bundle` reaches it only after `try_load` has
-    missed. A HIT pays for none of it.
+    The native label DAG costs a whole-Mondo -> OMOP mapping, closure-support
+    powering and a code climb — minutes of BigQuery — and the fit consumes NONE of
+    it directly: the DagLayout comes from `bundle.parent_int`, and the frontier is
+    baked into the cached `frontier`/`label` columns. So the build lives inside the
+    assemble seam, where `load_or_build_case_finding_bundle` reaches it only after
+    `try_load` has missed. A HIT pays for none of it.
 
-    `on_inputs(count_of=..., terminal_cids=..., reduced=...)` hands back the
-    by-products (the diag-only probe's per-terminal +counts) — it is NOT called on a
-    HIT, which is exactly why `per_node_head_report` tolerates an empty count_of.
+    `mondo_native_dag` builds the label DAG out of Mondo's own is-a graph (closure-
+    support powering, induced Hasse, splice) and hands back a per-code attestation
+    map; the assembler takes it through the `before_dag` / `attested_provider` pair.
+    `spec["gate_attestation"] == "ever"` (exp 0146) then overwrites each TRAIN
+    document's gate with its person's all-ever attestations.
 
-    `spec["dag_collapse"]` (exp 0109, default False) additionally puts the built
-    engine DAG through the splice-to-fixpoint reduction before assembly — a
-    DIFFERENT label DAG, hence a different cache key, hence its own bundle.
+    `on_inputs(count_of=..., terminal_cids=..., reduced=...)` hands back the build
+    by-products; it is NOT called on a HIT.
 
-    `spec["dag_source"] == "mondo_native"` (exp 0110) swaps the whole front end:
-    `mondo_native_dag` builds the label DAG out of Mondo's own is-a graph
-    (closure-support powering, induced Hasse, splice) and hands back a per-code
-    attestation map instead of a SNOMED climb frame. Same seam, same caching, same
-    `min_n=0` contract — only the DAG and the provider differ, which is exactly
-    what the `before_dag` / `attested_provider` override pair exists for.
-
-    `spec["index_mode"] == "external"` (exp 0111 WP-D2) routes the corpus onto the
-    driver-built episode / matched-random index: `_external_seam` builds the
-    `(person_id, index_date, source_cohort)` frame from the E4 sidecar (MISS-only —
-    a HIT never loads it), the assembler and the attestation provider both key on
-    EpisodeDocSpec, and `_attach_bounded_doc_index` bakes the BOUNDED within-corpus
-    `episode_no` the readout doc key needs onto the bundle. All of it is
-    driver-owned; no episode logic enters a source-hashed module.
-
-    `spec["preindex_closure"]` (E1, default False) adds a POST-PASS on the
-    assembled bundle: `preindex_closure.attach_preindex_closure_to_bundle` re-runs
-    the same provider over the same DAG on the FEATURE window and writes the
-    per-document sparse `R_d` column plus its witness. Placed here — between the
-    assembler's return and the cache write — rather than inside `multi_domain`,
-    because THAT module's source hash is folded into every multi-domain bundle key
-    and editing it would orphan every cached bundle including 0104's record. Same
-    reasoning, same seam, same discipline as `dag_collapse` above.
+    The anchor-Mondo / SNOMED fronts, the episode index, the pre-index closure and
+    the fit-time label set were removed in the 2026-10 cleanup (commit fff7bf4067
+    has them); `_multidomain_params` refuses a spec that asks for one.
     """
-    native = str(spec.get("dag_source", "snomed")) == "mondo_native"
-
-    def _with_preindex(spark, bundle, *, before_dag, provider, assembly_params):
-        """The E1 post-pass, or the bundle untouched when the flag is off.
-
-        Everything it needs about the corpus comes from `assembly_params` (the
-        exact kwargs the assembler was just called with, so the window and the
-        sample cannot drift from the corpus) and from the BUNDLE (`parent_int` /
-        `cid2int` / `int2cid` — the POST-PRUNE internals, per R1.3, never from
-        assembler internals the driver does not hold)."""
-        if not spec.get("preindex_closure"):
-            return bundle
-        from preindex_closure import (attach_preindex_closure_to_bundle,
-                                      format_preindex_report)
-        with _phase("pre-index closure (E1): re-derive the feature window"):
-            bundle = attach_preindex_closure_to_bundle(
-                spark, bundle, before_dag=before_dag, attested_provider=provider,
-                cdr=spec["cdr"], billing=spec["billing"],
-                person_mod=assembly_params["person_mod"],
-                lookback_days=assembly_params["lookback_days"],
-                label_window_days=assembly_params["label_window_days"],
-                n_bg=assembly_params["n_bg"], tpn=assembly_params["tpn"],
-                index_mode=assembly_params.get("index_mode", "population"),
-                disease=assembly_params.get("disease", "rare6"))
-            print(format_preindex_report(bundle), flush=True)
-        return bundle
-
-    def _with_gate_frontier(spark, bundle, *, first_attestation, before_dag,
-                            assembly_params):
-        """The exp 0111 WP-D3 (D13) gate-frontier swap, or the bundle untouched when
-        `gate_frontier_mode` is 'none'/absent.
-
-        Runs ONLY on the external path (an --index-arm) and ONLY when a positive gate
-        width is requested, so an un-gated episode/random bundle — and every non-
-        episode bundle — is byte-for-byte what it was. `n_bg`/`tpn` come from
-        `assembly_params` (the exact kwargs the assembler was called with), so the
-        gate's DagLayout cannot drift from the label's; `before_dag` and the reused
-        `first_attestation` frame both come from the closure, never from a HIT
-        bundle (which carries neither)."""
-        gate_days = _gate_frontier_days(spec.get("gate_frontier_mode"))
-        if gate_days <= 0:
-            return bundle
-        with _phase(f"exp-0111 D13 gate-frontier swap "
-                    f"([index, index+{gate_days}d), MISS-only)"):
-            bundle = _attach_gate_frontier(
-                spark, bundle, first_attestation=first_attestation,
-                before_dag=before_dag, gate_days=gate_days,
-                n_bg=int(assembly_params["n_bg"]), tpn=int(assembly_params["tpn"]))
-        return bundle
-
-    def _external_seam(spark, assembly_params, *, code_map_sdf, concept_col,
-                       node_col, code_map_identity, dag_source):
-        """exp 0111: `(index_df, assemble_doc_spec, provider_doc_spec, ordinal_df,
-        first_attestation)`.
-
-        On the external path (an --index-arm was chosen) this normalizes the label
-        front end's code map, builds the driver-owned episode/random index frame from
-        the sidecar (MISS-only) and selects EpisodeDocSpec for BOTH the assembler's BOW
-        and the attestation provider, so the doc_id the provider derives matches the
-        one the corpus is keyed on. It also hands back the E4 first-attestation frame
-        so the WP-D3 gate post-pass reuses it (no second sidecar load). Off the
-        external path it is a NO-OP that touches NONE of its code-map inputs: no index
-        frame, PatientCohortDocSpec on the provider, the assembler builds its own
-        default doc spec (doc_spec=None), and no first-attestation frame — byte-for-
-        byte the prior behavior (the code map is normalized only when the episode
-        index actually needs it)."""
-        from charmpheno.omop.doc_spec import EpisodeDocSpec, PatientCohortDocSpec
-        if str(assembly_params.get("index_mode")) != "external":
-            return None, None, PatientCohortDocSpec(), None, None
-        from conversion_sidecar import normalize_code_map
-        code_map_norm = normalize_code_map(
-            code_map_sdf, concept_col=concept_col, node_col=node_col)
-        arm = str(spec["episode_sampling"]["arm"])
-        with _phase(f"build exp-0111 {arm} index (external, MISS-only)"):
-            index_df, ordinal_df, first = _build_external_index_df(
-                spark, spec, code_map_norm=code_map_norm,
-                code_map_identity=code_map_identity, dag_source=dag_source,
-                cache_uri=cache_uri)
-        dml = int(assembly_params.get("doc_min_length") or 0)
-        return (index_df, EpisodeDocSpec(min_doc_length=dml), EpisodeDocSpec(),
-                ordinal_df, first)
-
     def _assemble_mondo_native(spark, **assembly_params):
+        from charmpheno.omop.doc_spec import PatientCohortDocSpec
         from charmpheno.omop.multi_domain import (
             assemble_multidomain_case_finding_corpus)
         from mondo_native_dag import (
-            MONDO_NATIVE_VERSION, build_mondo_native_fit_inputs,
-            format_native_build_report, format_native_powering_report,
-            make_mondo_native_attested_provider)
+            build_mondo_native_fit_inputs, format_native_build_report,
+            format_native_powering_report, make_mondo_native_attested_provider)
         build = _build_inputs or build_mondo_native_fit_inputs
         assemble = _assemble or assemble_multidomain_case_finding_corpus
         branch = spec.get("mondo_branch") or ""
-        # Spec 2026-10-07 §D1: the explicit label set (DisMech ribbon). The ids are
-        # re-read from the recorded path on this MISS; the identity in the spec is
-        # what keyed the bundle, and the two must agree or the recorded key names a
-        # different ribbon than the one about to be built.
-        label_ids, label_name = None, ""
-        if spec.get("label_set"):
-            from dismech_ribbon import load_label_set
-            label_ids, label_name, _rb = load_label_set(spec["label_set_path"])
-            if label_name != str(spec["label_set"]):
-                raise ValueError(
-                    f"--label-set {spec['label_set_path']} now has identity "
-                    f"{label_name} but the corpus spec recorded "
-                    f"{spec['label_set']}: the TSV changed under the key. Re-cut "
-                    "the ribbon into a new file or pass the original.")
-        with _phase(f"build native Mondo label DAG (branch={branch or 'ALL'}, "
-                    f"label set={label_name or 'ALL'})"):
+        with _phase(f"build native Mondo label DAG (branch={branch or 'ALL'})"):
             before_dag, code_map_sdf, kept_cids, support_of, stats = build(
                 spark, cdr=spec["cdr"], billing=spec["billing"],
                 mondo_version=spec["mondo_version"],
                 mondo_cache_dir=spec.get("mondo_cache_dir") or "data/mondo",
                 min_positives=spec["min_positives"],
                 branch_root=(branch or None),
-                label_set=label_ids, label_set_name=label_name)
-            # exp 0111 WP-D2: build the external episode/random index (if any) and
-            # pick the doc spec BOTH the provider and the assembler use. The code map
-            # is normalized inside the seam ONLY on the external path, so the ordinary
-            # Mondo path touches none of it.
-            index_df, assemble_doc_spec, provider_doc_spec, ordinal_df, first_att = (
-                _external_seam(spark, assembly_params, code_map_sdf=code_map_sdf,
-                               concept_col="std_cid", node_col="node_cid",
-                               code_map_identity=(
-                                   f"mondo_native:{MONDO_NATIVE_VERSION}:"
-                                   f"{len(kept_cids)}"),
-                               dag_source="mondo_native"))
+                label_set=None, label_set_name="")
             provider = make_mondo_native_attested_provider(
-                code_map_sdf, doc_spec=provider_doc_spec,
+                code_map_sdf, doc_spec=PatientCohortDocSpec(),
                 ancestor_pairs=stats.get("flat_ancestor_pairs"))
-            # BOTH lines before any fit: C and K are expected to GROW here
-            # (closure support >= direct support), and the plan says measure,
-            # do not guess.
+            # BOTH lines before any fit: C and K are measured here, not guessed.
             print(format_native_powering_report(stats), flush=True)
-            if label_ids is not None:
-                from mondo_native_dag import format_label_set_report
-                print(format_label_set_report(stats), flush=True)
             print(format_native_build_report(stats), flush=True)
             if on_inputs is not None:
-                # Same by-products contract as the anchor path, in the native id
-                # space: `count_of` is the per-node CLOSURE support (what
-                # per_node_head_report annotates each head with) and
-                # `terminal_cids` the final node set.
+                # `count_of` is the per-node CLOSURE support, `terminal_cids` the
+                # final node set.
                 on_inputs(count_of=support_of, terminal_cids=kept_cids,
                           reduced={"n_classes": stats["n_final_nodes"]
                                    - stats["n_coded_kept"], "native": stats})
         bundle = assemble(spark, before_dag=before_dag,
-                          attested_provider=provider, index_df=index_df,
-                          doc_spec=assemble_doc_spec, **assembly_params)
-        bundle = _with_preindex(spark, bundle, before_dag=before_dag,
-                                provider=provider, assembly_params=assembly_params)
+                          attested_provider=provider, index_df=None,
+                          doc_spec=None, **assembly_params)
         if spec.get("gate_attestation") == "ever":
-            if index_df is not None:
-                raise ValueError("--gate-attestation ever is defined on the population "
-                                 "path; an --index-arm bundle has its own gate "
-                                 "(--gate-frontier-days)")
             with _phase("label redesign R2: all-ever topic gate (train, MISS-only)"):
                 bundle = _attach_gate_ever(
                     spark, bundle, provider=provider, before_dag=before_dag,
                     cdr=spec["cdr"], billing=spec["billing"],
                     person_mod=assembly_params["person_mod"],
                     n_bg=int(assembly_params["n_bg"]), tpn=int(assembly_params["tpn"]))
-        if index_df is not None:
-            bundle = _attach_bounded_doc_index(bundle, ordinal_df=ordinal_df)
-            bundle = _with_gate_frontier(
-                spark, bundle, first_attestation=first_att,
-                before_dag=before_dag, assembly_params=assembly_params)
         # WP-C' (exp 0136): the `(std_cid, node_cid)` attestation map rides the
-        # bundle as an ATTRIBUTE (the E1-witness precedent — neither bundle
-        # dataclass may grow a field), is persisted in the cache meta, and is
-        # written to the run dir by the driver so the profile census can ask
-        # whether a block topic carries its node's OWN codes. Ontology ids and
-        # standard concept ids only; small (one row per attesting code).
+        # bundle as an ATTRIBUTE, is persisted in the cache meta, and is written to
+        # the run dir by the driver (the census's own-code criterion). Ontology ids
+        # and standard concept ids only; small (one row per attesting code).
         _collect = getattr(code_map_sdf, "collect", None)   # a test stub has none
         if _collect is not None:
             bundle.native_code_map = sorted(
                 (int(r["std_cid"]), int(r["node_cid"])) for r in _collect())
         return bundle
 
-    def _assemble_mondo(spark, **assembly_params):
-        from charmpheno.omop.multi_domain import (
-            assemble_multidomain_case_finding_corpus)
-        from mondo_dag import build_mondo_fit_inputs, make_mondo_attested_provider
-        build = _build_inputs or build_mondo_fit_inputs
-        assemble = _assemble or assemble_multidomain_case_finding_corpus
-        branch = spec.get("mondo_branch") or ""
-        with _phase(f"build Mondo DAG + climb (branch={branch or 'ALL'})"):
-            before_dag, climb_sdf, terminal_cids, count_of, reduced = build(
-                spark, cdr=spec["cdr"], billing=spec["billing"],
-                mondo_version=spec["mondo_version"],
-                mondo_cache_dir=spec.get("mondo_cache_dir") or "data/mondo",
-                min_positives=spec["min_positives"],
-                branch_root=(branch or None))
-            # exp 0111 WP-D2: build the external episode/random index (if any) and
-            # pick the doc spec BOTH the provider and the assembler use. The sidecar
-            # code map is the climb frame (normalized inside the seam only on the
-            # external path); its identity is the terminal count, exactly what
-            # conversion_sidecar.code_map_from_manifest folds, so the fit and the probe
-            # compute the SAME sidecar key.
-            index_df, assemble_doc_spec, provider_doc_spec, ordinal_df, first_att = (
-                _external_seam(spark, assembly_params, code_map_sdf=climb_sdf,
-                               concept_col="descendant_concept_id",
-                               node_col="ancestor_concept_id",
-                               code_map_identity=f"mondo:{len(terminal_cids)}",
-                               dag_source="mondo"))
-            provider = make_mondo_attested_provider(
-                climb_sdf, doc_spec=provider_doc_spec)
-            _cprint(f"[mondo]   powered terminals={len(terminal_cids)}, "
-                  f"class nodes={reduced['n_classes']}, "
-                  f"branch={branch or 'ALL'}", flush=True)
-            if spec.get("dag_collapse"):
-                # exp 0109. Applied HERE — between the hierarchy build and the
-                # assembler — rather than inside `mondo_dag`, because that module's
-                # source hash is folded into every Mondo bundle key and editing it
-                # would orphan every cached bundle including 0104's (see
-                # mondo_collapse's module docstring). Terminals are untouched, so
-                # `climb_sdf` / `terminal_cids` stay exactly right.
-                from mondo_collapse import (collapse_engine_dag,
-                                            format_collapse_report)
-                before_dag, collapse_stats = collapse_engine_dag(before_dag)
-                print(format_collapse_report(collapse_stats), flush=True)
-            if on_inputs is not None:
-                on_inputs(count_of=count_of, terminal_cids=terminal_cids,
-                          reduced=reduced)
-        bundle = assemble(spark, before_dag=before_dag,
-                          attested_provider=provider, index_df=index_df,
-                          doc_spec=assemble_doc_spec, **assembly_params)
-        bundle = _with_preindex(spark, bundle, before_dag=before_dag,
-                                provider=provider, assembly_params=assembly_params)
-        if index_df is not None:
-            bundle = _attach_bounded_doc_index(bundle, ordinal_df=ordinal_df)
-            bundle = _with_gate_frontier(
-                spark, bundle, first_attestation=first_att,
-                before_dag=before_dag, assembly_params=assembly_params)
-        return bundle
-
-    return _assemble_mondo_native if native else _assemble_mondo
+    return _assemble_mondo_native
 
 
 def multidomain_load_or_build(spark, spec, *, cache_uri=None, on_inputs=None,
@@ -4157,16 +3485,11 @@ def multidomain_load_or_build(spark, spec, *, cache_uri=None, on_inputs=None,
     a later readout and a readout's rebuild is reusable by a later fit.
     """
     from _case_finding_cache import load_or_build_case_finding_bundle
-    from charmpheno.omop.multi_domain import (
-        assemble_multidomain_case_finding_corpus)
 
     assembly, key_extra = _multidomain_params(spec)
-    if key_extra.get("mondo"):
-        assemble_fn = mondo_assemble_fn(spec, on_inputs=on_inputs,
-                                        _build_inputs=_build_inputs,
-                                        _assemble=_assemble, cache_uri=cache_uri)
-    else:
-        assemble_fn = _assemble or assemble_multidomain_case_finding_corpus
+    assemble_fn = mondo_assemble_fn(spec, on_inputs=on_inputs,
+                                    _build_inputs=_build_inputs,
+                                    _assemble=_assemble, cache_uri=cache_uri)
     return load_or_build_case_finding_bundle(
         spark, cache_uri=cache_uri, _assemble_fn=assemble_fn,
         _key_extra=key_extra, **assembly)
@@ -4200,7 +3523,6 @@ def parse_args(argv=None):
                         "domain 0 is always conditions). Empty (default) = single "
                         "fused condition vocabulary. Requires --window-mode lookback. "
                         "The per-domain lambda is inspected per node in the readout.")
-    p.add_argument("--min-n", type=int, default=50)
     p.add_argument("--holdout-frac", type=float, default=0.2)
     p.add_argument("--strip-mode", choices=["test_only", "both"], default="test_only")
     p.add_argument("--label-mask-mode", choices=["full", "closure"], default="full",
@@ -4284,48 +3606,11 @@ def parse_args(argv=None):
                    help="scalable spectral candidate floor (exps 0125/0128): 'guided' "
                         "= profile candidates must be at least as common as the node's "
                         "average word; 'all' = every candidate must. Derived, no knob.")
-    p.add_argument("--spectral-anchor-profile", default="", metavar="PATH",
-                   help="HPO-GUIDED spectral anchors (spec 2026-10-05): the "
-                        "profile-eta TSV (hpoa_stage2_probe --emit-eta) whose "
-                        "positive, weight>0, in-vocab condition concepts become "
-                        "each profiled node's PREFERRED anchor candidates; the "
-                        "spectral search picks from them first (those clearing "
-                        "the node's own df floor) and falls back to the open "
-                        "search for the rest. A set, not a weight — no "
-                        "strength knob. '' (default) = unguided. Requires "
-                        "--init spectral and the gate.")
-    p.add_argument("--profile-eta", default="", metavar="PATH",
-                   help="profile-eta prior TSV (hpoa_stage2_probe --emit-eta: "
-                        "mondo_id, concept_id, weight, neg, coverage). Each "
-                        "credited node's block gets a persistent word-side "
-                        "Dirichlet boost on its profile's condition tokens. "
-                        "'' (default) = flat eta. Requires the gate; "
-                        "incompatible with resume/warm-start (D5).")
-    p.add_argument("--profile-eta-strength", type=float, default=1.0,
-                   help="D3 scale: each boosted topic's positive boost vector "
-                        "is normalized to sum to strength * eta_base * "
-                        "V_condition added pseudo-mass (default 1.0 = double "
-                        "the topic's prior mass, concentrated on its profile).")
-    p.add_argument("--profile-eta-topics", type=int, default=1,
-                   help="D1 targeting: boost the FIRST N topics of each "
-                        "credited node's block (default 1; the rest stay "
-                        "flat/free — one aligned + tpn-1 free).")
-    p.add_argument("--profile-eta-min-coverage", type=float, default=0.0,
-                   help="D4 gate: drop a node's boost when its train "
-                        "positive-doc coverage (the TSV column) is below this "
-                        "(default 0 = off; targets the annotation-population-"
-                        "mismatch tail).")
-    p.add_argument("--dag-source", choices=["snomed", "mondo", "mondo_native"],
-                   default="snomed",
-                   help="snomed (default): the disease's SNOMED anchor forest via "
-                        "concept_ancestor. mondo: the whole-Mondo powered hierarchy "
-                        "(exp 0088) with a POPULATION index + SNOMED-climb attestation "
-                        "(routes through the multi-domain assembler). mondo_native: "
-                        "exp 0110's NATIVE Mondo label space — labels are Mondo terms "
-                        "powered by is-a CLOSURE support, the DAG is Mondo's own "
-                        "hierarchy transitively reduced over the kept set, and a doc "
-                        "attests the most-specific terms its codes map/climb to. "
-                        "--dag-collapse does not apply (the splice is intrinsic).")
+    p.add_argument("--dag-source", choices=["mondo_native"], default="mondo_native",
+                   help="the label space: exp 0110's NATIVE Mondo terms, powered by "
+                        "is-a CLOSURE support, the DAG Mondo's own hierarchy "
+                        "transitively reduced over the kept set (the only source "
+                        "since the 2026-10 cleanup).")
     p.add_argument("--mondo-branch", default="",
                    help="mondo: restrict to one body-system Mondo subtree (e.g. "
                         "MONDO:0004995 = cardiovascular disorder) — the Step-A template. "
@@ -4333,86 +3618,8 @@ def parse_args(argv=None):
     p.add_argument("--min-positives", type=int, default=100,
                    help="mondo: keep anchors with >= this many whole-pop patients "
                         "(the K dial; exp 0088 used 100).")
-    p.add_argument("--label-set", default="",
-                   help="mondo_native only: a ribbon TSV (dismech_ribbon.py; e.g. "
-                        "analysis/cloud/anchor_selection_data/dismech_ribbon.tsv) "
-                        "naming the Mondo terms the fit may label. Powering is "
-                        "unchanged; the powered set is intersected with the ribbon, "
-                        "codes under a member roll up to it, codes under no member "
-                        "are background-only. '' = the whole powered set (exp 0110).")
     p.add_argument("--mondo-version", default="2026-06-02")
     p.add_argument("--mondo-cache-dir", default="data/mondo")
-    p.add_argument("--dag-collapse", action="store_true",
-                   help="mondo: SPLICE-TO-FIXPOINT the label DAG before assembly "
-                        "(exp 0109) — repeatedly remove every class node with "
-                        "exactly one kept child (wiring its parents to that child) "
-                        "and every class node left with none, until no such node "
-                        "remains. Terminals (the powered anchors) and the root are "
-                        "never removed. This is what kills the 763 degenerate "
-                        "'constant fallback' readout cells at whole-Mondo, which are "
-                        "exactly {root} u {only-children} under closure masking. OFF "
-                        "by default: it changes the corpus (and its cache key), so "
-                        "existing experiments reproduce byte-identically.")
-    p.add_argument("--preindex-closure", action="store_true",
-                   help="mondo: also compute E1's PRE-INDEX CLOSURE column — per "
-                        "document, the sparse engine-id closure of what the "
-                        "patient already carried BEFORE the index, i.e. the label "
-                        "definition evaluated on the FEATURE window instead of the "
-                        "label window (preindex_closure.py). It is what makes "
-                        "incident eligibility (c NOT IN R_d) computable at eval "
-                        "time, and it is a CORPUS property: computed once, stored "
-                        "with the corpus, reused byte-identically by every run "
-                        "being compared, with nothing a fit produces entering it. "
-                        "Costs one extra full-history condition scan + one "
-                        "attestation pass at BUILD time only (a cache HIT pays "
-                        "nothing). OFF by default: it changes the bundle (and its "
-                        "cache key), so existing experiments reproduce "
-                        "byte-identically.")
-    # exp 0111 (WP-D2): episode-anchored / matched-random index arms. When
-    # --index-arm is set the Mondo corpus is assembled on a DRIVER-built external
-    # index (index_mode="external") of at most `--episode-cap` documents per
-    # person keyed on their gap-and-islands first-attestation EPISODES (episode
-    # arm) or on uniform-random in-observation dates (random arm), instead of the
-    # one-doc-per-person population/disease index. Both arms are multi-doc and
-    # share every gate/cap/salt — the random arm is drawn over the episode arm's
-    # SURVIVING persons so the two compare on an identical person set (D12).
-    p.add_argument("--index-arm", choices=["episode", "random"], default="",
-                   help="exp 0111: assemble on a driver-built EXTERNAL episode index "
-                        "(index_mode=external) instead of the population/disease "
-                        "index. 'episode' anchors documents on gap-and-islands "
-                        "first-attestation episodes; 'random' draws matched uniform "
-                        "in-observation dates over the episode arm's surviving "
-                        "persons. Empty (default) keeps the current single-doc "
-                        "index. Mondo path only (dag_source mondo/mondo_native).")
-    p.add_argument("--episode-gap-days", type=int, default=90,
-                   help="exp 0111: gap (days) that splits one first-attestation "
-                        "episode from the next (gap-and-islands). 90 is the probe's "
-                        "settled value.")
-    p.add_argument("--episode-cap", type=int, default=3,
-                   help="exp 0111: per-person document cap for BOTH arms (deterministic "
-                        "salted sample). Must be < 64 (the doc-key radix); 3 is the "
-                        "probe's settled value.")
-    p.add_argument("--episode-salt", default="0111",
-                   help="exp 0111: salt for the deterministic per-person cap sample "
-                        "(episode arm) and the uniform index draw (random arm). Same "
-                        "salt => identical draw on any rerun; never F.rand(). It is a "
-                        "corpus-identity input and folds into the bundle cache key.")
-    p.add_argument("--episode-prior-obs-days", type=int, default=365,
-                   help="exp 0111: prior-observation gate (days) an index must clear "
-                        "for BOTH arms. 365 matches the assembler's lookback floor "
-                        "(_LOOKBACK_PRIOR_OBS_DAYS) — the 0111 primary arm.")
-    p.add_argument("--episode-window-days", type=int, default=365,
-                   help="exp 0111: forward-observation gate (days) an index must clear "
-                        "for BOTH arms. 365 matches the assembler's label window.")
-    p.add_argument("--episode-sidecar-uri", default="",
-                   help="exp 0111: root URI of the E4 first-attestation sidecar the "
-                        "episode index is built from. The sidecar has its OWN "
-                        "(bundle-key-independent) key, so it is NOT part of the bundle "
-                        "cache key. Empty (default) derives <cache-uri>/"
-                        "conversion_sidecar, matching build-conversion-sidecar. Point "
-                        "it at a persistent in-boundary bucket so it survives a "
-                        "cluster (AGENTS.md). Loaded ONLY on a bundle cache MISS; a "
-                        "MISS with no sidecar present builds it once and saves it.")
     # exp 0111 (WP-D3 / D13): separate the estimator's GATE from the outcome LABEL.
     # When > 0 (and an --index-arm is set) each document's `frontier` gate is swapped
     # to its [index, index+N-day) PRESENTATION window while `label`/`labelMask` stay
@@ -4443,9 +3650,6 @@ def parse_args(argv=None):
                         "that REPLACES a profiled node's condition-domain seed (leaves "
                         "at iteration 0, later blocks at opening); unprofiled nodes "
                         "keep the histogram seed. Fit-only.")
-    p.add_argument("--gate-no-open-seed", action="store_true",
-                   help="With --gate-warm: do NOT seed blocks when they open (they die "
-                        "on arrival in simulation; ablation only).")
     p.add_argument("--gate-attestation", choices=("label", "ever"), default="label",
                    help="Label redesign R2 (spec 2026-10-13): which attestations GATE a "
                         "TRAIN document's topic blocks. 'label' (default, unchanged): X "
@@ -4454,15 +3658,6 @@ def parse_args(argv=None):
                         "code map and provider). label/labelMask and the TEST frontier "
                         "are untouched. Native-Mondo population path only; a distinct "
                         "bundle key.")
-    p.add_argument("--gate-frontier-days", type=int, default=0,
-                   help="exp 0111 (D13): forward-window width (days) of the GATE the "
-                        "gated estimator reads, separated from the 365-day outcome "
-                        "label. > 0 swaps each episode/random document's `frontier` "
-                        "to its [index, index+N-day) presentation window (90 is the "
-                        "spec's gate); the outcome `label`/`labelMask` stay the "
-                        "365-day frame. Folds into the bundle cache key as `gateNd`. "
-                        "0 (default) leaves the frontier at 365 days — no separation, "
-                        "byte-identical key. Requires --index-arm (external path).")
     p.add_argument("--optimize-doc-concentration", action="store_true")
     # PC head + SVI
     p.add_argument("--weight-y", type=float, default=50.0,
@@ -4542,7 +3737,6 @@ def parse_args(argv=None):
 
 
 def main() -> int:
-    from _case_finding_cache import load_or_build_case_finding_bundle
     from spark_vi.models.topic.dag_placement import DagLayout
 
     args = parse_args()
@@ -4568,168 +3762,51 @@ def main() -> int:
             extra_dirs=[d for d in spark.sparkContext.getConf()
                         .get("spark.local.dir", "").split(",") if d],
             log=lambda msg: _cprint(f"[driver] {msg}", flush=True))
-        if args.dag_source in _MONDO_DAG_SOURCES or extra_domains:
-            # MULTI-DOMAIN corpus (per-domain vocabularies, features_0..N-1), in
-            # either of its two flavours, both CACHED through the same seam:
-            #   dag_source=mondo — the label DAG is the whole-Mondo powered
-            #     hierarchy (exp 0088), patients are placed by SNOMED-climb and the
-            #     index is population-wide (no single disease); min_n=0 because that
-            #     DAG is already powered. The DAG build + climb now live INSIDE the
-            #     assemble seam, so a cache HIT skips them entirely (~5 min of
-            #     BigQuery per run that used to be unconditional).
-            #   otherwise      — the disease-anchored SNOMED forest with extra
-            #     domains bolted on (the one-off comparison run).
-            # Both require lookback windowing (the forward per-patient window is
-            # condition-defined and does not window a second domain).
-            if args.window_mode != "lookback":
-                raise ValueError(
-                    f"--dag-source {args.dag_source} / --extra-domains requires "
-                    f"--window-mode lookback (got {args.window_mode})")
-            corpus_spec = multidomain_corpus_spec(args, extra_domains)
+        if args.dag_source != "mondo_native":
+            raise ValueError(
+                f"--dag-source {args.dag_source!r}: the gated fit runs on the native "
+                "Mondo label space only (the SNOMED and anchor-Mondo paths were "
+                "removed in the 2026-10 cleanup; last at commit fff7bf4067)")
+        # The multi-domain native-Mondo corpus (per-domain vocabularies,
+        # features_0..N-1), cached through one seam; the DAG build and the code
+        # climb live inside the assemble closure, so a cache HIT skips them.
+        if args.window_mode != "lookback":
+            raise ValueError(
+                f"--dag-source {args.dag_source} / --extra-domains requires "
+                f"--window-mode lookback (got {args.window_mode})")
+        corpus_spec = multidomain_corpus_spec(args, extra_domains)
 
-            def _stash_mondo_inputs(*, count_of, terminal_cids, reduced):
-                # Only reached on a cache MISS; the diag-only probe degrades
-                # gracefully without these (per_node_head_report).
-                args._count_of = count_of
+        def _stash_mondo_inputs(*, count_of, terminal_cids, reduced):
+            # Only reached on a cache MISS; the diag-only probe degrades
+            # gracefully without these (per_node_head_report).
+            args._count_of = count_of
 
-            label = (args.dag_source.upper()
-                     if args.dag_source in _MONDO_DAG_SOURCES else "MULTI-DOMAIN")
-            with _phase(f"assemble {label} corpus (cached, cond + "
-                        f"{list(extra_domains)})"):
-                bundle = multidomain_load_or_build(
-                    spark, corpus_spec, cache_uri=args.cache_uri,
-                    on_inputs=_stash_mondo_inputs)
-                vocab_maps = bundle.vocab_maps
-                args._domain_cols = [f"features_{i}" for i in range(len(vocab_maps))]
-                args._domain_names = ["condition", *extra_domains]
-            _cprint(f"[driver]   ledger: {json.dumps(bundle.ledger)}", flush=True)
-            _bmp = write_bundle_meta(out, bundle)
-            _cprint(f"[driver]   wrote bundle meta -> {_bmp}", flush=True)
-            _ncm = getattr(bundle, "native_code_map", None)
-            if _ncm:
-                # WP-C': <run>/code_map.tsv (std concept id -> Mondo node cid), the
-                # census's own-code identity criterion. Present on every native
-                # bundle built or reloaded from here on; older cache entries lack it.
-                _cmp = write_code_map(out, _ncm)
-                _cprint(f"[driver]   wrote native code map: {len(_ncm)} (code, node) "
-                      f"pairs over {len({n for _, n in _ncm})} nodes -> {_cmp}",
-                      flush=True)
-        else:
-            with _phase("assemble corpus (cached, emit_labels)"):
-                bundle = load_or_build_case_finding_bundle(
-                    spark, cache_uri=args.cache_uri,
-                    # key-ONLY input (the assembler builds its own doc spec):
-                    # closes the doc-spec cache-key hole on the single-domain
-                    # path too. Today's value is the fold's default, so every
-                    # SNOMED key is byte-identical.
-                    _key_extra={"doc_spec": doc_spec_identity()},
-                    cdr=args.cdr, billing=args.billing, source_table=args.source_table,
-                    person_mod=args.person_mod, vocab_size=args.vocab_size,
-                    min_df=args.min_df, min_patient_count=args.min_patient_count,
-                    doc_min_length=args.doc_min_length, prior_obs_days=args.prior_obs_days,
-                    window_days=args.window_days, disease=args.disease, min_n=args.min_n,
-                    holdout_frac=args.holdout_frac, n_bg=args.n_bg, tpn=args.tpn,
-                    strip_mode=args.strip_mode, window_mode=args.window_mode,
-                    lookback_days=args.lookback_days,
-                    label_window_days=args.label_window_days,
-                    emit_labels=True, label_mask_mode=args.label_mask_mode)
-                vocab_maps = [bundle.vocab_map]
-                args._domain_cols = None
-                args._domain_names = ["condition"]
-            _cprint(f"[driver]   ledger: {json.dumps(bundle.ledger)}", flush=True)
-
+        with _phase(f"assemble MONDO_NATIVE corpus (cached, cond + "
+                    f"{list(extra_domains)})"):
+            bundle = multidomain_load_or_build(
+                spark, corpus_spec, cache_uri=args.cache_uri,
+                on_inputs=_stash_mondo_inputs)
+            vocab_maps = bundle.vocab_maps
+            args._domain_cols = [f"features_{i}" for i in range(len(vocab_maps))]
+            args._domain_names = ["condition", *extra_domains]
+        _cprint(f"[driver]   ledger: {json.dumps(bundle.ledger)}", flush=True)
+        _bmp = write_bundle_meta(out, bundle)
+        _cprint(f"[driver]   wrote bundle meta -> {_bmp}", flush=True)
+        _ncm = getattr(bundle, "native_code_map", None)
+        if _ncm:
+            # WP-C': <run>/code_map.tsv (std concept id -> Mondo node cid), the
+            # census's own-code identity criterion. Present on every native
+            # bundle built or reloaded from here on; older cache entries lack it.
+            _cmp = write_code_map(out, _ncm)
+            _cprint(f"[driver]   wrote native code map: {len(_ncm)} (code, node) "
+                  f"pairs over {len({n for _, n in _ncm})} nodes -> {_cmp}",
+                  flush=True)
         lay = DagLayout(bundle.parent_int, n_bg=args.n_bg, tpn=args.tpn)
         C = len(bundle.int2cid)               # label heads = engine nodes incl. root
         # Stash on args so the estimator builder can reach them without re-threading.
         args._C = C
         args._parent_int = bundle.parent_int
 
-        # Profile-eta word-side prior (plan D1-D5, exp 0116): read the probe's
-        # --emit-eta TSV, resolve mondo curie -> engine id exactly as the probe
-        # does (mondo_native_dag.mondo_cid + bundle.cid2int; import-only — that
-        # module is source-hashed), map concept ids into the CONDITION-domain
-        # vocab, and build the sparse per-topic boost over DagLayout's blocks.
-        # eta_base MUST equal the engine's flat prior: _build_model_and_config
-        # constructs the gated engine with eta = 1.0 / lay.K. Driver-side only;
-        # every gated arm built from these args (the PC fit AND the unsup_gated
-        # twin) then carries the same prior, mirroring how the spectral init
-        # applies to both. EGRESS: pe_stats is counts-of-nodes/concepts only —
-        # the TSV's coverage column is never printed.
-        args._profile_eta_boost = None
-        if getattr(args, "profile_eta", ""):
-            with _phase("build profile-eta boost (driver-side)"):
-                import pandas as pd
-                from mondo_native_dag import mondo_cid
-                from profile_eta import build_profile_eta_boost
-                eta_df = pd.read_csv(args.profile_eta, sep="\t")
-                eid_by_mondo = {}
-                for mid in eta_df["mondo_id"].astype(str).unique():
-                    try:
-                        eid = bundle.cid2int.get(mondo_cid(mid))
-                    except ValueError:
-                        eid = None            # not a Mondo curie — skip, counted
-                    if eid is not None:
-                        eid_by_mondo[str(mid)] = int(eid)
-                if not eid_by_mondo:
-                    raise ValueError(
-                        "--profile-eta: no profiled node maps into this run's "
-                        "label DAG — is this a mondo_native run? (cid2int keys "
-                        "must be Mondo numeric ids)")
-                pe_boost, pe_stats = build_profile_eta_boost(
-                    eta_df, eid_by_mondo=eid_by_mondo, block_of=lay.block,
-                    vocab_index_by_concept=vocab_maps[0],
-                    eta_base=1.0 / lay.K, v_condition=len(vocab_maps[0]),
-                    strength=args.profile_eta_strength,
-                    topics=args.profile_eta_topics,
-                    min_coverage=args.profile_eta_min_coverage)
-                if not pe_boost:
-                    raise ValueError(
-                        "--profile-eta produced an EMPTY boost (no credited "
-                        "node survived mapping/gating) — the run's one knob "
-                        "would be silently absent; check the TSV and "
-                        "--profile-eta-min-coverage")
-                args._profile_eta_boost = pe_boost
-                args._profile_eta_stats = pe_stats
-                _cprint(f"[driver]   profile-eta: {json.dumps(pe_stats)}",
-                      flush=True)
-        # Guided spectral anchors (spec 2026-10-05): the preferred candidate sets,
-        # built here from the SAME TSV + the same Mondo->engine-id and concept->
-        # vocab maps the profile-eta prior uses, handed to the estimator as ids
-        # (setSpectralAnchorCandidates). A fit parameter only: no cache-key
-        # change. EGRESS: stats are counts of nodes/concepts only.
-        args._anchor_candidates = None
-        if getattr(args, "spectral_anchor_profile", ""):
-            if str(getattr(args, "init", "random")) != "spectral":
-                raise ValueError("--spectral-anchor-profile requires --init spectral")
-            with _phase("build guided-anchor candidates (driver-side)"):
-                import pandas as pd
-                from mondo_native_dag import mondo_cid
-                from profile_eta import build_anchor_candidates
-                ap_df = pd.read_csv(args.spectral_anchor_profile, sep="\t")
-                ap_eid = {}
-                for mid in ap_df["mondo_id"].astype(str).unique():
-                    try:
-                        eid = bundle.cid2int.get(mondo_cid(mid))
-                    except ValueError:
-                        eid = None
-                    if eid is not None:
-                        ap_eid[str(mid)] = int(eid)
-                if not ap_eid:
-                    raise ValueError(
-                        "--spectral-anchor-profile: no profiled node maps into "
-                        "this run's label DAG — is this a mondo_native run?")
-                cands, ap_stats = build_anchor_candidates(
-                    ap_df, eid_by_mondo=ap_eid,
-                    vocab_index_by_concept=vocab_maps[0])
-                if not cands:
-                    raise ValueError(
-                        "--spectral-anchor-profile produced NO candidates (no "
-                        "node survived the rules) — the run's one change would "
-                        "be silently absent; check the TSV")
-                args._anchor_candidates = cands
-                args._anchor_candidate_stats = ap_stats
-                _cprint(f"[driver]   anchor guide: {json.dumps(ap_stats)}",
-                        flush=True)
         # Profile seed for the leaves-first schedule (exp 0157/0158): an external
         # phenotype profile (the marks TSV from hpo_profile_marks.py) replaces a
         # profiled node's condition-domain seed. Fit-only; counts-only stats.
@@ -4814,7 +3891,7 @@ def main() -> int:
         # true by construction rather than by two lists staying in sync.
         manifest_fields = {
             "model_class": "gated_pc",
-            "disease": args.disease, "min_n": args.min_n,
+            "disease": args.disease, "min_n": 0,
             "strip_mode": args.strip_mode, "label_mask_mode": args.label_mask_mode,
             "window_mode": args.window_mode, "lookback_days": args.lookback_days,
             "label_window_days": args.label_window_days,
@@ -4856,7 +3933,7 @@ def main() -> int:
                 "dag_source": args.dag_source,
                 "extra_domains": list(extra_domains),
                 "index_mode": (corpus_spec or {}).get("index_mode", "disease"),
-                "min_n": (corpus_spec or {}).get("min_n", args.min_n),
+                "min_n": corpus_spec["min_n"],
                 "disease": args.disease, "n_bg": args.n_bg, "tpn": args.tpn,
                 "strip_mode": args.strip_mode, "window_mode": args.window_mode,
                 "lookback_days": args.lookback_days,
@@ -4886,21 +3963,6 @@ def main() -> int:
                 "int2cid": {str(i): c for i, c in bundle.int2cid.items()},
                 "name_by_id": {str(c): n for c, n in bundle.name_by_id.items()}},
         }
-        # Profile-eta provenance (plan D5: a FIT parameter recorded in the run
-        # manifest — no cache-key change). Added ONLY when set, so every
-        # existing run's manifest stays byte-identical.
-        if getattr(args, "profile_eta", ""):
-            manifest_fields["profile_eta"] = {
-                "path": args.profile_eta,
-                "strength": float(args.profile_eta_strength),
-                "topics": int(args.profile_eta_topics),
-                "min_coverage": float(args.profile_eta_min_coverage),
-                **args._profile_eta_stats,      # counts only (egress-safe)
-            }
-
-        # Guided-anchor provenance (spec 2026-10-05): a FIT parameter recorded
-        # in the manifest; added ONLY when set (byte-identical manifests
-        # otherwise). The seed-side pooled counts are appended after the fit.
         # Init provenance: the spectral seed's settings, so `inspect_topics
         # --digest` can say how a block was seeded without the experiment doc.
         # Added ONLY for spectral fits (random-init manifests stay byte-identical).
@@ -4916,7 +3978,7 @@ def main() -> int:
             # Fit parameter; added only when set (byte-identical manifests otherwise).
             manifest_fields["gate_schedule"] = {
                 "warm": int(args.gate_warm),
-                "open_seed": not bool(getattr(args, "gate_no_open_seed", False))}
+                "open_seed": True}
             manifest_fields["gate_schedule"]["seed_mode"] = str(
                 getattr(args, "gate_seed_mode", "subtree"))
             manifest_fields["gate_schedule"]["seed_leaves"] = bool(
@@ -4927,11 +3989,7 @@ def main() -> int:
                     **getattr(args, "_gate_seed_profile_stats", {})}
         if int(getattr(args, "spectral_bg_anchors", 0) or 0) > 0:
             manifest_fields["spectral_bg_anchors"] = int(args.spectral_bg_anchors)
-        if getattr(args, "spectral_anchor_profile", ""):
-            manifest_fields["spectral_anchor_profile"] = {
-                "path": args.spectral_anchor_profile,
-                **args._anchor_candidate_stats,   # counts only (egress-safe)
-            }
+
 
         with _phase(f"gated_pc fit (weightY={args.weight_y}, K={lay.K})"):
             pc_est = _build_pc_estimator(args, weight_y=args.weight_y, gated=True)
@@ -4989,11 +4047,6 @@ def main() -> int:
             finally:
                 if _cofit_provider.get("provider") is not None:
                     _cofit_provider["provider"].close()
-            # Seed-side guided-anchor counts (how many anchors the profiles actually
-            # decided), pooled by the estimator after the spectral seed.
-            _ag = getattr(pc_est, "_anchor_guide_summary", None)
-            if _ag and "spectral_anchor_profile" in manifest_fields:
-                manifest_fields["spectral_anchor_profile"]["seed"] = dict(_ag)
             # Per-node spectral anchors -> <run>/spectral_anchors.json (vocab
             # indices + ontology names only; no patient data). Written for every
             # spectral fit, guided or not, so a block's anchor word is on record

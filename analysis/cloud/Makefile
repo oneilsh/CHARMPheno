@@ -662,50 +662,6 @@ build-conversion-sidecar: zip cluster-overlay $(WORKSPACE_ENV)
 	    $(if $(GPR_SIDECAR_URI),--sidecar-uri $(GPR_SIDECAR_URI),) \
 	    $(GPR_ARGS)
 
-# 0111 EPISODE PROBES (plan WP8a): R5.9 the episode MULTIPLIER and R5.10 the
-# observation-gate KILL RATE — the two numbers the 0111 plan cannot be written
-# without. An episode = a gap-and-islands cluster (gap 60/90d, both run) of a
-# person's FIRST-ATTESTATION dates; candidate index = episode_start - 1. It runs
-# ENTIRELY off the cached E4 sidecar plus one small observation_period read — no
-# condition_era rescan, no code-map rebuild, NO fit, no cache-key impact — and
-# gates survival by CALLING `_window_observed_cohort` (the assembler's own gate,
-# `cohorts.py:693-729`; calling is free, editing is what moves cache keys), three
-# ways: both gates / prior-obs only / follow-up only, so the kill decomposes.
-# Also reports first-vs-later episode kill (R5.10's anti-correlation claim,
-# measured), new-nodes-per-episode (incident positives an episode doc would
-# carry), and capped totals for per-person doc caps 3 and 5. Requires the sidecar
-# witness (exit 4 -> `make build-conversion-sidecar ID=N` first). Banner and
-# episode_probe_gap<g>.json are POOLED figures only.
-# GATE OCCUPANCY (--gate-occupancy on): additively measures how occupied each
-# arm's 90-day forward gate [index, index+90d) is — EPISODE-anchored (~100%
-# non-empty by construction) vs uniform-RANDOM index (feared mostly EMPTY) — off
-# the SAME cached sidecar, NO fit. Per arm, pooled: non-empty fraction + gate-size
-# mean/p50/p90/p99, side by side. Writes gate_occupancy_<tag>.json.
-# Example:
-#   make diag-episode-probe ID=110
-#   make diag-episode-probe ID=110 GPR_ARGS="--gap-days 30,60,90"
-#   make diag-episode-probe ID=110 GPR_ARGS="--gate-occupancy on"
-#   make diag-episode-probe ID=110 GPR_ARGS="--gate-occupancy on --gate-cap 3 --gate-salt 0111"
-diag-episode-probe: zip cluster-overlay $(WORKSPACE_ENV)
-	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
-	. ./$(WORKSPACE_ENV) && \
-	PYTHONPATH=$(REPO_ROOT):$$PYTHONPATH spark-submit \
-	    --master yarn \
-	    --deploy-mode client \
-	    --driver-memory 4g \
-	    --conf spark.executor.cores=2 \
-	    --conf spark.executor.memory=4g \
-	    --conf spark.executor.memoryOverhead=2g \
-	    --conf spark.task.maxFailures=8 \
-	    --conf spark.excludeOnFailure.enabled=true \
-	    --conf spark.dynamicAllocation.enabled=false \
-	    --conf spark.executor.instances=12 \
-	    $(foreach kv,$(GPR_SPARK_CONF),--conf $(kv)) \
-	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/conversion_sidecar.py,$(REPO_ROOT)/analysis/cloud/episode_index.py,$(REPO_ROOT)/analysis/cloud/diag_episode_probe.py \
-	    $(REPO_ROOT)/analysis/cloud/diag_episode_probe.py \
-	    --run-dir "$(RUNS_DIR)/$(shell printf '%04d' $(ID))-*" \
-	    $(GPR_ARGS)
-
 # Print summary.md for an experiment (copy/paste back to chat)
 summary:
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi

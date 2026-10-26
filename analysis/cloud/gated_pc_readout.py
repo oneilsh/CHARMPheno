@@ -1823,25 +1823,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--mondo-cache-dir", default=None,
                    help="mondo runs: local Mondo OBO cache dir for a rebuild "
                         "(default: the manifest's, else data/mondo).")
-    p.add_argument("--label-set", default=None,
-                   help="ribbon runs: where the fit's label-set TSV lives NOW, for a "
-                        "rebuild on a cache MISS (default: the manifest's path). The "
-                        "ribbon's identity is always the manifest's; a TSV whose "
-                        "identity differs is rejected at build time.")
-    p.add_argument("--dag-collapse", choices=["on", "off"], default=None,
-                   help="mondo runs: whether the fit used the exp-0109 "
-                        "splice-to-fixpoint DAG reduction (--dag-collapse). It is a "
-                        "cache-KEY input and it changes the DAG a rebuild produces, "
-                        "so a wrong value misses the cache and would rebuild a "
-                        "different corpus (the drift gate catches it). Default: the "
-                        "manifest's, else off — every fit predating the flag.")
-    p.add_argument("--preindex-closure", choices=["on", "off"], default=None,
-                   help="mondo runs: whether the fit's corpus carries E1's "
-                        "pre-index closure column (--preindex-closure). It is a "
-                        "cache-KEY input and it changes what a rebuild produces, "
-                        "so a wrong value misses the cache and would rebuild a "
-                        "different bundle. Default: the manifest's, else off — "
-                        "every fit predating the flag.")
     p.add_argument("--recall-targets", default="0.5,0.8,0.9")
     p.add_argument("--fdr-targets", default="0.1,0.25,0.5")
     p.add_argument("--min-label-count", type=int, default=None,
@@ -2619,12 +2600,7 @@ def main(argv=None) -> int:
                      mondo_version=args.mondo_version,
                      mondo_branch=args.mondo_branch,
                      min_positives=args.min_positives,
-                     mondo_cache_dir=args.mondo_cache_dir,
-                     label_set_path=args.label_set,
-                     dag_collapse=(None if args.dag_collapse is None
-                                   else args.dag_collapse == "on"),
-                     preindex_closure=(None if args.preindex_closure is None
-                                       else args.preindex_closure == "on"))
+                     mondo_cache_dir=args.mondo_cache_dir)
     # The fit records the cache root it used, so a recovery command need not
     # remember it; an explicit --cache-uri still wins.
     cm = manifest.get("corpus_manifest") or {}
