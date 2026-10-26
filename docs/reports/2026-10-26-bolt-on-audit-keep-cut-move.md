@@ -201,9 +201,9 @@ and survives (moving `conversion_sidecar.py` drops only the sidecar).
   written down in one place). **Organization: option A** (the `core / dag / models /
   readout / eval / mllib` layout), `readout` kept as the name, `dag/` strictly generic,
   framings stay in `analysis/`, MLlib-compatible flow with a heads Estimator. Collect-
-  free metrics must be exact (positive-anchored AUC), must not assume the positives fit
-  in memory (node-batched passes as the fallback), and must support ROC/PR curve output
-  for a node sample.
+  free metrics must be exact and must not assume anything fits on the driver: one
+  method, a distributed sort of the (node, score) cells with per-node ranks (decided over
+  positive-anchored counts), and ROC/PR curve output for a node sample.
 - Pending:
   collect-free evaluation (the readout needs a scalable metrics path before it moves to
   spark-vi); Q6 organization (option A, spark-vi, leaning; layout to brainstorm).
