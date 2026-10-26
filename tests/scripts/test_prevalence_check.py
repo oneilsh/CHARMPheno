@@ -105,26 +105,6 @@ def test_run_prevalence_check_end_to_end(spark, tmp_path):
     assert "largest gaps (stacked)" in (tmp_path / "prevalence_check_t.md").read_text()
 
 
-def test_incident_mask_kernel_masks_prior_nodes_but_never_the_root():
-    from pyspark.ml.linalg import Vectors
-    import gated_pc_readout as gpr
-    k = gpr.incident_mask_kernel(lambda: {3: [0, 1, 3], 7: [2]})
-    out = k(Vectors.sparse(12, [3, 5], [1.0, 2.0]), [1.0, 1.0, 1.0, 1.0])
-    assert out == [1.0, 0.0, 1.0, 0.0]                 # root kept, 1 and 3 masked
-    assert k(Vectors.sparse(12, [5], [1.0]), [1.0, 0.0, 1.0, 1.0]) == [1.0, 0.0, 1.0, 1.0]
-    assert k(Vectors.sparse(12, [7], [1.0]), None) is None
-
-
-def test_mask_prior_cells_on_a_spark_frame(spark):
-    from pyspark.ml.linalg import Vectors
-    from pyspark.sql import Row
-    import gated_pc_readout as gpr
-    df = spark.createDataFrame([
-        Row(person_id=1, features_0=Vectors.sparse(12, [3], [1.0]), labelMask=[1.0] * 4),
-        Row(person_id=2, features_0=Vectors.sparse(12, [9], [1.0]), labelMask=[1.0] * 4)])
-    got = {r.person_id: r.labelMask for r in
-           gpr.mask_prior_cells(df, {3: [1, 3]}).collect()}
-    assert got == {1: [1.0, 0.0, 1.0, 0.0], 2: [1.0] * 4}
 
 
 def test_sidecar_nodes_roll_up_the_mondo_is_a_to_readout_nodes():

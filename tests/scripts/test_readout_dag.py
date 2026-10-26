@@ -148,19 +148,12 @@ def test_widening_is_closure_max_labels_and_parent_activation_masks(spark, rdag)
 # --------------------------------------------------------------------------- #
 # plumbing: flags, front matter, the code-map (WP-C') round trips              #
 # --------------------------------------------------------------------------- #
-def test_readout_tool_and_fit_driver_parse_the_hierarchy_flag():
+def test_readout_tool_parses_the_hierarchy_flag():
     import gated_pc_readout as gpr
     a = gpr.build_parser().parse_args(["--run-dir", "/tmp/run"])
     assert a.readout_hierarchy == "auto"
     a = gpr.build_parser().parse_args(["--run-dir", "/tmp/run", "--readout-hierarchy", "flat"])
     assert a.readout_hierarchy == "flat"
-    import gated_pc_cloud as gpc
-    assert gpc._readout_hierarchy_on(
-        type("A", (), {"readout_hierarchy": "auto"})(), {"label_set": "dismech:x"})
-    assert not gpc._readout_hierarchy_on(
-        type("A", (), {"readout_hierarchy": "auto"})(), {"label_set": ""})
-    assert not gpc._readout_hierarchy_on(
-        type("A", (), {"readout_hierarchy": "flat"})(), {"label_set": "dismech:x"})
 
 
 

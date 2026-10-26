@@ -480,202 +480,67 @@ def test_lean_head_proba_collect_matches_driver_collect(spark):
 
 
 @pytest.mark.slow
-class TestReReadoutBothModes:
-    """`gated_pc_readout.run_readout` — the re-readout of a FINISHED fit — in both
-    modes, against the driver `score_arm` oracle on the same frozen θ."""
+class TestReReadout:
+    """`gated_pc_readout.run_readout` — the re-readout of a FINISHED fit — against
+    the driver `score_arm` (sklearn) oracle on the same frozen θ."""
 
     @pytest.fixture(scope="class")
     def scored(self, spark):
-        """What a finished fit's supervised transform leaves behind: θ + labels +
-        the co-fit head's own `probability` column (stand-in values — the head arm
-        reads that column, it never refits it)."""
         arrays = _make_arrays(seed=1)
         Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te = arrays
-        rng = np.random.default_rng(11)
-        train_df = _make_df(spark, Pi_tr, y_tr, m_tr, proba=rng.random((D_TR, C)))
-        test_df = _make_df(spark, Pi_te, y_te, m_te, offset=10_000,
-                           proba=rng.random((D_TE, C)))
+        train_df = _make_df(spark, Pi_tr, y_tr, m_tr)
+        test_df = _make_df(spark, Pi_te, y_te, m_te, offset=10_000)
         return arrays, train_df, test_df
 
     @pytest.fixture(scope="class")
-    def both(self, scored, tmp_path_factory):
+    def dist(self, scored, tmp_path_factory):
         _, train_df, test_df = scored
         out = tmp_path_factory.mktemp("run_dir")
-        manifest = {"C": C, "K": K, "weight_y": 1.0}
-        dist = gpr.run_readout(
+        manifest = {"C": C, "K": K, "weight_y": 0.0}
+        res = gpr.run_readout(
             train_df, test_df, manifest, recall_targets=RECALL_TARGETS,
-            fdr_targets=FDR_TARGETS, min_count=0, readout_mode="distributed",
-            out_dir=out)
-        drv = gpr.run_readout(
-            train_df, test_df, manifest, recall_targets=RECALL_TARGETS,
-            fdr_targets=FDR_TARGETS, min_count=0, readout_mode="driver")
-        return dist, drv, out
+            fdr_targets=FDR_TARGETS, min_count=0, out_dir=out)
+        return res, out
 
-    def test_distributed_arm_matches_driver_arm(self, both, scored):
-        """The recovery path's whole promise: re-reading distributed gives the same
-        per-node numbers the driver path would have printed."""
-        dist, drv, _ = both
+    def test_distributed_arm_matches_the_sklearn_oracle(self, dist, scored):
+        """The recovery path's whole promise: the batched distributed solve gives the
+        per-node numbers the sklearn readout would have."""
+        res, _ = dist
         Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te = scored[0]
         oracle = gpc.score_arm(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, C,
                                recall_targets=RECALL_TARGETS,
                                fdr_targets=FDR_TARGETS)
-        pd_, pv = dist["gated_pc"]["per_node"], drv["gated_pc"]["per_node"]
-        assert set(pd_) == set(pv) == set(oracle["per_node"])
+        pd_ = res["gated_pc"]["per_node"]
+        assert set(pd_) == set(oracle["per_node"])
         assert len(pd_) >= 3
         for c in pd_:
-            assert pv[c]["auc"] == oracle["per_node"][c]["auc"], c   # same call
             assert abs(pd_[c]["auc"] - oracle["per_node"][c]["auc"]) < 2e-3, c
-        assert abs(dist["gated_pc"]["ranking"]["auc"]
+        assert abs(res["gated_pc"]["ranking"]["auc"]
                    - oracle["ranking"]["auc"]) < 1e-3
 
-    def test_head_arm_present_and_mode_agnostic(self, both):
-        """The co-fit head arm reads the `probability` column as-is (no LR), so the
-        lean collector and the driver collector must give the identical readout."""
-        dist, drv, _ = both
-        assert dist["gated_pc_head"]["ranking"]["auc"] == pytest.approx(
-            drv["gated_pc_head"]["ranking"]["auc"], abs=1e-6)
-
-    def test_results_written_without_clobbering_the_fits_record(self, both):
+    def test_results_written_without_clobbering_the_fits_record(self, dist):
         """Durability is the point of the re-run (exp 0103 lost its readout to a
-        terminal): every arm lands in results_readout.json — and NOT in the fit's
+        terminal): the arm lands in results_readout.json — and NOT in the fit's
         own results_partial.json."""
-        dist, _, out = both
+        res, out = dist
         got = json.loads((out / "results_readout.json").read_text())
-        # FLAG-OFF (spec E2 acceptance): a corpus without E1's column produces
-        # exactly the two arms it always did — no incident block, no changed
-        # numbers. This is the regression that protects the 0104/0109 controls.
-        assert set(got) == {"gated_pc", "gated_pc_head"} == set(dist)
+        assert set(got) == {"gated_pc"} == set(res)
         assert got["gated_pc"]["ranking"]["auc"] == pytest.approx(
-            dist["gated_pc"]["ranking"]["auc"])
+            res["gated_pc"]["ranking"]["auc"])
         assert not (out / "results_partial.json").exists()
-
-
-@pytest.mark.slow
-def test_re_readout_emits_the_incident_block_from_a_saved_fit(spark, tmp_path,
-                                                              capsys):
-    """WP4's actual delivery route: `gated_pc_readout` over a corpus carrying E1's
-    column produces `gated_pc_incident` beside the prevalent arms, with no re-fit.
-
-    Also the flag-off half of the acceptance, on the SAME frames: dropping
-    `elig_col` leaves the prevalent numbers byte-identical, so the incident arm is
-    provably an addition rather than a perturbation.
-    """
-    Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te = _make_arrays(seed=5)
-    rng = np.random.default_rng(6)
-    # Prior carriers: a third of the docs already carried node 3 pre-index, so the
-    # incident arm scores a strictly smaller (and different) cohort there.
-    pre_tr = [[3] if d % 3 == 0 else [] for d in range(D_TR)]
-    pre_te = [[3] if d % 3 == 0 else [] for d in range(D_TE)]
-    train_df = _make_df(spark, Pi_tr, y_tr, m_tr, proba=rng.random((D_TR, C)),
-                        preindex=pre_tr)
-    test_df = _make_df(spark, Pi_te, y_te, m_te, offset=10_000,
-                       proba=rng.random((D_TE, C)), preindex=pre_te)
-    manifest = {"C": C, "K": K, "weight_y": 1.0}
-    out = tmp_path / "run"
-    out.mkdir()
-    on = gpr.run_readout(train_df, test_df, manifest,
-                         recall_targets=RECALL_TARGETS, fdr_targets=FDR_TARGETS,
-                         min_count=0, readout_mode="distributed", out_dir=out,
-                         elig_col="preindexClosure")
-    off = gpr.run_readout(train_df, test_df, manifest,
-                          recall_targets=RECALL_TARGETS, fdr_targets=FDR_TARGETS,
-                          min_count=0, readout_mode="distributed")
-    block = on["gated_pc_incident"]
-    assert "gated_pc_incident" not in off
-    # the prevalent arm is untouched by the extra CSR run
-    assert on["gated_pc"]["ranking"]["auc"] == pytest.approx(
-        off["gated_pc"]["ranking"]["auc"], abs=2e-3)
-    # ...and it landed on disk, where the recovery path needs it
-    got = json.loads((out / "results_readout.json").read_text())
-    assert set(got) == {"gated_pc", "gated_pc_head", "gated_pc_incident"}
-    assert "PREVALENT-FIT" in got["gated_pc_incident"]["naming"]
-    assert set(block["macros"]) == {"prevalent_full", "prevalent_shared",
-                                    "incident_full", "incident_shared"}
-    # eligibility really did bite: node 3's prior carriers left both classes
-    assert block["eligibility"]["n_eligible_cells"] < D_TE * C
-    assert "constant_prediction_column" in block["skipped_by_reason"]
-    txt = capsys.readouterr().out
-    assert "INCIDENT" in txt or "incident readout" in txt
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize("weight_y,with_proba", [(0.0, True), (1.0, False)])
-def test_head_arm_skipped_when_there_is_no_co_fit_head(spark, capsys, weight_y,
-                                                       with_proba):
-    """The scaled-back mainline is an UNSUPERVISED gate + post-hoc readout: weightY=0
-    means `transform` appends no `probability` column at all. EITHER witness alone
-    must skip the head arm with a log line — the manifest's weight_y=0 (here with a
-    column present, the belt-and-braces case) and the missing column (which covers a
-    manifest too old to record weight_y). Before this the re-readout raised an
-    AnalysisException on the `probability` select, AFTER paying for the pc_topics_lr
-    arm."""
-    Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te = _make_arrays(seed=2)
-    rng = np.random.default_rng(4)
-
-    def _p(n):
-        return rng.random((n, C)) if with_proba else None
-
-    train_df = _make_df(spark, Pi_tr, y_tr, m_tr, proba=_p(D_TR))
-    test_df = _make_df(spark, Pi_te, y_te, m_te, offset=10_000, proba=_p(D_TE))
-    got = gpr.run_readout(
-        train_df, test_df, {"C": C, "K": K, "weight_y": weight_y},
-        recall_targets=RECALL_TARGETS, fdr_targets=FDR_TARGETS, min_count=0,
-        readout_mode="driver")
-    assert set(got) == {"gated_pc"}, "the head arm must not be scored"
-    assert "co-fit head arm SKIPPED" in capsys.readouterr().out
-
-
-@pytest.mark.slow
-def test_re_readout_ab_check_runs_the_gate(spark, capsys):
-    """`--readout-ab-check` on the re-readout is the same report the fit driver
-    prints, on re-transformed frames: it must run BOTH paths and print the deltas
-    (the recovery run is often the only place the gate can still be run — the fit is
-    hours, the re-readout is minutes).
-
-    The manifest deliberately omits K, which is also the K-fallback path: a run old
-    enough not to record it must still route distributed, off the θ width."""
-    Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te = _make_arrays(seed=5)
-    train_df = _make_df(spark, Pi_tr, y_tr, m_tr)
-    test_df = _make_df(spark, Pi_te, y_te, m_te, offset=10_000)
-    gpr.run_readout(train_df, test_df, {"C": C, "weight_y": 0.0},
-                    recall_targets=RECALL_TARGETS, fdr_targets=FDR_TARGETS,
-                    min_count=0, readout_mode="distributed", ab_check=True)
-    txt = capsys.readouterr().out
-    assert "A/B readout equality gate" in txt and "per-node |ΔAUC|" in txt
 
 
 def test_readout_tool_parses_the_mode_flags():
     """Same flag names/defaults as the fit driver, so a re-run of a lost readout is
     the fit's command with the same knobs."""
     a = gpr.build_parser().parse_args(["--run-dir", "/tmp/r"])
-    assert a.readout_mode == "auto" and a.readout_ab_check is False
+    assert a.readout_mode == "distributed"         # the only mode (2026-10)
     b = gpr.build_parser().parse_args(
-        ["--run-dir", "/tmp/r", "--readout-mode", "distributed",
-         "--readout-ab-check"])
-    assert b.readout_mode == "distributed" and b.readout_ab_check is True
+        ["--run-dir", "/tmp/r", "--readout-mode", "distributed"])
+    assert b.readout_mode == "distributed"
+    with pytest.raises(SystemExit):
+        gpr.build_parser().parse_args(["--run-dir", "/tmp/r", "--readout-mode", "driver"])
 
-
-def test_resolve_readout_mode_auto_threshold():
-    """`auto` keeps every cardiovascular-scale run (C=444) on the byte-identical
-    driver path and routes whole-Mondo (C~3,300) to the distributed fit."""
-    assert gpc.resolve_readout_mode("auto", 444) == "driver"
-    assert gpc.resolve_readout_mode("auto", 500) == "driver"
-    assert gpc.resolve_readout_mode("auto", 501) == "distributed"
-    assert gpc.resolve_readout_mode("auto", 3300) == "distributed"
-    assert gpc.resolve_readout_mode("driver", 3300) == "driver"
-    assert gpc.resolve_readout_mode("distributed", 10) == "distributed"
-    with pytest.raises(ValueError):
-        gpc.resolve_readout_mode("nope", 10)
-
-
-def test_resolve_readout_calibration_gates_the_block():
-    """The one gate `main` consults, so the manifest, the log line and the dev
-    profile cannot disagree about what the string meant."""
-    assert gpc.resolve_readout_calibration("on") is True
-    assert gpc.resolve_readout_calibration("off") is False
-    assert gpc.resolve_readout_calibration(None) is True     # pre-flag namespace
-    with pytest.raises(ValueError):
-        gpc.resolve_readout_calibration("maybe")
 
 
 def test_save_fit_writes_the_model_then_overwrites_it_with_the_full_record(tmp_path):
@@ -825,55 +690,9 @@ def test_parse_args_readout_l2_resolves_cli_then_manifest_then_legacy(monkeypatc
     sig = inspect.signature(gpr.run_readout)
     assert sig.parameters["readout_l2"].default is None
     src = inspect.getsource(gpr.run_readout)
-    assert src.count("l2=readout_l2") == 2        # distributed-eval solve + driver-eval arm
+    assert src.count("l2=readout_l2") == 1        # the one batched solve
 
 
-def test_build_readout_feature_mask_modes_on_a_small_dag():
-    """Engine ids 0 (root) .. 4; n_bg=2, tpn=2 -> K=10. parent_int: 1<-0, 2<-1,
-    3<-1, 4<-0. Blocks: node1 [2,3], node2 [4,5], node3 [6,7], node4 [8,9]."""
-    C, K, n_bg, tpn = 5, 10, 2, 2
-    pi = {1: [0], 2: [1], 3: [1], 4: [0]}
-    assert gpr.build_readout_feature_mask("all", C, K, n_bg, tpn, pi) is None
-    own = gpr.build_readout_feature_mask("own", C, K, n_bg, tpn)
-    assert own.shape == (C, K) and own[2].tolist() == [False] * 4 + [True, True] + [False] * 4
-    assert not own[0].any()                               # root owns no block
-    ownbg = gpr.build_readout_feature_mask("own-bg", C, K, n_bg, tpn)
-    assert ownbg[2, :2].all() and ownbg[2, 4:6].all() and ownbg[2].sum() == 4
-    bg = gpr.build_readout_feature_mask("bg", C, K, n_bg, tpn)
-    assert bg[:, :2].all() and bg[:, 2:].sum() == 0
-    clo = gpr.build_readout_feature_mask("closure", C, K, n_bg, tpn, pi)
-    # node 2's closure: bg + own [4,5] + parent node1's [2,3]; NOT sibling 3 or node 4
-    assert clo[2].tolist() == [True, True, True, True, True, True, False, False, False, False]
-    assert clo[4].tolist() == [True, True, False, False, False, False, False, False, True, True]
-    do = gpr.build_readout_feature_mask("drop-own", C, K, n_bg, tpn)
-    assert (~do[2]).tolist() == [False] * 4 + [True, True] + [False] * 4
-    dc = gpr.build_readout_feature_mask("drop-closure", C, K, n_bg, tpn, pi)
-    assert dc[2].tolist() == [True, True, False, False, False, False, True, True, True, True]
-    # family: node 2's siblings under parent 1 = {3}; own [4,5] + sib [6,7] + bg
-    fam = gpr.build_readout_feature_mask("family", C, K, n_bg, tpn, pi)
-    assert fam[2].tolist() == [True, True, False, False, True, True, True, True, False, False]
-    # node 1's siblings under root = {4}
-    assert fam[1].tolist() == [True, True, True, True, False, False, False, False, True, True]
-    fc = gpr.build_readout_feature_mask("family-closure", C, K, n_bg, tpn, pi)
-    assert fc[2].tolist() == [True, True, True, True, True, True, True, True, False, False]
-    with pytest.raises(ValueError):
-        gpr.build_readout_feature_mask("family", C, K, n_bg, tpn)       # needs parent_int
-    with pytest.raises(ValueError):
-        gpr.build_readout_feature_mask("closure", C, K, n_bg, tpn)      # needs parent_int
-    with pytest.raises(ValueError):
-        gpr.build_readout_feature_mask("nope", C, K, n_bg, tpn)
-
-
-def test_parse_args_readout_feature_mask_default_all():
-    a = gpr.build_parser().parse_args(["--run-dir", "/tmp/r"])
-    assert a.readout_feature_mask == "all"
-    b = gpr.build_parser().parse_args(["--run-dir", "/tmp/r",
-                                       "--readout-feature-mask", "drop-own"])
-    assert b.readout_feature_mask == "drop-own"
-    import inspect
-    sig = inspect.signature(gpr.run_readout)
-    assert sig.parameters["feature_mask"].default is None
-    assert sig.parameters["mask_tag"].default is None
 
 
 def test_readout_main_tees_its_log_into_the_run_dir_before_scoring():
@@ -984,11 +803,9 @@ def test_re_readout_stacked_arm_adds_the_block_and_leaves_the_other_heads_alone(
     test_df = _make_df(spark, Pi_te, y_te, m_te, offset=10_000)
     manifest = {"C": C, "K": K, "weight_y": 0.0}
     base = gpr.run_readout(train_df, test_df, manifest, recall_targets=RECALL_TARGETS,
-                           fdr_targets=FDR_TARGETS, min_count=0,
-                           readout_mode="distributed", out_dir=tmp_path)
+                           fdr_targets=FDR_TARGETS, min_count=0, out_dir=tmp_path)
     stk = gpr.run_readout(train_df, test_df, manifest, recall_targets=RECALL_TARGETS,
-                          fdr_targets=FDR_TARGETS, min_count=0,
-                          readout_mode="distributed", out_dir=tmp_path,
+                          fdr_targets=FDR_TARGETS, min_count=0, out_dir=tmp_path,
                           mask_tag="stacked", stacked=True, parent_int=PARENT_INT)
     assert set(base) == {"gated_pc"}
     assert set(stk) == {"gated_pc", "gated_pc_stacked"}
@@ -1020,13 +837,6 @@ def test_re_readout_stacked_arm_adds_the_block_and_leaves_the_other_heads_alone(
     out = capsys.readouterr().out
     assert "STACKED arm: root head fit on EVERY train row" in out
     assert "root head alone" in out
-
-
-def test_re_readout_stacked_refuses_the_driver_mode():
-    with pytest.raises(SystemExit, match="readout-stacked"):
-        gpr.run_readout(None, None, {"C": C, "K": K}, recall_targets=RECALL_TARGETS,
-                        fdr_targets=FDR_TARGETS, min_count=0, readout_mode="driver",
-                        stacked=True, parent_int=PARENT_INT)
 
 
 

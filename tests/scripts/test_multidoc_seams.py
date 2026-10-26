@@ -160,69 +160,6 @@ def test_ab_alignment_dict_is_already_doc_keyed_by_a1(spark, capsys):
 # --------------------------------------------------------------------------- #
 # A3 — person-keyed calibration split, driver path (R5.6). Pure numpy.        #
 # --------------------------------------------------------------------------- #
-def test_person_keyed_cal_split_no_person_straddles():
-    """A3 oracle: the exp 0079 run-2 failure, pinned. 30 persons shaped like an
-    episode corpus (cap 3): 10 single-doc, 10 two-doc, 10 three-doc.
-
-    First, reproduce the OLD bug by construction: a per-ROW draw at this seed
-    demonstrably splits at least one multi-doc person's rows across both sides
-    — the fixture is chosen to exercise the failure, not just assert an
-    abstract probability of it.
-
-    Then the fix: `_person_keyed_cal_split`, tried across 20 seeds, never lets
-    a person straddle cal/fit — and still produces a non-degenerate split (both
-    sides non-empty) so the check is not vacuously true of an empty slice."""
-    doc_keys = []
-    for pid in range(10):
-        doc_keys.append(pid * RADIX)
-    for pid in range(10, 20):
-        doc_keys += [pid * RADIX + 0, pid * RADIX + 1]
-    for pid in range(20, 30):
-        doc_keys += [pid * RADIX + e for e in range(3)]
-    doc_keys = np.asarray(doc_keys, dtype=np.int64)
-    persons = dr.person_of(doc_keys)
-
-    # THE BUG THIS FIXES: a per-row draw straddles a multi-doc person.
-    old_row_cal = np.random.default_rng(0).random(len(doc_keys)) < 0.25
-    straddled = any(old_row_cal[persons == pid].any()
-                    and not old_row_cal[persons == pid].all()
-                    for pid in set(persons.tolist()))
-    assert straddled, ("fixture must reproduce the row-level straddle A3 "
-                       "fixes — if this stops firing, pick a new seed/shape")
-
-    # THE FIX, across many seeds.
-    saw_nonempty_split = False
-    for seed in range(20):
-        cal_sel, fit_sel = g._person_keyed_cal_split(doc_keys, seed)
-        assert np.array_equal(~cal_sel, fit_sel)
-        assert cal_sel.shape == doc_keys.shape
-        for pid in set(persons.tolist()):
-            rows = cal_sel[persons == pid]
-            assert rows.all() or not rows.any(), \
-                f"person {pid} straddles cal/fit at seed={seed}"
-        if cal_sel.any() and fit_sel.any():
-            saw_nonempty_split = True
-    assert saw_nonempty_split, "the split must be non-degenerate for SOME seed"
-
-
-def test_person_keyed_cal_split_is_row_order_independent():
-    """`np.unique` sorts by VALUE, so which persons land in `cal` is a function
-    of person identity + seed alone — shuffling `doc_keys`'s row order (as a
-    different upstream collect order would) must not change which PERSONS are
-    selected, only where their rows sit in the returned boolean arrays."""
-    doc_keys = np.array([pid * RADIX + e for pid in range(20) for e in range(2)],
-                        dtype=np.int64)
-    rng = np.random.default_rng(3)
-    perm = rng.permutation(len(doc_keys))
-    shuffled = doc_keys[perm]
-
-    cal_a, _ = g._person_keyed_cal_split(doc_keys, seed=7)
-    cal_b, _ = g._person_keyed_cal_split(shuffled, seed=7)
-
-    persons_cal_a = set(dr.person_of(doc_keys[cal_a]).tolist())
-    persons_cal_b = set(dr.person_of(shuffled[cal_b]).tolist())
-    assert persons_cal_a == persons_cal_b
-
 
 # --------------------------------------------------------------------------- #
 # A4 — person-level detection dedup (R5.7). Pure numpy.                       #

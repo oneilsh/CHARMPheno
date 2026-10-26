@@ -64,14 +64,10 @@ from _driver_common import (_phase, configure_logging, hard_exit,
                             install_stdout_tee, make_spark_session)
 from disk_telemetry import start_disk_telemetry
 from gated_pc_cloud import (
-    _DRIVER_READOUT_MAX_C, _MONDO_DAG_SOURCES, _collect_head_proba,
-    _collect_lean_proba, _collect_theta_labels, _dump_partial_results,
-    _fit_readout_heads, _read_readout_heads, _write_readout_heads,
-    distributed_ranking_readout,
-    distributed_score_arm, format_arm_readout, format_incident_readout,
-    format_stacked_readout, incident_readout, multidomain_cache_key,
-    multidomain_load_or_build, readout_ab_report, readout_from_proba,
-    resolve_eval_path, resolve_readout_mode, score_arm, stacked_readout,
+    _MONDO_DAG_SOURCES, _dump_partial_results,
+    _read_readout_heads, distributed_score_arm, format_arm_readout,
+    format_stacked_readout, multidomain_cache_key, multidomain_load_or_build,
+    stacked_readout,
 )
 
 # What the batched solve got before fits recorded their own cap. Runs older than
@@ -119,90 +115,7 @@ def resolve_readout_max_iter(cli_value, manifest):
     return _LEGACY_READOUT_MAX_ITER, "legacy default"
 
 
-_FEATURE_MASK_MODES = ("all", "own", "own-bg", "bg", "closure", "drop-own",
-                       "drop-closure", "family", "family-closure")
 
-
-def build_readout_feature_mask(mode, C, K, n_bg, tpn, parent_int=None):
-    """The (C,K) per-node topic mask for a readout FEATURE ABLATION, or None
-    for `all`. Rows are engine node ids 0..C-1 (root 0 owns no block; its row
-    keeps only the background under the bg-including modes and is degenerate
-    anyway); columns follow `DagLayout`: `[0, n_bg)` background, then one
-    `tpn`-wide block per non-root node in sorted engine-id order.
-
-      own          the node's own block only
-      own-bg       own block + background
-      bg           background only (0081's "the signal is shared" test)
-      closure      own + every ancestor's block + background — exactly the
-                   gate's allowed set for a document attested at this node
-      drop-own     everything EXCEPT the own block
-      drop-closure everything except own + ancestors' blocks (background kept)
-      family       own + SIBLINGS' blocks (other children of the node's parents)
-                   + background — the sibling-contrast decoder: under the closure
-                   label mask a node's negatives are its siblings, so their own
-                   topics firing is the direct evidence AGAINST this node
-      family-closure  family + every ancestor's block
-
-    `parent_int` (`{child: [parents]}` in engine ids) is needed by the closure
-    and family modes only. Pure numpy; unit-tested off-cluster."""
-    if mode not in _FEATURE_MASK_MODES:
-        raise ValueError(f"unknown feature mask mode {mode!r}; "
-                         f"choose from {_FEATURE_MASK_MODES}")
-    if mode == "all":
-        return None
-    C, K, n_bg, tpn = int(C), int(K), int(n_bg), int(tpn)
-    nodes = sorted(e for e in range(1, C))
-    block = {e: list(range(n_bg + i * tpn, n_bg + (i + 1) * tpn))
-             for i, e in enumerate(nodes)}
-    parents = {int(c): [int(p) for p in ps]
-               for c, ps in (parent_int or {}).items()}
-    needs_dag = ("closure", "drop-closure", "family", "family-closure")
-    if mode in needs_dag and not parents:
-        raise ValueError(f"feature mask mode {mode!r} needs parent_int")
-    children = {}
-    for c, ps in parents.items():
-        for q in ps:
-            children.setdefault(q, []).append(c)
-
-    def siblings(e):
-        out = set()
-        for q in parents.get(e, []):
-            out.update(children.get(q, []))
-        out.discard(e)
-        return out
-
-    def ancestors(e):
-        out, stack = set(), [e]
-        while stack:
-            for q in parents.get(stack.pop(), []):
-                if q != 0 and q not in out:
-                    out.add(q); stack.append(q)
-        return out
-
-    m = np.zeros((C, K), dtype=bool)
-    for e in range(C):
-        own = block.get(e, [])
-        anc = ([t for a in ancestors(e) for t in block.get(a, [])]
-               if mode in ("closure", "drop-closure", "family-closure") else [])
-        sib = ([t for a in siblings(e) for t in block.get(a, [])]
-               if mode in ("family", "family-closure") else [])
-        if mode == "own":
-            m[e, own] = True
-        elif mode == "own-bg":
-            m[e, own] = True; m[e, :n_bg] = True
-        elif mode == "bg":
-            m[e, :n_bg] = True
-        elif mode == "closure":
-            m[e, own] = True; m[e, anc] = True; m[e, :n_bg] = True
-        elif mode == "drop-own":
-            m[e, :] = True; m[e, own] = False
-        elif mode == "drop-closure":
-            m[e, :] = True; m[e, own] = False; m[e, anc] = False
-        elif mode == "family":
-            m[e, own] = True; m[e, sib] = True; m[e, :n_bg] = True
-        elif mode == "family-closure":
-            m[e, own] = True; m[e, sib] = True; m[e, anc] = True; m[e, :n_bg] = True
-    return m
 
 
 def resolve_readout_l2(cli_value, manifest):
@@ -432,101 +345,7 @@ def attach_raw_presence(df, selected, feat_cols, *, out_col="topicDistribution")
     return out.withColumn(out_col, udf(*[F.col(c) for c in feat_cols]))
 
 
-def incident_mask_kernel(get_v2n):
-    """The per-row kernel of `mask_prior_cells`: `(features vector, mask) -> mask` with
-    every node the patient has PRIOR evidence for (a mapped attestation code of the
-    node or a label descendant in the pre-index condition features — exactly
-    `prevalence_check.prior_matrix`'s rule) set to 0.0. The root (node 0) is never
-    touched. `get_v2n()` returns {vocab idx: [nodes]}; on the cluster it reads a
-    broadcast, so nothing array-shaped rides the task closure (ADR 0047).
 
-    A plain nested function on purpose: cloudpickle ships it by value, so no module
-    needs to be on --py-files."""
-    def kernel(vec, mask):
-        if mask is None:
-            return None
-        v2n = get_v2n()
-        idx = getattr(vec, "indices", None)
-        if idx is None:
-            arr = vec.toArray() if hasattr(vec, "toArray") else (vec or [])
-            idx = [i for i, x in enumerate(arr) if x]
-        out = list(mask)
-        for v in idx:
-            for n in v2n.get(int(v), ()):
-                if n != 0:
-                    out[n] = 0.0
-        return out
-    return kernel
-
-
-def mask_prior_cells(df, v2n, *, feat_col="features_0", mask_col="labelMask"):
-    """INCIDENT label rule (insight 0100; exp 0144), readout-side: a patient with prior
-    evidence for node X is neither a positive nor a negative for X's head, so the solve
-    learns "will X be newly coded", not "will X be coded again". Python UDF over the
-    widened `array<double>` mask; the caller caches and materializes the result (the
-    solver makes repeated passes)."""
-    from pyspark.sql import functions as F
-    from pyspark.sql.types import ArrayType, DoubleType
-    bc = df.sparkSession.sparkContext.broadcast(
-        {int(k): [int(n) for n in ns] for k, ns in v2n.items()})
-    kern = incident_mask_kernel(lambda: bc.value)
-    udf = F.udf(kern, ArrayType(DoubleType()))
-    return df.withColumn(mask_col, udf(F.col(feat_col), F.col(mask_col)))
-
-
-def run_conditional_from_heads(test_scored, run_dir, tag, *, C, parent_int, int2cid,
-                               name_by_id, min_count=20):
-    """CONDITIONAL DIAGNOSIS on held-out patients from a finished readout's saved
-    heads (spec 2026-10-07 §D4, WP-D part 2): "this patient is in Mondo group P;
-    which child?" scored per readout-DAG edge P -> c within P's test cohort
-    (`gated_pc_cloud.conditional_readout`, all-ones mask, cond AUC the sober column,
-    top-1 next to the majority baseline, ECE), for both the flat heads sigma(z_c)
-    and the stacked product P_stack(c). No solve: the heads are the record's own
-    (`readout_heads_gated_pc_<tag>.npz`), so this re-reads, never re-fits.
-
-    The two rows are not rival models. Under the closure mask every head of depth >= 1
-    is fit on its parent's positives, so sigma(z_c) IS P(c | parent) =
-    P_stack(c) / P_stack(parent); that is the conditional-diagnosis answer. The
-    P_stack(c) row ranks the MARGINAL within the parent cohort: the ancestor product
-    varies across a cohort that is already known to have the parent and carries no
-    which-child information, so it only adds noise, more with each level of depth.
-    It is kept as a reference for that reason (0138's first run, 2026-10-12).
-
-    Returns the results dict; writes `results_conditional_<tag>.json`. Counts stay in
-    the run dir (egress floor); the printed tables are the existing pooled format."""
-    from gated_pc_cloud import (closure_matrix, conditional_readout,
-                                format_conditional_readout, stacked_proba)
-    run_dir = Path(run_dir)
-    hp = run_dir / f"readout_heads_gated_pc_{tag}.npz"
-    if not hp.exists():
-        raise SystemExit(f"[readout] no saved heads at {hp}")
-    z = np.load(hp)
-    if int(z["C"]) != int(C):
-        raise SystemExit(f"[readout] heads {hp.name} are C={int(z['C'])} but the "
-                         f"widened frames are C={int(C)}: different readout DAG")
-    topm = int(z["theta_topm"])
-    _cprint(f"[readout]   conditional diagnosis from {hp.name} (C={int(C)} "
-            f"K={int(z['K'])} topm={topm}); test split only", flush=True)
-    proba, y, _m, _keys, _e = _collect_lean_proba(
-        test_scored, int(C), z["V"], z["b_raw"], degenerate=z["degenerate"],
-        const=z["const"], theta_topm=topm)
-    ones = np.ones_like(y)
-    out = {"heads": hp.name, "min_count": int(min_count)}
-    out["flat"] = conditional_readout(proba, y, ones, parent_int, int(C),
-                                      min_count=int(min_count))
-    print(format_conditional_readout(out["flat"], int2cid, name_by_id).replace(
-        "[conditional sharpening]", "[conditional diagnosis: P(c|parent) = sigma(z_c), the conditional head — THE ANSWER]"),
-        flush=True)
-    P = stacked_proba(proba, closure_matrix(parent_int, int(C)))
-    out["stacked"] = conditional_readout(P, y, ones, parent_int, int(C),
-                                         min_count=int(min_count))
-    print(format_conditional_readout(out["stacked"], int2cid, name_by_id).replace(
-        "[conditional sharpening]", "[reference: marginal P_stack(c) ranked within the parent cohort — the ancestor product is noise here]"),
-        flush=True)
-    _dump_partial_results(run_dir, out, name=f"results_conditional_{tag}.json")
-    _cprint(f"[readout]   wrote {run_dir / f'results_conditional_{tag}.json'}",
-            flush=True)
-    return out
 
 
 def collect_set_patients(test_df, members, n_domains, *, max_patients=5000, seed=0,
@@ -655,115 +474,6 @@ def _incident_test_frame(test_df, prior_pairs, prior_nodes, target_cids, parent_
     pdf = test_df.sparkSession.createDataFrame([(x,) for x in prev], "person_id long")
     return test_df.join(F.broadcast(pdf), "person_id", "left_anti")
 
-
-def run_acquisition(test_df, run_dir, pattern, *, adhoc=False, prior="population",
-                    results_name="results_readout_stacked_mass99.json",
-                    domains=("condition", "drug"), pool=150, steps=20,
-                    max_patients=5000, include_strata=False, thin_frac=0.1,
-                    own_top=5, rel_lambda=0.6, rho=0.3, seed=0, tag=None,
-                    length="distinct", tau="auto", engine="presence",
-                    heads_tag="stacked_mass99"):
-    """WP-D part 3: simulated acquisition on held-out patients (`voi_acquisition`).
-    Profiles, pool and prior come from the run dir exactly as part 1's tables do
-    (`voi_tables.load_voi_context`); Spark is used only to collect the test
-    patients' code sets per candidate set. Writes `acquisition[_<tag>].md/.json`
-    (pooled numbers only).
-
-    `engine="model"` (part 3b, `model_acquisition`) keeps the pool and the question
-    orders and swaps the posterior for the record's own: θ re-inferred from the
-    revealed codes (the deployment fold-in over the saved λ and α) scored by the
-    saved readout heads `readout_heads_gated_pc_<heads_tag>.npz`."""
-    import voi_acquisition as va
-    import voi_tables as vt
-    run_dir = Path(run_dir)
-    mfit = None
-    if engine == "model":
-        from gated_pc_cloud import closure_matrix
-        npz = np.load(run_dir / "gated_pc_result.npz")
-        lam_keys = sorted((k for k in npz.files if k.startswith("lambda_")),
-                          key=lambda k: int(k.split("_", 1)[1]))
-        lams_fit = [npz[k] for k in lam_keys] if lam_keys else [npz["lambda"]]
-        hp = run_dir / f"readout_heads_gated_pc_{heads_tag}.npz"
-        if not hp.exists():
-            raise SystemExit(f"[acquisition] --acq-engine model needs {hp}")
-        hz = np.load(hp)
-        rd = json.loads((run_dir / "readout_dag.json").read_text())
-        if int(hz["C"]) != int(rd["C"]):
-            raise SystemExit(f"[acquisition] heads are C={int(hz['C'])} but "
-                             f"readout_dag.json is C={rd['C']}")
-        M = closure_matrix({int(c): [int(x) for x in ps]
-                            for c, ps in rd["parent_int"].items()}, int(rd["C"]))
-        mfit = (lams_fit, npz["alpha"],
-                (hz["V"], hz["b_raw"], hz["degenerate"], hz["const"],
-                 int(hz["theta_topm"])), M)
-    bm = run_dir / "bundle_meta.json"
-    cm = run_dir / "code_map.tsv"
-    ctx = vt.load_voi_context(
-        run_dir, bundle_meta_path=str(bm) if bm.exists() else None,
-        own_codes_path=str(cm) if cm.exists() else None, results_name=results_name,
-        thin_frac=thin_frac, own_top=own_top, rel_lambda=rel_lambda, prior=prior,
-        include_strata=include_strata)
-    doms = [i for i, nm in enumerate(ctx.dom_names) if nm in set(domains)]
-    if not doms:
-        raise SystemExit(f"[acquisition] none of {domains} in {ctx.dom_names}")
-    sets = vt.select_sets(ctx, pattern, adhoc=adhoc)
-    if not sets:
-        raise SystemExit(f"[acquisition] no candidate set matches {pattern!r}")
-    L_ = [f"# {run_dir.name} — simulated acquisition (WP-D part 3)",
-          f"pattern {pattern!r}{' (ad hoc)' if adhoc else ''} · domains "
-          f"{[ctx.dom_names[d] for d in doms]} · prior {prior} · rho {rho:g} · "
-          + (f"ENGINE: θ fold-in + saved heads ({heads_tag}) · " if mfit else
-             f"L = the patient's {length} codes per domain · temper {tau} · ")
-          + f"profiles (pool only): signatures"
-          f"{' + strata' if include_strata else ''} · pool {pool}/domain · "
-          f"steps {steps}", ""]
-    js = {}
-    for n, gname, members in sets:
-        profs = {}
-        used = None
-        for d in doms:
-            pr, bg = vt.set_profiles(ctx, members, d)
-            u = [m for m in members if pr.get(m) is not None]
-            used = u if used is None else [m for m in used if m in u]
-            profs[d] = (pr, bg)
-        if len(used) < 2:
-            L_.append(f"## {gname}\n(fewer than 2 members with a signature profile)")
-            continue
-        pc = ctx.prior_counts
-        pri = np.array([float(pc.get(m, 0) or 0) for m in used])
-        pri = pri / pri.sum() if pri.sum() > 0 else np.full(len(used), 1 / len(used))
-        excl = {0: vt.set_exclusions(ctx, n, members)} if 0 in doms else {}
-        pool_items, mix = va.build_pool(
-            pri, {d: np.stack([profs[d][0][m] for m in used]) for d in doms},
-            {d: profs[d][1] for d in doms}, excl, pool=pool, rho=rho)
-        pats, n_all = collect_set_patients(test_df, used, len(ctx.lams),
-                                           max_patients=max_patients, seed=seed,
-                                           length=length)
-        pats = [p for p in pats if p[0]]
-        _cprint(f"[acquisition]   {gname}: {len(pats)} patients (of {n_all} "
-                f"positive), pool {len(pool_items)}", flush=True)
-        named = [ctx.rd_names.get(m, str(m))[:28] for m in used]
-        if mfit is not None:
-            import model_acquisition as ma
-            lams_fit, alpha_fit, heads, M = mfit
-            eng = ma.ModelEngine(
-                lams_fit, alpha_fit, heads,
-                {m: [int(a) for a in np.flatnonzero(M[m])] for m in used}, used)
-            res = ma.simulate_set_model(eng, pool_items, pats, steps=steps, seed=seed)
-            L_.append(ma.format_model_acquisition(gname, named, res))
-        else:
-            res = va.simulate_set(pri, pool_items, mix, pats, steps=steps, seed=seed,
-                                  tau=tau)
-            L_.append(va.format_acquisition(gname, named, pri, res))
-        L_.append("")
-        js[gname] = res if res["n"] >= va.EGRESS_FLOOR else {"suppressed": True}
-    text = "\n".join(L_).rstrip() + "\n"
-    stem = "acquisition" + (f"_{tag}" if tag else "")
-    (run_dir / f"{stem}.md").write_text(text)
-    (run_dir / f"{stem}.json").write_text(json.dumps(js, indent=1, default=str))
-    print(text, flush=True)
-    _cprint(f"[acquisition]   wrote {run_dir / (stem + '.md')}", flush=True)
-    return js
 
 
 def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
@@ -1317,158 +1027,6 @@ def _split_gidx(eng, g):
     return d, int(g - eng.offsets[d])
 
 
-def run_lookalikes(test_scored, run_dir, pattern, *, C, parent_int, adhoc=False,
-                   heads_tag="stacked_mass99", top_n=200, pos_cap=1000, bg_n=3000,
-                   seed=0, tag=None, thin_frac=0.1, own_top=5, rel_lambda=0.6):
-    """Framing 3 — UNDIAGNOSED LOOK-ALIKES (spec 2026-10-13, R3; `lookalikes.py`).
-    For every member X of the candidate sets matching `pattern`: rank held-out
-    patients WITHOUT an X label by the record's stacked readout P_stack(X) (saved
-    heads, test split only, no solve), and profile the top `top_n` against a random
-    test sample and X's own patients. Also reports how often the look-alikes carry a
-    concept NAMED like X that the code map missed (true diagnoses the label never
-    saw). Writes `lookalikes[_<tag>].md/.json` (pooled; rates on >= 20 patients)."""
-    import lookalikes as lk
-    import voi_tables as vt
-    from gated_pc_cloud import (_collect_lean_proba, _doc_key_column, closure_matrix,
-                                stacked_proba)
-    from pyspark.sql import functions as F
-    run_dir = Path(run_dir)
-    bm, cm = run_dir / "bundle_meta.json", run_dir / "code_map.tsv"
-    names_csv = run_dir / "concept_names.csv"
-    ctx = vt.load_voi_context(
-        run_dir, bundle_meta_path=str(bm) if bm.exists() else None,
-        own_codes_path=str(cm) if cm.exists() else None,
-        names_path=str(names_csv) if names_csv.exists() else None,
-        thin_frac=thin_frac, own_top=own_top, rel_lambda=rel_lambda)
-    sets = vt.select_sets(ctx, pattern, adhoc=adhoc)
-    targets = sorted({m for _, _, mem in sets for m in mem})
-    if not targets:
-        raise SystemExit(f"[lookalikes] no candidate set matches {pattern!r}")
-    hp = run_dir / f"readout_heads_gated_pc_{heads_tag}.npz"
-    z = np.load(hp)
-    if int(z["C"]) != int(C):
-        raise SystemExit(f"[lookalikes] heads {hp.name} are C={int(z['C'])}, frames C={C}")
-    _cprint(f"[lookalikes]   scoring the test split with {hp.name} for "
-            f"{len(targets)} target(s)", flush=True)
-    proba, y, _m, keys, _e = _collect_lean_proba(
-        test_scored, int(C), z["V"], z["b_raw"], degenerate=z["degenerate"],
-        const=z["const"], theta_topm=int(z["theta_topm"]))
-    P = stacked_proba(proba, closure_matrix(parent_int, int(C)))
-    rng = np.random.default_rng(int(seed))
-    keys = [int(k) for k in keys]
-    plan, want = {}, set()
-    for X in targets:
-        yx = y[:, X].astype(bool)
-        if int(yx.sum()) < lk.EGRESS_FLOOR:
-            continue
-        top, cut = lk.top_lookalikes(P[:, X], yx, keys, top_n)
-        pos_i = np.flatnonzero(yx)
-        pos = [keys[i] for i in rng.choice(pos_i, size=min(pos_cap, pos_i.size),
-                                           replace=False)]
-        plan[X] = {"auc": lk.auc(P[:, X], yx), "n_pos": int(yx.sum()), "cut": cut,
-                   "top": top, "pos": pos}
-        want.update(top); want.update(pos)
-    bg = [keys[i] for i in rng.choice(len(keys), size=min(bg_n, len(keys)),
-                                      replace=False)]
-    want.update(bg)
-    fcols = sorted((c for c in test_scored.columns if c.startswith("features_")),
-                   key=lambda c: int(c.split("_")[1])) or ["features"]
-    spark = test_scored.sparkSession
-    kdf = spark.createDataFrame([(int(k),) for k in want], ["doc_key"])
-    rows = (test_scored.withColumn("doc_key", _doc_key_column(test_scored, "person_id"))
-            .join(F.broadcast(kdf), "doc_key").select("doc_key", *fcols).collect())
-    bags = {}
-    for r in rows:
-        b = {}
-        for d, c in enumerate(fcols):
-            vec = r[c]
-            if vec is None:
-                continue
-            idx = getattr(vec, "indices", None)
-            if idx is None:
-                arr = np.asarray(vec.toArray() if hasattr(vec, "toArray") else vec)
-                idx = np.flatnonzero(arr)
-            b[d] = {int(i): 1.0 for i in idx}
-        bags[int(r["doc_key"])] = b
-    measured = set()
-    if "measurement" in ctx.dom_names and ctx.inv_maps:
-        dm = ctx.dom_names.index("measurement")
-        measured = {int(v) for v, tok in ctx.inv_maps[dm].items() if int(tok) % 100 == 0}
-    bgb = [bags[k] for k in bg if k in bags]
-    L_ = [f"# {run_dir.name} — undiagnosed look-alikes (framing 3)",
-          f"pattern {pattern!r}{' (ad hoc)' if adhoc else ''} · ranking P_stack(X) "
-          f"({heads_tag}) over test patients without an X label · top {top_n} "
-          f"profiled against {len(bgb)} random test patients and up to {pos_cap} of X's "
-          f"own · [measured] and X's attestation codes excluded from profiles · rates "
-          f"shown only on >= {lk.EGRESS_FLOOR} patients", ""]
-    js = {}
-    for X, pl in plan.items():
-        nm = str(ctx.rd_names.get(X, X))
-        named = set()
-        if ctx.names and ctx.inv_maps:
-            for v, cid in ctx.inv_maps[0].items():
-                if str(ctx.names.get(int(cid), "")).strip().lower() == nm.strip().lower():
-                    named.add(int(v))
-        excl = {0: set(ctx.own_idx.get(X, ())) | named}
-        if measured:
-            excl[dm] = measured
-        topb = [bags[k] for k in pl["top"] if k in bags]
-        posb = [bags[k] for k in pl["pos"] if k in bags]
-        # Who are the look-alikes? Features are the PRE-index history and labels the
-        # year after it (lookback mode), so "no X label" includes patients whose X
-        # diagnosis is in their history but was not re-coded in the label year.
-        own = set(ctx.own_idx.get(X, ()))
-        unmapped = named - own
-        grp = lk.split_lookalikes(topb, own, unmapped)
-        und = grp["undiagnosed"]
-        prof = lk.feature_profile(topb, posb, bgb, excl_by_dom=excl)
-        prof_u = (lk.feature_profile(und, posb, bgb, excl_by_dom=excl)
-                  if len(und) >= lk.EGRESS_FLOOR else [])
-        nbg_prior, nB = lk.share_with(bgb, {0: own})
-        fmt = lambda n, N: (f"{100 * n / N:.1f}%" if n >= lk.EGRESS_FLOOR else
-                            ("0" if n == 0 else f"<{lk.EGRESS_FLOOR} pts"))
-        nT = len(topb)
-        L_.append(f"## {nm} — AUC {pl['auc']:.3f} · {pl['n_pos']} test positives · "
-                  f"look-alike cut P_stack ≥ {pl['cut']:.3f}")
-        L_.append(f"top {nT} look-alikes: X code in their pre-index history "
-                  f"{fmt(len(grp['prior_dx']), nT)} (random {fmt(nbg_prior, nB)}) · "
-                  f"only an UNMAPPED X-named concept {fmt(len(grp['unmapped_only']), nT)} · "
-                  f"neither (undiagnosed by code) {fmt(len(und), nT)}"
-                  + (f" · X-named concepts: {len(named & own)} mapped, {len(unmapped)} "
-                     f"unmapped" if named else ""))
-        for title, rows in (("all look-alikes", prof),
-                            ("undiagnosed-by-code look-alikes only", prof_u)):
-            L_.append("")
-            if not rows:
-                L_.append(f"{title}: no code carried by >= {lk.EGRESS_FLOOR} of them is "
-                          f"X-like" + ("" if title.startswith("all") or
-                                       len(und) >= lk.EGRESS_FLOOR else
-                                       f" (fewer than {lk.EGRESS_FLOOR} patients)"))
-                continue
-            L_.append(f"{title}:")
-            L_.append("| code | look-alikes | X patients | random |")
-            L_.append("|---|--:|--:|--:|")
-            for (d, v), rt, rp, rb, lift in rows:
-                L_.append(f"| {ctx.code_name(d, v)} | {100 * rt:.0f}% | {100 * rp:.0f}% "
-                          f"| {100 * rb:.1f}% |")
-        L_.append("")
-        js[nm] = {"auc": pl["auc"], "n_pos": pl["n_pos"], "cut": pl["cut"],
-                  "n_top": nT, "prior_dx": len(grp["prior_dx"]),
-                  "unmapped_only": len(grp["unmapped_only"]), "undiagnosed": len(und),
-                  "prior_dx_bg": [nbg_prior, nB],
-                  "named_mapped": len(named & own), "named_unmapped": len(unmapped),
-                  "profile": [[ctx.code_name(d, v), rt, rp, rb, lift]
-                              for (d, v), rt, rp, rb, lift in prof],
-                  "profile_undiagnosed": [[ctx.code_name(d, v), rt, rp, rb, lift]
-                                          for (d, v), rt, rp, rb, lift in prof_u]}
-    text = "\n".join(L_).rstrip() + "\n"
-    stem = "lookalikes" + (f"_{tag}" if tag else "")
-    (run_dir / f"{stem}.md").write_text(text)
-    (run_dir / f"{stem}.json").write_text(json.dumps(js, indent=1, default=str))
-    print(text, flush=True)
-    _cprint(f"[lookalikes]   wrote {run_dir / (stem + '.md')}", flush=True)
-    return js
-
 
 def _whole_history_prior(test_scored, keys, run_dir, *, C, readout_int2cid,
                          parent_adj, sidecar_uri=None):
@@ -1640,22 +1198,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--doc-min-length", type=int, default=None,
                    help="Override doc_min_length for the cache key (older manifests "
                         "did not record it; the current driver does).")
-    p.add_argument("--conditional-from-heads", default=None, metavar="TAG",
-                   help="WP-D part 2: CONDITIONAL DIAGNOSIS from a finished readout's "
-                        "saved heads (readout_heads_gated_pc_<TAG>.npz, e.g. "
-                        "stacked_mass99) — no solve. Transforms the TEST split only, "
-                        "widens it to the readout DAG, collects the per-doc proba and "
-                        "scores, per Mondo parent -> child edge of the readout DAG, "
-                        "the within-parent-cohort cond AUC, top-1 vs majority and "
-                        "ECE, for the flat heads and the stacked product. Writes "
-                        "results_conditional_<TAG>.json.")
-    p.add_argument("--acquisition", default=None, metavar="REGEX",
-                   help="WP-D part 3: SIMULATED ACQUISITION on held-out patients for "
-                        "the candidate sets matching REGEX (as inspect_topics --voi): "
-                        "ask codes in greedy-EIG / static / random order, score the "
-                        "posterior on the true disease. Needs the run's "
-                        "readout_dag.json, code_map.tsv; no transform, no solve. "
-                        "Writes acquisition[_<tag>].md/.json.")
     p.add_argument("--differential", default=None, metavar="REGEX",
                    help="Framing 1 (spec 2026-10-13): DIFFERENTIAL WITH REASONS for the "
                         "candidate sets matching REGEX — four engines (presence "
@@ -1663,13 +1205,6 @@ def build_parser() -> argparse.ArgumentParser:
                         "scored on held-out single-positive patients. --acq-adhoc, "
                         "--acq-heads and --acq-tag apply. Writes "
                         "differential[_<tag>].md/.json.")
-    p.add_argument("--lookalikes", default=None, metavar="REGEX",
-                   help="Framing 3 (spec 2026-10-13): UNDIAGNOSED LOOK-ALIKES for every "
-                        "member of the candidate sets matching REGEX — test patients "
-                        "without the label ranked by the saved stacked heads "
-                        "(--acq-heads), the top --look-top profiled. Transforms the "
-                        "test split only; --acq-adhoc and --acq-tag apply.")
-    p.add_argument("--look-top", type=int, default=200)
     p.add_argument("--prevalence-check", action="store_true",
                    help="Insight 0100: per-node AUC of the saved heads (--acq-heads) "
                         "over all test patients vs with prior-diagnosis patients set "
@@ -1699,22 +1234,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "ancestors; every other head is masked to a constant. Outputs "
                         "tagged 'nodes_…'; with --readout-stacked --prev-history the "
                         "whole-history prevalence check follows on those heads.")
-    p.add_argument("--readout-incident", action="store_true",
-                   help="Exp 0144 (insight 0100): INCIDENT heads on the saved fit — "
-                        "every (patient, node) cell with prior evidence for the node "
-                        "(mapped own code, or a label descendant's, in the pre-index "
-                        "condition features) is masked in BOTH splits before the "
-                        "solve; outputs are tagged 'incident_…'; then the prevalence "
-                        "check runs on the new heads over the unmasked test split. "
-                        "Needs the Mondo readout DAG and <run>/code_map.tsv.")
     p.add_argument("--diff-max-patients", type=int, default=600)
-    p.add_argument("--diff-train-ever", action="store_true",
-                   help="(--differential) exp 0149: training members = ever coded (E4 "
-                        "sidecar, whole record), not only the label year; the test "
-                        "truth stays the label year. Needs <run>/conversion_sidecar.json")
-    p.add_argument("--diff-multi", action="store_true",
-                   help="(--differential) exp 0149: patients coded with 2+ members join "
-                        "training as soft targets and are scored apart on test")
     p.add_argument("--diff-survey", type=int, default=0, metavar="MAX_MEMBERS",
                    help="(--differential) exp 0150 SURVEY: every Mondo group matching "
                         "the pattern with 2..MAX_MEMBERS label members, fast engines "
@@ -1759,29 +1279,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "early in a workup (20%% visible)")
     p.add_argument("--acq-adhoc", action="store_true",
                    help="(--acquisition) REGEX picks label nodes as ONE set")
-    p.add_argument("--acq-prior", choices=("population", "uniform"),
-                   default="population")
-    p.add_argument("--acq-domains", default="condition,drug",
-                   help="(--acquisition) comma list of domains to ask about")
-    p.add_argument("--acq-pool", type=int, default=150)
-    p.add_argument("--acq-steps", type=int, default=20)
-    p.add_argument("--acq-max-patients", type=int, default=5000)
-    p.add_argument("--acq-include-strata", action="store_true",
-                   help="(--acquisition) census-rule sensitivity: strata join the "
-                        "signature profiles")
     p.add_argument("--acq-tag", default=None)
-    p.add_argument("--acq-length", choices=("distinct", "tokens"), default="distinct",
-                   help="(--acquisition) record length L_i: distinct codes (default) "
-                        "or token count (0138's first run; overconfident)")
-    p.add_argument("--acq-engine", choices=("presence", "model"), default="presence",
-                   help="(--acquisition) posterior engine: the per-code presence model "
-                        "(part 3) or the record's own θ fold-in + saved readout heads "
-                        "(part 3b; --acq-heads names the heads)")
     p.add_argument("--acq-heads", default="stacked_mass99",
                    help="(--acq-engine model) readout_heads_gated_pc_<TAG>.npz")
-    p.add_argument("--acq-tau", default="auto",
-                   help="(--acquisition) likelihood temper: 'auto' (fit on half the "
-                        "patients, scored on the other half) or a float (1 = none)")
     p.add_argument("--bundle-only", action="store_true",
                    help="Load (or rebuild) the bundle, write <run>/bundle_meta.json "
                         "and <run>/code_map.tsv, and stop: no transform, no solve. "
@@ -1827,31 +1327,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fdr-targets", default="0.1,0.25,0.5")
     p.add_argument("--min-label-count", type=int, default=None,
                    help="Small-cell mask floor; default = the run's own value.")
-    p.add_argument("--readout-mode", choices=["driver", "distributed", "auto"],
-                   default="auto",
-                   help="where the pc_topics_lr readout is fit, same semantics as "
-                        "gated_pc_cloud's flag (ADR 0046): 'driver' collects per-doc "
-                        "theta + dense label/mask for BOTH splits and fits C sklearn "
-                        "LRs on the driver; 'distributed' fits all C heads in ONE "
-                        "batched L-BFGS on the executors and collects only the lean "
-                        "float32/uint8 test-split eval bundle; 'auto' (default) = "
-                        f"driver at C<={_DRIVER_READOUT_MAX_C}, else distributed. "
-                        "Note the run's OWN --readout-mode is not consulted: the "
-                        "collect that has to fit is this driver's, not the fit's.")
-    p.add_argument("--readout-ab-check", action="store_true",
-                   help="run BOTH readout paths on the same re-transformed frames and "
-                        "print the deltas (macro AUC/AP, per-node |dAUC|, sampled max "
-                        "|dproba|). Report only — never asserts. Ignored unless the "
-                        f"mode resolves to distributed AND C<={_DRIVER_READOUT_MAX_C} "
-                        "(the driver path must still be affordable to compare to).")
-    p.add_argument("--eval-path", choices=["driver", "distributed"], default="driver",
-                   help="EVAL path for the gated_pc ranking arms (exp 0111 WP-B), "
-                        "orthogonal to --readout-mode. 'distributed' scores the "
-                        "prevalent + incident per-node ranking via the cell explode "
-                        "(no O(N.C) driver collect); 'driver' (default) uses the "
-                        "shipped lean collect. Only meaningful when the readout "
-                        "resolves to distributed. This is the flag the WP-B CLUSTER "
-                        "parity run flips against the 0110 corpus.")
+    p.add_argument("--readout-mode", choices=["distributed"], default="distributed",
+                   help="accepted for command compatibility; the distributed "
+                        "batched solve is the only readout since the 2026-10 cleanup")
     p.add_argument("--readout-theta-mass", type=float, default=None,
                    help="OVERRIDE: resolve the top-m width from a theta-MASS target "
                         "on the train frame (spec 2026-10-07 §D4; smallest m in "
@@ -1890,18 +1368,6 @@ def build_parser() -> argparse.ArgumentParser:
                         "cell counts 1.0 is near-unregularized over K "
                         "standardized features: 0120 went 0.7555 -> 0.7927 at "
                         "100 (insight 0089). A sweep is a named re-readout.")
-    p.add_argument("--readout-feature-mask", choices=_FEATURE_MASK_MODES,
-                   default="all",
-                   help="FEATURE ABLATION of the per-node readout heads: restrict "
-                        "each node's head to its own topic block (own), own+background "
-                        "(own-bg), background only (bg), the gate's closure (closure), "
-                        "or everything but its own block / closure (drop-own, "
-                        "drop-closure). Answers whether the gated per-node block "
-                        "carries the node's case-finding signal at all (insight "
-                        "0089: full heads put ~0 weight on it). Distributed mode "
-                        "only. Writes results_readout_<mode>.json and "
-                        "readout_heads_gated_pc_<mode>.npz — the record files are "
-                        "never touched.")
     p.add_argument("--readout-stacked", action="store_true",
                    help="Add the STACKED arm (spec 2026-10-06 Part A): the root "
                         "head is fit on every train row (case vs background) in "
@@ -2289,92 +1755,41 @@ def reconstruct_model(run_dir: Path, manifest: dict):
 
 
 def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targets,
-                min_count, readout_mode="auto", ab_check=False, out_dir=None,
-                theta_topm=None, readout_max_iter=None, elig_col=None,
-                eval_path="driver", readout_l2=None, feature_mask=None,
-                mask_tag=None, stacked=False, parent_int=None, theta_mass=None,
-                C=None, warm_start=None):
-    """Score both gated_pc arms off two already-TRANSFORMED splits. No argparse.
+                min_count, out_dir=None, theta_topm=None, readout_max_iter=None,
+                readout_l2=None, mask_tag=None, stacked=False, parent_int=None,
+                theta_mass=None, C=None, warm_start=None):
+    """Fit and score the pc_topics_lr heads off two already-TRANSFORMED splits.
 
-    The whole body of this tool that is worth testing: given the frames a finished
-    fit's model produced and that fit's manifest, it routes the pc_topics_lr arm
-    through the driver or the distributed readout (ADR 0046), optionally runs the
-    A/B equality report, adds the co-fit head arm, and returns
-    `{"gated_pc": ..., "gated_pc_head": ...}`. Taking DataFrames rather than a
-    SparkSession + run dir is what makes it callable against `score_arm` on a local
-    Spark fixture (same reason `distributed_score_arm` is shaped that way);
-    argparse, run-dir resolution and the bundle-cache reload stay cluster-covered.
+    One path (cleanup 2026-10): the per-node L2 logistic heads are fit by the
+    distributed batched L-BFGS solve (`distributed_score_arm`), the test split's
+    lean (D, C) proba is collected for the metrics, and `stacked=True` adds the
+    closure-product block on that same proba. Taking DataFrames rather than a
+    SparkSession + run dir keeps it callable on a local Spark fixture.
 
-    K comes from the manifest (`lay.K` at fit time) and is only needed by the
-    distributed solver; runs old enough to lack it fall back to the width of the
-    transform's own theta, which is the same number by construction. `theta_topm`
-    and `readout_max_iter` are both None-means-"ask the manifest" for the same
-    reason (see `resolve_readout_max_iter`): a recovery reproduces the fit's own
-    readout unless explicitly told otherwise.
+    `theta_topm` / `theta_mass` / `readout_max_iter` / `readout_l2` are None-means-
+    ask-the-manifest, so a re-readout of an old fit reproduces its own design
+    (manifests written since the cleanup carry none of them; the CLI sets them).
+    `out_dir` gets `results_readout[_<tag>].json` after each block lands, the solver
+    checkpoint while it runs, and the heads sidecar after.
 
-    `out_dir` gets a `results_readout.json` after EACH arm lands — a re-readout is
-    a recovery action (exp 0103 lost a 4h fit's readout to an empty summary), so
-    its output has to survive the terminal it was printed to. Deliberately NOT
-    results_partial.json: that file belongs to the fit's own record. It is also
-    where the SOLVER checkpoint goes (`readout_ckpt_gated_pc.npz`), so a recovery
-    that dies mid-solve resumes rather than restarting; it is removed when the
-    solve completes.
+    `stacked=True` (spec 2026-10-06 Part A): the TRAIN mask gets the root observed
+    on every row (`observe_root_everywhere`), so the root head is case vs background,
+    and `stacked_readout` scores the closure product. Needs `parent_int`.
 
-    `elig_col` (E2/WP4) is E1's pre-index closure column name, resolved by the
-    CALLER from the bundle's witness (`main` does it; `None` means "this corpus has
-    none"). Given it, the pc_topics_lr arm's lean collect picks up a fourth CSR run
-    and this returns a `gated_pc_incident` block beside the prevalent one — which is
-    how the incident numbers are actually produced: a re-readout of a SAVED FIT, no
-    re-fit, warm bundle. Without it the incident arm is SKIPPED with a printed line
-    and every other number is byte-identical to what it was.
-
-    `stacked=True` (spec 2026-10-06 Part A) adds the `gated_pc_stacked` block: the
-    TRAIN mask gets the root observed on every row (`observe_root_everywhere`), the
-    same batched solve then yields the prevalent heads for nodes ≥ 1 plus a real
-    case-vs-background root head, and the closure product of the per-doc
-    probabilities is scored by `gated_pc_cloud.stacked_readout`. Needs
-    `parent_int` (the bundle's engine-id parent map) and the distributed readout
-    on the driver eval path (the product is formed on the collected (D,C) proba).
-    The caller tags the outputs (`mask_tag="stacked"`) so the record's
-    `results_readout.json` / `readout_heads_gated_pc.npz` are never touched.
-
-    `C` (WP-B) overrides the manifest's label width when the frames have been
-    widened to the READOUT node space (`readout_dag.widen_labels_to_readout`);
-    `parent_int` is then the readout DAG. None = the fit's own C.
-
-    `warm_start=(V, b_raw)` (`--readout-warm-from`) starts the pc_topics_lr solve
-    from saved heads of the same problem, to continue an iteration-capped solve
-    rather than re-run it; the L-BFGS curvature history is not carried."""
+    `C` overrides the manifest's label width when the frames were widened to the
+    readout node space (`readout_dag.widen_labels_to_readout`); `parent_int` is then
+    the readout DAG. `warm_start=(V, b_raw)` (`--readout-warm-from`) starts the solve
+    from saved heads of the same problem."""
     C = int(manifest["C"] if C is None else C)
-    mode = resolve_readout_mode(readout_mode, C)
     K = int(manifest.get("K") or 0)
-    if mode == "distributed" and not K:
-        # Only the batched solver needs K, so only it pays for the peek.
+    if not K:
         K = int(train_scored.select("topicDistribution").head()[0].size)
-    _cprint(f"[readout]   readout_mode={readout_mode} -> {mode} (C={C}, "
-          f"K={K or 'n/a'}, driver-collect ceiling C<={_DRIVER_READOUT_MAX_C})",
-          flush=True)
-    ab = bool(ab_check) and mode == "distributed"
-    if bool(ab_check) and not ab:
-        _cprint("[readout]   readout_ab_check ignored (readout_mode resolved to driver "
-              "— there is nothing to compare against)", flush=True)
-    elif ab and C > _DRIVER_READOUT_MAX_C:
-        _cprint(f"[readout]   readout_ab_check SKIPPED: C={C} exceeds the driver path's "
-              f"own ceiling ({_DRIVER_READOUT_MAX_C}); the gate is meant to run at "
-              "cardiovascular scale (C=444)", flush=True)
-        ab = False
+    _cprint(f"[readout]   distributed readout (C={C}, K={K})", flush=True)
 
     arm = "gated_pc" if not mask_tag else f"gated_pc_{mask_tag}"
     results_name = ("results_readout.json" if not mask_tag
                     else f"results_readout_{mask_tag}.json")
-    if feature_mask is not None and mode != "distributed":
-        raise SystemExit("[readout] --readout-feature-mask needs the distributed "
-                         "readout (the driver-collect sklearn path has no mask)")
     if stacked:
-        if mode != "distributed" or resolve_eval_path(eval_path, mode) != "driver":
-            raise SystemExit("[readout] --readout-stacked needs the distributed "
-                             "readout on the DRIVER eval path (the closure product "
-                             "is formed on the collected (D,C) proba)")
         if parent_int is None:
             raise SystemExit("[readout] --readout-stacked needs the bundle's "
                              "parent_int (no DAG, no closure)")
@@ -2390,143 +1805,53 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
             _dump_partial_results(Path(out_dir), results, name=results_name)
 
     results = {}
-    dist = None
-    # E2/WP4. The eligibility column rides the LEAN collect, which only the
-    # distributed path performs, and only a corpus built with --preindex-closure
-    # carries it. Both misses print a line here rather than failing later: the
-    # incident arm is an ADDITION to this tool's output, never a precondition of it.
-    if elig_col is not None and mode != "distributed":
-        _cprint(f"[readout]   INCIDENT arm (E2) SKIPPED: readout_mode resolved to "
-              f"{mode!r} and the eligibility column rides the LEAN (distributed) "
-              "collect. Re-run with --readout-mode distributed for the incident "
-              "block.", flush=True)
-        elig_col = None
-    elif elig_col is None:
-        _cprint("[readout]   INCIDENT arm (E2) SKIPPED: this corpus carries no "
-              "pre-index closure witness (built without --preindex-closure). The "
-              "prevalent arms below are unaffected.", flush=True)
-    if mode == "distributed":
-        # No theta collect: the per-node LRs are fit on the executors and only the
-        # lean test-split eval bundle comes back. theta_topm defaults to the
-        # MANIFEST's value: a re-readout reproduces the fit's own design matrix —
-        # silently refitting a top-m run at full K would change the estimator
-        # (and crawl at whole-Mondo, the scale where top-m is on). An explicit
-        # override (--readout-theta-topm) exists for the truncation-PRICING
-        # experiment: force top-m onto a recorded full-K run and read the delta.
-        _mass = None
-        if theta_mass is not None and float(theta_mass) > 0:
-            _mass = float(theta_mass)
-            _cprint(f"[readout]   theta top-m by MASS target {_mass:g} (CLI OVERRIDE)",
-                  flush=True)
-        elif theta_topm is None and not int(manifest.get("readout_theta_topm", 0) or 0) \
-                and float(manifest.get("readout_theta_mass", 0) or 0) > 0:
-            # A fit-only manifest: the fit recorded the mass target but died before
-            # the transform resolved it. Re-resolve, as the fit would have.
-            _mass = float(manifest["readout_theta_mass"])
-            _cprint(f"[readout]   theta top-m by MASS target {_mass:g} (from the "
-                  "manifest; width not yet resolved there)", flush=True)
-        if _mass is not None:
-            import distributed_readout as _drm
-            _K = int(manifest.get("K") or 0) or None
-            theta_topm, _cov = _drm.resolve_theta_topm_by_mass(
-                train_scored, _K, _mass)
-            _cprint("[readout]   theta top-m by mass: "
-                  + " ".join(f"m={m}:{mean:.3f}/{p10:.3f}"
-                             for m, (mean, p10) in sorted(_cov.items()))
-                  + f" (mean/p10) -> " + (f"m={theta_topm}" if theta_topm else
-                                          f"FULL K={_K}"), flush=True)
-        elif theta_topm is None:
-            theta_topm = int(manifest.get("readout_theta_topm", 0) or 0)
-            if theta_topm:
-                _cprint(f"[readout]   theta top-m={theta_topm} (from manifest)",
-                      flush=True)
-        else:
-            theta_topm = int(theta_topm)
-            _cprint(f"[readout]   theta top-m={theta_topm} (CLI OVERRIDE — deltas vs "
-                  "the recorded run price the truncation)", flush=True)
-        # Only the batched solver has an iteration cap, so this is the only place
-        # the resolution matters — and the log line lands right where the number is
-        # about to be spent, next to top-m's.
-        readout_max_iter, _mi_src = resolve_readout_max_iter(readout_max_iter, manifest)
-        readout_l2, _l2_src = resolve_readout_l2(readout_l2, manifest)
-        _cprint(f"[readout]   readout l2={readout_l2:g} (from {_l2_src})", flush=True)
-        _cprint(f"[readout]   readout max_iter={readout_max_iter} (from {_mi_src})",
-              flush=True)
-        _epath = resolve_eval_path(eval_path, mode)
-        if _epath == "distributed" and int(theta_topm or 0) > 0:
-            _cprint(f"[readout]   eval_path=distributed IGNORED (readout_theta_topm="
-                  f"{theta_topm}>0; the cell explode is dense-θ only)", flush=True)
-            _epath = "driver"
-        if _epath == "distributed":
-            # WP-B: fit the heads on the executors, then score COLLECT-FREE via the
-            # cell explode (no (D_te,C) proba reaches the driver — audit §5f). This
-            # is the `make gated-pc-readout ID=110 --eval-path distributed` path the
-            # orchestrator points at the real 0110 corpus for the CLUSTER parity run.
-            _cprint("[readout]   eval_path=distributed (WP-B): ranking arms via "
-                  "score_cells_arms_df/per_node_metric_arms_rows (no driver "
-                  "collect); conditional/detection/PR axes need the collect and are "
-                  "skipped — run --eval-path driver for them.", flush=True)
-            _ck = Path(out_dir) / f"readout_ckpt_{arm}.npz" if out_dir else None
-            _V, _b, _const, _deg, _info = _fit_readout_heads(
-                train_scored, C, K, label=arm, max_iter=readout_max_iter,
-                l2=readout_l2, theta_topm=theta_topm, checkpoint_path=_ck,
-                checkpoint_every=10, feature_mask=feature_mask,
-                warm_start=warm_start)
-            if out_dir:
-                _write_readout_heads(out_dir, arm, _V, _b, _const, _deg,
-                                     C, K, theta_topm, W_std=_info.get("W_std"))
-            results["gated_pc"], _inc_block = distributed_ranking_readout(
-                test_scored, C, _V, _b,
-                recall_targets=recall_targets, fdr_targets=fdr_targets,
-                min_count=min_count, elig_col=elig_col,
-                arm_label=f"{arm} (pc_topics_lr)")
-            dist = None
-        else:
-            dist = distributed_score_arm(
-                train_scored, test_scored, C, K, recall_targets=recall_targets,
-                fdr_targets=fdr_targets, min_count=min_count, label=arm,
-                feature_mask=feature_mask,
-                theta_topm=theta_topm, max_iter=readout_max_iter, l2=readout_l2,
-                warm_start=warm_start,
-                # Same dir as `results_readout.json`, and for the same reason one
-                # step earlier in the pipeline: this tool IS the recovery path, and
-                # its solve is the multi-hour part. A death mid-solve (the 08-28
-                # preemption-wave job abort cost 9,112s) now costs at most
-                # `checkpoint_every` iterations, because the next invocation finds
-                # the checkpoint next to the manifest it already reads. `None` when
-                # no out_dir was given — nowhere durable to put it.
-                checkpoint_dir=out_dir, elig_col=elig_col)
-            results["gated_pc"] = dist[0]
-            _inc_block = None
+    _mass = None
+    if theta_mass is not None and float(theta_mass) > 0:
+        _mass = float(theta_mass)
+        _cprint(f"[readout]   theta top-m by MASS target {_mass:g} (CLI)", flush=True)
+    elif theta_topm is None and not int(manifest.get("readout_theta_topm", 0) or 0) \
+            and float(manifest.get("readout_theta_mass", 0) or 0) > 0:
+        # An older fit-only manifest recorded the mass target, not the width.
+        _mass = float(manifest["readout_theta_mass"])
+        _cprint(f"[readout]   theta top-m by MASS target {_mass:g} (from the "
+              "manifest; width not yet resolved there)", flush=True)
+    if _mass is not None:
+        import distributed_readout as _drm
+        theta_topm, _cov = _drm.resolve_theta_topm_by_mass(
+            train_scored, K or None, _mass)
+        _cprint("[readout]   theta top-m by mass: "
+              + " ".join(f"m={m}:{mean:.3f}/{p10:.3f}"
+                         for m, (mean, p10) in sorted(_cov.items()))
+              + " (mean/p10) -> " + (f"m={theta_topm}" if theta_topm else
+                                     f"FULL K={K}"), flush=True)
+    elif theta_topm is None:
+        theta_topm = int(manifest.get("readout_theta_topm", 0) or 0)
+        if theta_topm:
+            _cprint(f"[readout]   theta top-m={theta_topm} (from manifest)", flush=True)
     else:
-        _inc_block = None
-        Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(train_scored, C)
-        Pi_te, y_te, m_te, _ = _collect_theta_labels(test_scored, C)
-        results["gated_pc"] = score_arm(
-            Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, C, recall_targets=recall_targets,
-            fdr_targets=fdr_targets, min_count=min_count)
+        theta_topm = int(theta_topm)
+        _cprint(f"[readout]   theta top-m={theta_topm} (CLI)", flush=True)
+    readout_max_iter, _mi_src = resolve_readout_max_iter(readout_max_iter, manifest)
+    readout_l2, _l2_src = resolve_readout_l2(readout_l2, manifest)
+    _cprint(f"[readout]   readout l2={readout_l2:g} (from {_l2_src})", flush=True)
+    _cprint(f"[readout]   readout max_iter={readout_max_iter} (from {_mi_src})",
+          flush=True)
+    dist = distributed_score_arm(
+        train_scored, test_scored, C, K, recall_targets=recall_targets,
+        fdr_targets=fdr_targets, min_count=min_count, label=arm,
+        theta_topm=theta_topm, max_iter=readout_max_iter, l2=readout_l2,
+        warm_start=warm_start,
+        # The solve is the multi-hour part: a death mid-solve costs at most
+        # `checkpoint_every` iterations, because the next invocation finds the
+        # checkpoint next to the manifest it already reads.
+        checkpoint_dir=out_dir)
+    results["gated_pc"] = dist[0]
     _dump(results)
     print(format_arm_readout(f"{arm} (pc_topics_lr)", results["gated_pc"]),
           flush=True)
-    # E2/WP4 incident block. Two sources, one shape: the collect path scores the
-    # incident-masked (D,C) proba here; the eval_path=distributed path already built
-    # the block collect-free from the arms explode (`_inc_block`). This is the cheap
-    # path the program actually uses — `make gated-pc-readout ID=110` against a warm
-    # bundle and a saved fit.
-    _inc = _inc_block
-    if _inc is None and dist is not None and dist[6] is not None:
-        _inc = incident_readout(
-            dist[1], dist[2], dist[3], dist[6], C, recall_targets=recall_targets,
-            fdr_targets=fdr_targets, min_count=min_count,
-            prevalent=results["gated_pc"], arm_label="gated_pc (pc_topics_lr)")
-    if _inc is not None:
-        results["gated_pc_incident"] = _inc
-        _dump(results)
-        print(format_incident_readout(_inc).replace("[driver]", "[readout]"),
-              flush=True)
-    if stacked and dist is not None:
-        # Same collected proba the prevalent arm was scored on — one closure
-        # product, no second collect, no second solve.
+    if stacked:
+        # Same collected proba the arm was scored on — one closure product, no
+        # second collect, no second solve.
         _stk = stacked_readout(
             dist[1], dist[2], dist[3], parent_int, C, recall_targets=recall_targets,
             fdr_targets=fdr_targets, min_count=min_count,
@@ -2535,44 +1860,6 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
         _dump(results)
         print(format_stacked_readout(_stk).replace("[driver]", "[readout]"),
               flush=True)
-    if ab and dist is not None:
-        # Reuses the distributed result just computed, so the gate costs one extra
-        # (driver-path) readout, not two.
-        readout_ab_report(train_scored, test_scored, C, K,
-                          recall_targets=recall_targets, fdr_targets=fdr_targets,
-                          min_count=min_count, label="gated_pc", distributed=dist)
-
-    # Co-fit head arm. The scaled-back mainline (unsup gate + post-hoc readout) fits
-    # at weightY=0, whose transform appends NO `probability` column — the head does
-    # not exist, and asking for it used to fail the whole re-readout with an
-    # AnalysisException AFTER the expensive arm above had already been printed. Skip
-    # it on either witness (the manifest's weight_y, or the column itself, which also
-    # covers a manifest too old to record weight_y).
-    weight_y = float(manifest.get("weight_y", 1.0))
-    if weight_y == 0.0 or "probability" not in test_scored.columns:
-        _cprint(f"[readout]   co-fit head arm SKIPPED (weight_y={weight_y:g}, "
-              f"probability column "
-              f"{'present' if 'probability' in test_scored.columns else 'absent'}): "
-              "an unsupervised gate has no co-fit head to read out.", flush=True)
-        return results
-    if mode == "distributed":
-        # No LR involved — `probability` IS the per-doc (C,) P(node) — so the
-        # distributed variant is just the lean collector over that column.
-        hp, hy, hm, ids_hd, _ = _collect_lean_proba(
-            test_scored, C, score_col="probability")
-    else:
-        # WP-A4 residue (plan 2026-09-03 note): the co-fit head arm's OWN detection
-        # pool must dedup to persons under multi-doc too — collect the doc keys and
-        # thread them, exactly as the pc_topics_lr arm does. `with_doc_keys=True`
-        # is opt-in so the arity change is explicit (see `_collect_head_proba`).
-        hp, hy, hm, ids_hd = _collect_head_proba(
-            test_scored, C, with_doc_keys=True)
-    results["gated_pc_head"] = readout_from_proba(
-        hp, hy, hm, C, recall_targets=recall_targets, fdr_targets=fdr_targets,
-        min_count=min_count, doc_keys=ids_hd)
-    _dump(results)
-    print(format_arm_readout("gated_pc (co-fit head)", results["gated_pc_head"]),
-          flush=True)
     return results
 
 
@@ -2759,26 +2046,11 @@ def main(argv=None) -> int:
                     max_patients=args.diff_max_patients,
                     max_train=args.diff_max_train, tag=args.acq_tag,
                     next_question=args.diff_next_question,
-                    nq_hide=args.diff_nq_hide, train_ever=args.diff_train_ever,
-                    multi=args.diff_multi, crossfit=args.diff_crossfit,
+                    nq_hide=args.diff_nq_hide, crossfit=args.diff_crossfit,
                     sidecar_uri=args.prev_sidecar_uri,
                     fast=bool(args.diff_survey), max_members=(args.diff_survey or None),
                     incident=args.diff_incident, groups_like=args.diff_groups_like,
                     member_rule=args.diff_members)
-            return 0
-
-        if args.acquisition:
-            with _phase("simulated acquisition (WP-D part 3)"):
-                run_acquisition(
-                    bundle.test_df, run_dir, args.acquisition, adhoc=args.acq_adhoc,
-                    prior=args.acq_prior,
-                    domains=tuple(x.strip() for x in args.acq_domains.split(",")),
-                    pool=args.acq_pool, steps=args.acq_steps,
-                    max_patients=args.acq_max_patients,
-                    include_strata=args.acq_include_strata, tag=args.acq_tag,
-                    length=args.acq_length, engine=args.acq_engine,
-                    heads_tag=args.acq_heads,
-                    tau=(args.acq_tau if args.acq_tau == "auto" else float(args.acq_tau)))
             return 0
 
         if args.bundle_only:
@@ -2828,10 +2100,6 @@ def main(argv=None) -> int:
                     build_readout_dag, format_readout_dag_report,
                     load_mondo_parent_adj, widen_labels_to_readout,
                     write_readout_dag)
-                if args.readout_feature_mask != "all":
-                    raise SystemExit("[readout] --readout-feature-mask ablations "
-                                     "are defined on the FIT's blocks; not "
-                                     "available with --readout-hierarchy mondo")
                 _mv = args.mondo_version or _cm.get("mondo_version")
                 _mcd = args.mondo_cache_dir or _cm.get("mondo_cache_dir") or "data/mondo"
                 if not _mv:
@@ -2850,11 +2118,9 @@ def main(argv=None) -> int:
                 # Materialize the widened frames off the cached transforms, then
                 # drop the fit-width copies: the solver's repeated passes read
                 # the widened train frame, never these.
-                # Conditional-from-heads scores the test split only: never
+                # The prevalence check scores the test split only: never
                 # materialize the (much larger) train transform for it.
-                _n_tr = ("not materialized"
-                         if (args.conditional_from_heads or args.lookalikes
-                             or args.prevalence_check)
+                _n_tr = ("not materialized" if args.prevalence_check
                          else _tr_w.count())
                 _n_te = _te_w.count()
                 train_scored.unpersist(); test_scored.unpersist()
@@ -2888,30 +2154,6 @@ def main(argv=None) -> int:
                     history=(dict(readout_int2cid=_rdag.int2cid, parent_adj=_padj,
                                   sidecar_uri=args.prev_sidecar_uri)
                              if args.prev_history else None))
-            return 0
-
-        if args.lookalikes:
-            if _rdag is None:
-                raise SystemExit("[readout] --lookalikes needs the Mondo readout DAG")
-            with _phase("undiagnosed look-alikes (framing 3)"):
-                run_lookalikes(test_scored, run_dir, args.lookalikes, C=_C_ro,
-                               parent_int=_parent_ro, adhoc=args.acq_adhoc,
-                               heads_tag=args.acq_heads, top_n=args.look_top,
-                               tag=args.acq_tag)
-            return 0
-
-        if args.conditional_from_heads:
-            if _rdag is None:
-                raise SystemExit("[readout] --conditional-from-heads needs the Mondo "
-                                 "readout DAG (a label-set fit, or "
-                                 "--readout-hierarchy mondo)")
-            with _phase("conditional diagnosis from saved heads"):
-                _nb = dict(getattr(bundle, "name_by_id", {}) or {})
-                _nb.update(_rdag.name_by_id)
-                run_conditional_from_heads(
-                    test_scored, run_dir, args.conditional_from_heads, C=_C_ro,
-                    parent_int=_parent_ro, int2cid=_rdag.int2cid, name_by_id=_nb,
-                    min_count=min_count)
             return 0
 
         _manifest_ro = manifest
@@ -2958,53 +2200,8 @@ def main(argv=None) -> int:
                     f"root); the rest masked to constants", flush=True)
             train_scored = mask_to_nodes(train_scored, _keep)
             test_scored = mask_to_nodes(test_scored, _keep)
-        if args.readout_incident:
-            if _rdag is None:
-                raise SystemExit("[readout] --readout-incident needs the Mondo readout DAG")
-            with _phase("incident label rule: mask prior-evidence cells (exp 0144)"):
-                import prevalence_check as _pv
-                import voi_tables as _vt
-                _bm, _cmp = run_dir / "bundle_meta.json", run_dir / "code_map.tsv"
-                if not _cmp.exists():
-                    raise SystemExit("[readout] --readout-incident needs "
-                                     "<run>/code_map.tsv (the attestation map)")
-                _ctx = _vt.load_voi_context(
-                    run_dir, bundle_meta_path=str(_bm) if _bm.exists() else None,
-                    own_codes_path=str(_cmp))
-                _v2n = _pv.vocab_to_nodes(_ctx.own_idx, _rdag.pos_sources)
-                _fc = ("features_0" if "features_0" in train_scored.columns
-                       else "features")
-                _tr_i = mask_prior_cells(train_scored, _v2n, feat_col=_fc).cache()
-                _te_i = mask_prior_cells(test_scored, _v2n, feat_col=_fc).cache()
-                _cprint(f"[readout]   incident masking: {len(_v2n):,} condition codes "
-                        f"attest readout nodes; train docs={_tr_i.count()} test "
-                        f"docs={_te_i.count()} (masked frames materialized)", flush=True)
-                train_scored.unpersist()
-                train_scored, test_scored = _tr_i, _te_i
-
         with _phase("score"):
-            # E2/WP4: the incident arm's eligibility comes from the BUNDLE (spec
-            # R2.3 — a corpus property; nothing this run computes may enter it),
-            # and its availability is decided by E1's WITNESS, not by a column
-            # probe. `bundle_preindex_witness` answers None for every corpus built
-            # before E1 or without the flag, and `run_readout` then prints a skip
-            # line instead of raising. Deliberately NOT `require_preindex_closure`:
-            # that one RAISES, which is right for the census (whose whole job is
-            # the eligibility census) and wrong here (whose job is the prevalent
-            # readout, with the incident block as an addition).
-            from preindex_closure import bundle_preindex_witness
-            _pw = bundle_preindex_witness(bundle)
-            _elig_col = str(_pw.get("col_name")) if _pw else None
-            if _elig_col and _rdag is not None:
-                _cprint("[readout]   INCIDENT arm (E2) SKIPPED under "
-                      "--readout-hierarchy mondo: the pre-index closure column is "
-                      "in the FIT's node space (widening it is a WP-B follow-up).",
-                      flush=True)
-                _elig_col = None
-            if _elig_col:
-                _cprint(f"[readout]   incident eligibility column: {_elig_col!r} "
-                      f"({_pw.get('version')})", flush=True)
-            _fmask, _mtag = None, None
+            _mtag = None
             if args.readout_theta_topm is not None:
                 # A CLI top-m override is a pricing experiment, not the record:
                 # tag its outputs so they never overwrite results_readout.json
@@ -3015,25 +2212,6 @@ def main(argv=None) -> int:
                     raise SystemExit("[readout] --readout-theta-mass and "
                                      "--readout-theta-topm are mutually exclusive")
                 _mtag = f"mass{int(round(float(args.readout_theta_mass) * 100))}"
-            if args.readout_feature_mask != "all":
-                _fmask = build_readout_feature_mask(
-                    args.readout_feature_mask, C, int(manifest["K"]),
-                    int(manifest["n_bg"]), int(manifest["tpn"]),
-                    parent_int=getattr(bundle, "parent_int", None))
-                _mtag = (args.readout_feature_mask.replace("-", "_")
-                         + (f"_{_mtag}" if _mtag else ""))
-                _cprint(f"[readout]   FEATURE ABLATION mode={args.readout_feature_mask}: "
-                      f"results -> results_readout_{_mtag}.json, heads -> "
-                      f"readout_heads_gated_pc_{_mtag}.npz (record untouched)",
-                      flush=True)
-            if args.readout_hierarchy == "flat" and _cm.get("label_set"):
-                # The hierarchical read IS a label-set fit's record; an explicit
-                # flat read of one is the ablation and must not overwrite it.
-                _mtag = "flat" + (f"_{_mtag}" if _mtag else "")
-                _cprint(f"[readout]   FLAT read of a label-set fit: results -> "
-                      f"results_readout_{_mtag}.json (record untouched)", flush=True)
-            if args.readout_incident:
-                _mtag = "incident" + (f"_{_mtag}" if _mtag else "")
             if args.raw_baseline:
                 _mtag = (("rawm" if args.raw_select == "model" else "raw")
                          + f"{int(args.raw_baseline)}" + (f"_{_mtag}" if _mtag else ""))
@@ -3075,21 +2253,19 @@ def main(argv=None) -> int:
                       else f"results_readout_{_mtag}.json")
             run_readout(train_scored, test_scored, _manifest_ro, recall_targets=rt,
                         fdr_targets=ft, min_count=min_count,
-                        readout_mode=args.readout_mode,
-                        ab_check=args.readout_ab_check, out_dir=run_dir,
+                        out_dir=run_dir,
                         theta_topm=(0 if args.raw_baseline
                                     else args.readout_theta_topm),
                         readout_max_iter=args.readout_max_iter,
-                        elig_col=_elig_col, eval_path=args.eval_path,
-                        readout_l2=args.readout_l2, feature_mask=_fmask,
+                        readout_l2=args.readout_l2,
                         mask_tag=_mtag, stacked=bool(args.readout_stacked),
                         parent_int=_parent_ro,
                         theta_mass=args.readout_theta_mass, C=_C_ro,
                         warm_start=_warm)
             _cprint(f"[readout]   arm results written to {run_dir / _rname}",
                   flush=True)
-            if ((args.readout_incident or args.raw_baseline or args.readout_nodes
-                    or args.prev_history) and args.readout_stacked):
+            if ((args.raw_baseline or args.readout_nodes or args.prev_history)
+                    and args.readout_stacked):
                 # --prev-history alone asks for the new-diagnosis check too (exp 0153:
                 # a plain readout with it silently skipped the check).
                 # The comparison that matters: these heads vs the record's on the
