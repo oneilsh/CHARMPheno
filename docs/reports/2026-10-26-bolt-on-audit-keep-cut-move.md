@@ -190,6 +190,14 @@ and survives (moving `conversion_sidecar.py` drops only the sidecar).
 - 2026-10-26: **Q1 yes.** Cut the antidepressant/MDD (Hughes) line, including its
   `cohorts.py` block and the `analysis/pc` prototype; tag the last commit that has it so
   it can be resurrected from git.
+- 2026-10-26: **Profile-η prior: cut** (the continuous word-side prior; the profile
+  *seed* stays). **Fit-time label set: cut** (the ribbon is a post-hoc readout subset).
+  **Cache drops: not a cost concern** (clusters are recreated near-daily and caches are
+  on HDFS), so hashed edits happen where they belong, each re-pinning the tripwires,
+  with a `--bundle-only` rebuild checking corpus counts after any refactor-only edit.
+- Pending: pre-index closure (cut once the pre/post-index label handling is confirmed);
+  collect-free evaluation (the readout needs a scalable metrics path before it moves to
+  spark-vi); Q6 organization (option A, spark-vi, leaning; layout to brainstorm).
 
 ## Questions for the maintainer
 
