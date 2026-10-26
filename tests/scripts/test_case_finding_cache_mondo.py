@@ -66,10 +66,16 @@ _SNOMED_BASE = dict(
 # `cohort_defs_version()`, and the strip-claim comment fix moves `assembly_src`
 # (`case_finding_assembly.py`) — both fold into EVERY key, so all four hashes here
 # shifted at once. That was the announced, one-commit full cache drop; the whole
-# repo re-assembles once. These are the post-drop values.
-_SNOMED_KEY = "e1246c57202b8e8c"
-_SNOMED_LABELED_KEY = "ed0a73957bb603c2"          # emit_labels + closure mask
-_SNOMED_LOOKBACK_KEY = "63388be08ce3b53c"         # lookback windowing + strip both
+# repo re-assembles once.
+#
+# RE-PINNED by the 2026-10 cleanup (audit report 2026-10-26, decision Q1): removing
+# the antidepressant/MDD (Hughes) block from `cohorts.py` moves
+# `cohort_defs_version()`, which folds into EVERY key, so all four hashes shifted
+# at once. A deliberate, announced full cache drop; the caches are HDFS-local and
+# rebuilt per cluster anyway. These are the post-drop values.
+_SNOMED_KEY = "b93156d313311c55"
+_SNOMED_LABELED_KEY = "432529d7a57633da"          # emit_labels + closure mask
+_SNOMED_LOOKBACK_KEY = "a182bab9d8254751"         # lookback windowing + strip both
 
 
 def test_existing_snomed_keys_are_byte_identical():
@@ -105,7 +111,8 @@ _MD_BASE = dict(_SNOMED_BASE, multidomain=True, extra_domains=("drug",),
 # folds `multi_domain_src`, which WP-C moved by opening the `index_df` / `doc_spec`
 # injection seams — but it would have shifted regardless, since `cohort_defs` and
 # `assembly_src` (both moved by WP-C) fold into every key. Post-drop value.
-_MONDO_KEY_NO_COLLAPSE = "0ba6393f0d92af07"
+# RE-PINNED again by the 2026-10 cleanup with the SNOMED keys above (cohorts.py).
+_MONDO_KEY_NO_COLLAPSE = "6cc996e588c886ca"
 
 
 def test_mondo_key_with_collapse_off_is_byte_identical():
