@@ -22,12 +22,31 @@ from __future__ import annotations
 
 import numpy as np
 
-import lookalikes as lk
 
-__all__ = ["framing3_sources", "vocab_to_nodes", "prior_matrix", "sidecar_nodes_to_readout",
+__all__ = ["auc", "framing3_sources", "vocab_to_nodes", "prior_matrix", "sidecar_nodes_to_readout",
            "prior_from_sets", "containment", "node_aucs", "summarize", "EGRESS_FLOOR"]
 
 EGRESS_FLOOR = 20
+
+
+def auc(score, y):
+    """Mann-Whitney AUC of `score` for positives `y` (ties at half credit)."""
+    score = np.asarray(score, dtype=np.float64)
+    y = np.asarray(y).astype(bool)
+    n1, n0 = int(y.sum()), int((~y).sum())
+    if n1 == 0 or n0 == 0:
+        return float("nan")
+    order = np.argsort(score, kind="mergesort")
+    ranks = np.empty(len(score), dtype=np.float64)
+    s = score[order]
+    i = 0
+    while i < len(s):
+        j = i
+        while j + 1 < len(s) and s[j + 1] == s[i]:
+            j += 1
+        ranks[order[i:j + 1]] = (i + j) / 2.0 + 1.0
+        i = j + 1
+    return float((ranks[y].sum() - n1 * (n1 + 1) / 2.0) / (n1 * n0))
 
 
 def framing3_sources(run_dir):
@@ -150,8 +169,8 @@ def node_aucs(score, y, prior, nodes, *, floor=EGRESS_FLOOR):
         if n_all < floor or n_inc < floor or int((~yc & keep).sum()) < floor:
             continue
         out[int(c)] = {
-            "auc_all": lk.auc(score[:, c], yc),
-            "auc_incident": lk.auc(score[keep, c], yc[keep]),
+            "auc_all": auc(score[:, c], yc),
+            "auc_incident": auc(score[keep, c], yc[keep]),
             "n_pos_all": n_all, "n_pos_incident": n_inc,
             "prior_share_pos": float(pc[yc].mean()),
             "prior_share_neg": float(pc[~yc].mean())}
