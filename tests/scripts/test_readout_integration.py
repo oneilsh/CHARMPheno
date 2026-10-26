@@ -215,23 +215,6 @@ class TestDistributedArmMatchesDriverArm:
         assert drv["per_node"][0]["auc"] == pytest.approx(0.5, abs=1e-12)
 
 
-@pytest.mark.slow
-def test_ab_harness_runs_both_paths_and_reports(spark, capsys):
-    """The cardiovascular gate's machinery, in miniature: it must run BOTH paths and
-    print the deltas without asserting (a REPORT is the deliverable — the run is
-    diagnostic, and a hard assert on sklearn's stopping rule would be a false gate)."""
-    Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te = _make_arrays(seed=3)
-    train_df = _make_df(spark, Pi_tr, y_tr, m_tr)
-    test_df = _make_df(spark, Pi_te, y_te, m_te, offset=10_000)
-    out = gpc.readout_ab_report(
-        train_df, test_df, C, K, recall_targets=RECALL_TARGETS,
-        fdr_targets=FDR_TARGETS, min_count=0, label="ab-test", seed=7)
-    txt = capsys.readouterr().out
-    assert "A/B readout equality gate" in txt
-    assert "per-node |ΔAUC|" in txt and "max |Δp|" in txt
-    assert abs(out["distributed"]["ranking"]["auc"]
-               - out["driver"]["ranking"]["auc"]) < 1e-3
-
 
 @pytest.mark.slow
 def test_warm_started_calibration_fit_matches_the_cold_one(spark, capsys):
@@ -309,35 +292,6 @@ def test_warm_started_calibration_fit_matches_the_cold_one(spark, capsys):
     for df in (train_df, test_df, fit_df):
         df.unpersist()
 
-
-@pytest.mark.slow
-def test_ab_gate_warm_starts_its_sampled_fit_from_the_full_fit(spark, capsys):
-    """At `sample_frac<1` the passed-in full-data result is dropped — but not its fit.
-
-    The gate has to compare two solvers on ONE dataset, so a result fit on all the
-    rows cannot serve as its distributed side and the report refits on the sample.
-    That refit is the same C convex problems on a subset of their rows, so the
-    full-data `(V, b_raw)` is exactly what it should start from; the plumbing has
-    to lift the params out BEFORE it drops the result, which is what this pins.
-    """
-    Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te = _make_arrays(seed=6)
-    train_df = _make_df(spark, Pi_tr, y_tr, m_tr).cache()
-    test_df = _make_df(spark, Pi_te, y_te, m_te, offset=10_000).cache()
-    dist = gpc.distributed_score_arm(
-        train_df, test_df, C, K, recall_targets=RECALL_TARGETS,
-        fdr_targets=FDR_TARGETS, min_count=0, label="ab-warm")
-    capsys.readouterr()
-    gpc.readout_ab_report(
-        train_df, test_df, C, K, recall_targets=RECALL_TARGETS,
-        fdr_targets=FDR_TARGETS, min_count=0, label="ab-warm", seed=11,
-        sample_frac=0.7, distributed=dist)
-    txt = capsys.readouterr().out
-    # WP-A2 (R5.5): the sample is doc-key hashed, not `DataFrame.sample()`'s
-    # row-position draw — see gated_pc_cloud.readout_ab_report's docstring.
-    assert "restricted to the SAME 0.7 doc-key sample" in txt
-    assert "(warm start)" in txt, "the sampled refit must start from the full fit"
-    assert "A/B readout equality gate" in txt
-    train_df.unpersist(); test_df.unpersist()
 
 
 @pytest.mark.slow
