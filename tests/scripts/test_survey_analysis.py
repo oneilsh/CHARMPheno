@@ -97,3 +97,18 @@ def test_select_groups_with_identical_top_level_members(tmp_path):
         {"group A": {"metrics": _metrics(0.4, 0.5, 0.6), "n_eval": 100}}))
     picked, n_id, n_sz, n_all = ssg.select(nested, flat, "s")
     assert picked == ["group A"] and n_id == 1
+
+
+def test_framing3_sources_finds_the_record_check_and_skips_resolves_and_raw(tmp_path):
+    import json
+    from prevalence_check import framing3_sources
+    for n, v in [("prevalence_check_stacked_nodes_mass99_warm_it400.json", "warm"),
+                 ("prevalence_check_stacked_nodes_rawm2000.json", "rawm"),
+                 ("prevalence_check_stacked_nodes_raw2000.json", "raw")]:
+        (tmp_path / n).write_text(json.dumps({"v": v}))
+    th, rw = framing3_sources(tmp_path)
+    assert th is None and rw == {"v": "raw"}          # no θ record yet; raw found
+    (tmp_path / "prevalence_check_stacked_nodes_mass99.json").write_text('{"v": "theta"}')
+    assert framing3_sources(tmp_path)[0] == {"v": "theta"}
+    (tmp_path / "prevalence_check_history.json").write_text('{"v": "history"}')
+    assert framing3_sources(tmp_path)[0] == {"v": "history"}

@@ -201,16 +201,8 @@ def main(argv):
     js = json.loads((run / f"differential_{tag}.json").read_text())
     md = (run / f"differential_{tag}.md").read_text()
     mem = group_members(run)
-    load = lambda f: json.loads((run / f).read_text()) if (run / f).exists() else None
-    # θ framing-3 source: the whole-history check, else the stacked one a node-subset
-    # readout writes (0152: prevalence_check_stacked_nodes_mass99.json).
-    th = load("prevalence_check_history.json")
-    if th is None:
-        for f in sorted(run.glob("prevalence_check_stacked*.json")):
-            if "raw" not in f.name:
-                th = json.loads(f.read_text())
-                break
-    rw = load("prevalence_check_stacked_raw2000.json")
+    from prevalence_check import framing3_sources
+    th, rw = framing3_sources(run)
 
     def f3(members, src):
         if not src:

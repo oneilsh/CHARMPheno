@@ -451,9 +451,10 @@ class TestReReadout:
         _, train_df, test_df = scored
         out = tmp_path_factory.mktemp("run_dir")
         manifest = {"C": C, "K": K, "weight_y": 0.0}
+        # l2=1.0 is sklearn's C=1.0, the oracle's ridge (the CLI default is 100).
         res = gpr.run_readout(
             train_df, test_df, manifest, recall_targets=RECALL_TARGETS,
-            fdr_targets=FDR_TARGETS, min_count=0, out_dir=out)
+            fdr_targets=FDR_TARGETS, min_count=0, out_dir=out, readout_l2=1.0)
         return res, out
 
     def test_distributed_arm_matches_the_sklearn_oracle(self, dist, scored):
@@ -637,7 +638,7 @@ def test_parse_args_readout_l2_resolves_cli_then_manifest_then_legacy(monkeypatc
     assert a.readout_l2 is None
     b = gpr.build_parser().parse_args(["--run-dir", "/tmp/r", "--readout-l2", "1e4"])
     assert b.readout_l2 == 1e4
-    assert gpr.resolve_readout_l2(None, {}) == (1.0, "legacy default")
+    assert gpr.resolve_readout_l2(None, {}) == (100.0, "default")
     assert gpr.resolve_readout_l2(None, {"readout_l2": 100}) == (100.0, "manifest")
     assert gpr.resolve_readout_l2(7, {"readout_l2": 100}) == (7.0, "CLI")
     import inspect
