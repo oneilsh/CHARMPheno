@@ -253,3 +253,11 @@ def test_mask_to_nodes(spark):
     df = spark.createDataFrame([Row(person_id=1, labelMask=[1.0, 1.0, 0.0, 1.0])])
     got = gpr.mask_to_nodes(df, [True, False, True, True]).collect()[0].labelMask
     assert got == [1.0, 0.0, 0.0, 1.0]
+
+
+def test_auc_handles_ties_and_extremes():
+    import numpy as np
+    from prevalence_check import auc
+    assert auc([0.1, 0.2, 0.9, 0.8], [0, 0, 1, 1]) == 1.0
+    assert auc([0.5, 0.5], [0, 1]) == 0.5
+    assert np.isnan(auc([0.1, 0.2], [0, 0]))
