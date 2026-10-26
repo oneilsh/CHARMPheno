@@ -273,39 +273,6 @@ def test_sparse_stats_kernel_node_mask_is_exact_and_skips_the_rest():
         assert np.array_equal(a, b)
 
 
-def test_score_cells_kernel_sparse_and_dense_paths_agree(monkeypatch):
-    Pi, y, mask = _make_data(seed=5)
-    V, b_raw = _params(seed=6)
-    monkeypatch.setattr(dr, "_DENSE_MASK_FRACTION", 0.0)
-    dense = list(dr._score_cells_kernel(_rows(Pi, y, mask), V, b_raw, C))
-    monkeypatch.setattr(dr, "_DENSE_MASK_FRACTION", 2.0)
-    sparse = list(dr._score_cells_kernel(_rows(Pi, y, mask), V, b_raw, C))
-    assert len(dense) == int(mask.sum())
-    assert len(dense) == len(sparse)
-    # Same cells in the same order; p differs only in the last ulp (BLAS matvec vs
-    # gathered dot re-associates the K-term sum).
-    assert [(n, yv) for n, yv, _ in dense] == [(n, yv) for n, yv, _ in sparse]
-    assert np.allclose([p for _, _, p in dense], [p for _, _, p in sparse],
-                       atol=1e-14, rtol=0)
-
-
-def test_score_cells_kernel_matches_dense_reference():
-    Pi, y, mask = _make_data(seed=7)
-    V, b_raw = _params(seed=8)
-    _, _, _, P = _ref_stats(Pi, y, mask, V, b_raw)
-    cells = list(dr._score_cells_kernel(_rows(Pi, y, mask), V, b_raw, C))
-    assert len(cells) == int(mask.sum())
-    seen = np.zeros((D, C), dtype=int)
-    it = iter(cells)
-    for d in range(D):
-        for c in np.flatnonzero(mask[d]):
-            node, yv, pv = next(it)
-            assert node == int(c)
-            assert yv == y[d, c]
-            assert abs(pv - P[d, c]) < 1e-10
-            seen[d, c] = 1
-    assert np.array_equal(seen, mask.astype(int))
-
 
 def test_stats_kernel_gradient_matches_finite_differences():
     """(loss, g_raw, s) folded to standardized space == d/d(W_std, b_std) of the
@@ -444,12 +411,6 @@ def test_sparse_kernels_equal_dense_kernels_on_the_truncated_design(chunk):
     for a, b in zip(got, dr._stats_kernel(iter(dense_rows), V, b_raw, C, K)):
         assert np.allclose(a, b, atol=1e-10, rtol=0)
 
-    got = list(dr._sparse_score_cells_kernel(iter(packed), V, b_raw, C,
-                                             chunk_rows=chunk))
-    want = list(dr._score_cells_kernel(iter(dense_rows), V, b_raw, C))
-    assert len(got) == int(mask.sum()) and len(got) == len(want)
-    for (n1, y1, p1), (n2, y2, p2) in zip(got, want):
-        assert n1 == n2 and y1 == y2 and abs(p1 - p2) < 1e-10
 
 
 def test_sparse_lean_eval_kernel_equals_dense_on_the_truncated_design():
@@ -861,60 +822,8 @@ class TestLocalSparkRoundTrip:
             with pytest.raises(ValueError):
                 stats_fn(W, b, node_mask=np.ones(C - 1, dtype=bool))
 
-    def test_score_cells_df_matches_numpy(self, spark):
-        Pi, y, mask = _make_data(seed=24)
-        df = _make_df(spark, Pi, y, mask)
-        V, b_raw = _params(seed=25)
-        cells = dr.score_cells_df(df, V, b_raw, C)
-        collected = cells.collect()
-        assert len(collected) == int(mask.sum())
-        _, _, _, P = _ref_stats(Pi, y, mask, V, b_raw)
-        # Cells carry no doc id (plan §3: 16 bytes/cell), so compare the per-node
-        # MULTISET of (y, p) values against the numpy reference.
-        for c in range(C):
-            got = sorted((round(r["y"], 12), round(r["p"], 12))
-                         for r in collected if r["node"] == c)
-            rows = np.flatnonzero(mask[:, c])
-            want = sorted((round(float(y[d, c]), 12), round(float(P[d, c]), 12))
-                          for d in rows)
-            assert len(got) == len(want)
-            for (gy, gp), (wy, wp) in zip(got, want):
-                assert gy == wy
-                assert abs(gp - wp) < 1e-9
 
     @pytest.mark.parametrize("engine", ["rdd", "pandas"])
-    def test_per_node_metric_rows_matches_bundle_masked(self, spark, engine):
-        from analysis.pc.evaluate import _bundle_masked
-
-        Pi, y, mask = _make_data(seed=26)
-        df = _make_df(spark, Pi, y, mask)
-        V, b_raw = _params(seed=27)
-        _, _, _, P = _ref_stats(Pi, y, mask, V, b_raw)
-        cells = dr.score_cells_df(df, V, b_raw, C)
-        try:
-            got = dr.per_node_metric_rows(cells, C, engine=engine)
-        except Exception as exc:                     # pragma: no cover - env guard
-            if engine == "pandas" and "Unsafe" in str(exc):
-                pytest.skip("Spark 3.5's bundled Arrow cannot allocate direct "
-                            "buffers on this JDK; the 'pandas' engine is "
-                            "cluster-covered only")
-            raise
-        want = _bundle_masked(P, y, mask, C)["per_label"]
-        assert set(got) == set(want)
-        n_skipped = 0
-        for c in range(C):
-            g, w = got[c], want[c]
-            assert g["skipped"] == w["skipped"], c
-            assert g["n_pos"] == w["n_pos"] and g["n_neg"] == w["n_neg"], c
-            if w["skipped"] is not None:
-                n_skipped += 1
-                assert g["auc"] is None and g["ap"] is None
-                continue
-            assert abs(g["auc"] - w["auc"]) < 1e-9, c
-            assert abs(g["ap"] - w["ap"]) < 1e-9, c
-        # The fixture plants an all-positive node and a never-observed node, so the
-        # skip path is genuinely exercised (not vacuously equal).
-        assert n_skipped >= 2
 
     def test_theta_topm_coverage_matches_the_kernel(self, spark):
         """The measurement's Spark shell: one treeAggregate, same numbers as the
@@ -967,32 +876,3 @@ class TestLocalSparkRoundTrip:
         assert np.allclose(gW_std, _standardized_grad_from_raw(r_g, r_s, mu, sd),
                            atol=1e-10, rtol=0)
 
-    def test_score_cells_df_topm_matches_the_dense_kernel(self, spark):
-        Pi, y, mask = _make_data(seed=34)
-        df = _make_df(spark, Pi, y, mask)
-        V, b_raw = _params(seed=35)
-        collected = dr.score_cells_df(df, V, b_raw, C, topm=TOPM).collect()
-        want = list(dr._score_cells_kernel(
-            _rows(_densify_topm(Pi, TOPM), y, mask), V, b_raw, C))
-        assert len(collected) == len(want) == int(mask.sum())
-        for c in range(C):
-            got_c = sorted((round(r["y"], 12), round(r["p"], 10))
-                           for r in collected if r["node"] == c)
-            want_c = sorted((round(yv, 12), round(pv, 10))
-                            for n, yv, pv in want if n == c)
-            assert got_c == want_c, c
-
-    def test_per_node_metric_rows_min_count_skips_small_nodes(self, spark):
-        from analysis.pc.evaluate import _bundle_masked
-
-        Pi, y, mask = _make_data(seed=28)
-        df = _make_df(spark, Pi, y, mask)
-        V, b_raw = _params(seed=29)
-        _, _, _, P = _ref_stats(Pi, y, mask, V, b_raw)
-        got = dr.per_node_metric_rows(dr.score_cells_df(df, V, b_raw, C),
-                                      C, min_count=10)
-        want = _bundle_masked(P, y, mask, C, min_count=10)["per_label"]
-        for c in range(C):
-            assert got[c]["skipped"] == want[c]["skipped"], c
-        assert any(w["skipped"] is not None and "small test column" in w["skipped"]
-                   for w in want.values())

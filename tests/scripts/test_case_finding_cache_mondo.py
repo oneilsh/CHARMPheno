@@ -920,7 +920,7 @@ def test_readout_rebuilds_on_a_miss_writes_through_and_scores(
 
     monkeypatch.setattr(gpr, "rebuild_bundle", _rebuild)
     rc = gpr.main(["--run-dir", str(run), "--cache-uri", uri,
-                   "--readout-mode", "driver", "--min-label-count", "0"])
+                   "--min-label-count", "0"])
     out = capsys.readouterr().out
     assert rc == 0, out
     assert calls["n"] == 1

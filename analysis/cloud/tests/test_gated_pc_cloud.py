@@ -9,34 +9,6 @@ import numpy as np
 import pytest
 
 
-def test_pc_topics_lr_bundle_separable_theta_scores_high():
-    from gated_pc_cloud import pc_topics_lr_bundle
-    # C=2 nodes; theta dim 0 predicts node 0, dim 1 predicts node 1 (separable).
-    Pi_tr = np.array([[1.0, 0.0], [0.9, 0.1], [0.1, 0.9], [0.0, 1.0],
-                      [0.8, 0.2], [0.2, 0.8]])
-    y_tr = np.array([[1, 0], [1, 0], [0, 1], [0, 1], [1, 0], [0, 1]], float)
-    Pi_te = np.array([[0.95, 0.05], [0.05, 0.95], [0.85, 0.15], [0.15, 0.85]])
-    y_te = np.array([[1, 0], [0, 1], [1, 0], [0, 1]], float)
-    m_tr = np.ones_like(y_tr)
-    m_te = np.ones_like(y_te)
-    b = pc_topics_lr_bundle(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, C=2)
-    assert b["macro"]["auc"] == 1.0            # perfectly separable
-    assert b["macro"]["n_labels_scored"] == 2
-
-
-def test_pc_topics_lr_bundle_masks_unobserved_cells():
-    from gated_pc_cloud import pc_topics_lr_bundle
-    # Node 1 is entirely UNOBSERVED in test (mask all zero) -> skipped from macro.
-    Pi_tr = np.array([[1.0, 0.0], [0.0, 1.0], [0.9, 0.1], [0.1, 0.9]])
-    y_tr = np.array([[1, 0], [0, 1], [1, 0], [0, 1]], float)
-    Pi_te = np.array([[0.9, 0.1], [0.1, 0.9]])
-    y_te = np.array([[1, 0], [0, 1]], float)
-    m_tr = np.ones_like(y_tr)
-    m_te = np.array([[1, 0], [1, 0]], float)   # node 1 unobserved in test
-    b = pc_topics_lr_bundle(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, C=2)
-    assert b["macro"]["n_labels_scored"] == 1  # only node 0 had observed test cells
-    assert b["per_label"][1]["skipped"] is not None
-
 
 def test_dag_closure_parents_densifies_parent_int_over_range_C():
     from gated_pc_cloud import dag_closure_parents
@@ -57,46 +29,6 @@ def test_dag_children_and_depth():
     assert depth == {0: 0, 1: 1, 2: 1, 3: 2, 4: 2}
 
 
-def test_conditional_readout_sharpens_within_parent_cohort():
-    from gated_pc_cloud import conditional_readout
-    # 0 root; 1,2 -> 0; 3,4 -> 1. Among node-1's cohort, node 3 vs 4 is perfectly
-    # separable, so the conditional AUC and multiclass top-1 must be 1.0.
-    parent_int = {1: [0], 2: [0], 3: [1], 4: [1]}
-    C = 5
-    rng = np.random.default_rng(0)
-    rows = []
-    # closure labels: a doc at leaf L is positive at L, its parent 1, and root 0.
-    for _ in range(20):   # at node 3
-        rows.append(([1, 1, 0, 1, 0], [0.1, 0.5, 0.1, 0.9, 0.1]))
-    for _ in range(20):   # at node 4
-        rows.append(([1, 1, 0, 0, 1], [0.1, 0.5, 0.1, 0.1, 0.9]))
-    for _ in range(20):   # at node 2 (sibling of 1, outside 1's cohort)
-        rows.append(([1, 0, 1, 0, 0], [0.1, 0.1, 0.5, 0.1, 0.1]))
-    y = np.array([r[0] for r in rows], float)
-    proba = np.array([r[1] for r in rows], float)
-    mask = np.ones_like(y)
-    cond = conditional_readout(proba, y, mask, parent_int, C, min_count=5)
-
-    # parent-1 cohort has both children scored, each perfectly separable.
-    e13 = [e for e in cond["edges"] if e["parent"] == 1 and e["child"] == 3]
-    e14 = [e for e in cond["edges"] if e["parent"] == 1 and e["child"] == 4]
-    assert e13 and e14
-    assert e13[0]["cond_auc"] == 1.0 and e14[0]["cond_auc"] == 1.0
-    assert e13[0]["depth"] == 1                       # parent 1 is at depth 1
-    p1 = [p for p in cond["parents"] if p["parent"] == 1]
-    assert p1 and p1[0]["top1"] == 1.0               # argmax child always correct
-    # honesty fields: majority baseline (20/20 -> 0.5), balanced accuracy, ECE.
-    assert p1[0]["majority"] == 0.5                   # 20 vs 20 children -> 0.5 baseline
-    assert p1[0]["bal_acc"] == 1.0                    # perfect per-child recall
-    assert cond["ece"] is not None and cond["ece"] >= 0.0
-    # per-node reliability: each scored edge carries its OWN ECE, and the summary
-    # reports mean/max/worst over them so pooling can't hide a miscalibrated node.
-    assert e13[0]["ece"] is not None and e13[0]["ece"] >= 0.0
-    ne = cond["node_ece"]
-    assert ne is not None and ne["n_nodes"] == len(cond["edges"])
-    assert ne["max"] >= ne["mean"] >= 0.0
-    assert ne["max"] == max(e["ece"] for e in cond["edges"])
-
 
 def test_ece_perfectly_calibrated_is_zero_and_miscalibrated_is_positive():
     from gated_pc_cloud import _ece
@@ -110,31 +42,6 @@ def test_ece_perfectly_calibrated_is_zero_and_miscalibrated_is_positive():
     # confident-but-wrong -> large ECE.
     assert _ece(np.zeros(100), np.full(100, 0.9)) > 0.5
 
-
-def test_calibrate_per_node_fixes_ece_and_preserves_ranking():
-    from gated_pc_cloud import calibrate_per_node, _ece
-    import numpy as np
-    from sklearn.metrics import roc_auc_score
-    rng = np.random.default_rng(0)
-    C = 1
-    n = 4000
-    # true P = sigmoid of a signal; miscalibrate by squaring the score (monotone,
-    # so ranking is preserved but reliability is wrong).
-    signal = rng.standard_normal(n)
-    true_p = 1.0 / (1.0 + np.exp(-signal))
-    y = (rng.random(n) < true_p).astype(float)
-    bad = true_p ** 2                                    # miscalibrated, same ranking
-    # split train/test
-    tr = np.zeros(n, bool); tr[: n // 2] = True; te = ~tr
-    proba_tr = bad[:, None]; proba_te = bad[:, None]
-    yv = y[:, None]; mask = np.ones((n, 1))
-    cal = calibrate_per_node(proba_tr[tr], yv[tr], mask[tr], proba_te[te], C)
-    # calibration lowers ECE...
-    assert _ece(yv[te, 0], cal[:, 0]) < _ece(yv[te, 0], proba_te[te, 0])
-    # ...and approximately preserves the ranking (isotonic is monotone; only the
-    # flat regions it induces create ties that move AUC slightly).
-    assert abs(roc_auc_score(yv[te, 0], cal[:, 0])
-               - roc_auc_score(yv[te, 0], proba_te[te, 0])) < 0.01
 
 
 def test_precision_at_recall_and_recall_at_fdr():

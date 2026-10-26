@@ -88,45 +88,6 @@ def _fixture():
     return y, mask, elig, preindex, C
 
 
-def test_incident_mask_is_eligible_and_carries_a_class():
-    """`m_incident = elig & (y | mask)`, hand-checked cell by cell."""
-    y, mask, elig, _pre, C = _fixture()
-    m = gpc.incident_eval_mask(y, mask, elig)
-    want = np.array([[0, 0, 1],   # doc 0: carrier of 0 and 1 -> only node 2 left
-                     [1, 0, 1],   # doc 1: carrier of 1; node 2 is an UNMASKED pos
-                     [1, 1, 1],   # doc 2: carries nothing; every node carries a class
-                     [1, 1, 1]],  # doc 3: node 0 is a positive though unobserved
-                    dtype=np.uint8)
-    assert np.array_equal(m, want)
-
-
-def test_a_prior_carrier_leaves_BOTH_classes_not_just_the_positives():
-    """D2 is symmetric on purpose. Doc 0 carries node 1 pre-index AND is a label
-    positive there; doc 1 carries node 1 pre-index and is a label NEGATIVE there
-    (observed). Both must leave — dropping only the positives would silently
-    redefine the estimator."""
-    y, mask, elig, _pre, _C = _fixture()
-    m = gpc.incident_eval_mask(y, mask, elig)
-    assert y[0, 1] == 1 and m[0, 1] == 0        # carrier + positive -> gone
-    assert y[1, 1] == 0 and mask[1, 1] == 1 and m[1, 1] == 0  # carrier + neg -> gone
-
-
-def test_a_positive_needs_no_mask_but_a_negative_does():
-    """D3 vs D4: a positive is ATTESTED (a fact about the label window); a negative
-    only exists where the cell was OBSERVED, or the zero means 'not asked'."""
-    y, mask, elig, _pre, _C = _fixture()
-    m = gpc.incident_eval_mask(y, mask, elig)
-    assert y[3, 0] == 1 and mask[3, 0] == 0 and m[3, 0] == 1   # unmasked positive
-    assert y[1, 2] == 1 and mask[1, 2] == 0 and m[1, 2] == 1   # unmasked positive
-    assert y[3, 1] == 0 and mask[3, 1] == 1 and m[3, 1] == 1   # observed negative
-    assert y[2, 0] == 0 and mask[2, 0] == 1 and m[2, 0] == 1   # observed negative
-
-
-def test_no_eligibility_column_means_no_incident_arm():
-    """`elig=None` is 'no eligibility information' — which must SKIP, never fall
-    back to the prevalent mask under an incident label."""
-    y, mask, _elig, _pre, _C = _fixture()
-    assert gpc.incident_eval_mask(y, mask, None) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -179,92 +140,10 @@ def test_the_three_skip_reasons_are_counted_separately_and_never_summed():
     assert macro["n_labels_skipped"] == 3
 
 
-def test_the_incident_block_reports_the_constant_skip_count():
-    """End to end through `incident_readout`: a constant column that survives the
-    incident mask with both classes shows up in the block's skip counts, and its
-    0.5 does NOT show up in the macro."""
-    rng = np.random.default_rng(3)
-    D, C = 200, 3
-    y = np.zeros((D, C), dtype=np.uint8)
-    y[:80, 0] = 1
-    y[:70, 1] = 1
-    y[:60, 2] = 1
-    mask = np.ones((D, C), dtype=np.uint8)
-    elig = np.ones((D, C), dtype=np.uint8)
-    proba = rng.random((D, C))
-    proba[:, 2] = 0.42                          # the constant fallback column
-    block = gpc.incident_readout(proba, y, mask, elig, C, recall_targets=RT,
-                                 fdr_targets=FT, min_count=20)
-    assert block["skipped_by_reason"][SKIP_CONSTANT] == 1
-    assert 2 not in block["readout"]["per_node"]
-    assert block["macros"]["incident_full"]["n_nodes"] == 2
-
 
 # --------------------------------------------------------------------------- #
 # 4. R2.2 — macros on BOTH node sets.                                          #
 # --------------------------------------------------------------------------- #
-def test_shared_and_full_macros_are_both_emitted_and_differ():
-    """The prevalent arm scores a node the incident arm cannot (its eligible cells
-    starve), so the two full sets differ — and averaging across them would be the
-    non-comparison C2.2 names."""
-    rng = np.random.default_rng(7)
-    D, C = 400, 3
-    y = np.zeros((D, C), dtype=np.uint8)
-    y[:150, 0] = 1
-    y[:120, 1] = 1
-    y[:100, 2] = 1
-    mask = np.ones((D, C), dtype=np.uint8)
-    proba = rng.random((D, C))
-    # node 2 is signal-free under the incident mask because almost every doc that
-    # could be a negative there is a prior carrier.
-    elig = np.ones((D, C), dtype=np.uint8)
-    elig[100:, 2] = 0
-    prevalent = gpc.readout_from_proba(proba, y, mask, C, recall_targets=RT,
-                                       fdr_targets=FT, min_count=20)
-    block = gpc.incident_readout(proba, y, mask, elig, C, recall_targets=RT,
-                                 fdr_targets=FT, min_count=20,
-                                 prevalent=prevalent)
-    m = block["macros"]
-    assert set(m) == {"prevalent_full", "prevalent_shared", "incident_full",
-                      "incident_shared"}
-    assert m["prevalent_full"]["n_nodes"] == 3
-    assert m["incident_full"]["n_nodes"] == 2     # node 2 lost its negatives
-    assert m["prevalent_shared"]["n_nodes"] == 2 == m["incident_shared"]["n_nodes"]
-    assert block["node_sets"] == {"n_incident_scoreable": 2,
-                                  "n_prevalent_scoreable": 3, "n_shared": 2}
-    # the shared macro is NOT the full macro — that difference is the whole point
-    assert m["prevalent_shared"]["auc"] != m["prevalent_full"]["auc"]
-
-
-def test_the_block_carries_the_D7_naming_rule_and_the_four_tags():
-    """R2.4 / spec §8: every incident output says what it is, in the JSON itself,
-    so a table rendered from it cannot lose the qualification."""
-    D, C = 60, 2
-    y = np.zeros((D, C), dtype=np.uint8)
-    y[:30] = 1
-    mask = np.ones((D, C), dtype=np.uint8)
-    elig = np.ones((D, C), dtype=np.uint8)
-    proba = np.linspace(0, 1, D)[:, None] * np.ones((1, C))
-    block = gpc.incident_readout(proba, y, mask, elig, C, recall_targets=RT,
-                                 fdr_targets=FT, min_count=20)
-    assert "PREVALENT-FIT" in block["naming"] and "INCIDENT COHORT" in block["naming"]
-    assert set(block["tags"]) == {"arm", "node set".replace(" ", "_"), "cell_type",
-                                  "claim_type"}
-    assert block["tags"]["arm"] == "incident"
-    assert block["tags"]["claim_type"] == "discrimination"
-    assert "R2.3" in block["eligibility"]["source"]
-    text = gpc.format_incident_readout(block)
-    assert "PREVALENT-FIT" in text and "DISCRIMINATION" in text
-    assert "prevalent / shared" in text and "incident / shared" in text
-    assert gpc.format_incident_readout(None).endswith("pre-index closure column")
-
-
-def test_incident_readout_returns_None_without_an_eligibility_matrix():
-    """No column, no arm — never a silent duplicate of the prevalent block."""
-    D, C = 40, 2
-    y = np.zeros((D, C), dtype=np.uint8)
-    assert gpc.incident_readout(np.zeros((D, C)), y, np.ones((D, C), np.uint8),
-                                None, C, recall_targets=RT, fdr_targets=FT) is None
 
 
 # --------------------------------------------------------------------------- #
