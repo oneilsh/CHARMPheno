@@ -589,43 +589,6 @@ hpoa-profile-survey:
 	    --hpo-release $(HPOA_HPO_RELEASE) --cache-dir $(REPO_ROOT)/data/ontology \
 	    --out-dir $(HPOA_OUT) $(HPOA_ARGS)
 
-# Incident-eligibility CENSUS (E-census) — the GO/NO-GO gate for the incident
-# evaluation program. One treeAggregate over the cached bundle's TRAIN split
-# (label, labelMask, preindexClosure), then per node: how many docs are
-# incident-eligible (c NOT IN R_d, spec D2), how many of those are positive, and
-# how many are observed negatives. Prints the count of nodes clearing 20/20 on
-# BOTH incident classes against the spec's "a few hundred" bar, the C2.1
-# population (train-degenerate heads that acquire incident negatives and would
-# score a hard 0.5 in the macro without E2's constant-column guard), and writes
-# incident_census.json into the run dir.
-#
-# Requires the bundle to be a cache HIT (run the fit or gated-pc-readout first —
-# a diagnostic never pays a rebuild) AND to carry E1's pre-index closure column;
-# a bundle built without `preindex_closure: true` is refused by name (exit 3).
-# `preindex_closure.py` and this script ride in --py-files so the partition
-# kernel resolves on the executors however cloudpickle chooses to ship it.
-# Example:
-#   make diag-incident-census ID=110
-diag-incident-census: zip cluster-overlay $(WORKSPACE_ENV)
-	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
-	. ./$(WORKSPACE_ENV) && \
-	PYTHONPATH=$(REPO_ROOT):$$PYTHONPATH spark-submit \
-	    --master yarn \
-	    --deploy-mode client \
-	    --driver-memory 4g \
-	    --conf spark.executor.cores=2 \
-	    --conf spark.executor.memory=4g \
-	    --conf spark.executor.memoryOverhead=2g \
-	    --conf spark.task.maxFailures=8 \
-	    --conf spark.excludeOnFailure.enabled=true \
-	    --conf spark.dynamicAllocation.enabled=false \
-	    --conf spark.executor.instances=12 \
-	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/distributed_readout.py,$(REPO_ROOT)/analysis/cloud/preindex_closure.py,$(REPO_ROOT)/analysis/cloud/diag_incident_census.py \
-	    $(REPO_ROOT)/analysis/cloud/diag_incident_census.py \
-	    --run-dir "$(RUNS_DIR)/$(shell printf '%04d' $(ID))-*" \
-	    $(if $(GPR_CACHE_URI),--cache-uri $(GPR_CACHE_URI),) \
-	    $(GPR_ARGS)
-
 # Build the E4 FIRST-ATTESTATION SIDECAR for a finished run's corpus (spec E4 /
 # plan WP6, unit i). One full-history `condition_era` scan joined to the label
 # code map, aggregated to `(person_id, node_cid) -> min(condition_era_start_date)`

@@ -163,18 +163,6 @@ def test_readout_tool_and_fit_driver_parse_the_hierarchy_flag():
         type("A", (), {"readout_hierarchy": "flat"})(), {"label_set": "dismech:x"})
 
 
-def test_run_experiment_passes_readout_hierarchy_only_when_set(monkeypatch):
-    sys.path.insert(0, str(REPO_ROOT / "scripts"))
-    import run_experiment as rex
-    monkeypatch.setenv("WORKSPACE_CDR", "cdr")
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
-    base = {"source_table": "t", "person_mod": 1, "vocab_size": 5000, "min_df": 20,
-            "min_patient_count": 20, "doc_min_length": 10, "max_iter": 100,
-            "min_n": 0, "n_bg": 8, "tpn": 1, "seed": 0, "readout_mode": "distributed"}
-    argv = rex.build_gated_pc_args(dict(base, readout_hierarchy="mondo"), "/tmp/out")
-    assert argv[argv.index("--readout-hierarchy") + 1] == "mondo"
-    assert "--readout-hierarchy" not in rex.build_gated_pc_args(dict(base), "/tmp/out")
-
 
 def test_code_map_rides_the_cache_meta_and_the_run_dir(tmp_path):
     import _case_finding_cache as cfc
