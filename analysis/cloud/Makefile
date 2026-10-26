@@ -1,4 +1,4 @@
-.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect inspect-topics smoke-dataproc setup next-exp exp summary summary-tail report eval-exp build-dashboard-exp build-covariates lr-readout
+.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect inspect-topics smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates lr-readout
 
 REPO_ROOT       := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP    := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
@@ -112,7 +112,6 @@ help:
 	@echo "  exp ID=N [NO_EVAL=1]    Run/resume experiment N; fit (+ eval unless NO_EVAL)."
 	@echo "  summary ID=N            Print summary.md for experiment N."
 	@echo "  summary-tail ID=N       Print only the most-recent ## section of summary.md."
-	@echo "  report ID=N             COMPACT gated_pc digest (flags + fit-health + signal lines)."
 	@echo "  inspect-topics ID=N      OFF-CLUSTER topics view (sharpness + readout loadings)"
 	@echo "                           from the saved fit; no Spark/YARN, safe mid-fit."
 	@echo "                           Bundle key auto-discovered (override INSPECT_KEY=<hash>,"
@@ -123,7 +122,6 @@ help:
 	@echo "                           the credited topics duplicates the decoder routes around);"
 	@echo "                           --profile-support CREDITED=1 (prior topic vs the block's"
 	@echo "                           data-only siblings: does the corpus build the profile?)."
-	@echo "  readout-ab ID=N BASE=M  paired readout-AUC A/B (credited split + deltas vs run M)."
 	@echo "  eval-exp [ID=N]         Re-run eval; if ID omitted, auto-selects most-recently-fit."
 	@echo "  build-dashboard-exp     - build dashboard bundle (auto-picks freshest fit needing build)"
 	@echo "  build-dashboard-exp ID=N - force rebuild for a specific experiment"
@@ -573,15 +571,6 @@ inspect-topics: $(WORKSPACE_ENV)
 	    $(if $(COMPARE),--compare-run "$(RUNS_DIR)/$(COMPARE_PAD)-*") \
 	    $(INSPECT_ARGS)
 
-# The exp 0116 primary read in one line: paired --readout-auc of run ID against
-# run BASE, split by the credited profile-eta set (defaults to the probe's
-# --emit-eta TSV under data/ontology/). Bundle key auto-discovered as above.
-#   make readout-ab ID=116 BASE=113
-readout-ab:
-	@if [ -z "$(ID)" ] || [ -z "$(BASE)" ]; then echo "ERROR: provide ID=N BASE=M"; exit 1; fi
-	$(MAKE) inspect-topics ID=$(ID) COMPARE=$(BASE) CREDITED=$(or $(CREDITED),1) \
-	    INSPECT_ARGS="--readout-auc $(INSPECT_ARGS)"
-
 # Stage-1 OFFLINE HPOA profile survey — PUBLIC ontology data only (no CDR, no
 # Spark, no egress exposure; runs anywhere with network + pandas). Gauges
 # whether HPOA disease->phenotype profiles can seed/prior node topics
@@ -599,71 +588,6 @@ hpoa-profile-survey:
 	    --branch $(HPOA_BRANCH) --mondo-version $(HPOA_MONDO_VER) \
 	    --hpo-release $(HPOA_HPO_RELEASE) --cache-dir $(REPO_ROOT)/data/ontology \
 	    --out-dir $(HPOA_OUT) $(HPOA_ARGS)
-
-# Stage-2 IN-WORKSPACE HPOA probe — gates the "random init + HPO-profile eta
-# prior" experiment. Maps the stage-1 --emit-codes TSV (SNOMED codes per node
-# profile) through BigQuery 'Maps to' onto standard Condition concepts, into
-# the cached bundle's condition vocab (membership there IS the leakage-strip/
-# min_df/cap survivorship test), then one treeAggregate over TRAIN counts, per
-# node, its observed positives and how many carry >=1 profile token. Per-node
-# table (patient counts) stays in the run dir, WORKSPACE-INTERNAL; stdout and
-# the sidecar .md carry only the pooled egress-safe summary (floor 20).
-# Requires the bundle to be a cache HIT (run the fit or gated-pc-readout
-# first) and the stage-1 codes TSV (see the error text). The script rides in
-# --py-files so the partition kernel resolves on the executors however
-# cloudpickle chooses to ship it (same rationale as diag-incident-census).
-# Example:
-#   make hpoa-stage2-probe ID=116
-HPOA_PROFILE_CODES ?= $(REPO_ROOT)/data/ontology/profile_codes_MONDO_0004995.tsv
-hpoa-stage2-probe: zip cluster-overlay $(WORKSPACE_ENV)
-	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
-	@if [ ! -s "$(HPOA_PROFILE_CODES)" ]; then \
-	  echo "ERROR: profile-codes TSV missing: $(HPOA_PROFILE_CODES)"; \
-	  echo "  Generate it (offline, public ontology data) with:"; \
-	  echo "  make hpoa-profile-survey HPOA_ARGS=\"--emit-codes $(HPOA_PROFILE_CODES)\""; \
-	  exit 1; fi
-	. ./$(WORKSPACE_ENV) && \
-	PYTHONPATH=$(REPO_ROOT):$$PYTHONPATH spark-submit \
-	    --master yarn \
-	    --deploy-mode client \
-	    --driver-memory 4g \
-	    --conf spark.executor.cores=2 \
-	    --conf spark.executor.memory=4g \
-	    --conf spark.executor.memoryOverhead=2g \
-	    --conf spark.task.maxFailures=8 \
-	    --conf spark.excludeOnFailure.enabled=true \
-	    --conf spark.dynamicAllocation.enabled=false \
-	    --conf spark.executor.instances=12 \
-	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/hpoa_stage2_probe.py \
-	    $(REPO_ROOT)/analysis/cloud/hpoa_stage2_probe.py \
-	    --run-dir "$(RUNS_DIR)/$(shell printf '%04d' $(ID))-*" \
-	    --profile-codes "$(HPOA_PROFILE_CODES)" \
-	    $(if $(GPR_CACHE_URI),--cache-uri $(GPR_CACHE_URI),) \
-	    $(GPR_ARGS)
-
-# Sibling-support diagnostic for residual degenerate nodes (exp 0109): one pass
-# over the cached bundle's train labels, then buckets every degenerate node by
-# whether its children have any observed support. Requires the bundle to be a
-# cache HIT (run the fit or gated-pc-readout first). Example:
-#   make diag-sibling-support ID=109
-diag-sibling-support: zip cluster-overlay $(WORKSPACE_ENV)
-	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
-	. ./$(WORKSPACE_ENV) && \
-	PYTHONPATH=$(REPO_ROOT):$$PYTHONPATH spark-submit \
-	    --master yarn \
-	    --deploy-mode client \
-	    --driver-memory 4g \
-	    --conf spark.executor.cores=2 \
-	    --conf spark.executor.memory=4g \
-	    --conf spark.executor.memoryOverhead=2g \
-	    --conf spark.task.maxFailures=8 \
-	    --conf spark.excludeOnFailure.enabled=true \
-	    --conf spark.dynamicAllocation.enabled=false \
-	    --conf spark.executor.instances=12 \
-	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/distributed_readout.py \
-	    $(REPO_ROOT)/analysis/cloud/diag_sibling_support.py \
-	    --run-dir "$(RUNS_DIR)/$(shell printf '%04d' $(ID))-*" \
-	    $(if $(GPR_CACHE_URI),--cache-uri $(GPR_CACHE_URI),)
 
 # Incident-eligibility CENSUS (E-census) — the GO/NO-GO gate for the incident
 # evaluation program. One treeAggregate over the cached bundle's TRAIN split
@@ -738,74 +662,6 @@ build-conversion-sidecar: zip cluster-overlay $(WORKSPACE_ENV)
 	    $(if $(GPR_SIDECAR_URI),--sidecar-uri $(GPR_SIDECAR_URI),) \
 	    $(GPR_ARGS)
 
-# FUTURE-CONVERSION analysis (spec E4 / plan WP6, unit ii) — PU channel 1 as a
-# LOWER BOUND. Among the documents scored INCIDENT NEGATIVE for node c, the
-# fraction whose first attestation of closure(c) lands 1y/2y/3y AFTER the label
-# window, with denominators gated on observation_period_end_date at each horizon
-# (so the denominators SHRINK with the horizon — that is the right-censoring gate
-# working, not a bug). Reported overall and by model-score decile; the decile
-# profile doubles as case-finding validation (a top decile converting materially
-# above the bottom means the model is finding future cases among its own
-# negatives). Per-node table -> conversion_analysis.json (WORKSPACE-INTERNAL, many
-# cells under 20); the banner carries only pooled rates and counts of nodes.
-#
-# Requires, and refuses by name with distinct exit codes: a bundle cache HIT (2),
-# E1's pre-index closure witness (3), the E4 sidecar witness + a sidecar HIT (4 —
-# run `make build-conversion-sidecar ID=N` first), and a scoreable saved fit (5).
-# `--deciles off` (the DEFAULT) reports the overall table only. `--deciles on`
-# now SCORES the test split from the run's SAVED readout heads
-# (readout_heads_gated_pc.npz — one distributed mapPartitions, NO re-fit; the
-# re-fit was the disk cascade that took the cluster down on 0110), so it is cheap
-# and disk-safe. It needs that npz, which every readout fit under current code
-# persists; for a pre-existing fit run `make gated-pc-readout ID=N` ONCE to
-# persist it (an absent npz falls back to the overall table, never a re-fit).
-#
-# 0111 SCOUTING FLAGS (forwarded through GPR_ARGS, both reuse 0110's SAVED fit +
-# SAVED sidecar — NO re-fit, NO corpus re-assembly):
-#   --by-depth on|off (DEFAULT on — it is FREE): also reports the R4.8 decile
-#     case-finding table broken out by DAG DEPTH (depth = DagLayout.depth over the
-#     bundle's parent map). Individual depths where each carries >= --min-count
-#     incident-negative nodes, else shallow 1-3 / mid 4-6 / deep 7+ bands; the
-#     banding chosen and why is printed. Bucket-level pooled rates + counts-of-
-#     nodes only — same egress as the overall pooled output.
-#   --horizon-eval on|off (DEFAULT off — one extra SCORING pass, so opt-in): for
-#     each window W in --horizon-days builds a LONGER-WINDOW incident label from
-#     the sidecar (label_W=1 iff first attestation of closure(c) in [index,
-#     index+W); eligibility unchanged per D2; right-censored through index+W as the
-#     conversion denominator is) and reports macro AUC/AP on the SHARED node set
-#     scoreable at ALL horizons (R2.2) + each horizon's own full set, plus macro
-#     AUC by depth-bucket x horizon. RISING AUC with W = the 1y label under-credits
-#     the model's skill (motivates a re-fit); flat = signal already captured. A
-#     DISCRIMINATION measurement of a PREVALENT/1y-FIT model vs longer-horizon
-#     incident labels (D7/C2.4), NOT a prospective estimate. Needs the persisted
-#     heads npz (like --deciles on); absent, it prints the one-time re-readout fix
-#     and is SKIPPED (never a re-fit) — the overall + depth tables still run.
-# Example:
-#   make diag-conversion-analysis ID=110                       # overall + depth
-#   make gated-pc-readout ID=110                               # persists the heads
-#   make diag-conversion-analysis ID=110 GPR_ARGS="--deciles on"  # + score deciles
-#   make diag-conversion-analysis ID=110 GPR_ARGS="--horizon-eval on"  # + sweep
-diag-conversion-analysis: zip cluster-overlay $(WORKSPACE_ENV)
-	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
-	. ./$(WORKSPACE_ENV) && \
-	PYTHONPATH=$(REPO_ROOT):$$PYTHONPATH spark-submit \
-	    --master yarn \
-	    --deploy-mode client \
-	    --driver-memory $(GPR_DRIVER_MEMORY) \
-	    --conf spark.executor.cores=4 \
-	    --conf spark.executor.memory=6g \
-	    --conf spark.executor.memoryOverhead=2g \
-	    --conf spark.python.worker.memory=2g \
-	    --conf spark.task.maxFailures=8 \
-	    --conf spark.excludeOnFailure.enabled=true \
-	    $(foreach kv,$(GPR_SPARK_CONF),--conf $(kv)) \
-	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/distributed_readout.py,$(REPO_ROOT)/analysis/cloud/preindex_closure.py,$(REPO_ROOT)/analysis/cloud/conversion_sidecar.py,$(REPO_ROOT)/analysis/cloud/conversion_analysis.py \
-	    $(REPO_ROOT)/analysis/cloud/conversion_analysis.py \
-	    --run-dir "$(RUNS_DIR)/$(shell printf '%04d' $(ID))-*" \
-	    $(if $(GPR_CACHE_URI),--cache-uri $(GPR_CACHE_URI),) \
-	    $(if $(GPR_SIDECAR_URI),--sidecar-uri $(GPR_SIDECAR_URI),) \
-	    $(GPR_ARGS)
-
 # 0111 EPISODE PROBES (plan WP8a): R5.9 the episode MULTIPLIER and R5.10 the
 # observation-gate KILL RATE — the two numbers the 0111 plan cannot be written
 # without. An episode = a gap-and-islands cluster (gap 60/90d, both run) of a
@@ -850,32 +706,6 @@ diag-episode-probe: zip cluster-overlay $(WORKSPACE_ENV)
 	    --run-dir "$(RUNS_DIR)/$(shell printf '%04d' $(ID))-*" \
 	    $(GPR_ARGS)
 
-# WEARABLES x RARE DISEASE census (side question 2026-10-13; no fit, no cache keys):
-# persons with >= --min-days of Fitbit daily summaries AND a Mondo-rare diagnosis
-# (subsets rare / orphanet_rare / gard_rare / nord_rare), and the rare diseases with
-# the most wearables data. Pooled; rows under 20 dropped. Output in OUT (a workspace dir).
-# Example:
-#   make diag-wearables-rare
-#   make diag-wearables-rare GPR_ARGS="--flags gard_rare --min-days 90"
-WEAR_OUT ?= $(RUNS_DIR)/wearables-rare
-diag-wearables-rare: zip cluster-overlay $(WORKSPACE_ENV)
-	mkdir -p "$(WEAR_OUT)" && . ./$(WORKSPACE_ENV) && \
-	PYTHONPATH=$(REPO_ROOT):$(REPO_ROOT)/analysis/cloud:$$PYTHONPATH spark-submit \
-	    --master yarn \
-	    --deploy-mode client \
-	    --driver-memory 8g \
-	    --conf spark.executor.cores=2 \
-	    --conf spark.executor.memory=4g \
-	    --conf spark.executor.memoryOverhead=2g \
-	    --conf spark.task.maxFailures=8 \
-	    --conf spark.dynamicAllocation.enabled=false \
-	    --conf spark.executor.instances=12 \
-	    $(foreach kv,$(GPR_SPARK_CONF),--conf $(kv)) \
-	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY) \
-	    $(REPO_ROOT)/analysis/cloud/diag_wearables_rare.py \
-	    --out-dir "$(WEAR_OUT)" \
-	    $(GPR_ARGS) 2>&1 | tee -a "$(WEAR_OUT)/wearables_rare_log.md"
-
 # Print summary.md for an experiment (copy/paste back to chat)
 summary:
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
@@ -888,14 +718,6 @@ summary-tail:
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	@awk '/^## /{buf=""} {buf=buf$$0"\n"} END{printf "%s",buf}' \
 	    $(RUNS_DIR)/$(shell printf '%04d' $(ID))-*/summary.md
-
-# COMPACT post-fit report for a gated_pc run (copy/paste back to chat): drops the
-# bulky per-parent / λ-mass tables + per-iter spam, keeps the signal lines, and
-# prepends a weirdness scan + fit-health (ELBO / |w| / corr_relΔλ) trajectory.
-report:
-	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
-	@python $(REPO_ROOT)/analysis/cloud/gated_pc_report.py \
-	    --summary $(shell ls $(RUNS_DIR)/$(shell printf '%04d' $(ID))-*/summary.md | tail -1)
 
 # Re-run eval only against an existing experiment's checkpoint; appends a
 # timestamped ## Eval (NPMI) section to summary.md.
