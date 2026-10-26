@@ -195,7 +195,16 @@ and survives (moving `conversion_sidecar.py` drops only the sidecar).
   **Cache drops: not a cost concern** (clusters are recreated near-daily and caches are
   on HDFS), so hashed edits happen where they belong, each re-pinning the tripwires,
   with a `--bundle-only` rebuild checking corpus counts after any refactor-only edit.
-- Pending: pre-index closure (cut once the pre/post-index label handling is confirmed);
+- 2026-10-26: **Pre-index closure: cut** (the label rules are: pre-index features, a
+  post-index label year, train-only gating with ungated test transforms, heads trained
+  on all positives, incident-only evaluation via the whole-history sidecar; to be
+  written down in one place). **Organization: option A** (the `core / dag / models /
+  readout / eval / mllib` layout), `readout` kept as the name, `dag/` strictly generic,
+  framings stay in `analysis/`, MLlib-compatible flow with a heads Estimator. Collect-
+  free metrics must be exact (positive-anchored AUC), must not assume the positives fit
+  in memory (node-batched passes as the fallback), and must support ROC/PR curve output
+  for a node sample.
+- Pending:
   collect-free evaluation (the readout needs a scalable metrics path before it moves to
   spark-vi); Q6 organization (option A, spark-vi, leaning; layout to brainstorm).
 
