@@ -209,6 +209,41 @@ and survives (moving `conversion_sidecar.py` drops only the sidecar).
   collect-free evaluation (the readout needs a scalable metrics path before it moves to
   spark-vi); Q6 organization (option A, spark-vi, leaning; layout to brainstorm).
 
+## Progress
+
+**Step 1 (driver-side cuts), 2026-10-26/27 — done except the items listed below.**
+About 21k lines removed across ~70 files (from commit `fff7bf4067`):
+
+- Dead drivers and probes: antidepressant PC driver, Mondo completeness/hierarchy,
+  wearables census, sibling support, conversion analysis, run report, HPO stage-2
+  probe, incident census, episode index + probe, look-alikes, with tests, defaults
+  and Makefile targets.
+- Fit driver: ends at its save (no in-driver readout, arms, calibration, eval logger);
+  native Mondo only (SNOMED / anchor-Mondo / collapse / pre-index closure / label set /
+  episodes / profile-η / guided anchors removed). Native keys byte-identical until the
+  `cohorts.py` drop below; a spec asking for a removed option is refused, not re-keyed.
+  Both drivers reject abbreviated flags (a stale `--k 4` had parsed as `--kappa 4`).
+- Readout: one path (distributed batched solve, lean eval collect, optional stacked
+  product); acquisition, look-alikes, conditional, incident heads/arm, feature masks,
+  A/B, sklearn driver mode, collect-free cell explode, calibration and co-fit head arm
+  removed. `--readout-mode distributed` is accepted as a no-op; `--readout-l2` defaults
+  to 100. `inspect_topics` loses strip-audit, collinearity, profile-support,
+  profile-align and the VOI CLI.
+- Defaults: `population_mondo_all.yaml` is the central configuration (0163's fit argv
+  is byte-identical under it). `make exp` forwards `GPR_SPARK_CONF`. The survey's
+  framing-3 column reads the current file names. AGENTS.md hashed-module facts fixed.
+- **Cache drop:** the antidepressant block left `cohorts.py` (commit `671345b7`); every
+  bundle/corpus/covariate key moved and the tripwire pins were re-pinned. The next
+  readout of an existing run on a fresh cluster rebuilds its bundle (the drift gate
+  checks it matches the fit).
+- Tests: no new failures against the pre-cleanup baseline (the remaining failures are
+  the environmental local-Spark ones AGENTS.md describes).
+
+**Still open from step 1:** the differential's E1/E4 engines and `train_ever`/`multi`
+internals (framings stay in `analysis/` for now); the anchor-selection trio
+(`_download_cached`/`_read_bq` are imported by hashed `mondo_native_dag`); the
+`analysis/pc` prototype (it is spark-vi's test oracle, so it goes with step 2).
+
 ## Questions for the maintainer
 
 1. Antidepressant/MDD (Hughes) line, including its `cohorts.py` block and the
