@@ -1,4 +1,4 @@
-# ADR 0050 — One gated-LDA estimator; the supervised head and its satellites are removed
+# ADR 0050 — One DAG-gated LDA estimator; the supervised head and the DAG spectral init are removed
 
 **Date:** 2026-10-27
 **Status:** Proposed (maintainer review)
@@ -28,20 +28,29 @@ Params, the spectral routing, the per-domain λ conversion and the domain-bounds
    `warmStartFrom`): its only use was the supervised two-phase protocol. **`resume_from`
    stays**: continuing a fit is more iterations on the same Robbins–Monro counter, for
    every model.
-3. **One estimator**: `spark_vi.mllib.topic.GatedLDAEstimator` / `GatedLDAModel` carry
-   the union of the live Params: the gate (`frontierCol`, `gateParent`, `gateNBg`,
+3. **One estimator, named for its gate**: the engine becomes `DagGatedOnlineLDA`
+   (`models/topic/dag_gated_lda.py`) and the MLlib pair `DagGatedLDAEstimator` /
+   `DagGatedLDAModel`; the name says the gate is a DAG closure, which distinguishes it
+   from a flat labelled-LDA gate (a depth-1 DAG is that special case). It carries the
+   union of the live Params: the gate (`frontierCol`, `gateParent`, `gateNBg`,
    `gateTpn`), the schedule and seeds (`gateWarm`, `gateOpenSeed`, `gateSeedMode`
-   default **balanced**, `gateSeedOwnCodes`, `gateSeedLeaves`, `gateSeedProfile`), the
-   init (`random` | `spectral` with `spectralMethod`, `spectralD`, `spectralMaxVocab`,
-   `spectralMinDocFreq`, `spectralBgAnchors`), `docConcentration`,
-   `optimizeDocConcentration`, and multi-domain `featuresCols` / `domainBounds`.
-4. **Remove unused options**: profile-η prior (`etaBoost`, `profileEta*`; the profile
-   *seed* stays), guided anchors (`spectralAnchorCandidates`), `anchorScope=frontier`,
-   `spectralTopoOrder=reverse`, `spectralMarginalFloor`, the dense multi-domain spectral
-   path (multi-domain routes to the scalable one), `countTransform`, `alphaInit=
-   equalized`, the ω modality weight and per-domain η, and the CAVI θ twins that only
-   the head used.
-5. **Housekeeping in the same pass**: one `_destroy_broadcast` in `spark_vi.core`
+   default **balanced**, `gateSeedOwnCodes`, `gateSeedLeaves`, `gateSeedProfile`),
+   `docConcentration`, `optimizeDocConcentration`, and multi-domain `featuresCols` /
+   `domainBounds`. Initialization is random, with the data-driven gate seeds.
+4. **Remove the DAG spectral init** (`gated_init.py`'s block-aligned, multi-domain and
+   scalable anchor seeds, ~1,000 lines; the `init` / `spectral*` / `anchorScope` /
+   `spectralTopoOrder` / `spectralMarginalFloor` / `spectralBgAnchors` /
+   `spectralAnchorCandidates` Params; the anchor dump, `spectral_anchors.json`, the
+   digest's ⚓ marks and `name_spectral_anchors.py`). Last used in exp 0161; the leaf and
+   balanced seeds replaced it at equal or better quality (exps 0162, 0163), and its
+   DAG-specific variants (anchor scope, topological order, marginal floor, background
+   anchors) are complexity with no remaining use. The flat anchor-word init
+   (`spectral_init.py`, `spectral_init_scalable.py`) stays: it is the STM's validated
+   default (insight 0030) and predates this work.
+5. **Remove other unused options**: the profile-η prior (`etaBoost`, `profileEta*`; the
+   profile *seed* stays), `countTransform`, `alphaInit=equalized`, the ω modality
+   weight and per-domain η, and the CAVI θ twins that only the head used.
+6. **Housekeeping in the same pass**: one `_destroy_broadcast` in `spark_vi.core`
    (six copies today), one dict-λ → `expElogbeta` helper (three today), `DagLayout`
    built once per fit, and domain-neutral wording: the profile seed and own-code seed
    take the domain index as a parameter instead of assuming domain 0 is "conditions".
@@ -54,6 +63,8 @@ Params, the spectral routing, the per-domain λ conversion and the domain-bounds
   model and every head Param inert on the API. Rejected.
 - **Keep the head as an option**: three ADRs of engineering made it scale, and it is
   still a negative result; it stays recoverable from git (commit `fff7bf4067`).
+- **Keep the DAG spectral init as an option** (the 2026-10-23 decision): reversed on
+  2026-10-27 once the leaf seed made it redundant; it stays recoverable from git.
 - **Keep ω as an option**: a tempering weight tuned for a downstream task, never set by
   any run; observed volume cannot identify it. A learned per-topic domain mix is a
   different model question (noted below), not ω.
@@ -61,11 +72,14 @@ Params, the spectral routing, the per-domain λ conversion and the domain-bounds
 ## Consequences
 
 Supersedes ADRs 0038–0045 (the PC reference, head optimizer, head regularization, the
-injectable-engine composition and the supervised λ correction). Amends ADR 0049: the
+injectable-engine composition and the supervised λ correction), and the DAG uses of the
+spectral init in ADRs 0032 and 0037 (both stand for the flat STM path). Amends ADR 0049: the
 balanced open-time seed becomes the estimator default (`gateWarm` stays 0 by default;
 the central configuration sets it). `gated_pc_readout` reconstructs the model as a
-`GatedLDAModel` from the run's npz, so every existing run dir stays readable; models
-persisted with the old MLlib PC writer do not load (none are used). The fit driver keeps
+`DagGatedLDAModel` from the run's npz, so every existing run dir stays readable; models
+persisted with the old MLlib PC writer do not load (none are used). The older
+`dag_placement` model class (exps up to 0069) builds on the same engine and loses its
+spectral option with this change. The fit driver keeps
 its name for now; renaming the `gated_pc` model class and files is part of ADR 0051.
 
 Open model question, not decided here: each domain is a separate multinomial per topic,
