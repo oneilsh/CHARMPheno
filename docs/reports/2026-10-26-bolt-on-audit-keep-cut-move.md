@@ -185,6 +185,12 @@ and survives (moving `conversion_sidecar.py` drops only the sidecar).
 4. **Package moves and the single cache drop** (§6), as one announced commit.
 5. **Walkthrough** of what remains.
 
+## Decisions so far
+
+- 2026-10-26: **Q1 yes.** Cut the antidepressant/MDD (Hughes) line, including its
+  `cohorts.py` block and the `analysis/pc` prototype; tag the last commit that has it so
+  it can be resurrected from git.
+
 ## Questions for the maintainer
 
 1. Antidepressant/MDD (Hughes) line, including its `cohorts.py` block and the
