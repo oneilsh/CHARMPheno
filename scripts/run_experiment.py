@@ -753,7 +753,6 @@ def build_gated_pc_args(
         "--label-mask-mode", str(effective.get("label_mask_mode", "full")),
         "--n-bg", str(effective["n_bg"]),
         "--tpn", str(effective["tpn"]),
-        "--k", str(effective.get("K", 50)),
         "--weight-y", str(effective.get("weight_y", 50.0)),
         "--head-optimizer", str(effective.get("head_optimizer", "newton")),
         "--head-lr", str(effective.get("head_lr", 0.5)),
@@ -775,10 +774,7 @@ def build_gated_pc_args(
         "--kappa", str(effective.get("kappa", 0.51)),
         "--cavi-max-iter", str(effective.get("cavi_max_iter", 100)),
         "--cavi-tol", str(effective.get("cavi_tol", 1e-3)),
-        "--baseline-max-iter", str(effective.get("baseline_max_iter", -1)),
-        "--min-label-count", str(effective.get("min_label_count", 20)),
         "--num-partitions", str(effective.get("num_partitions", 0)),
-        "--eval-every", str(effective.get("eval_every", 0)),
         "--fit-save-interval", str(effective.get("fit_save_interval", 0)),
         "--out-dir", str(out_dir),
     ]
@@ -788,10 +784,6 @@ def build_gated_pc_args(
         args.extend(["--cache-uri", str(effective["cache_uri"])])
     if effective.get("optimize_doc_concentration"):
         args.append("--optimize-doc-concentration")
-    if effective.get("skip_unsup_gated"):
-        args.append("--skip-unsup-gated")
-    if effective.get("with_dag_head"):
-        args.append("--with-dag-head")
     if effective.get("localize_head"):
         args.append("--localize-head")
     if effective.get("head_support"):
@@ -800,8 +792,6 @@ def build_gated_pc_args(
         args.append("--head-intercept")
     if effective.get("head_standardize"):
         args.append("--head-standardize")
-    if effective.get("diag_only"):
-        args.append("--diag-only")
     # Spectral (anchor-word) lambda init for the gated engine (insight 0079). Emitted
     # ONLY for a non-random init: the driver already defaults to "random", so omitting
     # the flag there keeps every existing gated_pc run's arg string byte-identical (the
@@ -913,37 +903,6 @@ def build_gated_pc_args(
             args.extend(["--gate-seed-mode", str(effective["gate_seed_mode"])])
         if effective.get("gate_seed_profile"):
             args.extend(["--gate-seed-profile", str(effective["gate_seed_profile"])])
-    if effective.get("readout_sample_frac") is not None:
-        args.extend(["--readout-sample-frac", str(effective["readout_sample_frac"])])
-    if effective.get("readout_mode"):
-        args.extend(["--readout-mode", str(effective["readout_mode"])])
-    # exp 0111 WP-B: eval path for the gated_pc ranking arms (driver | distributed),
-    # orthogonal to readout_mode. The episode corpus (~x2.66 docs) makes the driver
-    # eval-collect the memory wall at C>2k, so the arms set eval_path: distributed;
-    # 0110's fewer docs let the driver path run, which is why it has no such key.
-    if effective.get("eval_path"):
-        args.extend(["--eval-path", str(effective["eval_path"])])
-    if effective.get("readout_ab_check"):
-        args.append("--readout-ab-check")
-    if effective.get("readout_max_iter") is not None:
-        args.extend(["--readout-max-iter", str(effective["readout_max_iter"])])
-    if effective.get("readout_theta_topm") is not None:
-        args.extend(["--readout-theta-topm", str(effective["readout_theta_topm"])])
-    if effective.get("readout_theta_mass"):
-        # spec 2026-10-07 §D4: truncate theta by MASS, not count (absent = omitted).
-        args.extend(["--readout-theta-mass", str(effective["readout_theta_mass"])])
-    if effective.get("readout_hierarchy"):
-        # WP-B (spec 2026-10-07 §D1/§D4): read a flat label-set fit through the
-        # Mondo hierarchy. Absent = the driver's 'auto' (on for label-set fits).
-        args.extend(["--readout-hierarchy", str(effective["readout_hierarchy"])])
-    if effective.get("readout_l2") is not None:
-        args.extend(["--readout-l2", str(effective["readout_l2"])])
-    if effective.get("readout_calibration"):
-        args.extend(["--readout-calibration", str(effective["readout_calibration"])])
-    if effective.get("head_converge_iters") is not None:
-        args.extend(["--head-converge-iters", str(effective["head_converge_iters"])])
-    if effective.get("head_fixed_ridge") is not None:
-        args.extend(["--head-fixed-ridge", str(effective["head_fixed_ridge"])])
     return args
 
 

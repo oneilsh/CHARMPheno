@@ -1619,6 +1619,7 @@ def run_prevalence_check(test_scored, run_dir, *, C, parent_int,
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
+        allow_abbrev=False,
         description="Post-hoc case-finding readout on a finished gated_pc run "
                     "(no re-fit): pc_topics_lr + precision@recall / recall@FDR / "
                     "detection for the gated_pc arm.",
