@@ -280,11 +280,11 @@ def validate_frontmatter(fm: dict) -> None:
             sys.exit(2)
 
     model_class = fm["model_class"]
-    if model_class not in ("lda", "stm", "dag_placement", "pc", "gated_pc",
-                           "anchor_select", "mondo_completeness", "mondo_hierarchy"):
+    if model_class not in ("lda", "stm", "dag_placement", "gated_pc", "anchor_select"):
         print(f"[run-exp] ERROR: model_class {model_class!r} not supported "
-              f"(currently: lda, stm, dag_placement, pc, gated_pc, anchor_select, "
-              f"mondo_completeness, mondo_hierarchy; hdp planned)", flush=True)
+              f"(currently: lda, stm, dag_placement, gated_pc, anchor_select; the "
+              f"pc / mondo_completeness / mondo_hierarchy drivers were removed in the "
+              f"2026-10 cleanup, last at commit fff7bf4067)", flush=True)
         sys.exit(2)
 
     if model_class == "stm":
@@ -317,16 +317,10 @@ def build_fit_driver_path(effective: dict) -> str:
         return f"{base}/stm_bigquery_cloud.py"
     if model_class == "dag_placement":
         return f"{base}/dag_placement_cloud.py"
-    if model_class == "pc":
-        return f"{base}/pc_antidepressant_cloud.py"
     if model_class == "gated_pc":
         return f"{base}/gated_pc_cloud.py"
     if model_class == "anchor_select":
         return f"{base}/anchor_selection_cloud.py"
-    if model_class == "mondo_completeness":
-        return f"{base}/mondo_completeness_cloud.py"
-    if model_class == "mondo_hierarchy":
-        return f"{base}/mondo_hierarchy_cloud.py"
     raise ValueError(f"no fit driver for model_class={model_class!r}")
 
 
@@ -346,48 +340,13 @@ def build_fit_args(
         return build_stm_args(effective, out_dir, resume_from)
     if model_class == "dag_placement":
         return build_dag_placement_args(effective, out_dir, resume_from)
-    if model_class == "pc":
-        return build_pc_args(effective, out_dir, resume_from)
     if model_class == "gated_pc":
         return build_gated_pc_args(effective, out_dir, resume_from)
     if model_class == "anchor_select":
         return build_anchor_select_args(effective, out_dir)
-    if model_class == "mondo_completeness":
-        return build_mondo_completeness_args(effective, out_dir)
-    if model_class == "mondo_hierarchy":
-        return build_mondo_hierarchy_args(effective, out_dir)
     raise ValueError(f"unknown model_class: {model_class!r}")
 
 
-def build_mondo_hierarchy_args(effective: dict, out_dir: str) -> list[str]:
-    """argv for analysis/cloud/mondo_hierarchy_cloud.py — whole-Mondo powered DAG
-    (map -> power-count -> reduce to branch points) + implied-K report."""
-    cdr, billing = _require_workspace_env()
-    return [
-        "--cdr", cdr,
-        "--billing", billing,
-        "--out", str(out_dir),
-        "--min-positives", str(effective.get("min_positives", 100)),
-        "--min-class-size", str(effective.get("min_class_size", 2)),
-        "--max-class-fraction", str(effective.get("max_class_fraction", 1.0)),
-        "--tpn", str(effective.get("tpn", 1)),
-        "--mondo-version", str(effective.get("mondo_version", "2026-06-02")),
-        "--mondo-cache-dir", str(effective.get("mondo_cache_dir", "data/mondo")),
-    ]
-
-
-def build_mondo_completeness_args(effective: dict, out_dir: str) -> list[str]:
-    """argv for analysis/cloud/mondo_completeness_cloud.py — whole-Mondo mapping
-    completeness + unplaced-condition diagnostic (small-cell suppressed)."""
-    cdr, billing = _require_workspace_env()
-    return [
-        "--cdr", cdr,
-        "--billing", billing,
-        "--out", str(out_dir),
-        "--mondo-version", str(effective.get("mondo_version", "2026-06-02")),
-        "--mondo-cache-dir", str(effective.get("mondo_cache_dir", "data/mondo")),
-        "--top-unplaced", str(effective.get("top_unplaced", 100)),
-    ]
 
 
 def build_anchor_select_args(effective: dict, out_dir: str) -> list[str]:
@@ -488,28 +447,6 @@ def _resume_corpus_mismatches(checkpoint_manifest: dict, effective: dict) -> lis
         if _norm(ck_spec) != _norm(want_spec):
             mismatches.append(
                 f"topic_block_spec: checkpoint={ck_spec!r} != config={want_spec!r}")
-    # PC-specific membership fields. The base `expected` block above covers
-    # person_mod + cohort (which PC also stores), but PC's corpus is additionally
-    # determined by its pre-index window / outcome-stability / vocab-pruning
-    # knobs, none of which the LDA/STM guard knows about. Compare them ONLY for
-    # model_class=pc (and only when present in the checkpoint), so LDA/STM resume
-    # behavior is unchanged while a PC warm-start onto a differently-windowed or
-    # differently-pruned corpus is refused rather than silently trained.
-    if effective.get("model_class") == "pc":
-        pc_expected = {
-            "lookback_days": effective.get("lookback_days"),
-            "window_days": effective.get("window_days"),
-            "stability_days": effective.get("stability_days"),
-            "grace_gap_days": effective.get("grace_gap_days"),
-            "min_df": effective.get("min_df"),
-            "min_patient_count": effective.get("min_patient_count"),
-        }
-        for key, want in pc_expected.items():
-            if key not in checkpoint_manifest:
-                continue
-            if checkpoint_manifest[key] != want:
-                mismatches.append(
-                    f"{key}: checkpoint={checkpoint_manifest[key]!r} != config={want!r}")
     return mismatches
 
 
@@ -1010,137 +947,6 @@ def build_gated_pc_args(
     return args
 
 
-def build_pc_args(
-    effective: dict, out_dir: str, resume_from: Path | None = None,
-) -> list[str]:
-    """Build argv for analysis/cloud/pc_antidepressant_cloud.py (Phase-C PC).
-
-    Faithful multi-task Prediction-Constrained topic model. Unlike dag_placement,
-    ``K`` is a real flag. The PC driver writes ONE results JSON via ``--out``
-    (pointed at the run dir). cdr/billing come from the workspace env exactly as
-    the other drivers. Every key maps to ``--key.replace('_','-')``.
-
-    Cohort: the ``cohort`` config key selects the driver's ``--cohort``. The
-    default ``mdd_antidepressant`` (the per-index-drug ">=90-day the drug worked"
-    cohort) is the driver's OWN argparse default, so it is left IMPLICIT — the
-    mdd_antidepressant argv stays byte-for-byte the prior command line (no
-    ``--cohort`` flag). ``cohort: mdd_stable_treatment`` (the Hughes-faithful
-    fully-observed stable-treatment cohort with all-history features) instead
-    emits ``--cohort mdd_stable_treatment`` plus its stable knobs
-    (``min_days`` -> ``--min-days``, ``max_gap_days`` -> ``--max-gap-days``,
-    ``min_history_events`` -> ``--min-history-events``, ``age_min`` -> ``--age-min``,
-    ``age_max`` -> ``--age-max``); the antidepressant window/stability/lookback
-    flags are inert for that cohort (the driver ignores them) but still emitted.
-
-    Backend: the ``backend`` config key selects the fit backend (default
-    ``inmem`` = the in-memory L-BFGS PC, byte-for-byte the prior behavior).
-    ``backend: vi`` selects the distributed VI-native OnlinePCLDAEstimator and additionally
-    passes the SVI schedule knobs (``subsampling_rate`` -> ``--subsampling-rate``,
-    ``tau0`` -> ``--tau0``, ``kappa`` -> ``--kappa``) and the unsupervised-warm-start
-    knob (``warm_start_unsup_iters`` -> ``--warm-start-unsup-iters``, default 0 =
-    cold start); those flags are omitted for the inmem backend so its argv is
-    unchanged.
-
-    Resume (VI backend only): the VI-native OnlinePCLDAEstimator checkpoints its VIResult,
-    so for ``backend: vi`` this also threads ``--save-dir <out_dir>`` +
-    ``--save-interval <save_interval>`` (and ``--resume-from <out_dir>`` when
-    ``resume_from`` is set) exactly as :func:`build_lda_args` does; ``--max-iter``
-    is then ADDITIONAL iterations on resume. The inmem (L-BFGS) backend has no
-    interim state, so ``resume_from`` is ignored there and NO save flags are
-    added — its argv stays byte-for-byte unchanged.
-    """
-    cdr, billing = _require_workspace_env()
-    backend = str(effective.get("backend", "inmem"))
-    args = [
-        "--cdr", cdr,
-        "--billing", billing,
-        "--backend", backend,
-        "--K", str(effective["K"]),
-        "--weight-y", str(effective["weight_y"]),
-        "--alpha", str(effective.get("alpha", 1.1)),
-        "--tau", str(effective.get("tau", 1.1)),
-        "--pi-iters", str(effective.get("pi_iters", 100)),
-        "--max-iter", str(effective["max_iter"]),
-        "--doc-batch-size", str(effective.get("doc_batch_size", 2048)),
-        "--lookback-days", str(effective.get("lookback_days", 365)),
-        "--window-days", str(effective.get("window_days", 365)),
-        "--stability-days", str(effective.get("stability_days", 90)),
-        "--grace-gap-days", str(effective.get("grace_gap_days", 30)),
-        "--vocab-size", str(effective["vocab_size"]),
-        "--min-df", str(effective["min_df"]),
-        "--min-patient-count", str(effective["min_patient_count"]),
-        "--person-mod", str(effective["person_mod"]),
-        "--test-frac", str(effective.get("test_frac", 0.25)),
-        "--seed", str(effective.get("seed", 0)),
-        "--min-label-count", str(effective.get("min_label_count", 20)),
-        # Baseline controls (both backends): --baseline-max-iter caps the two-stage
-        # unsupervised topic fit (<=0 => use --max-iter); --skip-two-stage (a
-        # store_true flag, emitted only when set) drops the two-stage baseline.
-        "--baseline-max-iter", str(effective.get("baseline_max_iter", -1)),
-        "--out", str(Path(out_dir) / "pc_results.json"),
-    ]
-    if effective.get("skip_two_stage"):
-        args.append("--skip-two-stage")
-    # Cohort selector: mdd_antidepressant (the driver default) stays IMPLICIT so
-    # its argv is byte-for-byte unchanged; mdd_stable_treatment emits --cohort +
-    # its stable-treatment knobs (which the antidepressant path never sees).
-    cohort = str(effective.get("cohort", "mdd_antidepressant"))
-    if cohort == "mdd_stable_treatment":
-        args.extend([
-            "--cohort", cohort,
-            "--min-days", str(effective.get("min_days", 90)),
-            "--max-gap-days", str(effective.get("max_gap_days", 395)),
-            "--min-history-events", str(effective.get("min_history_events", 2)),
-            "--age-min", str(effective.get("age_min", 18)),
-            "--age-max", str(effective.get("age_max", 80)),
-        ])
-    # VI backend: thread the distributed-SVI schedule knobs AND the checkpoint /
-    # resume flags (the VI-native OnlinePCLDAEstimator persists its VIResult, so resume is
-    # supported). Both are kept out of the inmem argv so the default backend's
-    # command line is byte-for-byte unchanged (L-BFGS has no interim state).
-    if backend == "vi":
-        args.extend([
-            "--subsampling-rate", str(effective.get("subsampling_rate", 0.05)),
-            "--tau0", str(effective.get("tau0", 1024.0)),
-            "--kappa", str(effective.get("kappa", 0.51)),
-            # Head-only learning-rate controls (RM <-> weight_y decoupling): scale
-            # the logistic-head SGD step alone (converge an under-moved head in
-            # fewer iters without touching the topic schedule) and optionally ramp
-            # weight_y in so a hot head doesn't spike early. VI-only; default 1.0/0
-            # => byte-for-byte the prior VI argv when unset.
-            "--head-lr-scale", str(effective.get("head_lr_scale", 1.0)),
-            "--weight-y-warmup-iters", str(effective.get("weight_y_warmup_iters", 0)),
-            # Head optimizer: 'sgd' (default; shares the topics' RM schedule) or
-            # 'newton' (a per-iteration ridge-Newton/IRLS step that converges the head
-            # on the current theta — the settled head fix, ADR 0039). head_lr is the
-            # newton step-damping fraction (ignored for sgd). Default sgd/0.05 =>
-            # byte-for-byte the prior VI argv when unset.
-            "--head-optimizer", str(effective.get("head_optimizer", "sgd")),
-            "--head-lr", str(effective.get("head_lr", 0.05)),
-            # newton head: relative ridge conditioning the per-label IRLS solve.
-            "--head-newton-ridge", str(effective.get("head_newton_ridge", 0.01)),
-            # Per-iteration trust-region on the supervised topic correction (maps
-            # to OnlinePCLDAEstimator.topicTrust). Default 0.1; lower to keep the supervised
-            # topics near the unsupervised warm-start, 0 to freeze them (head-only).
-            "--topic-trust", str(effective.get("topic_trust", 0.1)),
-            # Differentiable-CAVI unroll depth for the supervised theta. Must be
-            # deep enough to MATCH the scoring CAVI (converged) or the co-fit head
-            # trains on a different theta than it is scored on. 20 for small docs;
-            # ~50 for large (avg ~300+ token) docs.
-            "--grad-cavi-iters", str(effective.get("grad_cavi_iters", 20)),
-            # Unsupervised-warm-start (Hughes et al.): 0 (default) = cold start;
-            # N > 0 runs a phase-1 weight_y=0 topic warm-up before the supervised
-            # phase 2 (fresh RM schedule). VI-only; absent from the inmem argv.
-            "--warm-start-unsup-iters", str(effective.get("warm_start_unsup_iters", 0)),
-            "--save-dir", str(out_dir),
-            "--save-interval", str(effective.get("save_interval", -1)),
-        ])
-        if resume_from is not None:
-            args.extend(["--resume-from", str(resume_from)])
-    if effective.get("cache_uri"):
-        args.extend(["--cache-uri", str(effective["cache_uri"])])
-    return args
-
 
 def build_eval_args(checkpoint_dir: Path, effective: dict) -> list[str]:
     """Build the CLI arg list for eval_coherence_cloud.py."""
@@ -1228,7 +1034,7 @@ def _apply_dev_profile(effective: dict) -> dict:
     """
     if os.environ.get("CHARM_DEV", "").strip().lower() not in ("1", "true", "yes", "on"):
         return effective
-    if effective.get("model_class") not in ("pc", "gated_pc"):
+    if effective.get("model_class") != "gated_pc":
         return effective
     dev = dict(effective)
     dev["max_iter"] = min(int(effective.get("max_iter", 100)), 30)
@@ -1311,7 +1117,7 @@ def _driver_memory_for(model_class: str) -> str:
     override = os.environ.get("CHARM_DRIVER_MEMORY")
     if override:
         return override
-    return "8g" if model_class in ("pc", "gated_pc") else "4g"
+    return "8g" if model_class == "gated_pc" else "4g"
 
 
 def cluster_overlay_path(repo_root: Path) -> Path:
@@ -1871,7 +1677,7 @@ def main(argv: list[str] | None = None) -> int:
         # REPO_ROOT on PYTHONPATH lets the import resolve. Other model_classes
         # import only the zipped packages.
         fit_env: dict | None = None
-        if model_class in ("pc", "gated_pc"):
+        if model_class == "gated_pc":
             fit_env = {
                 **os.environ,
                 "PYTHONPATH": f"{REPO_ROOT}:{os.environ.get('PYTHONPATH', '')}",
@@ -1908,19 +1714,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.build_only:
         print("[run-exp] --build-only: skipping eval dispatch", flush=True)
         # Fall through to the build-dispatch block below.
-    elif effective.get("model_class") in ("dag_placement", "pc", "gated_pc",
-                                          "anchor_select", "mondo_completeness",
-                                          "mondo_hierarchy"):
+    elif effective.get("model_class") in ("dag_placement", "gated_pc", "anchor_select"):
         # These write their own self-contained result (dag_placement: npz +
-        # manifest with placement AUC/MRR; pc: pc_results.json with per-drug
-        # heldout AUC; gated_pc: npz + manifest with pc_topics_lr per arm;
+        # manifest with placement AUC/MRR; gated_pc: npz + manifest;
         # anchor_select: candidates_with_counts.tsv + the coverage ladder), not a
         # topic-word bundle the NPMI eval driver can read.
         _mc = effective.get("model_class")
-        _artifact = ("pc_results.json" if _mc == "pc"
-                     else "candidates_with_counts.tsv" if _mc == "anchor_select"
-                     else "mondo_omop_mapping.tsv" if _mc == "mondo_completeness"
-                     else "mondo_powered_hierarchy.tsv" if _mc == "mondo_hierarchy"
+        _artifact = ("candidates_with_counts.tsv" if _mc == "anchor_select"
                      else "manifest.json")
         print(f"[run-exp] model_class={_mc}: NPMI eval not wired for the "
               f"self-contained result; skipping eval (see {_artifact} + fit log).",
