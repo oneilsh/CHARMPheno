@@ -188,8 +188,9 @@ and survives (moving `conversion_sidecar.py` drops only the sidecar).
 ## Decisions so far
 
 - 2026-10-26: **Q1 yes.** Cut the antidepressant/MDD (Hughes) line, including its
-  `cohorts.py` block and the `analysis/pc` prototype; tag the last commit that has it so
-  it can be resurrected from git.
+  `cohorts.py` block and the `analysis/pc` prototype. **Resurrection point: commit
+  `fff7bf4067`** on `claude/dismech-ribbon` (the last commit before any cut; the
+  tag `pre-cleanup-2026-10` exists locally only, as tag pushes are refused here).
 - 2026-10-26: **Profile-η prior: cut** (the continuous word-side prior; the profile
   *seed* stays). **Fit-time label set: cut** (the ribbon is a post-hoc readout subset).
   **Cache drops: not a cost concern** (clusters are recreated near-daily and caches are
