@@ -177,3 +177,13 @@ its cause (cluster state, or θ recompute cost) is not pinned down. Both solves 
 200-iteration cap with about 45% of nodes converged (gtol or stall), about 140 line-search
 failures. A warm-started continuation (`--readout-warm-from stacked_nodes_mass99
 --readout-max-iter 400`, outputs tagged `..._warm_it400`) checks whether the AUCs move.
+
+**2026-10-26 — convergence re-solve result.** Warm-started from the 200-iteration heads
+for 400 more iterations (fresh cluster, ~26 h solve): converged 471 → 933 of 1,060
+(381 gtol, 554 stalled), max|grad| 145 → 5.5, line-search failures 573. New-diagnosis
+AUC on the 827 ribbon nodes did not move: stacked 0.7104 → 0.7105 (median +0.0001; every
+stratum ±0.000), flat 0.6059 → 0.6059. The 200-iteration cap is enough for these
+comparisons; 0161 vs 0163 stands. Timing: 48 s per pass with 68 nodes per pass on this
+cluster, against 22 s with 233 nodes on 0163's original cluster. A pass costs the scan of
+the θ frame, not the nodes still searching, and that cost varies about 2–3× between
+clusters for the same model, which is the likeliest reading of 0161's slow readout.
