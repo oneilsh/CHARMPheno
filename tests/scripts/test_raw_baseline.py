@@ -98,3 +98,17 @@ def test_masked_heads_drop_out_of_the_distributed_solve(spark, tmp_path, capsys)
                     stacked=True, parent_int={0: [], 1: [0], 2: [0]}, readout_l2=1.0)
     z = np.load(tmp_path / "readout_heads_gated_pc_nodes_stacked.npz")
     assert bool(z["degenerate"][2]) and not bool(z["degenerate"][1])
+
+
+def test_model_codes_round_robin_over_node_topics_skipping_background():
+    import numpy as np
+    from gated_pc_readout import select_model_codes
+    # K = 3: topic 0 background (would pick word 0), topics 1, 2 node blocks.
+    lam = {0: np.array([[9.0, 0, 0, 0], [0, 5, 4, 0], [0, 0, 1, 0]]),
+           1: np.array([[0.0, 0], [0, 1], [3, 0]])}
+    # topic 1 ranks: (0,1) .556, (0,2) .444, (1,1) 1.0 -> (1,1), (0,1), (0,2)
+    # topic 2 ranks: (0,2) 1.0, (1,0) 1.0 -> (0,2), (1,0)
+    assert select_model_codes(lam, 1, 2) == [(0, 2), (1, 1)]
+    assert select_model_codes(lam, 1, 3) == [(0, 1), (0, 2), (1, 1)]   # (0,2) seen
+    assert select_model_codes(lam, 1, 10) == [(0, 1), (0, 2), (1, 0), (1, 1)]
+    assert (0, 0) not in select_model_codes(lam, 1, 10)                # background

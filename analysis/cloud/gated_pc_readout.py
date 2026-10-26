@@ -315,6 +315,20 @@ def mask_to_nodes(df, keep, *, mask_col="labelMask"):
                                                lambda x, i: x * lit[i]))
 
 
+def _raw_tokens_name(select):
+    return ("raw_baseline_tokens.json" if select == "freq"
+            else f"raw_baseline_tokens_{select}.json")
+
+
+def _load_lambda(run_dir):
+    """The saved fit's λ: one array, or the multi-domain {m: (K, V_m)} dict."""
+    npz = np.load(Path(run_dir) / "gated_pc_result.npz")
+    if "lambda" in npz.files:
+        return npz["lambda"]
+    return {int(f.split("_", 1)[1]): npz[f] for f in npz.files
+            if f.startswith("lambda_")}
+
+
 def raw_feature_cols(df):
     """The per-domain BOW columns of a bundle frame, in domain order."""
     cols = sorted((c for c in df.columns if c.startswith("features_")),
@@ -342,6 +356,44 @@ def select_raw_codes(train_df, n_top, feat_cols):
               .reduceByKey(lambda a, b: a + b).collect())
     counts.sort(key=lambda kv: (-kv[1], kv[0]))
     return sorted(k for k, _ in counts[:int(n_top)])
+
+
+def select_model_codes(lam, n_bg, n_top):
+    """The `n_top` (domain, vocab idx) tokens the FIT puts at the head of its node
+    topics: round-robin over the block topics (indices >= `n_bg`; the background is
+    the frequent, shared vocabulary), each topic contributing its next-ranked unseen
+    token per round, until `n_top` are chosen. Sorted by (domain, idx).
+
+    Why: the frequency-selected raw baseline (`select_raw_codes`) never consults the
+    model, so "codes beat θ" leaves open what the model is for. This set is the
+    model's own per-node vocabulary — a model-informed feature selection with the
+    same budget — so raw(frequency) vs raw(model) asks whether the fit picks better
+    predictors than counting does. Within a topic, tokens rank by their per-domain
+    normalized λ (each domain's β sums to 1, as the engine normalizes them); `lam` is
+    the multi-domain dict {m: (K, V_m)} or a single (K, V) array."""
+    doms = lam if isinstance(lam, dict) else {0: lam}
+    keys = sorted(doms)
+    K = int(np.asarray(doms[keys[0]]).shape[0])
+    ranked = []
+    for k in range(int(n_bg), K):
+        cand = []
+        for m in keys:
+            row = np.asarray(doms[m][k], dtype=np.float64)
+            tot = row.sum()
+            if tot > 0:
+                p = row / tot
+                cand.extend((float(p[i]), int(m), int(i)) for i in np.flatnonzero(p))
+        cand.sort(key=lambda t: (-t[0], t[1], t[2]))
+        ranked.append([(m, i) for _, m, i in cand])
+    chosen, seen, r = [], set(), 0
+    while len(chosen) < int(n_top) and any(r < len(t) for t in ranked):
+        for t in ranked:
+            if r < len(t) and t[r] not in seen:
+                seen.add(t[r]); chosen.append(t[r])
+                if len(chosen) >= int(n_top):
+                    break
+        r += 1
+    return sorted(chosen)
 
 
 def raw_presence_kernel(get_pos, n_cols):
@@ -1622,6 +1674,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "over all test patients vs with prior-diagnosis patients set "
                         "aside (mapped own code in the pre-index features). Transforms "
                         "the test split only.")
+    p.add_argument("--raw-select", choices=["freq", "model"], default="freq",
+                   help="How --raw-baseline picks its N tokens: 'freq' = train document "
+                        "frequency (exp 0147); 'model' = round-robin over the fit's node "
+                        "topics' top words (select_model_codes). Model outputs are "
+                        "tagged 'rawm<N>'.")
     p.add_argument("--raw-baseline", type=int, default=0, metavar="N",
                    help="Exp 0147: RAW-CODE BASELINE. Skip the θ transform; the heads "
                         "are fit on the binary presence of the N most frequent train "
@@ -2836,7 +2893,8 @@ def main(argv=None) -> int:
             if args.raw_baseline:
                 # Exp 0147 re-check from SAVED raw heads: the exact token list the
                 # solve used (raw_baseline_tokens.json), test split only, no solve.
-                _tj = json.loads((run_dir / "raw_baseline_tokens.json").read_text())
+                _tj = json.loads((run_dir / _raw_tokens_name(args.raw_select))
+                                 .read_text())
                 if int(_tj["n"]) != int(args.raw_baseline):
                     raise SystemExit(f"[readout] raw_baseline_tokens.json has n="
                                      f"{_tj['n']}, not --raw-baseline {args.raw_baseline}")
@@ -2887,6 +2945,13 @@ def main(argv=None) -> int:
             with _phase(f"raw-code baseline features (exp 0147, top {args.raw_baseline})"):
                 _fcols = raw_feature_cols(train_scored)
                 _sel = select_raw_codes(train_scored, args.raw_baseline, _fcols)
+                if args.raw_select == "model":
+                    _freq = set(_sel)
+                    _sel = select_model_codes(_load_lambda(run_dir),
+                                              int(manifest["n_bg"]), args.raw_baseline)
+                    _cprint(f"[readout]   raw baseline, MODEL-selected: {len(_sel)} "
+                            f"tokens from the node topics; {len(_freq & set(_sel))} also "
+                            f"in the frequency top {args.raw_baseline}", flush=True)
                 _tr_r = attach_raw_presence(train_scored, _sel, _fcols).cache()
                 _te_r = attach_raw_presence(test_scored, _sel, _fcols).cache()
                 _by_dom = {}
@@ -2899,8 +2964,8 @@ def main(argv=None) -> int:
                 train_scored, test_scored = _tr_r, _te_r
                 _manifest_ro = dict(manifest, K=len(_sel), readout_theta_topm=0,
                                     readout_theta_mass=0)
-                (run_dir / "raw_baseline_tokens.json").write_text(json.dumps(
-                    {"n": len(_sel), "feat_cols": _fcols,
+                (run_dir / _raw_tokens_name(args.raw_select)).write_text(json.dumps(
+                    {"n": len(_sel), "feat_cols": _fcols, "select": args.raw_select,
                      "tokens": [[int(d), int(i)] for d, i in _sel]}))
         _test_unmasked = test_scored
         if args.readout_nodes:
@@ -2993,7 +3058,8 @@ def main(argv=None) -> int:
             if args.readout_incident:
                 _mtag = "incident" + (f"_{_mtag}" if _mtag else "")
             if args.raw_baseline:
-                _mtag = f"raw{int(args.raw_baseline)}" + (f"_{_mtag}" if _mtag else "")
+                _mtag = (("rawm" if args.raw_select == "model" else "raw")
+                         + f"{int(args.raw_baseline)}" + (f"_{_mtag}" if _mtag else ""))
             if args.readout_nodes:
                 _mtag = "nodes" + (f"_{_mtag}" if _mtag else "")
             if args.readout_stacked:
