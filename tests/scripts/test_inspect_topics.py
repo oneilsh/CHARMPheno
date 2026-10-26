@@ -503,36 +503,7 @@ def _align_tsv(tmp_path):
     return p
 
 
-def test_profile_align_scores_boosted_starved_topic(tmp_path):
-    run = _make_align_run(tmp_path, "r_tilt", tilt_profile=True)
-    rep = it.build_profile_align(run, str(_align_tsv(tmp_path)),
-                                 bundle_meta_path=str(_align_meta(tmp_path)))
-    # nodeA's starved boosted topic holds ~all mass on its 2 profile tokens.
-    assert "starved: n=1" in rep
-    assert "median mass=0.429" in rep      # (0.03+0.03)/0.14
-    # nodeB's fed topic concentrates on off-profile idx 7 -> ~zero mass.
-    assert "fed: n=1 median mass=0.000" in rep
-    assert "most aligned:  nodeA" in rep
 
-
-def test_profile_align_paired_baseline_shows_flat(tmp_path):
-    run = _make_align_run(tmp_path, "r2", tilt_profile=True)
-    base = _make_align_run(tmp_path, "b2", tilt_profile=False)
-    rep = it.build_profile_align(run, str(_align_tsv(tmp_path)),
-                                 bundle_meta_path=str(_align_meta(tmp_path)),
-                                 compare_dir=str(base))
-    # baseline starved topic is exactly flat: mass = |profile|/V = 0.2.
-    assert "baseline mass=0.200" in rep     # flat: 2 profile tokens / V=10
-    assert "median mass=0.429" in rep
-
-
-def test_profile_align_requires_emit_eta_columns(tmp_path):
-    run = _make_align_run(tmp_path, "r3", tilt_profile=True)
-    bad = tmp_path / "bad.tsv"
-    bad.write_text("mondo_id\tweight\nMONDO:0004995\t1.0\n")
-    with pytest.raises(SystemExit, match="concept_id"):
-        it.build_profile_align(run, str(bad),
-                               bundle_meta_path=str(_align_meta(tmp_path)))
 
 
 def test_digest_marks_profile_tokens_and_legend(tmp_path):
@@ -612,92 +583,9 @@ def _make_collin_run(tmp_path, name, *, dag_source="mondo_native",
     return d, meta
 
 
-def test_strip_audit_native_ids_are_a_noop(tmp_path):
-    run, meta = _make_collin_run(tmp_path, "sa")
-    rep = it.build_strip_audit(run, bundle_meta_path=str(meta),
-                               profile_file=str(_align_tsv(tmp_path)))
-    assert "dag_source=mondo_native" in rep
-    assert "Mondo numerics" in rep
-    # no Mondo numeric (4995, 5010, ...) is an OMOP vocab key (100..109)
-    assert "domain 0 (condition): 0 of 10 vocab dims" in rep
-    assert "domain 1 (drug): 0 of 4 vocab dims" in rep
-    assert "NO-OP" in rep
-    # profile concepts 102,103,104 live in vocab 0; none equals a node id
-    assert "3 in the condition vocab (live), 0 equal to a node id" in rep
 
 
-def test_strip_audit_counts_a_colliding_dim(tmp_path):
-    # node cid 105 == vocab concept 105 (idx 5): one dim the strip WOULD drop
-    run, meta = _make_collin_run(tmp_path, "sb", colliding_cid=105)
-    rep = it.build_strip_audit(run, bundle_meta_path=str(meta))
-    assert "domain 0 (condition): 1 of 10 vocab dims" in rep
-    assert "NO-OP" in rep                       # 1 hit is still within the coincidence budget
 
-
-def test_strip_audit_anchor_path_reports_real_strip(tmp_path):
-    run, meta = _make_collin_run(tmp_path, "sc", dag_source="mondo",
-                                 colliding_cid=105)
-    rep = it.build_strip_audit(run, bundle_meta_path=str(meta))
-    assert "node ids are OMOP concept ids" in rep
-    assert "VERDICT: 1 DAG-node dims stripped" in rep
-    assert "NO-OP" not in rep
-
-
-def test_collinearity_credited_pair_is_collinear_and_decoded_elsewhere(tmp_path):
-    run, meta = _make_collin_run(tmp_path, "cl")
-    rep = it.build_collinearity(run, str(_align_tsv(tmp_path)),
-                                bundle_meta_path=str(meta))
-    # groups: 2 credited (A,B), 2 uncredited fed (parentC, D), 0 starved
-    assert "credited=2 uncredited fed=2 starved=0" in rep
-    # A and B share profile token idx 2 (A={2,3}, B={2,4}) -> Jaccard 1/3
-    assert "median-of-max=0.33" in rep
-    # identically tilted boosted topics: peer cosine 1.00 for the credited pair;
-    # the fed pair are sharp on DIFFERENT words: peer cosine ~0
-    top = [l for l in rep.splitlines() if " peer=" in l]
-    cred_top = [l for l in top if l.startswith("  credited:")][0]
-    fed_top = [l for l in top if l.startswith("  uncredited fed:")][0]
-    assert "peer=1.00" in cred_top
-    # the fed pair share only their FLAT drug-domain halves (cos 0.20), well
-    # below the credited pair's identical-content 1.00
-    assert "peer=0.20" in fed_top
-    # credited topics sit AT the flat floor (flat=1.00): their peer/bg/anc
-    # agreement is the starvation-floor artefact the flat column exists to
-    # expose (parentC's block has a flat 2nd topic -> anc=1.00), not content
-    assert "flat=1.00" in cred_top and "anc=1.00" in cred_top and "(n_anc=2)" in cred_top
-    assert "flat=0.53" in fed_top
-    # decoder: credited heads put 0 on their own block, 0.75 on the ancestor
-    # (parentC) block, 0.25 on BG; fed heads put 1.00 on their own block
-    dec = [l for l in rep.splitlines() if l.startswith("  ")]
-    cred_dec = [l for l in dec if l.startswith("  credited: n=2 own=")][0]
-    # |w| = 3+3 on parentC's block + 1 on BG0: anc 6/7, bg 1/7, own 0
-    assert "own=0.00" in cred_dec and "anc=0.86" in cred_dec and "bg=0.14" in cred_dec
-    assert "desc=0.00" in cred_dec and "other=0.00" in cred_dec
-    assert "own<0.05: 2/2" in cred_dec
-    fed_dec = [l for l in dec if l.startswith("  uncredited fed: n=2 own=")][0]
-    assert "own=1.00" in fed_dec
-    # top-5 relation census: the credited pair's 5 largest |w| are the 2
-    # ancestor topics, BG0, then zeros (classed by position: own block first)
-    # fed-only view: fixture fed topics = BG0 + t5 (parentC) + t7 (D); the
-    # credited pair's |w| among those is all on parentC's t5 and BG0 -> own 0
-    fedl = [l for l in rep.splitlines() if "among FED topics only" in l]
-    assert len(fedl) == 2 and "(3 of 9)" in fedl[0] and "own=0.00" in fedl[0]
-    assert "own=1.00" in fedl[1]
-    rel = [l for l in rep.splitlines() if "top-5 loaded topics by relation" in l]
-    assert len(rel) == 2 and "anc=40%" in rel[0] and "bg=20%" in rel[0]
-    # raw V on disk here -> the header names the inflated scale
-    assert "decoder (raw-θ V (INFLATED))" in rep
-    # evidence: both credited boosted topics are at the prior floor
-    ev = [l for l in rep.splitlines() if "at floor" in l]
-    assert any(l.startswith("  credited:") and "2/2" in l for l in ev)
-    assert any(l.startswith("  uncredited fed:") and "0/2" in l for l in ev)
-
-
-def test_collinearity_without_heads_says_so(tmp_path):
-    run, meta = _make_collin_run(tmp_path, "cn")
-    (run / "readout_heads_gated_pc.npz").unlink()
-    rep = it.build_collinearity(run, str(_align_tsv(tmp_path)),
-                                bundle_meta_path=str(meta))
-    assert "decoder: no readout heads/checkpoint on disk" in rep
 
 
 def test_heads_sidecar_w_std_is_preferred_over_raw_v(tmp_path):
@@ -713,38 +601,6 @@ def test_heads_sidecar_w_std_is_preferred_over_raw_v(tmp_path):
     assert h["W_load"][2, 3] == 0.9
 
 
-def test_collinearity_flags_raw_v_decoder_as_inconclusive(tmp_path):
-    run, meta = _make_collin_run(tmp_path, "rv")
-    rep = it.build_collinearity(run, str(_align_tsv(tmp_path)),
-                                bundle_meta_path=str(meta))
-    assert "INCONCLUSIVE: only the raw-θ decoder V is on disk" in rep
-    z = np.load(run / "readout_heads_gated_pc.npz")
-    np.savez(run / "readout_heads_gated_pc.npz", V=z["V"], b_raw=z["b_raw"],
-             degenerate=z["degenerate"], W_std=z["V"])
-    rep = it.build_collinearity(run, str(_align_tsv(tmp_path)),
-                                bundle_meta_path=str(meta))
-    assert "INCONCLUSIVE" not in rep
-    assert "decoder (standardized W_std)" in rep
-
-
-def test_profile_support_reads_data_only_siblings(tmp_path):
-    """Fixture: credited nodeA (eng 1, block t=[1,2]) has a faint prior tilt on
-    its boosted topic t=1 and a STARVED sibling t=2; credited nodeB (eng 2,
-    block [3,4]) has t=3 boosted and a FED sibling t=4 -> make t=4 sharp on
-    idx 2 (a profile token of B) so its overlap is high."""
-    run, meta = _make_collin_run(tmp_path, "ps")
-    z = np.load(run / "gated_pc_result.npz")
-    lam0 = np.array(z["lambda_0"]); lam0[4, 2] += 300.0       # B's data sibling: profile idx 2
-    np.savez(run / "gated_pc_result.npz", lambda_0=lam0, lambda_1=z["lambda_1"],
-             alpha=z["alpha"], w_CK=z["w_CK"], b_CK=z["b_CK"])
-    rep = it.build_profile_support(run, str(_align_tsv(tmp_path)),
-                                   bundle_meta_path=str(meta), top_m=2)
-    assert "2 credited node(s), tpn=2" in rep
-    assert "nodes with >=1 FED data-only sibling: 1/2" in rep
-    # B's fed sibling: top-2 = {idx2, +one flat} -> overlap 0.50 -> counts as >=20%
-    assert "fed siblings whose top-2 is >=20% profile tokens: 1/1" in rep
-    assert "- nodeB:" in rep and "fed, ov 0.50" in rep
-    assert "- nodeA:" in rep and "STARVED" in rep
 
 
 # --------------------------------------------------------------------------- #

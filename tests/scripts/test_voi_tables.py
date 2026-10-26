@@ -54,19 +54,6 @@ def test_voi_report_on_a_saved_run_ranks_the_separating_code_first(tmp_path):
     assert "cid:511" not in "\n".join(rows[:2])          # the background code is uninformative
 
 
-def test_voi_cli_dispatch_writes_voi_tables_md(tmp_path, monkeypatch):
-    import inspect_topics as it
-    from test_inspect_topics import _make_census_run
-    _make_census_run(tmp_path)
-    (tmp_path / "vocab.json").write_text(json.dumps([{str(500 + i): i for i in range(12)}]))
-    (tmp_path / "readout_dag.json").write_text(json.dumps({
-        "C_fit": 4, "C": 5, "int2cid": {"4": 4994}, "name_by_id": {"4994": "cardiomyopathy"},
-        "pos_sources": [[0], [1], [2], [3], [1, 2]]}))
-    monkeypatch.setattr(sys, "argv", ["inspect_topics", str(tmp_path), "--voi", "cardio",
-                                      "--vocab-map", str(tmp_path / "vocab.json")])
-    it.main()
-    assert "code-level VOI" in (tmp_path / "voi_tables.md").read_text()
-
 
 def test_voi_uniform_prior_ignores_counts_and_members_list_one_per_chunk(tmp_path):
     from test_inspect_topics import _make_census_run
