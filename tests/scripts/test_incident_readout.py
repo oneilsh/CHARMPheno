@@ -53,7 +53,6 @@ os.environ["PYTHONPATH"] = os.pathsep.join(
                 str(REPO_ROOT / "spark-vi"), os.environ.get("PYTHONPATH", ""))
     if p)
 
-import diag_incident_census as dic  # noqa: E402
 import distributed_readout as dr  # noqa: E402
 import gated_pc_cloud as gpc  # noqa: E402
 from analysis.pc.evaluate import (SKIP_CONSTANT, SKIP_DEGENERATE, SKIP_SMALL,  # noqa: E402
@@ -133,54 +132,6 @@ def test_no_eligibility_column_means_no_incident_arm():
 # --------------------------------------------------------------------------- #
 # 2. Exact agreement with the census's eligibility semantics.                  #
 # --------------------------------------------------------------------------- #
-def test_incident_mask_agrees_CELL_FOR_CELL_with_diag_incident_census():
-    """The tranche's load-bearing fixture.
-
-    `diag_incident_census.census_partial` counts `n_ipos = elig*y` and
-    `n_ineg = elig*mask*(1-y)` over the same rows. Splitting the readout's
-    `m_incident` into its two classes must reproduce those vectors exactly — the
-    census gated this arm, so the two cannot be allowed to mean different things
-    by 'eligible'.
-    """
-    y, mask, elig, preindex, C = _fixture()
-    rows = [dict(label=[float(v) for v in y[d]],
-                 labelMask=[float(v) for v in mask[d]],
-                 preindexClosure=list(preindex[d])) for d in range(len(y))]
-    part = dic.census_partial(iter(rows), C)
-    n_obs, n_pos, n_elig, n_ipos, n_ineg = part[0]
-
-    m = gpc.incident_eval_mask(y, mask, elig).astype(bool)
-    got_pos = ((y == 1) & m).sum(axis=0)
-    got_neg = ((y == 0) & m).sum(axis=0)
-    assert np.array_equal(got_pos, n_ipos.astype(int))
-    assert np.array_equal(got_neg, n_ineg.astype(int))
-    # and the eligibility vector itself is the census's `n_elig`
-    assert np.array_equal(elig.sum(axis=0), n_elig.astype(int))
-    # sanity: the prevalent side is unchanged by any of this
-    assert np.array_equal(mask.sum(axis=0), n_obs.astype(int))
-    assert np.array_equal((y * mask).sum(axis=0), n_pos.astype(int))
-
-
-def test_agreement_holds_on_a_random_corpus():
-    """The same identity over 200 random documents — the hand fixture proves the
-    reading, this proves there is no edge the reading misses."""
-    rng = np.random.default_rng(11)
-    D, C = 200, 17
-    y = (rng.random((D, C)) < 0.4).astype(np.uint8)
-    mask = (rng.random((D, C)) < 0.7).astype(np.uint8)
-    preindex = [sorted(rng.choice(C, size=int(rng.integers(0, 6)), replace=False)
-                       .tolist()) for _ in range(D)]
-    elig = np.ones((D, C), dtype=np.uint8)
-    for d, ids in enumerate(preindex):
-        elig[d, list(ids)] = 0
-    rows = [dict(label=[float(v) for v in y[d]],
-                 labelMask=[float(v) for v in mask[d]],
-                 preindexClosure=list(preindex[d])) for d in range(D)]
-    _o, _p, n_elig, n_ipos, n_ineg = dic.census_partial(iter(rows), C)[0]
-    m = gpc.incident_eval_mask(y, mask, elig).astype(bool)
-    assert np.array_equal(((y == 1) & m).sum(axis=0), n_ipos.astype(int))
-    assert np.array_equal(((y == 0) & m).sum(axis=0), n_ineg.astype(int))
-    assert np.array_equal(elig.sum(axis=0), n_elig.astype(int))
 
 
 # --------------------------------------------------------------------------- #

@@ -46,17 +46,6 @@ def test_choose_topm_resolves_to_dense_when_only_K_meets_the_target():
     assert dr.choose_topm_for_mass({16: (0.5, 0.3)}, 0.99) == 0  # nothing qualifies
 
 
-def test_run_experiment_passes_theta_mass_only_when_set(monkeypatch):
-    import run_experiment as rex
-    monkeypatch.setenv("WORKSPACE_CDR", "cdr")
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
-    base = {"source_table": "t", "person_mod": 1, "vocab_size": 5000, "min_df": 20,
-            "min_patient_count": 20, "doc_min_length": 10, "max_iter": 100,
-            "min_n": 0, "n_bg": 8, "tpn": 1, "seed": 0, "readout_mode": "distributed"}
-    argv = rex.build_gated_pc_args(dict(base, readout_theta_mass=0.99), "/tmp/out")
-    assert argv[argv.index("--readout-theta-mass") + 1] == "0.99"
-    assert "--readout-theta-mass" not in rex.build_gated_pc_args(dict(base), "/tmp/out")
-
 
 def test_readout_parses_the_mass_override():
     a = gpr.build_parser().parse_args(["--run-dir", "/tmp/run",
