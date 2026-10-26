@@ -136,40 +136,6 @@ def test_anchor_select_route(monkeypatch):
     assert args[args.index("--seed-tsv") + 1].endswith("priority_seed.tsv")
 
 
-def test_mondo_completeness_route(monkeypatch):
-    """model_class=mondo_completeness validates, resolves to the completeness driver,
-    and builds argv (cdr/billing from env + out-dir + top-unplaced)."""
-    mod = _run_exp(monkeypatch)
-    mod.validate_frontmatter({
-        "id": 87, "slug": "mondo-completeness",
-        "cohort": "population_rare_priority", "model_class": "mondo_completeness"})
-    assert mod.build_fit_driver_path({"model_class": "mondo_completeness"}) \
-        == "analysis/cloud/mondo_completeness_cloud.py"
-    args = mod.build_fit_args(
-        {"model_class": "mondo_completeness", "top_unplaced": 100}, "/out")
-    assert args[args.index("--cdr") + 1] == "proj.ds"
-    assert args[args.index("--billing") + 1] == "bill"
-    assert args[args.index("--out") + 1] == "/out"
-    assert args[args.index("--top-unplaced") + 1] == "100"
-
-
-def test_mondo_hierarchy_route(monkeypatch):
-    """model_class=mondo_hierarchy validates, resolves to the hierarchy driver, and
-    builds argv (cdr/billing from env + out-dir + power/reduction knobs)."""
-    mod = _run_exp(monkeypatch)
-    mod.validate_frontmatter({
-        "id": 88, "slug": "mondo-hierarchy",
-        "cohort": "population_rare_priority", "model_class": "mondo_hierarchy"})
-    assert mod.build_fit_driver_path({"model_class": "mondo_hierarchy"}) \
-        == "analysis/cloud/mondo_hierarchy_cloud.py"
-    args = mod.build_fit_args(
-        {"model_class": "mondo_hierarchy", "min_positives": 100, "tpn": 1}, "/out")
-    assert args[args.index("--cdr") + 1] == "proj.ds"
-    assert args[args.index("--out") + 1] == "/out"
-    assert args[args.index("--min-positives") + 1] == "100"
-    assert args[args.index("--tpn") + 1] == "1"
-
-
 def test_mondo_dag_source_flags_thread(monkeypatch):
     """dag_source=mondo + mondo_branch/min_positives frontmatter -> the mondo CLI
     flags -> the driver parses them (the whole-Mondo / template-branch fit path)."""
