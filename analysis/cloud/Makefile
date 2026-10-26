@@ -348,9 +348,12 @@ next-exp: zip cluster-overlay $(WORKSPACE_ENV)
 # --max-iter): for a run whose NUMBERS DON'T MATTER and you just need it to COMPLETE,
 # e.g. bootstrapping a cache-HIT bundle + manifest.json for the --emit-eta probe on a
 # fresh cluster without paying a full fit. NEVER for a run of record.
+# GPR_SPARK_CONF (space-separated k=v) reaches the fit as CHARM_SPARK_CONF, the
+# same knob gated-pc-readout takes, so one command line serves both.
 exp: zip cluster-overlay $(WORKSPACE_ENV)
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	. ./$(WORKSPACE_ENV) && \
+	CHARM_SPARK_CONF="$(strip $$CHARM_SPARK_CONF $(GPR_SPARK_CONF))" \
 	python $(REPO_ROOT)/scripts/run_experiment.py --id $(ID) --runs-dir $(RUNS_DIR) $(if $(NO_EVAL),--no-eval) $(if $(MAX_ITER),--max-iter $(MAX_ITER))
 
 # Post-hoc likelihood-ratio readout on an EXISTING run (no re-fit). Reads the

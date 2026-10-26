@@ -1,9 +1,58 @@
-# Whole-Mondo ALL-BRANCH case-finding cohort (the 0104+ mainline). Same contract
-# as population_mondo_cardiovascular.yaml: the corpus identity does NOT come from
-# `disease` — the label DAG is the FULL Mondo powered hierarchy (`dag_source:
-# mondo` with NO `mondo_branch`, i.e. every body system; K≈3,827 per insight
-# 0071), patients are placed by SNOMED-climb, and the index is population-wide.
-# This file exists so load_defaults finds a <cohort>.yaml to merge over
-# _base.yaml; `disease` is vestigial here.
+# Whole-Mondo case-finding cohort: the CENTRAL CONFIGURATION (exp 0163, insight
+# 0104), so a new experiment doc states only the parameter it varies.
+#
+# The label DAG is Mondo's own is-a graph over terms with >= min_positives persons
+# in their closure (dag_source: mondo_native, no mondo_branch = every body
+# system), patients are placed by their codes, the index is population-wide, and
+# `disease` is vestigial (it only names the key's legacy slot).
+#
+# Layered as _base.yaml -> this file -> the experiment's front matter. The run's
+# effective config is written to its summary.md, so editing this file does not
+# rewrite the record of a run already made; experiments 0104-0163 set every key
+# they depended on in their own front matter.
 cohort: population_mondo_all
 cohort_def: population_mondo_all
+
+# --- corpus (bundle cache-key inputs) ---
+dag_source: mondo_native
+mondo_version: 2026-06-02
+mondo_cache_dir: data/mondo
+mondo_branch: ""
+min_positives: 100
+disease: rare_priority
+extra_domains: measurement,drug
+gate_attestation: ever          # exp 0146: the topic gate reads all-ever attestation
+label_mask_mode: closure
+strip_mode: both
+window_mode: lookback
+lookback_days: 1825
+label_window_days: 365
+prior_obs_days: 0
+person_mod: 1
+doc_min_length: 10
+vocab_size: 5000
+min_df: 20
+min_patient_count: 20
+holdout_frac: 0.2
+cache_uri: hdfs:///user/dataproc/charm/case_finding_cache
+
+# --- model ---
+n_bg: 200                       # exp 0157: 1,200 costs AUC with no legibility gain
+tpn: 1
+init: random                    # exp 0162/0163: every block is data-seeded
+doc_concentration: 0.5
+optimize_doc_concentration: false   # insight 0091
+weight_y: 0.0                   # no supervision during the fit
+gate_warm: 2                    # leaves-first: iterations per height level
+gate_seed_mode: balanced        # exp 0160
+gate_seed_leaves: true          # exp 0162
+
+# --- SVI ---
+max_iter: 60
+subsampling_rate: 0.1
+tau0: 64.0
+kappa: 0.51
+cavi_max_iter: 100
+cavi_tol: 0.001
+num_partitions: 96
+seed: 42

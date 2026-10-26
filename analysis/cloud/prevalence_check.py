@@ -24,10 +24,41 @@ import numpy as np
 
 import lookalikes as lk
 
-__all__ = ["vocab_to_nodes", "prior_matrix", "sidecar_nodes_to_readout",
+__all__ = ["framing3_sources", "vocab_to_nodes", "prior_matrix", "sidecar_nodes_to_readout",
            "prior_from_sets", "containment", "node_aucs", "summarize", "EGRESS_FLOOR"]
 
 EGRESS_FLOOR = 20
+
+
+def framing3_sources(run_dir):
+    """`(theta, raw)`: the run's new-diagnosis check for θ heads and for the frequency
+    raw-code heads (parsed JSON, or None). θ: the whole-history check
+    (`prevalence_check_history.json`, exps 0145-0151), else the record stacked check
+    (`prevalence_check_stacked[_nodes]_mass99.json`, 0152 on); convergence re-solves
+    (`_warm`, `_it<N>`) and raw arms never count as θ. Raw: `..._raw2000` on either
+    naming. The survey and `survey_analysis` both read through this, so they cannot
+    disagree about which file is framing 3."""
+    import json
+    from pathlib import Path
+    run_dir = Path(run_dir)
+
+    def _load(*names):
+        for n in names:
+            f = run_dir / n
+            if f.exists():
+                return json.loads(f.read_text())
+        return None
+    theta = _load("prevalence_check_history.json",
+                  "prevalence_check_stacked_nodes_mass99.json",
+                  "prevalence_check_stacked_mass99.json")
+    if theta is None:
+        for f in sorted(run_dir.glob("prevalence_check_stacked*.json")):
+            if not any(t in f.name for t in ("raw", "_warm", "_it")):
+                theta = json.loads(f.read_text())
+                break
+    raw = _load("prevalence_check_stacked_nodes_raw2000.json",
+                "prevalence_check_stacked_raw2000.json")
+    return theta, raw
 
 
 def vocab_to_nodes(own_idx, pos_sources):

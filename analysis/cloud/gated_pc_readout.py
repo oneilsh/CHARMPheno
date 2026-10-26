@@ -118,16 +118,22 @@ def resolve_readout_max_iter(cli_value, manifest):
 
 
 
+# The ridge every readout of record has used since exp 0122 (insight 0089).
+_DEFAULT_READOUT_L2 = 100.0
+
+
 def resolve_readout_l2(cli_value, manifest):
     """Ridge strength for a re-readout: explicit CLI > the fit's recorded
-    ``readout_l2`` > the legacy 1.0. Same reproduce-the-run doctrine as
-    `resolve_readout_max_iter`. Returns ``(l2, source)``."""
+    ``readout_l2`` > 100. Fits stopped recording it in the 2026-10 cleanup (the fit
+    no longer reads out), so the default is the record setting, not the pre-0122
+    1.0; re-reading a pre-0122 run that never recorded it needs ``--readout-l2 1``.
+    Returns ``(l2, source)``."""
     if cli_value is not None:
         return float(cli_value), "CLI"
     recorded = manifest.get("readout_l2")
     if recorded is not None:
         return float(recorded), "manifest"
-    return 1.0, "legacy default"
+    return _DEFAULT_READOUT_L2, "default"
 
 
 def observe_root_everywhere(df, C, mask_col="labelMask"):
@@ -859,11 +865,8 @@ def differential_survey(js, sets, run_dir, *, top=40):
     (members' mean new-diagnosis AUC from the whole-history prevalence checks, θ and
     raw codes, when those files are in the run dir). Pooled per group; groups under
     the egress floor never reach `js`."""
-    def _load(name):
-        f = Path(run_dir) / name
-        return json.loads(f.read_text()) if f.exists() else None
-    th = _load("prevalence_check_history.json")
-    rw = _load("prevalence_check_stacked_raw2000.json")
+    from prevalence_check import framing3_sources
+    th, rw = framing3_sources(run_dir)
 
     def f3(members, src):
         if not src or "history_stacked" not in src:
@@ -1363,7 +1366,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--readout-l2", type=float, default=None,
                    help="OVERRIDE the ridge strength of the per-node readout "
                         "heads (SUMMED log-loss; 1.0 == sklearn C=1.0). Default: "
-                        "the manifest's recorded readout_l2, else 1.0 — so a "
+                        "the manifest's recorded readout_l2, else 100 — so a "
                         "recovery reproduces the fit's own readout. At record "
                         "cell counts 1.0 is near-unregularized over K "
                         "standardized features: 0120 went 0.7555 -> 0.7927 at "
