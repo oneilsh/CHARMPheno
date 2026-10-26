@@ -241,16 +241,16 @@ def test_parse_args_surface_defaults_and_arms():
     a = parse_args([
         "--cdr", "p.d", "--billing", "bp", "--disease", "rare6",
         "--n-bg", "2", "--tpn", "1", "--weight-y", "80", "--out-dir", "/tmp/g",
-        "--with-dag-head",
     ])
     assert a.disease == "rare6" and a.weight_y == 80.0
     assert a.head_optimizer == "newton"        # settled convergent head default
     assert a.head_l2 == 1e-3                    # absolute ridge (ADR 0041)
     assert a.label_mask_mode == "full"         # full-observation default
-    assert a.with_dag_head is True
-    assert a.skip_unsup_gated is False
     assert a.weight_y_warmup_iters == 10
-    assert a.eval_every == 0                   # per-iter eval off by default
+    assert not hasattr(a, "with_dag_head")     # the fit ends at save (2026-10)
+    import pytest
+    with pytest.raises(SystemExit):            # no prefix matching: --k != --kappa
+        parse_args(["--cdr", "p.d", "--billing", "bp", "--out-dir", "/t", "--k", "4"])
 
 
 def test_head_l2_ridge_round_trips_through_estimator_and_engine():
@@ -261,7 +261,7 @@ def test_head_l2_ridge_round_trips_through_estimator_and_engine():
     from spark_vi.mllib.topic.pc import _build_model_and_config
     a = parse_args([
         "--cdr", "p.d", "--billing", "bp", "--out-dir", "/tmp/g",
-        "--head-optimizer", "newton", "--head-l2", "0.01", "--k", "4",
+        "--head-optimizer", "newton", "--head-l2", "0.01",
     ])
     assert a.head_l2 == 0.01 and a.head_optimizer == "newton"
     a._C = 1

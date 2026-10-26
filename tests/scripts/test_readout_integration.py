@@ -668,27 +668,6 @@ def test_resolve_readout_mode_auto_threshold():
         gpc.resolve_readout_mode("nope", 10)
 
 
-def test_parse_args_readout_flags():
-    a = gpc.parse_args(["--cdr", "x", "--billing", "y", "--out-dir", "/tmp/o"])
-    assert a.readout_mode == "auto" and a.readout_ab_check is False
-    b = gpc.parse_args(["--cdr", "x", "--billing", "y", "--out-dir", "/tmp/o",
-                        "--readout-mode", "distributed", "--readout-ab-check"])
-    assert b.readout_mode == "distributed" and b.readout_ab_check is True
-
-
-def test_parse_args_theta_topm_and_calibration_defaults_are_the_old_behaviour():
-    """Both new knobs default to what every existing run already did: full-K theta
-    and calibration ON. A default change here would silently reinterpret every
-    committed exp doc."""
-    a = gpc.parse_args(["--cdr", "x", "--billing", "y", "--out-dir", "/tmp/o"])
-    assert a.readout_theta_topm == 0
-    assert a.readout_calibration == "on"
-    b = gpc.parse_args(["--cdr", "x", "--billing", "y", "--out-dir", "/tmp/o",
-                        "--readout-theta-topm", "256",
-                        "--readout-calibration", "off"])
-    assert b.readout_theta_topm == 256 and b.readout_calibration == "off"
-
-
 def test_resolve_readout_calibration_gates_the_block():
     """The one gate `main` consults, so the manifest, the log line and the dev
     profile cannot disagree about what the string meant."""
@@ -697,63 +676,6 @@ def test_resolve_readout_calibration_gates_the_block():
     assert gpc.resolve_readout_calibration(None) is True     # pre-flag namespace
     with pytest.raises(ValueError):
         gpc.resolve_readout_calibration("maybe")
-
-
-def test_calibration_block_is_entirely_inside_the_gate():
-    """`--readout-calibration off` must skip the WORK, not just the print.
-
-    `main` cannot be called without a BigQuery corpus, so the "not executed" claim is
-    pinned structurally instead: every piece of the calibration block — its second
-    batched solve, its lean collects / BINNED stats, the isotonic fit and the result
-    keys — has to live inside a `run_calibration`-gated suite, at a deeper indent. A
-    future edit that hoists any of them out (the easy mistake: computing
-    `proba_te_fit` unconditionally because something below "might" want it) fails
-    here, which is the only place it would be caught before a cluster run pays for it.
-
-    WP-B split the block into an `if run_calibration and eval_path == "distributed":`
-    branch (the collect-free BINNED calibration) and an `elif run_calibration:`
-    branch (the shipped collect path); BOTH are gated on `run_calibration`, so
-    `--readout-calibration off` still skips every calibration action. This checks the
-    whole if/elif compound statement is one gated region and every marker is inside.
-    """
-    import inspect
-    import textwrap
-
-    src = textwrap.dedent(inspect.getsource(gpc.main)).splitlines()
-    starts = [i for i, ln in enumerate(src)
-              if ln.strip() == "if run_calibration and eval_path == \"distributed\":"]
-    assert len(starts) == 1, "one gated calibration region"
-    head = starts[0]
-    indent = len(src[head]) - len(src[head].lstrip())
-
-    def _same_indent_clause(ln):
-        # an `elif`/`else` continuing the SAME compound statement at head indent
-        return (len(ln) - len(ln.lstrip())) == indent and \
-            ln.strip().startswith(("elif ", "else:"))
-
-    # every `elif`/`else` at head indent from `head` on is gated on run_calibration
-    for i in range(head + 1, len(src)):
-        ln = src[i]
-        if not ln.strip():
-            continue
-        li = len(ln) - len(ln.lstrip())
-        if li < indent:
-            break
-        if li == indent and not _same_indent_clause(ln):
-            end = i
-            break
-    else:
-        end = len(src)
-    # the region is head .. end; assert its `elif` continues the run_calibration gate
-    assert any("elif run_calibration:" in src[i] for i in range(head, end)), \
-        "the second calibration branch must stay gated on run_calibration"
-    block = "\n".join(src[head:end])
-    outside = "\n".join(src[:head] + src[end:])
-    for marker in ('label="gated_pc calibration-fit"', "calibrate_per_node(",
-                   '"gated_pc_conditional_cal"', "conditional ECE (VOI readiness",
-                   "binned_calibration_stats(", '"gated_pc_calibration_binned"'):
-        assert marker in block, marker
-        assert marker not in outside, f"{marker} escaped the gate"
 
 
 def test_save_fit_writes_the_model_then_overwrites_it_with_the_full_record(tmp_path):
@@ -803,40 +725,6 @@ def test_save_fit_splits_a_multi_domain_lambda_dict(tmp_path):
         assert np.array_equal(z["b_CK"], np.full(3, 0.25))
 
 
-def test_the_fit_only_save_precedes_every_readout_in_main():
-    """The early save must run BEFORE any readout work, or it saves nothing new.
-
-    `main` needs a BigQuery corpus, so — as with the calibration gate above — the
-    ordering claim is pinned structurally: the `partial="fit-only"` write has to
-    appear after the estimator's `.fit(` and before the first line that spends
-    cluster time on a readout (the θ transforms, either scoring path, the A/B
-    gate). The failure this catches is the natural drift: someone moves the save
-    "next to the other save" at the end of the run, and the next readout death
-    costs a whole fit again.
-    """
-    import inspect
-    import textwrap
-
-    src = textwrap.dedent(inspect.getsource(gpc.main))
-    lines = src.splitlines()
-
-    def _line(pred, what):
-        hits = [i for i, ln in enumerate(lines) if pred(ln)]
-        assert hits, f"no line matching {what}"
-        return hits[0]
-
-    fit = _line(lambda ln: "pc_model = pc_est.fit(" in ln, "the gated_pc fit")
-    early = _line(lambda ln: 'partial="fit-only"' in ln, "the fit-only save")
-    readout = min(_line(lambda ln: "pc_model.transform(" in ln, "the θ transform"),
-                  _line(lambda ln: "distributed_score_arm(" in ln, "the dist arm"),
-                  _line(lambda ln: "_collect_theta_labels(" in ln, "the θ collect"))
-    final = _line(lambda ln: "results=results" in ln, "the final save")
-    assert fit < early < readout, (fit, early, readout)
-    assert readout < final
-    # ...and both writes go through the one helper, so they cannot drift apart
-    assert len([ln for ln in lines if "_save_fit(" in ln]) == 2
-
-
 def test_re_readout_never_indexes_a_possibly_null_manifest_results():
     """A fit-only manifest has `results: None`, and the re-readout tool is exactly
     the thing you run against one — so its echo of the other arms must treat that
@@ -860,26 +748,6 @@ def test_dev_profile_skips_the_calibration_solve(monkeypatch, capsys):
     assert "readout_calibration=off" in capsys.readouterr().out
     monkeypatch.delenv("CHARM_DEV")
     assert "readout_calibration" not in rex._apply_dev_profile(dict(base))
-
-
-def test_gated_pc_args_pass_the_new_front_matter_keys_through(monkeypatch):
-    """Front-matter -> argv, following the `readout_max_iter` pattern: absent keys
-    emit NOTHING, so an exp doc that predates the flags produces byte-identical
-    argv."""
-    # the CDR/billing pair is workspace env, not config (see _require_workspace_env)
-    monkeypatch.setenv("WORKSPACE_CDR", "cdr")
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
-    base = {"source_table": "t", "person_mod": 1, "vocab_size": 5000, "min_df": 20,
-            "min_patient_count": 20, "doc_min_length": 10, "max_iter": 100,
-            "min_n": 0, "n_bg": 8, "tpn": 1, "seed": 0,
-            "readout_mode": "distributed"}
-    argv = rex.build_gated_pc_args(
-        dict(base, readout_theta_topm=256, readout_calibration="off"), "/tmp/out")
-    assert argv[argv.index("--readout-theta-topm") + 1] == "256"
-    assert argv[argv.index("--readout-calibration") + 1] == "off"
-    plain = rex.build_gated_pc_args(dict(base), "/tmp/out")
-    assert "--readout-theta-topm" not in plain
-    assert "--readout-calibration" not in plain
 
 
 def test_densify_lean_blocks_handles_dense_mask_marker():
@@ -944,7 +812,7 @@ def test_stdout_tee_batches_between_flush_intervals(tmp_path):
 
 def test_parse_args_readout_l2_resolves_cli_then_manifest_then_legacy(monkeypatch):
     """`--readout-l2` is None-means-ask-the-manifest (reproduce the fit's own
-    readout), the fit driver records `readout_l2`, and both head solves of
+    readout; fits before 2026-10 recorded `readout_l2`), and both head solves of
     `run_readout` receive it as `l2=`."""
     a = gpr.build_parser().parse_args(["--run-dir", "/tmp/r"])
     assert a.readout_l2 is None
@@ -953,11 +821,6 @@ def test_parse_args_readout_l2_resolves_cli_then_manifest_then_legacy(monkeypatc
     assert gpr.resolve_readout_l2(None, {}) == (1.0, "legacy default")
     assert gpr.resolve_readout_l2(None, {"readout_l2": 100}) == (100.0, "manifest")
     assert gpr.resolve_readout_l2(7, {"readout_l2": 100}) == (7.0, "CLI")
-    fit = gpc.parse_args(["--cdr", "x", "--billing", "y", "--out-dir", "/tmp/o"])
-    assert fit.readout_l2 == 1.0
-    fit = gpc.parse_args(["--cdr", "x", "--billing", "y", "--out-dir", "/tmp/o",
-                          "--readout-l2", "100"])
-    assert fit.readout_l2 == 100.0
     import inspect
     sig = inspect.signature(gpr.run_readout)
     assert sig.parameters["readout_l2"].default is None
