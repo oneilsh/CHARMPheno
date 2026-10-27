@@ -13,6 +13,7 @@
   - [Data Contract: User-Facing vs. Internal](#data-contract-user-facing-vs-internal)
   - [The VIRunner](#the-virunner)
   - [The LocalRunner (in-memory engine)](#the-localrunner-in-memory-engine)
+  - [The readout (`spark_vi.readout`)](#the-readout-spark_vireadout)
   - [VIConfig](#viconfig)
   - [VIResult and Model Export](#viresult-and-model-export)
 - [Notebook Diagnostics and Output](#notebook-diagnostics-and-output)
@@ -386,6 +387,29 @@ batches than Spark's per-partition samplers). One `@pytest.mark.slow` test,
 leaves-first schedule. `LocalRunner.transform(rows, global_params)` maps
 `infer_local` eagerly and returns a list.
 
+### The readout (`spark_vi.readout`)
+
+After a fit, case-finding reads each label-DAG node off a frozen per-row feature
+vector (topic proportions θ, raw-code presence, any representation) with an
+independent L2 logistic head, fit on the rows the node's mask observes. On frozen
+features the C heads are independent convex problems that share every data pass,
+so `fit_heads` solves them together with one batched L-BFGS (`solver.py`) whose
+stats seam returns all C heads' (loss, gradient) from ONE pass, optionally
+restricted to the heads still line-searching (`node_mask`). The fit standardizes
+each head on its own observed rows (folded back to raw coordinates afterwards, so
+scoring needs no scaler), gives single-class nodes the constant fallback, and can
+checkpoint and resume a multi-hour solve.
+
+A pass runs on either backend, over the same numpy kernels (`kernels.py`):
+`SparkReadoutData` makes it a `treeAggregate` over the scored DataFrame;
+`LocalReadoutData` holds the split once in memory (built from numpy arrays, or
+collected from a DataFrame with the executors packing and top-m truncating each
+row) and loops over it. The two agree up to summation order
+(`tests/test_readout_local.py`). The readout imports nothing from `models`: its
+inputs are a vector column, `label`/`labelMask` arrays and, for the closure
+product (`stacked.py`), a `{child: [parents]}` DAG. Metrics over the scored
+probabilities stay in the analysis layer until `eval/metrics` (ADR 0051 step 4).
+
 **Output modes:**
 
 - `VIRunner(spark, model, output="notebook")` — **default.** Live-updating display
@@ -612,6 +636,9 @@ underexercised after the HDP and OU. Candidates:
 
 ## Project Structure
 
+The layout as of ADR 0051 step 2 (steps 3-6 add `dag/`, `eval/metrics/` and the
+`DagHeads` shim; see the ADR).
+
 ```
 spark_vi/
 ├── core/
@@ -620,20 +647,23 @@ spark_vi/
 │   ├── runner.py           # VIRunner: the Spark E-step (sample, broadcast, treeReduce)
 │   ├── local_runner.py     # LocalRunner: the in-memory E-step (ADR 0051)
 │   ├── config.py           # VIConfig
-│   └── result.py           # VIResult, save/load
-├── models/
-│   ├── hdp.py              # Online HDP
-│   ├── sparse_ou.py        # Sparse OU estimator
-│   └── ...                 # Third model TBD
-├── diagnostics/
-│   ├── notebook.py         # Live notebook display
-│   ├── batch.py            # Logging-based output for batch mode
-│   └── plotting.py         # Shared matplotlib utilities
-└── tests/
-    ├── test_runner.py      # Framework orchestration tests
-    ├── test_hdp.py         # HDP-specific tests
-    ├── test_sparse_ou.py   # OU-specific tests
-    └── synthetic/          # Synthetic data generators for validation
+│   ├── result.py           # VIResult
+│   ├── broadcast.py        # destroy_broadcast (ADR 0047 lifecycle)
+│   └── retry.py            # retry_spark_action: idempotent actions across preemption
+├── models/topic/           # LDA, HDP, STM, DAG-gated LDA; flat spectral init (STM);
+│                           #   gate seeds; DagLayout (moves to dag/ in step 3)
+├── readout/                # per-node heads over ANY feature column (ADR 0051)
+│   ├── kernels.py          # pure-numpy moments / stats / lean-eval kernels
+│   ├── solver.py           # batched multi-head L-BFGS (solve_batched_lr)
+│   ├── heads.py            # fit_heads: the backend-agnostic fit, checkpoints, heads npz
+│   ├── spark.py            # SparkReadoutData: a pass = one treeAggregate
+│   ├── local.py            # LocalReadoutData: a pass = numpy over rows held once
+│   └── stacked.py          # closure product over a label DAG
+├── eval/topic/             # coherence (incl. gated NPMI), concentration
+├── mllib/topic/            # Estimator/Model shims: LDA, HDP, STM, DagGatedLDA
+├── inference/              # concentration (α/η) optimization
+├── io/export.py            # save_result / load_result
+└── diagnostics/persist.py  # the cached-input precondition
 ```
 
 ---

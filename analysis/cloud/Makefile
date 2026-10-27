@@ -360,7 +360,7 @@ exp: zip cluster-overlay $(WORKSPACE_ENV)
 # readout. PYTHONPATH=REPO_ROOT so the driver imports analysis.pc (the scorer),
 # which is not in any --py-files zip (client mode: the master has the repo).
 #
-# Under --readout-mode distributed it also PERSISTS the fitted readout heads to
+# It also PERSISTS the fitted readout heads to
 # the run dir (readout_heads_gated_pc.npz) — the raw-θ scoring params that
 # `diag-conversion-analysis --deciles on` scores from without a re-fit. Run this
 # once on a pre-existing fit (e.g. 0110) to write that sidecar.
@@ -370,10 +370,10 @@ exp: zip cluster-overlay $(WORKSPACE_ENV)
 # (current driver) needs neither. If the key still misses, pass GPR_ARGS="--bundle-path
 # <cache_uri>/<key>".
 #
-# distributed_readout.py rides in --py-files for the same reason the fit's submit
-# ships it (scripts/run_experiment.py:build_spark_submit_cmd): GPR_ARGS="--readout-mode
-# distributed" sends its mapPartitions kernels to the executors pickled BY MODULE
-# REFERENCE, so the executors must be able to `import distributed_readout` too.
+# The readout kernels ship in the spark-vi zip (spark_vi.readout, ADR 0051).
+# GPR_ARGS="--readout-engine local" runs the heads' passes in driver memory
+# (each split collected once, top-m truncated): size GPR_DRIVER_MEMORY for the
+# packed train split.
 #
 # The EXPERIMENT DOC's `spark_conf:` front matter is injected too (resolved by
 # scripts/run_experiment.py --print-spark-conf, the same doc the fit was launched
@@ -383,8 +383,8 @@ exp: zip cluster-overlay $(WORKSPACE_ENV)
 # them per launch. Layering matches the fit path exactly: fixed confs above, then
 # the doc's, then GPR_SPARK_CONF (spark-submit takes the last value of a repeated
 # key), so the env-style hook remains the one-off override.
-# Example (re-read a lost readout WITH the A/B equality gate):
-#   make gated-pc-readout ID=103 GPR_ARGS="--readout-mode distributed --readout-ab-check"
+# Example (re-read with the heads' passes in driver memory):
+#   make gated-pc-readout ID=163 GPR_ARGS="--readout-engine local"
 # Example (recover exp 0104's readout; its doc's spark_conf rides automatically,
 # and --readout-max-iter is only needed for a fit whose manifest predates the
 # recorded readout_max_iter):
@@ -436,7 +436,7 @@ gated-pc-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	    --conf spark.dataproc.listeners= \
 	    $$EXP_CONF_FLAGS \
 	    $(foreach kv,$(GPR_SPARK_CONF),--conf $(kv)) \
-	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/distributed_readout.py,$(REPO_ROOT)/analysis/cloud/preindex_closure.py,$(REPO_ROOT)/analysis/cloud/topic_npmi.py \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/preindex_closure.py,$(REPO_ROOT)/analysis/cloud/topic_npmi.py \
 	    $(REPO_ROOT)/analysis/cloud/gated_pc_readout.py \
 	    --run-dir "$(GPR_RUN_DIR)" \
 	    --cache-uri $(GPR_CACHE_URI) \
@@ -569,7 +569,7 @@ build-conversion-sidecar: zip cluster-overlay $(WORKSPACE_ENV)
 	    --conf spark.executor.memoryOverhead=2g \
 	    --conf spark.task.maxFailures=8 \
 	    --conf spark.excludeOnFailure.enabled=true \
-	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/distributed_readout.py,$(REPO_ROOT)/analysis/cloud/preindex_closure.py,$(REPO_ROOT)/analysis/cloud/conversion_sidecar.py \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/preindex_closure.py,$(REPO_ROOT)/analysis/cloud/conversion_sidecar.py \
 	    $(REPO_ROOT)/analysis/cloud/conversion_sidecar.py \
 	    --run-dir "$(RUNS_DIR)/$(shell printf '%04d' $(ID))-*" \
 	    $(if $(GPR_SIDECAR_URI),--sidecar-uri $(GPR_SIDECAR_URI),) \

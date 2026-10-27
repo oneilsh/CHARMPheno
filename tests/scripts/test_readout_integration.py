@@ -1,11 +1,11 @@
 """End-to-end gate for the DISTRIBUTED readout wired into the gated_pc driver
 (Package C of `docs/superpowers/plans/2026-08-20-distributed-readout-plan.md`).
 
-`tests/scripts/test_distributed_readout.py` covers the Spark seams in isolation and
-`analysis/pc/tests/test_batched_lr.py` covers the solver against the sklearn oracle.
-What is left — and what this file pins — is the JOIN: `gated_pc_cloud`'s
-`distributed_score_arm` must produce the same readout as `score_arm` (the driver
-path) when both are handed the SAME frozen θ, including the degenerate-node
+`spark-vi/tests/test_readout_*.py` cover the readout's kernels, backends and heads
+in isolation and `analysis/pc/tests/test_batched_lr.py` covers the solver against
+the sklearn oracle. What is left — and what this file pins — is the JOIN:
+`gated_pc_cloud.readout_arm`, on BOTH engines (spark, local), must produce the same
+readout as `score_arm` (the sklearn path) when both are handed the SAME frozen θ, including the degenerate-node
 fallback, which is the plan's open question ("must yield the same constant-
 prediction fallback as `_lr_proba_per_label_masked`, so macro means stay
 comparable"). The cluster A/B at C=444 is the full-scale version of exactly this
@@ -50,16 +50,17 @@ for _p in (str(REPO_ROOT), str(CLOUD)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 # PySpark workers are separate processes and inherit PYTHONPATH, not the driver's
-# sys.path. BOTH entries are needed: REPO_ROOT for `analysis.pc.*`, and
-# analysis/cloud for the TOP-LEVEL `distributed_readout` — which is the name
-# gated_pc_cloud imports it under, and therefore the name cloudpickle stamps into
-# every mapPartitions closure (on the cluster that name comes from --py-files; see
-# scripts/run_experiment.py:build_spark_submit_cmd). Set at import time so it is in
-# place before the session-scoped `spark` fixture builds the context.
+# sys.path: REPO_ROOT for `analysis.pc.*` and analysis/cloud for the driver
+# modules. Set at import time so it is in place before the session-scoped `spark`
+# fixture builds the context.
 os.environ["PYTHONPATH"] = os.pathsep.join(
     p for p in (str(REPO_ROOT), str(CLOUD), os.environ.get("PYTHONPATH", "")) if p)
 
 import gated_pc_cloud as gpc  # noqa: E402
+from spark_vi.readout import SparkReadoutData, fit_heads  # noqa: E402
+from spark_vi.readout import heads as readout_heads  # noqa: E402
+from spark_vi.readout import kernels as readout_kernels  # noqa: E402
+from spark_vi.readout import spark as readout_spark  # noqa: E402
 import gated_pc_readout as gpr  # noqa: E402
 import run_experiment as rex  # noqa: E402
 
@@ -144,17 +145,18 @@ def _make_df(spark, Pi, y, mask, offset=0, parts=3, proba=None, preindex=None):
 
 @pytest.mark.slow
 class TestDistributedArmMatchesDriverArm:
-    """`distributed_score_arm` vs `score_arm` on identical frozen θ."""
+    """`readout_arm` (both engines) vs `score_arm` on identical frozen θ."""
 
-    @pytest.fixture(scope="class")
-    def both(self, spark):
+    @pytest.fixture(scope="class", params=["spark", "local"])
+    def both(self, spark, request):
         arrays = _make_arrays()
         Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te = arrays
         train_df = _make_df(spark, Pi_tr, y_tr, m_tr)
         test_df = _make_df(spark, Pi_te, y_te, m_te, offset=10_000)
-        dist = gpc.distributed_score_arm(
+        dist = gpc.readout_arm(
             train_df, test_df, C, K, recall_targets=RECALL_TARGETS,
-            fdr_targets=FDR_TARGETS, min_count=0, label="test-arm")
+            fdr_targets=FDR_TARGETS, min_count=0, label="test-arm",
+            engine=request.param)
         drv = gpc.score_arm(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, C,
                             recall_targets=RECALL_TARGETS, fdr_targets=FDR_TARGETS)
         return arrays, dist, drv
@@ -216,8 +218,14 @@ class TestDistributedArmMatchesDriverArm:
 
 
 
+def _fit(df, **kw):
+    """`fit_heads` on the Spark backend over a test frame."""
+    return fit_heads(SparkReadoutData(df, C, kw.pop("K", K),
+                                      topm=kw.pop("theta_topm", 0)), **kw)
+
+
 @pytest.mark.slow
-def test_warm_started_calibration_fit_matches_the_cold_one(spark, capsys):
+def test_warm_started_calibration_fit_matches_the_cold_one(spark, caplog):
     """The driver's calibration flow, warm vs cold, on the same 75% hash split.
 
     The isotonic calibrator needs an OUT-OF-SAMPLE fit, so a supervised arm pays a
@@ -244,6 +252,7 @@ def test_warm_started_calibration_fit_matches_the_cold_one(spark, capsys):
     """
     from pyspark.sql import functions as F
 
+    caplog.set_level("INFO", logger="spark_vi.readout")
     Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te = _make_arrays(seed=4)
     train_df = _make_df(spark, Pi_tr, y_tr, m_tr).cache()
     test_df = _make_df(spark, Pi_te, y_te, m_te, offset=10_000).cache()
@@ -251,17 +260,17 @@ def test_warm_started_calibration_fit_matches_the_cold_one(spark, capsys):
     h = F.pmod(F.hash(F.col("person_id"), F.lit(0)), F.lit(4))
     fit_df = train_df.filter(h != 0).cache()
 
-    V, b_raw, _, _, _ = gpc._fit_readout_heads(train_df, C, K, label="main-fit")
-    cold = gpc._fit_readout_heads(fit_df, C, K, label="calibration-fit cold")
-    warm = gpc._fit_readout_heads(fit_df, C, K, label="calibration-fit warm",
+    V, b_raw, _, _, _ = _fit(train_df, label="main-fit")
+    cold = _fit(fit_df, label="calibration-fit cold")
+    warm = _fit(fit_df, label="calibration-fit warm",
                                   warm_start=(V, b_raw))
-    assert "(warm start)" in capsys.readouterr().out
+    assert "(warm start)" in caplog.text
 
     assert cold[4]["warm_started"] is False and warm[4]["warm_started"] is True
     assert np.array_equal(cold[3], warm[3]), "same rows must give the same mask"
 
     def _proba(fit, max_iter=None):
-        p, y, m, _, _ = gpc._collect_lean_proba(
+        p, y, m, _ = gpc._collect_lean_proba(
             test_df, C, fit[0], fit[1], degenerate=fit[3], const=fit[2])
         return p, gpc.readout_from_proba(p, y, m, C, recall_targets=RECALL_TARGETS,
                                          fdr_targets=FDR_TARGETS, min_count=0)
@@ -282,9 +291,9 @@ def test_warm_started_calibration_fit_matches_the_cold_one(spark, capsys):
     assert np.array_equal(p_warm[:, deg], p_cold[:, deg])
 
     # ...and the cap is where it pays: 3 iterations, same budget, both paths.
-    cap_cold = gpc._fit_readout_heads(fit_df, C, K, max_iter=3,
+    cap_cold = _fit(fit_df, max_iter=3,
                                       label="calibration-fit cold@3")
-    cap_warm = gpc._fit_readout_heads(fit_df, C, K, max_iter=3, warm_start=(V, b_raw),
+    cap_warm = _fit(fit_df, max_iter=3, warm_start=(V, b_raw),
                                       label="calibration-fit warm@3")
     d_cold = np.abs(_proba(cap_cold)[0].astype(np.float64) - p_cold).max()
     d_warm = np.abs(_proba(cap_warm)[0].astype(np.float64) - p_cold).max()
@@ -307,8 +316,8 @@ def test_theta_topm_equal_to_K_is_the_identity_truncation(spark):
     train_df = _make_df(spark, Pi_tr, y_tr, m_tr).cache()
     test_df = _make_df(spark, Pi_te, y_te, m_te, offset=10_000).cache()
     kw = dict(recall_targets=RECALL_TARGETS, fdr_targets=FDR_TARGETS, min_count=0)
-    full = gpc.distributed_score_arm(train_df, test_df, C, K, label="full", **kw)
-    trunc = gpc.distributed_score_arm(train_df, test_df, C, K, label="topm=K",
+    full = gpc.readout_arm(train_df, test_df, C, K, label="full", **kw)
+    trunc = gpc.readout_arm(train_df, test_df, C, K, label="topm=K",
                                       theta_topm=K, **kw)
     assert np.array_equal(trunc[1], full[1]), "identical proba, bit for bit"
     assert np.allclose(trunc[5][0], full[5][0], atol=1e-12, rtol=0)
@@ -320,7 +329,7 @@ def test_theta_topm_equal_to_K_is_the_identity_truncation(spark):
 
 
 @pytest.mark.slow
-def test_theta_topm_on_concentrated_theta_keeps_the_readout(spark, capsys):
+def test_theta_topm_on_concentrated_theta_keeps_the_readout(spark, caplog):
     """Top-m on CONCENTRATED θ: the readout survives, and how well is a property of
     the DATA, not of the code.
 
@@ -329,10 +338,11 @@ def test_theta_topm_on_concentrated_theta_keeps_the_readout(spark, capsys):
     truncation that keeps most of the mass should move per-node AUC by little. The
     tolerance here is DELIBERATELY loose and is not a correctness gate: exactness is
     pinned against the dense-on-truncated oracle in
-    `test_distributed_readout.py`, and how much AUC a given m costs on a given corpus
+    `spark-vi/tests/test_readout_kernels.py`, and how much AUC a given m costs on a given corpus
     is exactly what `theta_topm_coverage` exists to report before anyone sets the
     flag. Assert tightly here and the test would be asserting on a Dirichlet draw.
     """
+    caplog.set_level("INFO", logger="spark_vi.readout")
     rng = np.random.default_rng(21)
     K_wide, topm = 40, 6
     Pi_tr = rng.dirichlet(np.full(K_wide, 0.05), size=D_TR)
@@ -352,14 +362,14 @@ def test_theta_topm_on_concentrated_theta_keeps_the_readout(spark, capsys):
     kw = dict(recall_targets=RECALL_TARGETS, fdr_targets=FDR_TARGETS, min_count=0)
 
     # the measurement that justifies the setting, on the same frame
-    cov = _dr_module().theta_topm_coverage(train_df, K_wide, ms=(topm, K_wide))
+    cov = readout_spark.theta_topm_coverage(train_df, K_wide, ms=(topm, K_wide))
     assert cov[K_wide][0] == pytest.approx(1.0)
     assert cov[topm][0] > 0.5, "fixture must actually be concentrated"
 
-    full = gpc.distributed_score_arm(train_df, test_df, C, K_wide, label="full", **kw)
-    trunc = gpc.distributed_score_arm(train_df, test_df, C, K_wide,
+    full = gpc.readout_arm(train_df, test_df, C, K_wide, label="full", **kw)
+    trunc = gpc.readout_arm(train_df, test_df, C, K_wide,
                                       label="topm", theta_topm=topm, **kw)
-    assert "(theta top-m=6)" in capsys.readouterr().out
+    assert "(theta top-m=6)" in caplog.text
     shared = sorted(set(full[0]["per_node"]) & set(trunc[0]["per_node"]))
     assert len(shared) >= 3
     d_auc = np.array([abs(trunc[0]["per_node"][c]["auc"]
@@ -369,7 +379,7 @@ def test_theta_topm_on_concentrated_theta_keeps_the_readout(spark, capsys):
 
 
 @pytest.mark.slow
-def test_coverage_line_is_logged_only_for_large_fits(spark, capsys, monkeypatch):
+def test_coverage_line_is_logged_only_for_large_fits(spark, caplog, monkeypatch):
     """The measurement is always on WHERE IT MATTERS and nowhere else.
 
     Small fits (every cardiovascular-scale run) must not pay an extra data pass for a
@@ -377,14 +387,16 @@ def test_coverage_line_is_logged_only_for_large_fits(spark, capsys, monkeypatch)
     coverage whether or not `theta_topm` is set, so the run of record carries the
     evidence for — or against — the setting it used.
     """
+    caplog.set_level("INFO", logger="spark_vi.readout")
     Pi_tr, y_tr, m_tr, _, _, _ = _make_arrays(seed=9)
     train_df = _make_df(spark, Pi_tr, y_tr, m_tr).cache()
-    gpc._fit_readout_heads(train_df, C, K, label="small", max_iter=2)
-    assert "theta top-m mass" not in capsys.readouterr().out
+    _fit(train_df, label="small", max_iter=2)
+    assert "theta top-m mass" not in caplog.text
+    caplog.clear()
 
-    monkeypatch.setattr(gpc, "_COVERAGE_MIN_FIT_BYTES", 0)
-    gpc._fit_readout_heads(train_df, C, K, label="big", max_iter=2)
-    txt = capsys.readouterr().out
+    monkeypatch.setattr(readout_heads, "_COVERAGE_MIN_FIT_BYTES", 0)
+    _fit(train_df, label="big", max_iter=2)
+    txt = caplog.text
     assert "big: theta top-m mass:" in txt
     line = next(ln for ln in txt.splitlines() if "theta top-m mass" in ln)
     assert all(f"m={m}:" in line for m in (64, 128, 256, 512))
@@ -392,14 +404,6 @@ def test_coverage_line_is_logged_only_for_large_fits(spark, capsys, monkeypatch)
     # K=10 here, so every m keeps all the mass — the identity end of the scale
     assert "m=64:1.000/0.999" in line
     train_df.unpersist()
-
-
-def _dr_module():
-    """The partition-kernel module under the TOP-LEVEL name the driver imports it
-    as (see this file's PYTHONPATH note)."""
-    import distributed_readout
-
-    return distributed_readout
 
 
 @pytest.mark.slow
@@ -424,7 +428,7 @@ def test_lean_head_proba_collect_matches_driver_collect(spark):
         [(int(d), Vectors.dense(p[d]), [float(v) for v in y[d]],
           [float(v) for v in m[d]]) for d in range(40)], schema).repartition(3)
 
-    lean_p, lean_y, lean_m, persons, _ = gpc._collect_lean_proba(
+    lean_p, lean_y, lean_m, persons = gpc._collect_lean_proba(
         df, C, score_col="probability")
     order = np.argsort(np.asarray(persons))
     assert lean_p.dtype == np.float32
@@ -485,16 +489,18 @@ class TestReReadout:
         assert not (out / "results_partial.json").exists()
 
 
-def test_readout_tool_parses_the_mode_flags():
-    """Same flag names/defaults as the fit driver, so a re-run of a lost readout is
-    the fit's command with the same knobs."""
+def test_readout_tool_parses_the_engine_flag():
+    """`--readout-engine` picks the readout backend (ADR 0051); spark by default."""
     a = gpr.build_parser().parse_args(["--run-dir", "/tmp/r"])
-    assert a.readout_mode == "distributed"         # the only mode (2026-10)
+    assert a.readout_engine == "spark"
     b = gpr.build_parser().parse_args(
-        ["--run-dir", "/tmp/r", "--readout-mode", "distributed"])
-    assert b.readout_mode == "distributed"
+        ["--run-dir", "/tmp/r", "--readout-engine", "local"])
+    assert b.readout_engine == "local"
     with pytest.raises(SystemExit):
-        gpr.build_parser().parse_args(["--run-dir", "/tmp/r", "--readout-mode", "driver"])
+        gpr.build_parser().parse_args(["--run-dir", "/tmp/r", "--readout-engine", "gpu"])
+    with pytest.raises(SystemExit):                # the old no-op flag is gone
+        gpr.build_parser().parse_args(["--run-dir", "/tmp/r", "--readout-mode",
+                                       "distributed"])
 
 
 
@@ -575,7 +581,7 @@ def test_densify_lean_blocks_handles_dense_mask_marker():
     blocks = [(np.array([7, 8], dtype=np.int64), P,
                np.array([0, 2], dtype=np.int32), np.array([0, 1, 2], dtype=np.int64),
                None, None)]
-    proba, y, mask, ids, _elig = gpc._densify_lean_blocks(blocks, 3)
+    proba, y, mask, ids = readout_kernels.densify_lean_blocks(blocks, 3)
     assert np.array_equal(proba, P)
     assert np.array_equal(y, np.array([[1, 0, 0], [0, 0, 1]], dtype=np.uint8))
     assert np.array_equal(mask, np.ones((2, 3), dtype=np.uint8))

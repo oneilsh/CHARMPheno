@@ -133,7 +133,7 @@ def load_readout_heads(run_dir, label="gated_pc"):
     ridge-logistic heads. Two on-disk forms of them:
 
     1. `readout_heads_{label}.npz` -- the COMPLETED fit's raw-theta coeffs
-       (`_write_readout_heads`, written right after the solve returns): V (C,K),
+       (`spark_vi.readout.write_heads`, written right after the solve returns): V (C,K),
        b_raw (C,), degenerate (C,) bool mask of no-fittable-head nodes (the
        "detection-skipped" ones). Preferred.
     2. `readout_ckpt_{label}.npz` -- the solver CHECKPOINT (W_std/b_std, every 10

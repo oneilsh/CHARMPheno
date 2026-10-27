@@ -21,7 +21,8 @@ for _p in (str(REPO_ROOT / "analysis" / "cloud"), str(REPO_ROOT / "charmpheno"),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import distributed_readout as dr  # noqa: E402
+from spark_vi.readout import kernels as kern  # noqa: E402
+from spark_vi.readout import spark as dr  # noqa: E402
 import gated_pc_readout as gpr  # noqa: E402
 
 
@@ -66,11 +67,11 @@ def test_excess_coverage_discounts_the_prior_floor():
     gamma[:allowed] = alpha + n[:allowed]          # gated-out topics are exactly 0
     theta = gamma / gamma.sum()
     ms = (2, 16, 1024)
-    raw = dr.coverage_from_accum(*dr._topm_coverage_kernel(iter([theta]), ms), ms)
-    exc = dr.coverage_from_accum(*dr._topm_coverage_kernel(iter([theta]), ms, excess=True), ms)
+    raw = kern.coverage_from_accum(*kern.topm_coverage_kernel(iter([theta]), ms), ms)
+    exc = kern.coverage_from_accum(*kern.topm_coverage_kernel(iter([theta]), ms, excess=True), ms)
     assert raw[16][0] < 0.1                         # the floor dominates raw mass
     assert exc[2][0] == pytest.approx(1.0)          # all of the doc's own signal
     # a doc with no excess at all (pure prior) counts as fully covered
     flat = np.r_[np.full(allowed, 1.0 / allowed), np.zeros(K - allowed)]
-    assert dr.coverage_from_accum(
-        *dr._topm_coverage_kernel(iter([flat]), ms, excess=True), ms)[2][0] == 1.0
+    assert kern.coverage_from_accum(
+        *kern.topm_coverage_kernel(iter([flat]), ms, excess=True), ms)[2][0] == 1.0
