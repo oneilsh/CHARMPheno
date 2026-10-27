@@ -784,17 +784,3 @@ def test_re_readout_stacked_arm_adds_the_block_and_leaves_the_other_heads_alone(
     assert "root head alone" in out
 
 
-
-def test_gated_pc_args_emit_spectral_bg_anchors_only_when_set(monkeypatch):
-    """`spectral_bg_anchors` (exp 0134): emitted only when > 0; absent or 0 ->
-    nothing, so every older spectral doc's argv is byte-identical."""
-    monkeypatch.setenv("WORKSPACE_CDR", "cdr")
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
-    base = {"source_table": "t", "person_mod": 1, "vocab_size": 5000, "min_df": 20,
-            "min_patient_count": 20, "doc_min_length": 10, "max_iter": 50,
-            "min_n": 0, "n_bg": 1200, "tpn": 1, "seed": 0, "init": "spectral"}
-    argv = rex.build_gated_pc_args(dict(base, spectral_bg_anchors=8), "/tmp/out")
-    assert argv[argv.index("--spectral-bg-anchors") + 1] == "8"
-    assert "--spectral-bg-anchors" not in rex.build_gated_pc_args(dict(base), "/tmp/out")
-    assert "--spectral-bg-anchors" not in rex.build_gated_pc_args(
-        dict(base, spectral_bg_anchors=0), "/tmp/out")

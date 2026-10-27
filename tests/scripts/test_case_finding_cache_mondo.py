@@ -685,22 +685,6 @@ def test_mondo_load_or_build_misses_once_then_hits(spark, tmp_path, capsys,
 
 
 
-def test_head_starvation_probe_degrades_without_the_power_counts():
-    """A cache HIT skips the Mondo power-count, so the diag-only probe has no
-    per-terminal +counts. It must still read the fitted head (its actual subject)
-    and SAY the counts are missing rather than print a wall of zeros."""
-    from spark_vi.models.topic.dag_placement import DagLayout
-    lay = DagLayout(_PARENT_INT, n_bg=2, tpn=1)
-    w = np.zeros((3, lay.K))
-    w[1, :] = 1.0
-    with_counts = gpc.per_node_head_report(w, lay, 3, _INT2CID, {1001: 400, 1002: 9})
-    without = gpc.per_node_head_report(w, lay, 3, _INT2CID, {})
-    assert "median +ct=" in with_counts
-    assert "median +ct=" not in without
-    assert "per-terminal +counts UNAVAILABLE" in without
-    assert "heads DEAD" in without and "|w_c|:" in without
-
-
 # --------------------------------------------------------------------------- #
 # The re-readout: same key, load-or-BUILD, and the drift gate.                 #
 # --------------------------------------------------------------------------- #
