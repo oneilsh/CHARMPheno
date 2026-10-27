@@ -23,38 +23,27 @@ treeAggregate); see docs/architecture/SPARK_VI_FRAMEWORK.md and
 docs/decisions/0005-mini-batch-sampling.md for references. Auto-checkpoint
 and resume_from semantics are described in
 docs/decisions/0006-unified-persistence-format.md.
+
+Steps 5-6 and all the bookkeeping live in `spark_vi.core.loop.run_svi_loop`,
+shared with the in-memory `LocalRunner` (ADR 0051 §2); this module supplies only
+the Spark E-step (steps 1-4).
 """
 from __future__ import annotations
 
 import logging
-import random
-import time
 from pathlib import Path
 from typing import Any, Callable
 
-import numpy as np
 from pyspark import RDD, StorageLevel
 
+from spark_vi.core.broadcast import destroy_broadcast as _destroy_broadcast
 from spark_vi.core.config import VIConfig
+from spark_vi.core.loop import run_svi_loop
 from spark_vi.core.model import VIModel
 from spark_vi.core.result import VIResult
 from spark_vi.diagnostics.persist import assert_persisted
-from spark_vi.io.export import load_result, save_result
-from spark_vi.core.broadcast import destroy_broadcast as _destroy_broadcast
 
 log = logging.getLogger(__name__)
-
-
-def _runner_metadata(model, **extra):
-    """Merge model.get_metadata() with runner-set keys.
-
-    Runner-set keys (passed as kwargs) win over model-supplied keys.
-    Used at all three VIResult-construction sites so the precedence
-    rule lives in one place and downstream code can rely on
-    `metadata['model_class']` being the actual class name even if a
-    misconfigured model returns a conflicting key.
-    """
-    return {**model.get_metadata(), "model_class": type(model).__name__, **extra}
 
 
 _AGG_DEPTH_THRESHOLD_BYTES = 128 * 1024 * 1024
@@ -79,31 +68,6 @@ def _agg_depth(global_params: dict) -> int:
         return int(getattr(v, "nbytes", 0))
 
     return 3 if _nbytes(global_params) > _AGG_DEPTH_THRESHOLD_BYTES else 2
-
-
-def _fmt_diagnostic(value: object) -> str:
-    """Compact formatter for one iteration_diagnostics value.
-
-    Scalars (Python or NumPy) format to ~4 sig figs. 0-d ndarrays are treated
-    as scalars. 1-D arrays show up to 6 elements with 4 sig figs each;
-    higher-dim arrays are flattened then truncated (no shape prefix). Longer
-    arrays get an ellipsis. Anything else falls back to repr — diagnostic log
-    lines are best-effort and shouldn't crash the fit.
-    """
-    if isinstance(value, np.ndarray):
-        if value.ndim == 0:
-            return f"{float(value):.4g}"
-        flat = value.ravel()
-        if not np.issubdtype(flat.dtype, np.number):
-            # Non-numeric arrays (e.g. string label arrays from topic_block_labels)
-            # fall back to repr rather than crashing on float() conversion.
-            return repr(flat[:6].tolist()) + (", ..." if flat.size > 6 else "")
-        head = ", ".join(f"{float(x):.4g}" for x in flat[:6])
-        suffix = ", ..." if flat.size > 6 else ""
-        return f"[{head}{suffix}]"
-    if isinstance(value, (int, float, np.floating, np.integer)):
-        return f"{float(value):.4g}"
-    return repr(value)
 
 
 class VIRunner:
@@ -180,55 +144,25 @@ class VIRunner:
         model = self.model
         cfg = self.config
 
-        if resume_from is not None:
-            loaded = load_result(resume_from)
-            global_params = loaded.global_params
-            elbo_trace: list[float] = list(loaded.elbo_trace)
-            start_iteration = loaded.n_iterations
-            log.info(
-                "Resuming from %s (n_iterations=%d, converged=%s)",
-                resume_from, loaded.n_iterations, loaded.converged,
-            )
-        else:
-            global_params = model.initialize_global(data_summary)
-            elbo_trace = []
-
         # Strict precondition: data_rdd must be cached. Loop-heavy training
         # otherwise re-executes the upstream lineage (e.g. a BigQuery scan)
         # every iteration. See spark_vi.diagnostics.persist for the rationale
         # behind raising vs. logging here.
         assert_persisted(data_rdd, name="VIRunner.data_rdd")
-
         sc = data_rdd.context
-        prior_bcast = None
-        converged = False
 
-        # Per-iteration trajectories of model-supplied scalars/small-arrays.
-        # Populated below from model.iteration_diagnostics(); empty if the
-        # model doesn't override the default.
-        diagnostic_traces: dict[str, list[Any]] = {}
+        # corpus_size matches the MLlib OnlineLDAOptimizer convention of
+        # using corpus_size / batch_size as the natural-gradient scale.
+        corpus_size = (data_rdd.count() if cfg.mini_batch_fraction is not None
+                       else None)
 
-        # If mini-batching is enabled, count the corpus once and seed the RNG
-        # used to derive per-iteration sample seeds. corpus_size matches the
-        # MLlib OnlineLDAOptimizer convention of using corpus_size / batch_size
-        # as the natural-gradient scale.
-        if cfg.mini_batch_fraction is not None:
-            corpus_size = data_rdd.count()
-            rng = random.Random(cfg.random_seed)
-        else:
-            corpus_size = None
-            rng = None
-
-        for step in range(cfg.max_iterations):
-            t = start_iteration + step
-            t_iter_start = time.perf_counter()
-
+        def _estep(global_params, seed):
             # 1. Sample a mini-batch (or use the full RDD).
-            if cfg.mini_batch_fraction is not None:
+            if seed is not None:
                 batch_rdd = data_rdd.sample(
                     withReplacement=cfg.sample_with_replacement,
                     fraction=cfg.mini_batch_fraction,
-                    seed=rng.randint(0, 2 ** 31 - 1),
+                    seed=seed,
                 )
                 # Cache the sampled RDD so count() and mapPartitions don't each
                 # recompute the sample lineage. Without persistence, sampling
@@ -237,12 +171,10 @@ class VIRunner:
                 batch_size = batch_rdd.count()
                 if batch_size == 0:
                     batch_rdd.unpersist(blocking=False)
-                    log.info("Iteration %d skipped: empty mini-batch", step + 1)
-                    continue
-                stats_scale = float(corpus_size) / float(batch_size)
+                    return None, 0
             else:
                 batch_rdd = data_rdd
-                stats_scale = 1.0
+                batch_size = None
 
             # 2. Broadcast current global params.
             bcast = sc.broadcast(global_params)
@@ -274,157 +206,36 @@ class VIRunner:
             # pushes one more combine round onto the executors and cuts the
             # driver burst to ~P^(1/3) partials, for one extra shuffle round
             # that is noise next to the E-step.
-            aggregated = batch_rdd.mapPartitions(_local).treeReduce(
-                model.combine_stats, depth=_agg_depth(bcast.value))
+            try:
+                aggregated = batch_rdd.mapPartitions(_local).treeReduce(
+                    model.combine_stats, depth=_agg_depth(global_params))
+            finally:
+                # DESTROY the broadcast once the aggregate has returned — and
+                # destroy, not unpersist, because unpersist frees the EXECUTOR
+                # copies only. pyspark writes every broadcast's pickle to a temp
+                # file on the DRIVER's local disk and keeps a driver
+                # block-manager copy, and both survive until destroy(). At
+                # whole-Mondo scale that is ~355 MB of λ per fit iteration: exp
+                # 0104's 100-iteration record fit (2026-08-30) leaked the
+                # master's whole disk and its post-fit readout died on
+                # `[Errno 28] No space left on device` from `sc.broadcast`
+                # itself. Safe because the treeReduce action has completed, so
+                # nothing references this broadcast any more. See
+                # RISKS_AND_MITIGATIONS.md §Broadcast lifecycle.
+                _destroy_broadcast(bcast)
+                # Free the cached batch RDD before the next iteration's sample.
+                if seed is not None:
+                    batch_rdd.unpersist(blocking=False)
+            return aggregated, batch_size
 
-            # 5. Pre-scale aggregated stats to form the natural-gradient target.
-            # In mini-batch mode this multiplies each ndarray by corpus / batch
-            # so the model's update_global sees an unbiased corpus-equivalent.
-            # In full-batch mode (stats_scale == 1.0) the dict is passed through
-            # unchanged.
-            if stats_scale != 1.0:
-                target_stats = {k: v * stats_scale for k, v in aggregated.items()}
-            else:
-                target_stats = aggregated
-
-            # M-step (Robbins-Monro step size).
-            # Hoffman et al. 2013 index t from 1 so the first rho is (tau0+1)^-kappa
-            # rather than (tau0)^-kappa — the latter can collapse to 1.0 and
-            # force a full jump on the first step (see SVI paper §3).
-            rho_t = (cfg.learning_rate_tau0 + t + 1) ** -cfg.learning_rate_kappa
-            global_params = model.update_global(global_params, target_stats, learning_rate=rho_t)
-
-            # 6. ELBO + convergence. Pass the *raw* aggregated stats (not the
-            # pre-scaled target_stats) so ELBO terms representing observed
-            # data evidence stay correct.
-            elbo = model.compute_elbo(global_params, aggregated)
-            elbo_trace.append(float(elbo))
-
-            # Per-iteration progress line. INFO level so it can be surfaced
-            # by configuring `spark_vi` to INFO without firehosing root.
-            iter_dt = time.perf_counter() - t_iter_start
-            batch_str = (f"batch={batch_size}" if cfg.mini_batch_fraction
-                         else "full-batch")
-            log.info(
-                "iter %d/%d: ELBO=%.4f, %s, rho=%.4f, %.1fs",
-                step + 1, cfg.max_iterations, elbo, batch_str, rho_t, iter_dt,
-            )
-            # Model-defined summary, emitted as one log.info per line so any
-            # configured log formatter prefix (e.g. "[driver]   ") gets reapplied
-            # to each line. Empty / missing => skipped.
-            model_str = model.iteration_summary(global_params)
-            for line in model_str.splitlines():
-                if line:
-                    log.info(line)
-
-            # Per-iteration diagnostics: accumulate into traces and emit a
-            # compact key=value log line. Default impl returns {}, so models
-            # that don't opt in pay nothing here.
-            diagnostics = model.iteration_diagnostics(global_params)
-            if diagnostics:
-                # We don't .copy() the values — models must return fresh objects per
-                # call (don't mutate-and-return the same array across iterations).
-                for key, value in diagnostics.items():
-                    diagnostic_traces.setdefault(key, []).append(value)
-                parts = [f"{k}={_fmt_diagnostic(v)}" for k, v in diagnostics.items()]
-                log.info("  diagnostics: " + ", ".join(parts))
-
-            # Diagnostic callback (model-agnostic; whatever the caller wants
-            # to do with global_params). Catch + log so a buggy callback
-            # doesn't kill the fit — the model itself is the load-bearing
-            # work, the diagnostic is incidental.
-            if on_iteration is not None:
-                try:
-                    on_iteration(step + 1, global_params, elbo_trace)
-                except Exception as exc:
-                    log.warning("on_iteration callback raised %r — continuing fit",
-                                exc)
-
-            # 7. Auto-checkpoint (if configured). Writes a VIResult to
-            # cfg.checkpoint_dir every checkpoint_interval iterations,
-            # overwriting the previous checkpoint. Done after the global-params
-            # update so the on-disk checkpoint reflects the current loop state.
-            if (
-                cfg.checkpoint_interval is not None
-                and (step + 1) % cfg.checkpoint_interval == 0
-            ):
-                interim = VIResult(
-                    global_params=global_params,
-                    elbo_trace=list(elbo_trace),
-                    n_iterations=t + 1,
-                    converged=False,
-                    metadata=_runner_metadata(model, checkpoint=True),
-                    diagnostic_traces={k: list(v) for k, v in diagnostic_traces.items()},
-                )
-                save_result(interim, cfg.checkpoint_dir)
-
-            # DESTROY the *previous* broadcast so we don't leak it — and destroy,
-            # not unpersist, because unpersist frees the EXECUTOR copies only.
-            # pyspark writes every broadcast's pickle to a temp file on the
-            # DRIVER's local disk and keeps a driver block-manager copy, and both
-            # survive until destroy(). At whole-Mondo scale that is ~355 MB of λ
-            # per fit iteration: exp 0104's 100-iteration record fit (2026-08-30)
-            # leaked the master's whole disk and its post-fit readout died on
-            # `[Errno 28] No space left on device` from `sc.broadcast` itself —
-            # the same lifecycle bug already fixed on the readout side
-            # (analysis/cloud/distributed_readout._destroy_broadcast). Destroy is
-            # safe here for the same reason the deferred-unpersist was: iteration
-            # t's aggregate has already RETURNED before iteration t+1 reaches
-            # this line, so nothing references the prior broadcast any more.
-            # See RISKS_AND_MITIGATIONS.md §Broadcast lifecycle.
-            if prior_bcast is not None:
-                _destroy_broadcast(prior_bcast)
-            prior_bcast = bcast
-
-            # Free the cached batch RDD before the next iteration's sample.
-            if cfg.mini_batch_fraction is not None:
-                batch_rdd.unpersist(blocking=False)
-
-            # Early-stop only in FULL-BATCH mode. In mini-batch SVI the
-            # per-iteration ELBO is computed on a fresh random sub-sample, so
-            # its iteration-to-iteration variance makes a two-point
-            # relative-change test fire on coincidental closeness, not true
-            # convergence (repeatedly observed: false stops at iter 67 and 157
-            # of a 200-iter budget). Spark MLlib's reference online LDA
-            # (OnlineLDAOptimizer) has NO convergence tolerance and runs exactly
-            # maxIterations for this reason; we match it — mini-batch fits run
-            # the full budget, full-batch fits keep the valid corpus-wide check.
-            if (cfg.mini_batch_fraction is None
-                    and model.has_converged(elbo_trace, cfg.convergence_tol)):
-                converged = True
-                log.info("Converged at iteration %d (ELBO=%.6f)", step + 1, elbo)
-                # One-more destroy for the final broadcast.
-                _destroy_broadcast(prior_bcast)
-                prior_bcast = None
-                result = VIResult(
-                    global_params=global_params,
-                    elbo_trace=elbo_trace,
-                    n_iterations=t + 1,
-                    converged=True,
-                    metadata=_runner_metadata(model),
-                    diagnostic_traces=diagnostic_traces,
-                )
-                # Final-save guarantee: when checkpoint_dir is set, the
-                # post-fit directory is authoritative regardless of where
-                # the interval boundary falls.
-                if cfg.checkpoint_dir is not None:
-                    save_result(result, cfg.checkpoint_dir)
-                return result
-
-        # Hit max_iterations without convergence.
-        if prior_bcast is not None:
-            _destroy_broadcast(prior_bcast)
-        result = VIResult(
-            global_params=global_params,
-            elbo_trace=elbo_trace,
-            n_iterations=start_iteration + cfg.max_iterations,
-            converged=False,
-            metadata=_runner_metadata(model),
-            diagnostic_traces=diagnostic_traces,
+        return run_svi_loop(
+            model, cfg, _estep,
+            corpus_size=corpus_size,
+            data_summary=data_summary,
+            start_iteration=start_iteration,
+            resume_from=resume_from,
+            on_iteration=on_iteration,
         )
-        if cfg.checkpoint_dir is not None:
-            save_result(result, cfg.checkpoint_dir)
-        return result
 
     def transform(self, data_rdd: RDD, global_params: dict[str, Any]) -> RDD:
         """Apply trained global params to infer per-row posteriors.
