@@ -45,8 +45,9 @@ Params, the spectral routing, the per-domain λ conversion and the domain-bounds
    balanced seeds replaced it at equal or better quality (exps 0162, 0163), and its
    DAG-specific variants (anchor scope, topological order, marginal floor, background
    anchors) are complexity with no remaining use. The flat anchor-word init
-   (`spectral_init.py`, `spectral_init_scalable.py`) stays: it is the STM's validated
-   default (insight 0030) and predates this work.
+   (`spectral_init.py`, `spectral_init_scalable.py`) stays as the STM default: re-tested
+   under the unit-diagonal Σ (exps 0164/0165), random init still lands in a much worse
+   optimum (ELBO −7.21e6 vs −5.48e6, foreground blocks lose more than half their mass).
 5. **Remove other unused options**: the profile-η prior (`etaBoost`, `profileEta*`; the
    profile *seed* stays), `countTransform`, `alphaInit=equalized`, the ω modality
    weight and per-domain η, and the CAVI θ twins that only the head used.
