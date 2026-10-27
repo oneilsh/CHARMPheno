@@ -46,9 +46,7 @@ lbfgs_tol: 1.0e-4
 
 # --- dag_placement (hierarchical case-finding) defaults ---
 # model_class: dag_placement triggers the gated-SVI placement engine. K is
-# EMERGENT (n_bg + surviving-DAG-nodes * tpn), NOT set here. init=random is the
-# validated default; init=spectral is the pre-registered A/B arm (dense
-# block-aligned anchor-word seed, Arora et al. 2013). `disease` selects both the
+# EMERGENT (n_bg + surviving-DAG-nodes * tpn), NOT set here. `disease` selects both the
 # foreground cohort and the label-DAG anchors (cohorts.disease_anchors):
 # 'diabetes'/'eds' root at one anchor; 'rare6' builds a six-disease forest.
 disease: diabetes
@@ -64,10 +62,6 @@ window_days: 365
 window_mode: forward
 lookback_days: 365
 label_window_days: 365
-init: random
-spectral_max_vocab: 8000
-spectral_method: auto      # auto|dense|scalable; auto routes by vocab vs spectral_max_vocab
-anchor_scope: closure      # closure|frontier; frontier = bg/node anchors from only their own docs
 cavi_max_iter: 100
 cavi_tol: 1.0e-3
 strip_mode: test_only

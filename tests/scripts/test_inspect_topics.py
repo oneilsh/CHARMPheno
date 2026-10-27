@@ -890,9 +890,9 @@ def test_measurement_state_report_end_to_end_on_a_tiny_run(tmp_path):
     assert "| order only ([measured]) | 1 | 25.0% |" in rep
 
 
-def test_digest_init_line_anchors_and_own_codes(tmp_path):
-    # spectral provenance + per-node anchor word (⚓, * = from HPO profile) and
-    # † on the node's own attesting codes (code_map.tsv)
+def test_digest_init_line_and_own_codes(tmp_path):
+    # init provenance from the manifest (an old spectral fit) and † on the
+    # node's own attesting codes (code_map.tsv)
     _make_run(tmp_path, V=10)
     meta = {"parent_int": {"1": [0], "2": [0], "3": [0], "4": [0], "5": [0]},
             "int2cid": {str(e): 1000 + e for e in range(6)},
@@ -901,16 +901,11 @@ def test_digest_init_line_anchors_and_own_codes(tmp_path):
                            {str(300 + i): i for i in range(10)}]}
     (tmp_path / "meta.json").write_text(json.dumps(meta))
     man = json.loads((tmp_path / "manifest.json").read_text())
-    man["domain_names"] = ["condition", "drug"]   # † / * mark the condition domain
+    man["domain_names"] = ["condition", "drug"]   # † marks the condition domain
     man["init"] = {"init": "spectral", "spectral_method": "scalable",
                    "spectral_d": 768, "anchor_scope": "closure",
                    "spectral_topo_order": "forward"}
     (tmp_path / "manifest.json").write_text(json.dumps(man))
-    (tmp_path / "spectral_anchors.json").write_text(json.dumps(
-        {"vocab_domain": 0, "nodes": {
-            "1": {"cid": 1001, "anchors": [3], "from_profile": [True]},
-            "2": {"cid": 1002, "anchors": [4], "from_profile": [False]},
-            "3": {"cid": 1003, "anchors": [12], "from_profile": [False]}}}))
     (tmp_path / "code_map.tsv").write_text("std_cid\tnode_cid\n200\t1001\n")
     names = tmp_path / "names.csv"
     names.write_text("concept_id,concept_name\n"
@@ -922,19 +917,19 @@ def test_digest_init_line_anchors_and_own_codes(tmp_path):
                           own_codes_path=str(tmp_path / "code_map.tsv"))
     init = next(ln for ln in dig.splitlines() if ln.startswith("init:"))
     assert "spectral" in init and "spectral_d=768" in init
-    assert "HPO: 1/3 nodes have a profile anchor" in init
-    # concatenated-vocab anchor 12 = domain 1 (drug) local index 2
-    n3 = next(ln for ln in dig.splitlines() if ln.strip().startswith("node3 "))
-    assert "⚓[drug] d2" in n3
+    assert "HPO: none" in init
     n1 = next(ln for ln in dig.splitlines() if ln.strip().startswith("node1 "))
-    assert "⚓w3*" in n1 and "w0†" in n1
-    n2 = next(ln for ln in dig.splitlines() if ln.strip().startswith("node2 "))
-    assert "⚓w4" in n2 and "*" not in n2.split("⚓")[1].split(" ")[0]
+    assert "w0†" in n1
+    assert "⚓" not in dig
 
 
 def test_init_provenance_fallbacks():
-    assert "random or unrecorded" in it.init_provenance({}, None)
+    assert it.init_provenance({}).startswith("random")
     line = it.init_provenance({"profile_eta": {"path": "/x/eta.tsv",
-                                               "strength": 2.0}}, {})
-    assert "settings not in this manifest" in line
+                                               "strength": 2.0}})
     assert "profile-eta prior (strength 2.0, eta.tsv)" in line
+    line = it.init_provenance({"gate_schedule": {
+        "warm": 2, "seed_mode": "balanced", "seed_leaves": True,
+        "seed_profile": {"path": "/x/marks.tsv"}}})
+    assert "gate seed balanced + leaves" in line
+    assert "HPO: profile seed (marks.tsv)" in line

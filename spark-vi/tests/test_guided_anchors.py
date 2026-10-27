@@ -1,5 +1,6 @@
-"""HPO-guided spectral anchors (spec 2026-10-05): the preferred-set two-stage
-anchor search and its threading through both gated spectral paths.
+"""The preferred-set two-stage anchor search in the flat anchor-word init
+(`find_anchors` / `find_anchors_projected`; spec 2026-10-05). Its threading
+through the DAG spectral init was removed with that init (ADR 0050).
 
 The contract under test, in order of what would hurt most if broken:
   1. IDENTITY: `preferred=None` / empty reproduces the unguided search exactly —
@@ -10,13 +11,11 @@ The contract under test, in order of what would hurt most if broken:
      the rest, on one shared Gram–Schmidt basis.
   4. The floor still applies to preferred rows (a preferred word below the
      node's df floor cannot anchor), and seeds/degenerate rows are skipped.
-  5. gated_init threads per-node sets and reports per-node counts; the dense
-     and scalable paths agree on a planted corpus.
 """
 import numpy as np
 import pytest
 
-from spark_vi.models.topic.spectral_init import find_anchors, word_cooccurrence
+from spark_vi.models.topic.spectral_init import find_anchors
 from spark_vi.models.topic.spectral_init_scalable import find_anchors_projected
 
 
@@ -104,120 +103,6 @@ def test_projected_floor_applies_to_preferred_rows_then_falls_back():
     assert got[0] == 2 and 6 not in got and len(got) == 3
 
 
-# --------------------------------------------------------------------------- #
-# gated_init threading                                                         #
-# --------------------------------------------------------------------------- #
-def _planted():
-    """Parent 1 (tokens 0,1), child 2 (tokens 2,3 + inherits 0), background 8,9;
-    tokens 4..7 are a 'confound' that co-occurs with node 2's docs more purely
-    than its own phenotype tokens, so the OPEN search anchors node 2 on it and
-    the GUIDED search (preferred = node 2's phenotype tokens) does not."""
-    docs, labels = [], []
-    for i in range(40):
-        docs.append(np.array([8, 9, 0, 1])); labels.append(frozenset())
-        docs.append(np.array([0, 1, 8])); labels.append(frozenset({1}))
-        # node 2: phenotype tokens 2,3 in every doc; confound 4..7 in a sharp
-        # sub-stratum that never carries anything else
-        if i % 2 == 0:
-            docs.append(np.array([2, 3, 0, 8])); labels.append(frozenset({2}))
-        else:
-            docs.append(np.array([4, 5, 6, 7])); labels.append(frozenset({2}))
-    return docs, labels
-
-
-def test_dense_gated_init_threads_candidates_and_reports_counts():
-    from spark_vi.models.topic.dag_placement import DagLayout
-    from spark_vi.models.topic.gated_init import spectral_block_aligned_lambda
-
-    docs, labels = _planted()
-    lay = DagLayout({1: 0, 2: 1}, n_bg=2, tpn=1)
-    V = 10
-    ds = {"train_docs": docs, "train_labels": labels}
-    stats_open: dict = {}
-    lam_open = spectral_block_aligned_lambda(ds, lay, V, anchor_stats=stats_open)
-    stats_g: dict = {}
-    lam_g = spectral_block_aligned_lambda(
-        ds, lay, V, anchor_candidates={2: [2, 3]}, anchor_stats=stats_g)
-    # unguided stats: every node seeded, none guided
-    assert set(stats_open) == {1, 2} and all(v[0] == 0 for v in stats_open.values())
-    # guided: node 2 drew its one anchor from its preferred set; node 1 untouched
-    assert stats_g[2][0] == 2 and stats_g[2][2] == 1 and stats_g[2][3] == 1
-    assert stats_g[1] == stats_open[1]
-    # the tally carries the anchor ids and their from-preferred flags
-    assert stats_g[2][4][0] in (2, 3) and stats_g[2][5] == (True,)
-    assert stats_open[2][5] == (False,)
-    b2_open, b2_g = lam_open[lay.block[2][0]], lam_g[lay.block[2][0]]
-    assert np.allclose(lam_open[lay.block[1][0]], lam_g[lay.block[1][0]])
-    # the guided block puts more of its mass on the phenotype tokens than the
-    # open one does
-    assert b2_g[[2, 3]].sum() / b2_g.sum() > b2_open[[2, 3]].sum() / b2_open.sum()
-
-
-def test_summarize_anchor_stats_pools_to_counts_only():
-    from spark_vi.models.topic.gated_init import summarize_anchor_stats
-    st = {1: (0, None, 0, 1), 2: (3, 2, 1, 1), 3: (4, 0, 0, 1), 4: (2, 2, 1, 2)}
-    s = summarize_anchor_stats(st, n_nodes=5, tpn=2)
-    assert s["nodes_seeded"] == 4 and s["nodes_total"] == 5
-    assert s["nodes_guided"] == 3 and s["anchors_from_profile"] == 2
-    assert s["anchors_total"] == 5 and s["anchors_possible"] == 10
-    assert (s["nodes_fully_guided"], s["nodes_partially_guided"],
-            s["nodes_fallback_only"]) == (1, 1, 1)
-    assert summarize_anchor_stats(None, n_nodes=3, tpn=1)["nodes_guided"] == 0
-
-
-@pytest.mark.slow
-def test_scalable_and_dense_agree_on_guided_anchors(spark):
-    from spark_vi.models.topic.dag_placement import DagLayout
-    from spark_vi.models.topic.types import GatedBOWDocument
-    from spark_vi.models.topic.gated_init import (
-        scalable_block_aligned_lambda, spectral_block_aligned_lambda)
-
-    docs, labels = _planted()
-    lay = DagLayout({1: 0, 2: 1}, n_bg=2, tpn=1)
-    V = 10
-    rows = [GatedBOWDocument(indices=np.asarray(sorted(d), dtype=np.int32),
-                             counts=np.ones(len(d)), length=len(d),
-                             frontier=frozenset(l)) for d, l in zip(docs, labels)]
-    rdd = spark.sparkContext.parallelize(rows, 3)
-    st_s: dict = {}
-    scalable_block_aligned_lambda(rdd, lay, V, seed=0, min_doc_freq=1,
-                                  anchor_candidates={2: [2, 3]}, anchor_stats=st_s)
-    st_d: dict = {}
-    spectral_block_aligned_lambda({"train_docs": docs, "train_labels": labels},
-                                  lay, V, anchor_candidates={2: [2, 3]},
-                                  anchor_stats=st_d)
-    # both paths guided node 2 from its set, and both left node 1 unguided
-    assert st_s[2][2] == st_d[2][2] == 1 and st_s[1][0] == st_d[1][0] == 0
-    assert st_s[2][1] == 2                       # scalable reports the df-floor count
-
-
-def test_estimator_param_roundtrip_and_random_init_guard():
-    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
-    est = OnlinePCLDAEstimator()
-    assert est.getSpectralAnchorCandidates() == {}
-    est.setSpectralAnchorCandidates({3: [7, 2, 7], 5: []})
-    assert est.getSpectralAnchorCandidates() == {3: [2, 7]}     # deduped, sorted, empty dropped
-    est.setSpectralAnchorCandidates(None)
-    assert est.getSpectralAnchorCandidates() == {}
-    with pytest.raises(TypeError):
-        est.setSpectralAnchorCandidates({3: [1.5]})              # float id must not truncate
-
-
-def test_anchor_dump_payload_is_ids_and_ontology_names_only():
-    from spark_vi.models.topic.gated_init import anchor_dump_payload
-    st = {2: (2, 1, 1, 1, (3,), (True,)), 1: (0, None, 0, 1, (0,), (False,))}
-    pay = anchor_dump_payload(st, int2cid={1: 4994, 2: 5021},
-                              name_by_id={4994: "cardiomyopathy", 5021: "dilated CM"})
-    assert list(pay) == ["1", "2"]                       # sorted by engine id
-    assert pay["2"] == {"cid": 5021, "name": "dilated CM", "anchors": [3],
-                        "from_profile": [True], "n_preferred": 2, "n_eligible": 1}
-    assert pay["1"]["name"] == "cardiomyopathy" and pay["1"]["from_profile"] == [False]
-    # no maps -> ids only, never a crash
-    assert anchor_dump_payload(st)["2"]["cid"] is None
-    # old 4-tuples (pre-ids) still summarize and dump without anchors
-    assert anchor_dump_payload({5: (1, 1, 0, 1)})["5"]["anchors"] == []
-
-
 def test_projected_marginal_floor_guided_and_all():
     QR, p_w, df_w = _sketch()
     p_w = p_w.copy(); p_w[[2, 6]] = 1e-4            # two rare preferred words
@@ -229,6 +114,5 @@ def test_projected_marginal_floor_guided_and_all():
     assert 2 not in a and 6 not in a                           # nor anchor at all
     assert find_anchors_projected(QR, p_w, df_w, 3, marginal_floor="none") == \
         find_anchors_projected(QR, p_w, df_w, 3)
-    import pytest
     with pytest.raises(ValueError):
         find_anchors_projected(QR, p_w, df_w, 3, marginal_floor="bogus")

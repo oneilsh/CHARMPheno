@@ -52,18 +52,3 @@ def test_exclusion_is_identity_when_nothing_is_under_the_root():
                          "neg": [False], "freq": [1.0]})
     kept, st = hs.exclude_hpo_subtree(prof, _toy_parents())
     assert kept.equals(prof) and st["n_rows_dropped"] == 0
-
-
-def test_name_spectral_anchors_renders_names_flags_and_grep():
-    import name_spectral_anchors as nsa
-    doc = {"vocab_domain": 0, "nodes": {
-        "147": {"cid": 5021, "name": "dilated cardiomyopathy", "anchors": [3, 9, 77],
-                "from_profile": [True, False, True], "n_preferred": 2, "n_eligible": 2},
-        "19": {"cid": 4994, "name": "cardiomyopathy", "anchors": [1],
-               "from_profile": [False], "n_preferred": 0, "n_eligible": None}}}
-    vm0 = {"77619": 3, "433736": 9, "4150384": 1}          # idx 77 is NOT in the map
-    names = {77619: "Reduced fetal movement", 433736: "Obesity", 4150384: "Urine cytology abnormal"}
-    lines = nsa.name_anchors(doc, vm0, names)
-    assert lines == ["cardiomyopathy | Urine cytology abnormal",
-                     "dilated cardiomyopathy | Reduced fetal movement* · Obesity · idx:77*"]
-    assert nsa.name_anchors(doc, vm0, names, grep="^dilated") == lines[1:]

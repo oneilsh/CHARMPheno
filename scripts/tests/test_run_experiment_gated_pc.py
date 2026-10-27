@@ -249,3 +249,15 @@ def test_build_gated_pc_args_alpha_init_forwarded_only_when_non_uniform(monkeypa
     assert "--alpha-init" not in args
     args = mod.build_gated_pc_args({**_base_eff(), "alpha_init": "equalized"}, "/out")
     assert args[args.index("--alpha-init") + 1] == "equalized"
+
+
+def test_a_removed_option_is_refused_and_its_inert_value_accepted(monkeypatch):
+    # ADR 0050: a spec still asking for a removed fit option fails loudly; the
+    # value that meant "off" (e.g. an old spec's `init: random`) passes.
+    mod = _run_exp(monkeypatch)
+    mod.build_gated_pc_args({**_base_eff(), "init": "random",
+                             "anchor_scope": "closure"}, "/out")
+    for key, val in (("init", "spectral"), ("spectral_bg_anchors", 8),
+                     ("anchor_scope", "frontier")):
+        with pytest.raises(ValueError, match="ADR 0050"):
+            mod.build_gated_pc_args({**_base_eff(), key: val}, "/out")
