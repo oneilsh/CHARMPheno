@@ -112,3 +112,23 @@ def test_model_codes_round_robin_over_node_topics_skipping_background():
     assert select_model_codes(lam, 1, 3) == [(0, 1), (0, 2), (1, 1)]   # (0,2) seen
     assert select_model_codes(lam, 1, 10) == [(0, 1), (0, 2), (1, 0), (1, 1)]
     assert (0, 0) not in select_model_codes(lam, 1, 10)                # background
+
+
+def test_relevance_codes_exclude_own_codes_and_keep_the_domain_quota():
+    import numpy as np
+    from gated_pc_readout import select_relevance_codes
+    # K = 3: topic 0 background, topics 1, 2 node blocks. Domain 0 has 4 words,
+    # domain 1 has 2. Word 0 is common everywhere; word 1 is topic 1's own code.
+    lam = {0: np.array([[50.0, 1, 1, 1], [30, 40, 5, 1], [30, 1, 1, 9]]),
+           1: np.array([[5.0, 5], [1, 9], [9, 1]])}
+    got = select_relevance_codes(lam, 1, {0: 2, 1: 1}, rel_lambda=0.6,
+                                 exclude={1: [1]})
+    dom0 = [i for d, i in got if d == 0]
+    assert len(dom0) == 2 and len([1 for d, _ in got if d == 1]) == 1
+    assert 1 not in dom0                  # topic 1's own code never chosen
+    # λ = 0 is pure lift: the word common everywhere (0) loses to distinctive ones
+    lift = select_relevance_codes(lam, 1, {0: 2}, rel_lambda=0.0, exclude={1: [1]})
+    assert (0, 0) not in lift and len(lift) == 2
+    # λ = 1 is plain top words: the common word 0 leads again
+    plain = select_relevance_codes(lam, 1, {0: 1}, rel_lambda=1.0, exclude={1: [1]})
+    assert plain == [(0, 0)]
