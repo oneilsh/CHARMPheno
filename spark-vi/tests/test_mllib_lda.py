@@ -47,7 +47,7 @@ def test_optimize_topic_concentration_param_can_be_set():
     assert e.getOrDefault("optimizeTopicConcentration") is True
 
 
-def test_optimize_doc_concentration_default_matches_mllib():
+def test_optimize_doc_concentration_default_matches_mllib(spark):
     """ADR 0010 flipped this default to match pyspark.ml.clustering.LDA."""
     from pyspark.ml.clustering import LDA as MLlibLDA
     from spark_vi.mllib.topic.lda import OnlineLDAEstimator

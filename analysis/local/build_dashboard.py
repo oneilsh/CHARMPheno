@@ -196,6 +196,9 @@ def main(argv: list[str] | None = None) -> int:
     corpus_manifest = result.metadata.get("corpus_manifest", {})
     doc_spec_manifest = corpus_manifest.get("doc_spec", {"name": "patient"})
     doc_spec = DocSpec.from_manifest(doc_spec_manifest)
+    # A session that already exists (a test's, a notebook's) belongs to its
+    # creator: stop only the one this script starts.
+    _owns_spark = SparkSession.getActiveSession() is None
     spark = _build_spark()
     df = load_omop_parquet(str(args.input), spark=spark)
     bow_df, _ = to_bow_dataframe(df, doc_spec=doc_spec, vocab=vocab_ids)
@@ -710,7 +713,8 @@ def main(argv: list[str] | None = None) -> int:
     ).tolist()
     bow_df.unpersist()
     bow_df_stats.unpersist()
-    spark.stop()
+    if _owns_spark:
+        spark.stop()
 
     v_disp = write_model_and_vocab_bundles(
         out_dir=args.out_dir,

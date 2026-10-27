@@ -1,5 +1,6 @@
 # tests/scripts/test_fit_stm_local.py
 import sys
+import pytest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "analysis" / "local"))
@@ -21,6 +22,7 @@ def _make_sim(tmp_path):
             tmp_path / "gated_person_N300_seed5.parquet")
 
 
+@pytest.mark.slow
 def test_fit_stm_local_writes_gated_checkpoint(tmp_path):
     from fit_stm_local import main as fit_main
     omop, person = _make_sim(tmp_path)
@@ -43,6 +45,7 @@ def test_fit_stm_local_writes_gated_checkpoint(tmp_path):
     assert lam.shape[0] == 5  # K rows
 
 
+@pytest.mark.slow
 def test_fit_recovers_planted_rare_foreground(tmp_path):
     from simulate_gated_omop import main as sim_main
     from fit_stm_local import main as fit_main
@@ -80,6 +83,7 @@ def test_fit_recovers_planted_rare_foreground(tmp_path):
     assert bg_mass < 0.15, bg_mass
 
 
+@pytest.mark.slow
 def test_fit_stm_local_reference_topic_end_to_end(tmp_path):
     """--reference-topic threads through to the engine: the saved Gamma has its
     reference column zeroed and the metadata records the hardening config.
@@ -111,6 +115,7 @@ def test_fit_stm_local_reference_topic_end_to_end(tmp_path):
     assert np.allclose(Gamma[:, 0], 0.0)               # reference column zeroed
 
 
+@pytest.mark.slow
 def test_fit_stm_local_spectral_init_end_to_end(tmp_path):
     """--spectral-init threads through to the engine: the fit completes on the
     gated sim corpus (exercising the block-aware anchor-word path) and the
@@ -130,6 +135,7 @@ def test_fit_stm_local_spectral_init_end_to_end(tmp_path):
     assert manifest["metadata"]["stm_hardening"]["spectral_init"] is True
 
 
+@pytest.mark.slow
 def test_fit_stm_local_spectral_method_dense_end_to_end(tmp_path):
     """--spectral-method dense (the default) threads to the engine and the
     metadata records stm_hardening['spectral_method'] == 'dense'.
@@ -149,6 +155,7 @@ def test_fit_stm_local_spectral_method_dense_end_to_end(tmp_path):
     assert manifest["metadata"]["stm_hardening"]["spectral_method"] == "dense"
 
 
+@pytest.mark.slow
 def test_fit_stm_local_full_sigma_end_to_end(tmp_path):
     """Full-Sigma pipeline smoke test with --min-pair-support 2.
 

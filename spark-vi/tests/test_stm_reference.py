@@ -145,6 +145,7 @@ def _toy_docs(rng, *, V, D, doc_len, K_blocks):
     return docs
 
 
+@pytest.mark.slow
 def test_reference_gamma_column_zero_and_sigma_diagonal_pinned():
     """After full-batch updates with reference_topic, the reference topic's
     Gamma column stays 0 and its Sigma diagonal is pinned to 1 (block-wise
@@ -164,6 +165,7 @@ def test_reference_gamma_column_zero_and_sigma_diagonal_pinned():
     assert gp["Sigma"][0, 0] == 1.0
 
 
+@pytest.mark.slow
 def test_reference_topic_still_learns_content():
     """The reference is a real topic: its lambda row carries vocabulary mass."""
     rng = np.random.default_rng(0)
@@ -191,6 +193,7 @@ def test_reference_elbo_finite():
     assert np.isfinite(elbo)
 
 
+@pytest.mark.slow
 def test_reference_on_is_the_default():
     """reference_topic now defaults to True (validated default, insight 0030):
     omitting the kwarg is identical to reference_topic=True, and differs from the
@@ -214,6 +217,7 @@ def test_reference_on_is_the_default():
     assert not np.array_equal(gpd["Gamma"], gpoff["Gamma"])
 
 
+@pytest.mark.slow
 def test_reference_gated_infer_local_pins_reference():
     """infer_local must use the same parameterization as training, so exported
     theta has the reference pinned to eta=0."""

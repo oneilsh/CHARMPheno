@@ -348,6 +348,7 @@ def test_domains_must_sum_to_vocab():
 
 # --- SP2 Task 2: dict-aware E/M-step + per-domain eta + multi-domain ELBO ---
 
+@pytest.mark.slow
 def test_multidomain_em_refines_seeded_per_domain_betas():
     """The dict-aware multi-domain E/M-step recovers each node's planted per-domain
     signature (>0.4 mass on the planted support in BOTH domains) when its block

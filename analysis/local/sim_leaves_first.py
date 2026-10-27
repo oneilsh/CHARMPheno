@@ -290,6 +290,9 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     from pyspark.sql import SparkSession
+    # A session that already exists (a test's, a notebook's) belongs to its
+    # creator: stop only the one this script starts.
+    _owns_spark = SparkSession.getActiveSession() is None
     spark = (SparkSession.builder.master("local[4]").appName("sim-leaves-first")
              .config("spark.ui.enabled", "false")
              .config("spark.sql.shuffle.partitions", "4").getOrCreate())
@@ -320,7 +323,8 @@ def main(argv=None):
                     res.setdefault(arm, {}).setdefault(u, []).append(r)
                 print(f"[sim] seed {s} {label(*arm)} done", flush=True)
     finally:
-        spark.stop()
+        if _owns_spark:
+            spark.stop()
 
     print(f"\n# leaves-first sim — VIRunner local Spark, mini-batch {args.frac}, "
           f"tau0 {args.tau0}, kappa {args.kappa}, {args.total} iters, "

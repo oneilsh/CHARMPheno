@@ -56,6 +56,7 @@ def test_build_rows_skips_unnamed_real_ids():
     assert 200 in rows and 999 not in rows
 
 
+@pytest.mark.slow
 def test_main_names_json_writes_csv(tmp_path):
     (tmp_path / "manifest.json").write_text(json.dumps({
         "domain_names": ["condition", "measurement"],
@@ -76,6 +77,7 @@ def test_main_names_json_writes_csv(tmp_path):
     assert got["30003"] == "creat [high]"
 
 
+@pytest.mark.slow
 def test_dry_run_needs_no_bq(tmp_path):
     (tmp_path / "manifest.json").write_text(json.dumps({
         "domain_names": ["condition"], "corpus_manifest": {"cdr": "p.d", "billing": "b"}}))

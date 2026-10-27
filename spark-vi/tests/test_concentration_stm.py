@@ -30,6 +30,7 @@ class TestCorpusConcentrationStmNumpy:
                      partition=part, seed=seed)
         return docs, part, gp, K
 
+    @pytest.mark.slow
     def test_numpy_summary_shape_and_bounds(self):
         from spark_vi.mllib.topic.stm import corpus_concentration_stm
 

@@ -120,6 +120,7 @@ def test_pool_reasons_suppresses_small_members():
     assert out == {1: ["a", "b"]}
 
 
+@pytest.mark.slow
 def test_run_differential_end_to_end_on_a_tiny_run(tmp_path, monkeypatch):
     import json
     sys.path.insert(0, str(REPO_ROOT / "tests" / "scripts"))
@@ -321,6 +322,7 @@ def test_code_head_learns_markers_and_candidates_match_predict():
     assert py[0] > py[1]                                   # marker of class 0
 
 
+@pytest.mark.slow
 def test_hybrid_code_head_and_next_question_with_codes():
     eng, head, pats, th = _toy_engine_and_head()
     tr = _marker_bags(200, 5)

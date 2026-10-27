@@ -18,6 +18,7 @@ import concentration_recovery_gated_experiment as crge
 
 
 class TestRunSmallSmoke:
+    @pytest.mark.slow
     @pytest.mark.parametrize("beta_mode", ["disjoint", "shared"])
     def test_run_small_smoke(self, beta_mode):
         results = crge.run(

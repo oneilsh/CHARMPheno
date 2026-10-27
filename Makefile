@@ -70,10 +70,16 @@ data:
 data-clean:
 	rm -rf data/cache data/simulated
 
+# Unit tier (seconds): every package's tests minus `slow` (local Spark, simulator
+# fits) and `cluster`. The driver suites need the repo and both packages on the
+# path. See AGENTS.md "Testing" for when to run which tier.
+DRIVER_TESTS := tests/scripts scripts/tests analysis
+DRIVER_PYTHONPATH := PYTHONPATH=.:spark-vi:charmpheno
+
 test:
 	@if [ -d spark-vi ]; then $(MAKE) -C spark-vi test; fi
 	@if [ -d charmpheno ]; then $(MAKE) -C charmpheno test; fi
-	@if [ -d tests/scripts ]; then poetry run pytest tests/scripts -v; fi
+	$(DRIVER_PYTHONPATH) poetry run pytest $(DRIVER_TESTS) -q -m "not slow and not cluster"
 
 # See spark-vi/Makefile and charmpheno/Makefile for the JAVA_HOME selection
 # rationale (PySpark 3.5+ requires Java >=17). Same logic inlined here for
@@ -89,6 +95,7 @@ JAVA_PREFIX := $(if $(JAVA_HOME),JAVA_HOME=$(JAVA_HOME) ,)
 test-all:
 	@if [ -d spark-vi ]; then $(MAKE) -C spark-vi test-all; fi
 	@if [ -d charmpheno ]; then $(MAKE) -C charmpheno test-all; fi
+	$(JAVA_PREFIX)$(DRIVER_PYTHONPATH) poetry run pytest $(DRIVER_TESTS) -q -m "not cluster"
 	@if [ -d tests/integration ]; then \
 		cd charmpheno && $(JAVA_PREFIX)poetry run pytest ../tests/integration -v -m "not cluster"; \
 	fi

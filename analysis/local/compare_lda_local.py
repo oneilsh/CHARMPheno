@@ -127,6 +127,9 @@ def main(argv: list[str] | None = None) -> int:
                          format="%(asctime)s %(levelname)s %(message)s")
     args.output.mkdir(parents=True, exist_ok=True)
 
+    # A session that already exists (a test's, a notebook's) belongs to its
+    # creator: stop only the one this script starts.
+    _owns_spark = SparkSession.getActiveSession() is None
     spark = _build_spark()
     try:
         df_raw = load_omop_parquet(str(args.input), spark=spark)
@@ -203,7 +206,8 @@ def main(argv: list[str] | None = None) -> int:
         bow_df.unpersist()
         return 0
     finally:
-        spark.stop()
+        if _owns_spark:
+            spark.stop()
 
 
 if __name__ == "__main__":

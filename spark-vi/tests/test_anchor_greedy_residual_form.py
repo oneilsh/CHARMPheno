@@ -112,6 +112,7 @@ def test_dense_greedy_matches_the_reprojection_reference(seed):
     assert got == _reference_greedy(Qbar, norms, candidate, 8, seed_rows=[3, 4])
 
 
+@pytest.mark.slow
 def test_projected_greedy_scales_to_a_wide_background():
     """1,200 anchors from an 11.6k x 2048 sketch is exp 0134's background. The
     old form needed days; this must take seconds (no timing assert — the point

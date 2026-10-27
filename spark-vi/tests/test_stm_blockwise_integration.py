@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from spark_vi.models.topic.stm import OnlineSTM
 from _stm_synth import (gated_ln_corpus, planted_recovery,
                         foreground_recovers_group)
@@ -20,6 +21,7 @@ def _fit(cls, docs, part, V, beta, n_iter=150, batch=120, seed=42):
     return gp, max_var
 
 
+@pytest.mark.slow
 def test_blockwise_no_runaway_and_recovers_subphenotypes():
     docs, part, Sigma_true, beta = gated_ln_corpus(
         group_weights={"A": 0.92, "B": 0.08}, fg_per_group=4, bg_k=6,
@@ -37,6 +39,7 @@ def test_blockwise_no_runaway_and_recovers_subphenotypes():
     assert Sig[a, b] > 0.05, "within-group A correlation not recovered"
 
 
+@pytest.mark.slow
 def test_blockwise_marginals_are_pd():
     docs, part, Sigma_true, beta = gated_ln_corpus(
         group_weights={"A": 0.92, "B": 0.08}, fg_per_group=4, bg_k=6,
@@ -48,6 +51,7 @@ def test_blockwise_marginals_are_pd():
         assert np.linalg.eigvalsh(Sig[np.ix_(allowed, allowed)]).min() > 0
 
 
+@pytest.mark.slow
 def test_nongated_sigma_is_unit_diagonal_correlation():
     """Non-gated (no groups): every pair is observed, so Sigma is the directly
     standardized full correlation matrix — unit diagonal, all |offdiag|<=1, PD."""

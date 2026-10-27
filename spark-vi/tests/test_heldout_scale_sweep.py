@@ -92,6 +92,7 @@ class TestNumpyRddParity:
 
 
 class TestArgmaxRecoversPlantedScale:
+    @pytest.mark.slow
     def test_argmax_recovers_planted_scale(self):
         """KEY test: plant a GATED corpus at a known scalar generative scale s
         and confirm the sweep's argmax_c recovers it (not the diffuse end)."""
@@ -166,6 +167,7 @@ class TestEmptyRddRaises:
 
 
 class TestReferenceTopicHandled:
+    @pytest.mark.slow
     def test_reference_topic_handled(self):
         from spark_vi.mllib.topic.stm import corpus_heldout_scale_sweep_gated
 
