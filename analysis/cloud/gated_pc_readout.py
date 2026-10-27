@@ -315,6 +315,56 @@ def select_model_codes(lam, n_bg, n_top):
     return sorted(chosen)
 
 
+def select_relevance_codes(lam, n_bg, quota, *, rel_lambda=0.6, exclude=None):
+    """Per-domain token sets chosen by the fit's node topics under LDAvis relevance
+    (Sievert & Shirley 2014): r(w|k) = λ log p(w|k) + (1 - λ) log(p(w|k) / p(w)),
+    with p(w) the fit's own word marginal in that domain. λ = 1 is plain top words;
+    0.6 (the dashboard's setting) lifts codes distinctive of a topic over codes
+    common everywhere.
+
+    Why this shape: the plain top-words selector (`select_model_codes`) spent its
+    budget on the nodes' own attesting codes, which by the new-diagnosis rule are
+    absent before the index for every patient being scored, and drew almost no
+    measurements (exp 0163). Here `exclude` ({topic: domain-0 vocab idx}, the node's
+    and its descendants' own codes, `topic_npmi.own_code_exclusions`) drops those
+    words from each topic's ranking, and `quota` ({domain: n}) fixes the per-domain
+    count, matched to the frequency baseline's mix, so the comparison is about which
+    codes within a domain, not how many of each domain. Within a domain the node
+    topics take turns (round-robin by rank) until the quota is met. Sorted
+    (domain, idx)."""
+    doms = lam if isinstance(lam, dict) else {0: lam}
+    exclude = exclude or {}
+    chosen = []
+    for m, q in sorted(quota.items()):
+        L = np.asarray(doms[m], dtype=np.float64)
+        pw = L.sum(axis=0) / max(L.sum(), 1e-300)
+        ranked = []
+        for k in range(int(n_bg), L.shape[0]):
+            tot = L[k].sum()
+            if tot <= 0:
+                continue
+            beta = L[k] / tot
+            with np.errstate(divide="ignore", invalid="ignore"):
+                lb = np.log(np.where(beta > 0, beta, np.nan))
+                r = rel_lambda * lb + (1.0 - rel_lambda) * (lb - np.log(
+                    np.where(pw > 0, pw, np.nan)))
+            r = np.nan_to_num(r, nan=-np.inf)
+            if m == 0 and k in exclude:
+                r[list(exclude[k])] = -np.inf
+            order = np.argsort(-r, kind="stable")
+            ranked.append([int(i) for i in order if np.isfinite(r[i])])
+        seen, r_i = set(), 0
+        while len(seen) < int(q) and any(r_i < len(t) for t in ranked):
+            for t in ranked:
+                if r_i < len(t) and t[r_i] not in seen:
+                    seen.add(t[r_i])
+                    if len(seen) >= int(q):
+                        break
+            r_i += 1
+        chosen.extend((int(m), i) for i in seen)
+    return sorted(chosen)
+
+
 def raw_presence_kernel(get_pos, n_cols):
     """`(*domain vectors) -> DenseVector(n)`: 1.0 where the document carries a selected
     token. `get_pos()` returns {(domain, idx): column}; a broadcast on the cluster
@@ -1213,11 +1263,18 @@ def build_parser() -> argparse.ArgumentParser:
                         "over all test patients vs with prior-diagnosis patients set "
                         "aside (mapped own code in the pre-index features). Transforms "
                         "the test split only.")
-    p.add_argument("--raw-select", choices=["freq", "model"], default="freq",
+    p.add_argument("--raw-select", choices=["freq", "model", "relevance"],
+                   default="freq",
                    help="How --raw-baseline picks its N tokens: 'freq' = train document "
                         "frequency (exp 0147); 'model' = round-robin over the fit's node "
-                        "topics' top words (select_model_codes). Model outputs are "
-                        "tagged 'rawm<N>'.")
+                        "topics' top words (select_model_codes; tag 'rawm<N>'); "
+                        "'relevance' = the node topics' LDAvis relevance at "
+                        "--raw-rel-lambda with each topic's own and descendant codes "
+                        "excluded and the frequency set's per-domain mix "
+                        "(select_relevance_codes; tag 'rawr<N>').")
+    p.add_argument("--raw-rel-lambda", type=float, default=0.6,
+                   help="relevance weight λ for --raw-select relevance (1 = plain "
+                        "top words; 0.6 = the dashboard's setting)")
     p.add_argument("--raw-baseline", type=int, default=0, metavar="N",
                    help="Exp 0147: RAW-CODE BASELINE. Skip the θ transform; the heads "
                         "are fit on the binary presence of the N most frequent train "
@@ -2174,6 +2231,39 @@ def main(argv=None) -> int:
                     _cprint(f"[readout]   raw baseline, MODEL-selected: {len(_sel)} "
                             f"tokens from the node topics; {len(_freq & set(_sel))} also "
                             f"in the frequency top {args.raw_baseline}", flush=True)
+                elif args.raw_select == "relevance":
+                    import inspect_topics as _it
+                    from spark_vi.models.topic.dag_placement import DagLayout
+                    from topic_npmi import own_code_exclusions
+                    _freq = set(_sel)
+                    _quota = {}
+                    for d, _i in _sel:
+                        _quota[d] = _quota.get(d, 0) + 1
+                    _lay = DagLayout({int(c): [int(q) for q in ps] for c, ps in
+                                      bundle.parent_int.items()},
+                                     n_bg=int(manifest["n_bg"]),
+                                     tpn=int(manifest["tpn"]))
+                    _vm0 = bundle.vocab_maps[0]
+                    if _vm0 and isinstance(next(iter(_vm0)), str):
+                        _vm0 = {int(k): v for k, v in _vm0.items()}
+                    _own = _it.own_code_vocab_idx(
+                        _it.load_code_map(run_dir / "code_map.tsv"),
+                        bundle.int2cid, _vm0)
+                    _excl = own_code_exclusions(_lay, _own)
+                    if not _excl:
+                        raise SystemExit("[readout] --raw-select relevance: no own codes "
+                                         "mapped into the condition vocab (code_map.tsv "
+                                         "vs bundle ids?) — refusing to run unexcluded")
+                    _cprint(f"[readout]   relevance selector: own+descendant codes "
+                            f"excluded on {len(_excl)} topics", flush=True)
+                    _sel = select_relevance_codes(
+                        _load_lambda(run_dir), int(manifest["n_bg"]), _quota,
+                        rel_lambda=args.raw_rel_lambda, exclude=_excl)
+                    _cprint(f"[readout]   raw baseline, RELEVANCE-selected (λ="
+                            f"{args.raw_rel_lambda:g}, own+descendant codes excluded, "
+                            f"per-domain quota {_quota}): {len(_sel)} tokens; "
+                            f"{len(_freq & set(_sel))} also in the frequency top "
+                            f"{args.raw_baseline}", flush=True)
                 _tr_r = attach_raw_presence(train_scored, _sel, _fcols).cache()
                 _te_r = attach_raw_presence(test_scored, _sel, _fcols).cache()
                 _by_dom = {}
@@ -2216,7 +2306,7 @@ def main(argv=None) -> int:
                                      "--readout-theta-topm are mutually exclusive")
                 _mtag = f"mass{int(round(float(args.readout_theta_mass) * 100))}"
             if args.raw_baseline:
-                _mtag = (("rawm" if args.raw_select == "model" else "raw")
+                _mtag = ({"model": "rawm", "relevance": "rawr"}.get(args.raw_select, "raw")
                          + f"{int(args.raw_baseline)}" + (f"_{_mtag}" if _mtag else ""))
             if args.readout_nodes:
                 _mtag = "nodes" + (f"_{_mtag}" if _mtag else "")
