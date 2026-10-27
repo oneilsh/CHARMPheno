@@ -4,14 +4,13 @@ Exp 0132 (spec 2026-10-06 Part B) fits HSLDA's flat shared topics with the
 SAME engine, corpus and saved-fit format as every gated run: every node's
 block is empty, K == n_bg, and every document's allowed set is the whole
 topic range — i.e. plain online LDA, multi-domain λ included, with nothing
-on the topic side knowing the DAG. These pin the three facts the run relies
-on: the layout's K and blocks, the gate's allowed set, and the alpha init.
+on the topic side knowing the DAG. These pin the facts the run relies on:
+the layout's K and blocks and the gate's allowed set.
 """
 import numpy as np
 
 from spark_vi.models.topic.dag_placement import DagLayout
-from spark_vi.models.topic.gated_lda import (GatedBOWDocument, GatedOnlineLDA,
-                                             equalized_alpha)
+from spark_vi.models.topic.gated_lda import GatedBOWDocument, GatedOnlineLDA
 
 PARENT = {1: [0], 2: [0], 3: [1], 4: [1, 2]}
 
@@ -41,8 +40,3 @@ def test_tpn0_gated_e_step_touches_every_topic_for_every_doc():
     assert out["lambda_stats"].shape == (6, 12)
     assert (out["lambda_stats"].sum(axis=1) > 0).all()     # no topic is gated out
 
-
-def test_tpn0_equalized_alpha_is_uniform_not_a_zero_division():
-    lay = DagLayout(PARENT, n_bg=5, tpn=0)
-    a = equalized_alpha(lay, {frozenset(): 10, frozenset({3}): 4}, 0.5)
-    assert np.allclose(a, 0.5) and a.shape == (5,)

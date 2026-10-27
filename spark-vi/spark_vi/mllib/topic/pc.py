@@ -134,30 +134,6 @@ def _row_to_gated_pc_document(
     )
 
 
-def _transform_counts(doc, mode: str):
-    """Return `doc` with its BOW counts damped per `mode`, length recomputed.
-
-    'binary' -> min(count, 1) (per-doc presence: a code recorded every visit counts
-    ONCE); 'log1p' -> log(1 + count) (softer damping, keeps some repetition). Applied
-    to EVERY document before both the spectral seed and the fit, so the anchor search
-    and the topic evidence see presence/damped volume rather than raw utilization
-    counts. `doc` is a frozen PCDocument/GatedPCDocument dataclass, so replace() makes
-    a new one (indices/y/label_mask/frontier unchanged). 'none' returns doc as-is.
-    """
-    import numpy as np
-    from dataclasses import replace
-    if mode == "none":
-        return doc
-    c = np.asarray(doc.counts, dtype=np.float64)
-    if mode == "binary":
-        c = np.minimum(c, 1.0)
-    elif mode == "log1p":
-        c = np.log1p(c)
-    else:
-        raise ValueError(f"countTransform must be none|binary|log1p, got {mode!r}")
-    return replace(doc, counts=c, length=int(round(float(c.sum()))))
-
-
 class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams):
     """Shared Param surface for OnlinePCLDAEstimator and OnlinePCLDAModel.
 
@@ -370,20 +346,6 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         "(topic-side gate vs label-side head — they may use the same or different DAGs).",
         typeConverter=TypeConverters.toString,
     )
-    etaBoost = Param(
-        Params._dummy(), "etaBoost",
-        "JSON-encoded sparse per-topic eta boost {topic_index: [[vocab_idx, ...], "
-        "[weight, ...]]} — the profile-eta word-side prior (requires gateParent): "
-        "each listed topic's Dirichlet prior on beta becomes eta + boost on the "
-        "listed CONDITION-DOMAIN (domain 0) vocab indices, re-entering every "
-        "lambda update (lambda_target = eta_vec + counts), so a zero-count topic "
-        "keeps a tilted E[log beta] on its profile tokens while real counts "
-        "dominate it. Weights are final SIGNED deltas (scale/IDF folded "
-        "upstream; negatives are the NOT downweights, validated to keep "
-        "eta + w > 0). Empty (default) = flat eta, byte-identical to the "
-        "un-boosted fit.",
-        typeConverter=TypeConverters.toString,
-    )
     gateNBg = Param(
         Params._dummy(), "gateNBg",
         "number of shared background topics for the topic-side gate (gateParent); "
@@ -465,61 +427,6 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         "doc's topic training to DagLayout.allowed_set(frontier).",
         typeConverter=TypeConverters.toString,
     )
-    alphaInit = Param(Params._dummy(), "alphaInit",
-                      "initial doc-concentration policy for the GATED engine: 'uniform' "
-                      "(docConcentration on every topic, the historical behaviour) or "
-                      "'equalized' (children-first: every topic block receives the same "
-                      "TOTAL prior pseudo-count across the training corpus, alpha_b ∝ "
-                      "1/N_b, rescaled to the docConcentration mean — "
-                      "spark_vi.models.topic.gated_lda.equalized_alpha). An init, not a "
-                      "strength: with optimizeDocConcentration the per-node empirical-"
-                      "Bayes step takes over from it.",
-                      typeConverter=TypeConverters.toString)
-    countTransform = Param(Params._dummy(), "countTransform",
-                           "per-token count transform applied to EVERY document's BOW "
-                           "before the spectral seed AND the fit: 'none' (default; raw "
-                           "occurrence counts), 'binary' (min(count,1) = per-doc "
-                           "presence, so a code recorded every visit counts once — "
-                           "de-biases the anchor/evidence criteria away from utilization "
-                           "volume toward phenotype, insight 0077's measurement fix "
-                           "extended to all domains), or 'log1p' (log(1+count), a softer "
-                           "damping that keeps some repetition). Applied in-memory at "
-                           "fit time; the cached bundle stays raw (no cache-key change).",
-                           typeConverter=TypeConverters.toString)
-    # -- Profile-eta word-side prior (plan 2026-09-06, exp 0116) -------------
-    # Provenance/recording Params for the HPO-profile eta prior. The boost
-    # itself arrives PRE-BUILT through `setEtaBoost` (the FIT driver reads the
-    # emitted TSV, maps concept ids into the condition-domain vocab via the
-    # bundle meta it already holds, and builds the sparse per-topic boost —
-    # plan D4; unlike the spectral seed there is no way to build it from the
-    # RDD alone). These four record WHICH file and knobs produced that boost,
-    # so the run manifest / model params carry the full provenance, and the
-    # D5 resume/warm-start guard in `_fit` keys off them.
-    profileEta = Param(Params._dummy(), "profileEta",
-                       "path to the profile-eta prior TSV (hpoa_stage2_probe "
-                       "--emit-eta: mondo_id, concept_id, weight, neg, "
-                       "coverage) this fit's etaBoost was built from; empty "
-                       "(default) = no profile prior. Requires gateParent (via "
-                       "etaBoost); incompatible with resumeFrom.",
-                       typeConverter=TypeConverters.toString)
-    profileEtaStrength = Param(Params._dummy(), "profileEtaStrength",
-                               "D3 scale: each boosted topic's positive boost "
-                               "vector is normalized to sum to strength * "
-                               "eta_base * V_condition added pseudo-mass. "
-                               "Default 1.0 (doubles the topic's prior mass, "
-                               "concentrated on its profile tokens).",
-                               typeConverter=TypeConverters.toFloat)
-    profileEtaTopics = Param(Params._dummy(), "profileEtaTopics",
-                             "D1 targeting: the boost lands on the FIRST N "
-                             "topics of each credited node's block (the rest "
-                             "stay flat/free). Default 1.",
-                             typeConverter=TypeConverters.toInt)
-    profileEtaMinCoverage = Param(Params._dummy(), "profileEtaMinCoverage",
-                                  "D4 coverage gate: drop a node's boost "
-                                  "entirely when its train positive-doc "
-                                  "coverage (the TSV's coverage column) is "
-                                  "below this. Default 0.0 = off.",
-                                  typeConverter=TypeConverters.toFloat)
     # -- Multi-domain features (MixEHR-style per-domain vocabularies) --------
     featuresCols = Param(
         Params._dummy(), "featuresCols",
@@ -563,23 +470,6 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
 
     def getClosureParents(self) -> str:
         return str(self.getOrDefault(self.closureParents))
-
-    def setEtaBoost(self, boost) -> "OnlinePCLDAEstimator":
-        """Set the sparse per-topic eta boost from {topic_index: (vocab_idx_seq,
-        weight_seq)} (JSON-encoded into the string Param), or a pre-encoded JSON
-        string. Empty/None restores the flat (un-boosted) eta."""
-        if boost is None or boost == "" or boost == {}:
-            return self._set(etaBoost="")
-        # operator.index (not int()) on the vocab indices: a float index would
-        # otherwise TRUNCATE silently and boost the wrong token.
-        encoded = boost if isinstance(boost, str) else json.dumps(
-            {operator.index(k): [[operator.index(i) for i in pair[0]],
-                                 [float(w) for w in pair[1]]]
-             for k, pair in boost.items()})
-        return self._set(etaBoost=encoded)
-
-    def getEtaBoost(self) -> str:
-        return str(self.getOrDefault(self.etaBoost))
 
     def setGateSeedProfile(self, prof) -> "OnlinePCLDAEstimator":
         """{engine node id: {vocab idx: weight}} (or a pre-encoded JSON string);
@@ -689,31 +579,6 @@ def _build_model_and_config(
     topic_engine = None
     topic_support = None
     gate_raw = str(estimator.getOrDefault("gateParent"))
-    # Sparse per-topic eta boost (profile-eta word-side prior). Decoded here to
-    # plain (indices, weights) pairs; deep validation (ranges, duplicates,
-    # positivity, integer dtype) is GatedOnlineLDA's `_resolve_eta_boost`, so
-    # the estimator and the direct-model path enforce identical contracts.
-    boost_raw = str(estimator.getOrDefault("etaBoost"))
-    eta_boost = None
-    if boost_raw:
-        if not gate_raw:
-            raise ValueError(
-                "etaBoost requires gateParent to be set: the boost is a "
-                "per-NODE-TOPIC prior over the gated layout's blocks; an "
-                "ungated OnlineLDA has no node topics to boost.")
-        try:
-            decoded = json.loads(boost_raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"etaBoost is not valid JSON: {exc}") from exc
-        if not isinstance(decoded, dict):
-            raise ValueError(
-                f"etaBoost must decode to an object {{topic_index: [[idx, ...], "
-                f"[weight, ...]]}}, got {type(decoded).__name__}")
-        try:
-            eta_boost = {int(k): v for k, v in decoded.items()}
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"etaBoost topic keys must be integers: {exc}") from exc
     if gate_raw:
         from spark_vi.models.topic.dag_placement import DagLayout
         from spark_vi.models.topic.gated_lda import GatedOnlineLDA
@@ -745,7 +610,6 @@ def _build_model_and_config(
         topic_engine = GatedOnlineLDA(
             lay, vocab_size,
             alpha=alpha, eta=1.0 / lay.K,
-            eta_boost=eta_boost,                     # None = flat eta, unchanged
             domains=domains,                         # None = single fused vocab
             gamma_shape=estimator.getOrDefault("gammaShape"),
             cavi_max_iter=estimator.getOrDefault("caviMaxIter"),
@@ -826,15 +690,11 @@ _ONLINE_PCLDA_DEFAULTS = dict(
     headHistoryReset=True, headLr=0.05, headNewtonRidge=0.01,
     headL2=1e-3, headIntercept=False, headStandardize=False,
     closureParents="",
-    gateParent="", etaBoost="", gateNBg=2, gateTpn=1, gateWarm=0, gateOpenSeed=True, gateSeedProfile="", gateSeedMode="subtree",
+    gateParent="", gateNBg=2, gateTpn=1, gateWarm=0, gateOpenSeed=True, gateSeedProfile="", gateSeedMode="subtree",
     gateSeedOwnCodes="", gateSeedLeaves=False,
     localizeHead=False,
     headSupport="siblings",
     frontierCol="frontier",
-    countTransform="none",
-    alphaInit="uniform",
-    profileEta="", profileEtaStrength=1.0, profileEtaTopics=1,
-    profileEtaMinCoverage=0.0,
     featuresCols=[],   # domainBounds intentionally omitted: it uses isSet (no default)
 )
 
@@ -888,7 +748,6 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         headStandardize: bool = False,
         closureParents: str = "",
         gateParent: str = "",
-        etaBoost: str = "",
         gateNBg: int = 2,
         gateTpn: int = 1,
         gateWarm: int = 0,
@@ -900,12 +759,6 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         localizeHead: bool = False,
         headSupport: str = "siblings",
         frontierCol: str = "frontier",
-        countTransform: str = "none",
-        alphaInit: str = "uniform",
-        profileEta: str = "",
-        profileEtaStrength: float = 1.0,
-        profileEtaTopics: int = 1,
-        profileEtaMinCoverage: float = 0.0,
         featuresCols: list[str] | None = None,
         domainBounds: list[int] | None = None,
         # _PersistenceParams kwargs — see that mixin's docstring; these MUST
@@ -1016,21 +869,6 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         # and > 0 fits go through this one VIRunner.fit code path.
         config, resume_path = apply_persistence_params(self, config)
 
-        # Profile-eta boost guard (plan D5) — the exact twin of the spectral-init
-        # guard below: the boost is a FIT-LONG prior re-entering every lambda
-        # update, and a checkpoint's lambda was fit without it (or under another
-        # one), so resuming/warm-starting under a different eta prior silently
-        # mixes objectives mid-schedule. Keyed on BOTH the provenance Param
-        # (profileEta) and the mechanism Param (etaBoost) so neither route can
-        # slip past.
-        if (str(self.getOrDefault("profileEta"))
-                or str(self.getOrDefault("etaBoost"))):
-            if resume_path is not None:
-                raise ValueError(
-                    "profileEta/etaBoost is incompatible with resumeFrom: "
-                    "the boost is a fit-long word-side prior and "
-                    "the checkpoint's lambda was fit without it. Set at most one.")
-
         label_col = self.getOrDefault("labelCol") if self.isSet("labelCol") else None
         label_mask_col = (
             self.getOrDefault("labelMaskCol") if self.isSet("labelMaskCol") else None
@@ -1074,16 +912,7 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
             return _row_to_pc_document(row, _fc, _lc, _mc, _C,
                                        features_cols=_fcs, domain_sizes=_ds)
 
-        _ct = str(self.getOrDefault("countTransform"))
-        pc_rows = dataset.select(*select_cols).rdd.map(_to_pc)
-        if _ct != "none":
-            # De-bias the anchor/evidence criteria off utilization VOLUME: a code
-            # recorded every visit should count once (presence), not N times. Applied
-            # before the seed AND the fit (both consume pc_rdd), in-memory — the cached
-            # bundle stays raw-count (no cache-key change). See insight 0077 (the same
-            # fix already applied to the bursty measurement domain).
-            pc_rows = pc_rows.map(lambda d, _m=_ct: _transform_counts(d, _m))
-        pc_rdd = pc_rows.persist(StorageLevel.MEMORY_AND_DISK)
+        pc_rdd = dataset.select(*select_cols).rdd.map(_to_pc).persist(StorageLevel.MEMORY_AND_DISK)
         pc_rdd.count()  # materialize for VIRunner's strict cache precondition
 
         data_summary = None
@@ -1163,14 +992,13 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         # (one countByValue over frontiers) and hand it to the engine together with
         # the initial-alpha policy ('uniform' | 'equalized', see alphaInit). Inert
         # on the ungated path.
-        _ainit = str(self.getOrDefault("alphaInit"))
         _aopt = bool(self.getOrDefault("optimizeDocConcentration"))
-        if gated and (_aopt or _ainit != "uniform"):
+        if gated and _aopt:
             _hist = {fr: int(n) for fr, n in
                      pc_rdd.map(lambda d: d.frontier).countByValue().items()}
-            model_obj._lda.set_alpha_policy(_hist, optimize=_aopt, init=_ainit)
+            model_obj._lda.set_alpha_policy(_hist, optimize=_aopt)
             _a = model_obj._lda.alpha
-            print(f"[pc] gated alpha policy: init={_ainit} optimize={_aopt} "
+            print(f"[pc] gated alpha policy: optimize={_aopt} "
                   f"({len(_hist)} frontier groups; alpha mean={float(np.mean(_a)):.4f} "
                   f"min={float(np.min(_a)):.4g} max={float(np.max(_a)):.4g})",
                   flush=True)

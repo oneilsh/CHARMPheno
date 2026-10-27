@@ -58,11 +58,9 @@ def _phase(name: str) -> Iterator[None]:
 
 class _ColorLogFormatter(logging.Formatter):
     """Bold the `iter N/M` marker + dim the trailing per-iter timing on
-    spark_vi's progress line, and green-highlight an `η_boost[...]` wiring
-    sentinel wherever it appears (gated_lda's per-iter model summary,
-    `spark_vi.models.topic.gated_lda`) -- WITHOUT editing spark-vi: both
-    rules live in `term_colors` and are applied here, at the print site, to
-    the fully-formatted "[driver]   ..." line. Identity on any other line,
+    spark_vi's progress line -- WITHOUT editing spark-vi: the rule lives in
+    `term_colors` and is applied here, at the print site, to the
+    fully-formatted "[driver]   ..." line. Identity on any other line,
     and identity (via term_colors.c) when color is disabled.
 
     `term_colors` is imported LOCALLY inside `format` (see `_phase` above
@@ -72,7 +70,7 @@ class _ColorLogFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         import term_colors
         msg = super().format(record)
-        return term_colors.colorize_eta_boost(term_colors.colorize_iter_line(msg))
+        return term_colors.colorize_iter_line(msg)
 
 
 def configure_logging(extra_loggers: dict[str, int] | None = None) -> None:

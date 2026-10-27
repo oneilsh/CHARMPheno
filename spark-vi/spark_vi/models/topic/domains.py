@@ -18,13 +18,6 @@ malformed sequence and produced a SILENT WRONG ANSWER instead of an error --
 with columns 3..5 permanently ineligible, and `split_domains(beta, [0, 3])`
 dropped columns 3..5 from the result.
 
-`resolve_per_domain` is the matching validator for a PER-DOMAIN HYPERPARAMETER
-(eta_m, omega_m, beta_prior_m): scalar-broadcast-or-one-per-domain. It exists
-once because the three hand-rolled copies did not agree -- two dispatched on
-``np.isscalar``, which is False for a 0-d ndarray, so ``eta=np.array(0.02)``
-raised "TypeError: iteration over a 0-d array" from inside a list comprehension
-instead of being treated as the scalar it is.
-
 Domain-agnostic: integer token ids and integer domain sizes only.
 """
 from __future__ import annotations
@@ -82,50 +75,3 @@ def validate_domain_bounds(domain_bounds, V: int, *,
     if bounds[0] != 0 or bounds[-1] != int(V) or np.any(np.diff(bounds) <= 0):
         _reject()
     return bounds
-
-
-def resolve_per_domain(value, n_domains: int, name: str, *,
-                       allow_zero: bool = False) -> np.ndarray:
-    """Resolve a scalar-or-per-domain hyperparameter to a length-n_domains array.
-
-    A SCALAR broadcasts to every domain (which with one domain is exactly the
-    scalar, so the single-domain path keeps the caller's own value); a SEQUENCE
-    must give one value per domain, in domain order.
-
-    The scalar/sequence dispatch is on the resolved array's ``ndim``, NOT
-    ``np.isscalar`` (False for a 0-d ndarray, which would then take the sequence
-    branch and fail with an opaque "iteration over a 0-d array" TypeError), and
-    iterables are materialized first so a one-shot iterator is not consumed
-    twice. The VALUE check runs BEFORE the shape dispatch so neither branch can
-    bypass it: a negative weight slipping through the scalar branch corrupts
-    downstream arithmetic with no error raised.
-
-    ``allow_zero=False`` (the default) requires strictly positive values --
-    every Dirichlet concentration (eta_m, beta_prior_m) must be > 0 or the
-    prior is improper. ``allow_zero=True`` additionally admits 0.0, for a
-    pseudo-likelihood weight where 0 legitimately means "drop this domain".
-    """
-    if isinstance(value, np.ndarray):
-        raw = value
-    elif hasattr(value, "__iter__") and not isinstance(value, (str, bytes)):
-        raw = list(value)
-    else:
-        raw = value
-    try:
-        arr = np.asarray(raw, dtype=np.float64)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"{name} must be a number or a length-{n_domains} (n_domains) "
-            f"sequence of numbers, got {value!r}") from exc
-    bad_value = (np.any(arr < 0.0) if allow_zero else np.any(arr <= 0.0))
-    if not np.all(np.isfinite(arr)) or bad_value:
-        raise ValueError(
-            f"{name} components must be finite and "
-            f"{'>= 0' if allow_zero else '> 0'}, got {arr.tolist()}")
-    if arr.ndim == 0:
-        return np.full(n_domains, float(arr), dtype=np.float64)
-    if arr.ndim != 1 or arr.shape[0] != n_domains:
-        raise ValueError(
-            f"{name} must be a scalar or a length-{n_domains} (n_domains) "
-            f"sequence, got shape {arr.shape}")
-    return arr.astype(np.float64, copy=True)
