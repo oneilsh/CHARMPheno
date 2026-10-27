@@ -22,7 +22,7 @@ def test_gated_bow_document_frontier_defaults_empty():
 
 
 from spark_vi.models.topic.dag_placement import DagLayout
-from spark_vi.models.topic.gated_lda import GatedOnlineLDA, node_affinity
+from spark_vi.models.topic.gated_lda import GatedOnlineLDA
 
 PARENT = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}
 
@@ -69,18 +69,6 @@ def test_local_update_empty_frontier_is_background_only():
     assert out["n_docs"] == 1.0
 
 
-def test_node_affinity_sums_blocks():
-    lay = _lay()
-    theta = np.zeros(lay.K)
-    for u in lay.nodes:
-        for k in lay.block[u]:
-            theta[k] = 0.1
-    aff = node_affinity(theta, lay)
-    assert set(aff.keys()) == set(lay.nodes)
-    for u in lay.nodes:
-        assert np.isclose(aff[u], 0.1 * lay.tpn)
-
-
 def test_local_update_gamma_init_is_content_deterministic_with_seed():
     # Regression: GatedOnlineLDA.local_update must inherit OnlineLDA's content-deterministic
     # gamma_init seeding (blake2b hash of random_seed + doc content) so a distributed fit is
@@ -120,9 +108,9 @@ def test_compute_elbo_is_finite_and_gated_doc_kl_is_positive():
     assert np.isfinite(elbo)
 
 
-from spark_vi.models.topic.dag_placement import fit_gated, profile, evaluate
+from spark_vi.models.topic.dag_placement import fit_gated, profile
 from _stm_synth import (
-    dag_placement_corpus, fit_gated_svi_local, svi_node_profiles,
+    dag_placement_corpus, fit_gated_svi_local, placement_metrics, svi_node_profiles,
 )
 
 
@@ -143,7 +131,7 @@ def test_svi_matches_gibbs_placement_single_parent():
 
     # Gibbs oracle
     beta_g = fit_gated(tr_d, tr_l, lay, V, rng=np.random.default_rng(0))
-    ev_g = evaluate([profile(d, beta_g, lay, rng=np.random.default_rng(i))
+    ev_g = placement_metrics([profile(d, beta_g, lay, rng=np.random.default_rng(i))
                      for i, d in enumerate(te_d)], te_l, lay)
 
     # Gated SVI (random init default)
@@ -151,7 +139,7 @@ def test_svi_matches_gibbs_placement_single_parent():
            for d, y in zip(tr_d, tr_l)]
     m = GatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
     gp = fit_gated_svi_local(m, bow, n_iter=250)
-    ev_s = evaluate(svi_node_profiles(m, gp, te_d, lay), te_l, lay)
+    ev_s = placement_metrics(svi_node_profiles(m, gp, te_d, lay), te_l, lay)
 
     # Depth-weighted: DEEP-node AUC must meet the oracle within tolerance.
     max_depth = max(lay.depth(u) for u in lay.nodes)
@@ -185,13 +173,13 @@ def test_svi_matches_gibbs_placement_multi_parent():
     te_d, te_l = docs[n_train:], labels[n_train:]
 
     beta_g = fit_gated(tr_d, tr_l, lay, V, rng=np.random.default_rng(0))
-    ev_g = evaluate([profile(d, beta_g, lay, rng=np.random.default_rng(i))
+    ev_g = placement_metrics([profile(d, beta_g, lay, rng=np.random.default_rng(i))
                      for i, d in enumerate(te_d)], te_l, lay)
 
     bow = [GatedBOWDocument(*_bow(d), frontier=f) for d, f in zip(tr_d, tr_l)]
     m = GatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
     gp = fit_gated_svi_local(m, bow, n_iter=250)
-    ev_s = evaluate(svi_node_profiles(m, gp, te_d, lay), te_l, lay)
+    ev_s = placement_metrics(svi_node_profiles(m, gp, te_d, lay), te_l, lay)
 
     max_depth = max(lay.depth(u) for u in lay.nodes)
     assert ev_s["auc_by_depth"][max_depth] >= ev_g["auc_by_depth"][max_depth] - 0.08
@@ -1134,9 +1122,9 @@ def test_vi_runner_full_batch_matches_local_variational_em(spark):
     """
     import numpy as np
     from tests._stm_synth import (dag_placement_corpus, fit_gated_svi_local,
-                                  svi_node_profiles)
+                                  placement_metrics, svi_node_profiles)
     from spark_vi.core import VIConfig, VIRunner
-    from spark_vi.models.topic.dag_placement import DagLayout, evaluate
+    from spark_vi.models.topic.dag_placement import DagLayout
     from spark_vi.models.topic.gated_lda import GatedOnlineLDA
     from spark_vi.models.topic.types import GatedBOWDocument
 
@@ -1154,7 +1142,7 @@ def test_vi_runner_full_batch_matches_local_variational_em(spark):
     # Reference arm: the validated in-memory lr=1.0 variational EM.
     m_ref = GatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
     gp_ref = fit_gated_svi_local(m_ref, bow, n_iter=n_iter, seed=0)
-    ev_ref = evaluate(svi_node_profiles(m_ref, gp_ref, te_d, lay), te_l, lay)
+    ev_ref = placement_metrics(svi_node_profiles(m_ref, gp_ref, te_d, lay), te_l, lay)
 
     # Production arm: the same model, same budget, through VIRunner's full-batch
     # path (mini_batch_fraction=None).
@@ -1179,7 +1167,7 @@ def test_vi_runner_full_batch_matches_local_variational_em(spark):
     # here -- its step vanishes faster than it closes the residual.
     assert res.converged is True, (res.n_iterations, res.elbo_trace[-3:])
 
-    ev_prod = evaluate(svi_node_profiles(m_prod, res.global_params, te_d, lay),
+    ev_prod = placement_metrics(svi_node_profiles(m_prod, res.global_params, te_d, lay),
                        te_l, lay)
 
     # Secondary floor only -- see the docstring: these are NOT sensitive to the

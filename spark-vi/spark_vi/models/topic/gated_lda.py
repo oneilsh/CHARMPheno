@@ -46,9 +46,9 @@ expElogpi_k[m_n] factor of shape (K, n_unique), which does NOT fit through the c
 signature: v2 is a ONE-PARAMETER addition to `_cavi_doc_inference` plus passing
 `self._expElogpi[:, tok_dom]` at each caller. Cheap, but not zero-plumbing — do not plan on
 "no signature change".
-TRAINING is gated (above); DEPLOYMENT is different — GatedLDAModel._transform folds held-out
+TRAINING is gated (above); DEPLOYMENT is different — the MLlib model's transform folds held-out
 docs in UNGATED full-K CAVI (the label is unknown at scoring time, which is the whole point)
--> theta -> node_affinity.
+-> theta.
 
 Validated against the collapsed-Gibbs oracle (dag_placement.fit_gated): placement (node-AUC by
 depth, MRR, top2) matches at every depth; the DAG gate supplies the identifiability spectral
@@ -70,14 +70,6 @@ from spark_vi.models.topic.dag_placement import DagLayout
 from spark_vi.models.topic.domains import domains_to_bounds, resolve_per_domain
 from spark_vi.models.topic.lda import OnlineLDA, _cavi_doc_inference, _dirichlet_kl
 from spark_vi.models.topic.types import GatedBOWDocument
-
-
-def node_affinity(theta: np.ndarray, lay: DagLayout) -> dict[int, float]:
-    """Per-node affinity from a full-K theta: the mass on each node's topic block.
-
-    The SVI analogue of dag_placement.profile's per-node readout. The full dict IS the
-    case-finding output; do not collapse to a single node."""
-    return {u: float(theta[lay.block[u]].sum()) for u in lay.nodes}
 
 
 # ---------------------------------------------------------------------------

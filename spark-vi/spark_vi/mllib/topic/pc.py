@@ -69,7 +69,7 @@ def _row_to_pc_document(
     unchanged (the head is domain-agnostic).
     """
     if features_cols:
-        from spark_vi.mllib.topic.gated_lda import _concat_domain_features
+        from spark_vi.mllib.topic._common import _concat_domain_features
         indices, counts = _concat_domain_features(
             [row[c] for c in features_cols], domain_sizes)
         length = int(counts.sum())
@@ -1361,7 +1361,7 @@ class OnlinePCLDAModel(_OnlinePCLDAParams, _PersistableModel, Model):
         def _infer(*features):
             p = bcast.value
             if p["domain_sizes"] is not None:
-                from spark_vi.mllib.topic.gated_lda import _concat_domain_features
+                from spark_vi.mllib.topic._common import _concat_domain_features
                 indices, counts = _concat_domain_features(features, p["domain_sizes"])
             else:
                 doc = _vector_to_bow_document(features[0])
