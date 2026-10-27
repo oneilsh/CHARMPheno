@@ -196,6 +196,7 @@ readout DAG, ribbon nodes and whole-history new-diagnosis rule as θ; 200 iterat
 | θ (0163) | 0.710 | 0.606 |
 | raw 2,000, by train document frequency (680 cond / 978 meas / 342 drug) | **0.735** | **0.631** |
 | raw 2,000, the model's node-topic top words (1,594 / 44 / 362; 551 shared with frequency) | 0.683 | 0.583 |
+| raw 2,000, LDAvis relevance λ = 0.6 over node topics, own + descendant codes excluded, frequency's domain mix (660 shared with frequency) | 0.717 | 0.623 |
 
 - Frequency codes beat θ: median +0.019 stacked (696 of 827 nodes) and flat (609);
   largest for small nodes (+0.03 at 20-300 new cases), +0.009 above 1,000. The gap was
@@ -211,4 +212,16 @@ readout DAG, ribbon nodes and whole-history new-diagnosis rule as θ; 200 iterat
   excludes own codes and keeps the domain mix would.
 - Solver: frequency 600/1,060 converged (88 stalled); model-selected 1,017 (418 stalled,
   998 line-search failures): sparse, rare codes are near-separable for many heads.
+- **Relevance selector (`rawr2000`, 2026-10-27).** Fixing both flaws of the naive
+  selector (own and descendant codes excluded on 1,877 topics; per-domain quota 680 /
+  978 / 342 copied from the frequency set) recovers most of its loss. Against θ it now
+  wins narrowly: stacked median +0.005 (517 of 827 nodes), flat +0.016 (594), on every
+  size stratum. Against frequency it still loses: stacked median −0.012 (178 wins), flat
+  −0.003 (360), and the loss sits on the small nodes (−0.024 / −0.032 at 20-100 new
+  cases; within ±0.01 from 300 up). λ = 0.6 weights lift over p(w|k), which pushes out
+  the common codes; that those common codes are what the small nodes lose points to
+  utilization (insight 0101's length hypothesis) rather than to specific predictors.
+- Solver: relevance 753/1,060 converged (190 stalled, 502 line-search failures) in 200
+  iterations at 177 s/iter (8.2 h for the solve; 768 passes, 191 nodes per pass), so
+  convergence is not what separates it from frequency (600 converged).
 
