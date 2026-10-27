@@ -1,7 +1,7 @@
 # ADR 0051 — spark-vi layout, two engines (Spark and local), and a model-agnostic readout
 
 **Date:** 2026-10-28
-**Status:** Proposed (maintainer review)
+**Status:** Accepted (2026-10-28)
 
 ## Context
 
@@ -47,8 +47,9 @@ sample at the configured rate, the Robbins–Monro schedule and the gate schedul
 identical, so a local fit is the Spark fit in distribution (not bit for bit: partition
 order and RNG streams differ). The readout's solver is already backend-agnostic (a
 stats function per pass); the local backend computes it with numpy over θ held once.
-Spark stays the default for corpora that do not fit; the engines are tested against
-each other on the same corpus.
+Spark stays the default for corpora that do not fit. Agreement is checked by one
+`@pytest.mark.slow` test (local Spark vs `LocalRunner` on a small synthetic corpus:
+same λ statistics within sampling tolerance), not by the unit suite, which stays fast.
 
 **3. Collect-free metrics by a distributed sort.** Per node, ranks come from a Spark
 sort of the (node, score, label) cells; AUC, precision@recall, recall@FDR and top-k
@@ -80,12 +81,14 @@ inspect), renamed from `gated_pc_*` to `dag_gated_*` with the model class.
 
 ## Consequences
 
-Order of work, each step test-gated and committed alone: (1) `spark_vi.dag` with
-`DagLayout` moved out of `dag_placement.py` and the Mondo DAG code into charmpheno: one
-announced cache drop, tripwires re-pinned; (2) `spark_vi.readout` extracted from
-`gated_pc_cloud.py` / `distributed_readout.py` with the Spark backend, behaviour
-unchanged; (3) `eval/metrics` with the distributed sort, replacing the driver collect;
-(4) `LocalRunner` and the local readout backend, validated against Spark on one
-corpus; (5) the `DagHeads` shim; (6) driver and model-class renames. Updates
+Order of work, each step test-gated and committed alone, local engine first because
+it is independent of the moves: (1) `LocalRunner` and the slow agreement test;
+(2) `spark_vi.readout` extracted from `gated_pc_cloud.py` / `distributed_readout.py`
+with Spark and local backends, behaviour unchanged, plus a local readout entry point;
+(3) `spark_vi.dag` with `DagLayout` moved out of `dag_placement.py` and the Mondo DAG
+code into charmpheno: one announced cache drop, tripwires re-pinned; (4)
+`eval/metrics` with the distributed sort, replacing the driver collect; (5) the
+`DagHeads` shim; (6) driver and model-class renames. Framings stay in `analysis/`
+throughout. Updates
 `docs/architecture/SPARK_VI_FRAMEWORK.md` (layout, runners) in the commits that make
 each change. The walkthrough follows step 6.
