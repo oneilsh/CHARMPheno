@@ -6,7 +6,7 @@ truth), the pruned label DagLayout, and a held-out split with the leakage strip
 applied. Piece 2 of the cluster driver (piece 1 = condition_dag.py; piece 3 =
 the cloud driver). Composes the piece-1 DAG builder, the population+disease
 cohort machinery (cohorts.apply_population_disease_cohort), to_bow_dataframe,
-and the engine's frontier helpers (spark_vi.models.topic.dag_placement).
+and the engine's frontier helpers (spark_vi.dag).
 
 This is the concept-id DOMAIN bridge: concept-ids are expected here. The engine
 stays integer-id agnostic. Three id spaces are threaded with care (the tests pin
@@ -25,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from charmpheno.omop.condition_dag import _nearest_surviving_ancestors
-from spark_vi.models.topic.dag_placement import frontier_from_coded
+from spark_vi.dag import frontier_from_coded
 
 # Fixed salt for the deterministic train/test split. Hashing person_id with a
 # constant salt makes the split reproducible + resume-stable across runs (Spark's
@@ -309,16 +309,15 @@ def strip_test_features(test_df, drop_idxs, *, features_col="features"):
 class CaseFindingBundle:
     """The assembled case-finding corpus. `train_df`/`test_df` carry
     [person_id, doc_id, features, frontier(engine-ids), source_cohort] — the exact
-    shape GatedLDAEstimator(labelCol="frontier").fit consumes and dag_placement's
-    evaluate scores. `parent_int`/`int2cid`/`cid2int` bridge engine <-> concept-id;
+    shape `DagGatedLDAEstimator(frontierCol="frontier").fit` consumes. `parent_int`/`int2cid`/`cid2int` bridge engine <-> concept-id;
     `vocab_map` is {concept_id: vocab_idx}; `name_by_id` is {concept_id:
     concept_name} for interpretation; `ledger` is the pruning receipt
     (kept/dropped/K_nodes + coarsening).
 
-    NOTE (id space): `name_by_id` is keyed on CONCEPT-ids, but
-    dag_placement.render_profile keys its `names` on ENGINE-ids (lay.nodes). Remap
-    before rendering:  {i: name_by_id[c] for i, c in int2cid.items() if c in name_by_id}.
-    Passing name_by_id straight into render_profile silently mislabels every node."""
+    NOTE (id space): `name_by_id` is keyed on CONCEPT-ids, but every engine-side
+    consumer (`DagLayout.nodes`, the readout's per-node tables) is keyed on ENGINE-ids.
+    Remap before rendering:  {i: name_by_id[c] for i, c in int2cid.items() if c in name_by_id}.
+    Passing name_by_id straight to an engine-id consumer silently mislabels every node."""
     train_df: object
     test_df: object
     parent_int: dict
@@ -354,9 +353,8 @@ def assemble_from_events(events_df, before_dag, *, doc_spec, min_n,
 
     `emit_labels` (optional, default False): when True, append dense
     `label`/`labelMask` array<double> columns (length `C = len(int2cid)`) to both
-    splits via `attach_labels`, so the SAME bundle feeds both the unsupervised
-    gated placement (reads `frontier`) and Gated-PC (`OnlinePCLDAEstimator`, reads
-    `label`/`labelMask`). `label_mask_mode` ('full' default / 'closure') is the
+    splits via `attach_labels`, so the SAME bundle feeds both the gated fit (reads
+    `frontier`) and the readout heads (read `label`/`labelMask`). `label_mask_mode` ('full' default / 'closure') is the
     observation policy — see `frontier_to_label`. Off by default so the existing
     gated-placement path is byte-for-byte unchanged.
 
@@ -373,7 +371,7 @@ def assemble_from_events(events_df, before_dag, *, doc_spec, min_n,
     from pyspark.sql import functions as F
     from charmpheno.omop.condition_dag import prune_by_attestation, pruning_ledger
     from charmpheno.omop.topic_prep import to_bow_dataframe
-    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.dag import DagLayout
 
     node_cids = before_dag.nodes()
     # 1) split PATIENTS first (events carry person_id); nothing downstream sees

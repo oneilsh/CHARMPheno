@@ -33,7 +33,7 @@ What the artifacts give us (and the one thing they do not)
   corpus_manifest.int2cid  {engine-id -> concept_id}
   corpus_manifest.name_by_id {concept_id -> concept_name}
 
-The topic layout is `DagLayout` (spark-vi dag_placement.py): topics [0, n_bg)
+The topic layout is `DagLayout` (spark_vi.dag): topics [0, n_bg)
 are shared BACKGROUND; then one block of `tpn` topics per non-root node, in
 `sorted(engine-id)` order. So foreground topic t (t >= n_bg) belongs to
 node = sorted(non-root engine ids)[(t - n_bg) // tpn], which int2cid/name_by_id
@@ -1547,7 +1547,7 @@ def _credited_engine_ids(credited_file, manifest):
     ``credited_file`` is typically the probe's ``--emit-eta`` table (the fit's
     own credited set — plan D5's internal-control split for exp 0116), but any
     TSV with a `mondo_id` column works. Curie -> engine id mirrors
-    `mondo_native_dag.mondo_cid` (the numeric part of `MONDO:%07d`; stable by
+    `charmpheno.mondo.native_dag.mondo_cid` (the numeric part of `MONDO:%07d`; stable by
     construction) so this off-cluster tool needs no extra imports, then engine
     ids come from the manifest's int2cid — so the slice matches exactly the
     nodes the fit driver credited. Non-Mondo rows and nodes outside this run's

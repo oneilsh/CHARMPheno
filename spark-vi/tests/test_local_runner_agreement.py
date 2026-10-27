@@ -21,7 +21,7 @@ from _stm_synth import dag_placement_corpus
 
 
 def _corpus():
-    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.dag import DagLayout
     from spark_vi.models.topic.types import GatedBOWDocument
 
     parent = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}

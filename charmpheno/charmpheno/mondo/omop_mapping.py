@@ -1,4 +1,4 @@
-"""MONDO -> OMOP standard-condition mapping (Stage 2 of anchor selection).
+"""MONDO -> OMOP standard-condition mapping (the native label build's code map).
 
 A faithful port of Monarch's `mondo_to_omop.py`
 (https://github.com/monarch-initiative/mondo2omop) into a pure, injectable
@@ -9,8 +9,8 @@ filters, same `same_as` -> (SNOMED|MeSH|ICD10CM) parse, same
 `Condition` concept resolution, same rare-subset flags. The only changes:
 
 - file reads / `input()` become function arguments (MONDO frames + OMOP frames);
-- `networkx.descendants` is replaced by an identical breadth-first transitive
-  closure over the subclass_of edges (drops the networkx dependency);
+- `networkx.descendants` is replaced by an identical transitive closure over the
+  subclass_of edges (`spark_vi.dag.descendants`; drops the networkx dependency);
 - an optional `restrict_mondo_ids` prefilters the node set for speed.
 
 Original authorship credit: monarch-initiative/mondo2omop. See
@@ -19,6 +19,8 @@ docs/superpowers/specs/2026-07-31-expanded-snomed-anchor-selection-design.md.
 from __future__ import annotations
 
 import pandas as pd
+
+from spark_vi.dag.ops import descendants as _descendants
 
 # MONDO roots used by the original's include/exclude filters.
 _HUMAN_DISEASE = "MONDO:0700096"
@@ -35,20 +37,6 @@ _XREF_PREFIXES = {
 _RARE_SUBSETS = (
     "rare", "gard_rare", "nord_rare", "orphanet_rare", "inferred_rare", "mondo_rare",
 )
-
-
-def _descendants(child_adj: dict[str, list[str]], root: str) -> set[str]:
-    """Transitive descendants of ``root`` (breadth-first), matching
-    ``networkx.descendants`` over the same parent->child adjacency."""
-    seen: set[str] = set()
-    stack = list(child_adj.get(root, ()))
-    while stack:
-        node = stack.pop()
-        if node in seen:
-            continue
-        seen.add(node)
-        stack.extend(child_adj.get(node, ()))
-    return seen
 
 
 def _disease_child_adjacency(edges_df: pd.DataFrame, nodes_df: pd.DataFrame) -> dict:

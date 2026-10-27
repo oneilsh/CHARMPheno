@@ -636,8 +636,8 @@ underexercised after the HDP and OU. Candidates:
 
 ## Project Structure
 
-The layout as of ADR 0051 step 2 (steps 3-6 add `dag/`, `eval/metrics/` and the
-`DagHeads` shim; see the ADR).
+The layout as of ADR 0051 step 3 (steps 4-6 add `eval/metrics/` and the `DagHeads`
+shim; see the ADR).
 
 ```
 spark_vi/
@@ -650,8 +650,11 @@ spark_vi/
 │   ├── result.py           # VIResult
 │   ├── broadcast.py        # destroy_broadcast (ADR 0047 lifecycle)
 │   └── retry.py            # retry_spark_action: idempotent actions across preemption
+├── dag/                    # generic label-DAG mechanics (ADR 0051)
+│   ├── layout.py           # DagLayout (topic blocks over a DAG, the gate), frontier_from_coded
+│   └── ops.py              # closure, descendants, depth, transitive reduction, closure matrix
 ├── models/topic/           # LDA, HDP, STM, DAG-gated LDA; flat spectral init (STM);
-│                           #   gate seeds; DagLayout (moves to dag/ in step 3)
+│                           #   gate seeds
 ├── readout/                # per-node heads over ANY feature column (ADR 0051)
 │   ├── kernels.py          # pure-numpy moments / stats / lean-eval kernels
 │   ├── solver.py           # batched multi-head L-BFGS (solve_batched_lr)

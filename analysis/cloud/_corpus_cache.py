@@ -66,6 +66,9 @@ def compute_cache_key(
     # manual `v` bump. `v` remains for shape changes unrelated to cohort code
     # (and as the fallback when the source hash is unavailable).
     from charmpheno.omop.cohorts import cohort_defs_version
+    # corpus_code: the loaders / measurement tokens / bag-of-words prep that shape
+    # the corpus without being cohort code (ADR 0051 step 3; audit 2026-10-26 §6).
+    from charmpheno.omop.source_identity import corpus_code_version
     payload = {
         "source_table": source_table,
         "person_mod": int(person_mod),
@@ -75,6 +78,7 @@ def compute_cache_key(
         "cohort": cohort,
         "prior_obs_days": int(prior_obs_days),
         "cohort_defs": cohort_defs_version(),
+        "corpus_code": corpus_code_version(),
         "v": 7,
     }
     s = json.dumps(payload, sort_keys=True)

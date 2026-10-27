@@ -9,7 +9,7 @@ import pytest
 
 
 def test_dag_children_and_depth():
-    from gated_pc_cloud import _dag_children_and_depth
+    from spark_vi.dag import children_and_depth as _dag_children_and_depth
     # 0 root; 1,2 -> 0; 3,4 -> 1. C=5.
     parent_int = {1: [0], 2: [0], 3: [1], 4: [1]}
     children, depth = _dag_children_and_depth(parent_int, C=5)

@@ -90,7 +90,7 @@ def test_chunking_does_not_change_the_fit():
 def test_gate_schedule_advances_through_global_params():
     """The leaves-first gate's counter rides global_params on this engine too."""
     from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
-    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.dag import DagLayout
     from spark_vi.models.topic.types import GatedBOWDocument
 
     lay = DagLayout({1: 0, 2: 0, 3: 1}, n_bg=1, tpn=1)

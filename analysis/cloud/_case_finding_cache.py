@@ -57,8 +57,8 @@ def _module_source_hash(module) -> str:
 # byte-identical while making tomorrow's doc-unit change visible, which is the
 # whole point: the driver-side doc spec is hard-coded, so changing it alone would
 # otherwise poison the cache under a byte-identical key (audit seam 4 / R5.3).
-# This is the same "fold only when it is on" discipline `emit_labels`, `mondo`,
-# `dag_collapse` and `mondo_native` already follow.
+# This is the same "fold only when it is on" discipline `emit_labels` and `mondo`
+# follow.
 DEFAULT_DOC_SPEC = "patient_cohort"
 
 
@@ -72,21 +72,20 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
                              label_mask_mode="full", multidomain=False,
                              extra_domains=(), index_mode="disease", mondo=False,
                              mondo_version="", mondo_branch="",
-                             min_positives=0, dag_collapse=False,
-                             dag_collapse_version="", mondo_native=False,
-                             mondo_native_version="", label_set="",
+                             min_positives=0, mondo_native=False,
+                             mondo_native_version="",
                              doc_spec=DEFAULT_DOC_SPEC,
-                             preindex_closure=False,
-                             preindex_closure_version="",
                              episode_sampling=None,
                              gate_frontier_mode=None,
                              gate_attestation=None) -> str:
     """Stable 16-hex hash of the inputs that determine the assembled bundle.
 
-    Folds cohort_defs_version() plus content hashes of condition_dag +
-    case_finding_assembly, so any assembly-logic edit auto-invalidates the cache
-    (same discipline as _corpus_cache's cohort_defs). `v` is the manual shape
-    version for layout changes unrelated to that source.
+    Folds cohort_defs_version(), corpus_code_version() (the loaders, measurement
+    tokens and bag-of-words prep) and content hashes of condition_dag,
+    case_finding_assembly and `spark_vi.dag.layout` (the frontier and the gate's
+    layout), so any assembly-logic edit auto-invalidates the cache (same discipline
+    as _corpus_cache's cohort_defs). `v` is the manual shape version for layout
+    changes unrelated to that source.
 
     `split_salt` defaults to the assembly's own `_SPLIT_SALT` constant when not
     given, so the key stays consistent with the split the (unparameterized)
@@ -101,15 +100,11 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
     `multidomain=True` selects the MULTI-DOMAIN corpus identity (the
     `charmpheno.omop.multi_domain` assembler): the per-domain `extra_domains` and
     the `index_mode`, plus `mondo`/`mondo_version`/`mondo_branch`/`min_positives`
-    when the label DAG is built from Mondo, plus `dag_collapse`
-    (+ `dag_collapse_version`) when the ANCHOR hierarchy is put through the
-    exp-0109 splice-to-fixpoint reduction, plus `mondo_native`
-    (+ `mondo_native_version` and the two new modules' source hashes) when the
-    label space is exp 0110's NATIVE Mondo one. Those fields are folded in
-    ONLY on that path, exactly like `emit_labels` below, so every SNOMED key stays
-    byte-identical and every existing cache entry stays valid — and the
-    `multidomain` marker itself guarantees the new (vocab_maps) meta format can
-    never land under a key an old (vocab_map) entry already occupies.
+    and `mondo_native` (+ `mondo_native_version` and the source hashes of
+    `charmpheno.mondo` and `spark_vi.dag.ops`) for the native Mondo label space, the
+    only Mondo flavour since ADR 0051 (`mondo` without `mondo_native` raises). The
+    `multidomain` marker guarantees the (vocab_maps) meta format can never land under
+    a key a single-domain (vocab_map) entry occupies.
 
     `source_table`/`prior_obs_days`/`window_days` are required for the
     single-domain key and IGNORED (pinned to null) for the multi-domain one: that
@@ -120,17 +115,6 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
     when it differs from today's constant, so every existing key is byte-identical
     while a future doc-unit change (an `EpisodeDocSpec`, say) can no longer land a
     different corpus under the same key.
-
-    `label_set` (spec 2026-10-07 §D1) is the identity of an explicit label set the
-    native build filters its kept terms by — the DisMech ribbon,
-    `dismech_ribbon.label_set_identity` = `dismech:<commit>:<n>:<digest>` of the
-    sorted Mondo ids. A different label set is a different C, K and label columns,
-    so a different corpus. Folded ONLY when non-empty AND on the native path, so
-    every exp-0110-style key (whole powered set) is byte-identical to before.
-
-    `preindex_closure` (+ `preindex_closure_version` and the module's source hash)
-    marks a bundle that carries E1's per-document pre-index closure column. Mondo
-    path only, folded ONLY when on — the `dag_collapse` discipline.
 
     `episode_sampling` (exp 0111 WP-D2) is the identity of a driver-built EXTERNAL
     index frame — the episode arm or its matched-random sibling. Folded ONLY when
@@ -148,6 +132,8 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
     """
     from charmpheno.omop import condition_dag, case_finding_assembly
     from charmpheno.omop.cohorts import cohort_defs_version
+    from charmpheno.omop.source_identity import corpus_code_version
+    from spark_vi.dag import layout as dag_layout
     if not multidomain and (source_table is None or prior_obs_days is None
                             or window_days is None):
         raise TypeError(
@@ -169,9 +155,11 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
         "window_mode": window_mode, "lookback_days": int(lookback_days),
         "label_window_days": int(label_window_days),
         "cohort_defs": cohort_defs_version(),
+        "corpus_code": corpus_code_version(),
         "dag_src": _module_source_hash(condition_dag),
         "assembly_src": _module_source_hash(case_finding_assembly),
-        "v": 4,
+        "dag_layout_src": _module_source_hash(dag_layout),
+        "v": 5,
     }
     # The doc unit. Every corpus in the repo was assembled under
     # DEFAULT_DOC_SPEC, and none of their keys names it, so folding the default
@@ -188,7 +176,7 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
     # (person, index_date) rows exist) is folded here as an explicit dict. The two
     # arms (`episode` / `random`) share every parameter and differ only in `arm`,
     # so `arm` is what splits their two bundles. Folded ONLY when supplied (the
-    # `index_mode="external"` path), for exactly the `dag_collapse` reason: every
+    # `index_mode="external"` path), for the fold-only-when-on reason: every
     # population/disease/mondo key ever computed passed no episode_sampling and
     # must stay byte-identical, and the tripwire suite pins that.
     if episode_sampling:
@@ -230,74 +218,28 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
         payload["window_mode"] = "lookback"
         payload["mdv"] = 1            # multi-domain cache-format version
         if mondo:
-            # The label DAG is BUILT (mondo_dag), not loaded from concept_ancestor,
-            # so its identity is the build inputs plus that module's source — the
-            # same auto-invalidation discipline dag_src/assembly_src give the
-            # SNOMED path. `mondo_dag` is a sibling driver module, importable
-            # wherever this one is.
-            import mondo_dag
+            # The label DAG is BUILT (charmpheno.mondo.native_dag), not loaded from
+            # concept_ancestor, so its identity is the build inputs plus the source of
+            # every module the build runs: the native build, the splice, the Mondo->
+            # OMOP map, the release fetch and the generic graph operations. The anchor
+            # flavour (mondo without mondo_native) was removed with ADR 0051.
+            if not mondo_native:
+                raise ValueError(
+                    "compute_bundle_cache_key: mondo=True requires mondo_native=True "
+                    "(the anchor-Mondo label space was removed with ADR 0051)")
+            from charmpheno.mondo import collapse, native_dag, omop_mapping, ontology
+            from spark_vi.dag import ops as dag_ops
             payload["mondo"] = True
             payload["mondo_version"] = str(mondo_version)
             payload["mondo_branch"] = str(mondo_branch or "")
             payload["min_positives"] = int(min_positives)
-            payload["mondo_src"] = _module_source_hash(mondo_dag)
-            # exp 0109's splice-to-fixpoint DAG reduction: a DIFFERENT label DAG
-            # (763 fewer nodes at whole-Mondo), hence a different corpus. Folded
-            # ONLY when it is switched on — the same discipline as `mondo` itself
-            # — so every key from a collapse-OFF run (incl. exp 0104's cached
-            # record bundle) is byte-identical to what it was before this existed.
-            # That is also why the reduction lives in its own module: `mondo_src`
-            # would otherwise move every Mondo key on a comment edit.
-            if dag_collapse:
-                import mondo_collapse
-                payload["dag_collapse"] = True
-                # The version string is the citable record of WHICH reduction ran;
-                # the source hash is the guard that no one has to remember to bump.
-                payload["dag_collapse_version"] = str(dag_collapse_version)
-                payload["dag_collapse_src"] = _module_source_hash(mondo_collapse)
-            # exp 0110's NATIVE Mondo label space: a different attestation, a
-            # different powering rule and a different DAG — a different corpus.
-            # Folded ONLY when it is on, for the same reason `dag_collapse` is:
-            # exp 0104's and 0109's keys (dag_source=mondo) must not move, and the
-            # four hashes pinned in tests/scripts/test_case_finding_cache_mondo.py
-            # are the tripwire that proves they did not. `mondo_dag`'s hash keeps
-            # riding along on both paths — it is still the module the ANCHOR
-            # flavour is built from, and re-scoping it would move the pinned keys.
-            # `mondo_collapse` is folded here unconditionally because the native
-            # build always applies its splice.
-            if mondo_native:
-                import mondo_collapse
-                import mondo_native_dag
-                import mondo_usage_core
-                payload["mondo_native"] = True
-                payload["mondo_native_version"] = str(mondo_native_version)
-                payload["mondo_native_src"] = _module_source_hash(mondo_native_dag)
-                payload["mondo_usage_core_src"] = _module_source_hash(
-                    mondo_usage_core)
-                payload["native_collapse_src"] = _module_source_hash(mondo_collapse)
-                # The DisMech ribbon (or any explicit label set). Its identity
-                # string already names the DisMech commit and the member digest,
-                # so no module source needs folding for it; `dismech_ribbon.py`
-                # is a pure reader whose edits cannot change which ids are kept
-                # without changing the digest.
-                if label_set:
-                    payload["label_set"] = str(label_set)
-            # E1's pre-index closure column: a per-document sparse `R_d` (what the
-            # doc already carried BEFORE its index) written into the cached
-            # bundle. A bundle with the column is a DIFFERENT artifact from one
-            # without — a readout can ask for the column and a diagnostic can
-            # refuse a bundle that lacks it — so it is corpus identity. Folded
-            # ONLY when the flag is on, for exactly the reason `dag_collapse` and
-            # `mondo_native` are: 0104's, 0109's and every flag-off 0110 key must
-            # stay byte-identical, and the four hashes pinned in
-            # tests/scripts/test_case_finding_cache_mondo.py are the tripwire that
-            # proves they did. The module is NEW, so its source hash is free to
-            # move — it only ever appears on keys that asked for it.
-            if preindex_closure:
-                import preindex_closure as _preindex
-                payload["preindex_closure"] = True
-                payload["preindex_closure_version"] = str(preindex_closure_version)
-                payload["preindex_closure_src"] = _module_source_hash(_preindex)
+            payload["mondo_native"] = True
+            payload["mondo_native_version"] = str(mondo_native_version)
+            payload["mondo_native_src"] = _module_source_hash(native_dag)
+            payload["mondo_collapse_src"] = _module_source_hash(collapse)
+            payload["mondo_omop_mapping_src"] = _module_source_hash(omop_mapping)
+            payload["mondo_ontology_src"] = _module_source_hash(ontology)
+            payload["dag_ops_src"] = _module_source_hash(dag_ops)
     s = json.dumps(payload, sort_keys=True)
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
 
@@ -429,7 +371,7 @@ def try_load(spark, cache_uri, key) -> Optional["CaseFindingBundle"]:
 # assembler takes a `doc_spec` kwarg — both construct `PatientCohortDocSpec`
 # themselves inside a source-hashed module this branch may not edit. It is a
 # key-ONLY input and therefore rides `_key_extra`, the channel that exists for
-# exactly that (`multidomain`, `mondo`, `dag_collapse`, ... are all key-only too).
+# exactly that (`multidomain`, `mondo`, `mondo_native`, ... are all key-only too).
 _KEY_PARAM_NAMES = (
     "source_table", "person_mod", "vocab_size", "min_df",
     "min_patient_count", "doc_min_length", "prior_obs_days", "window_days",
@@ -447,13 +389,13 @@ def load_or_build_case_finding_bundle(spark, *, cache_uri=None, _assemble_fn=Non
     `assembly_params` are the assembler's kwargs (cdr, billing, disease,
     person_mod, min_n, n_bg, tpn, vocab_size, ...). `_assemble_fn` is the assembler
     seam — a testing hook, and on the multi-domain paths the real dispatch: the
-    Mondo driver binds a closure that builds the Mondo DAG + SNOMED-climb provider
+    Mondo driver binds a closure that builds the Mondo DAG + code-ladder provider
     and THEN assembles, so a cache HIT never pays for a hierarchy the cached bundle
     already encodes (see gated_pc_cloud.mondo_assemble_fn).
 
     `_key_extra` are cache-key inputs that are NOT assembler kwargs — the
     multi-domain/Mondo identity markers (`multidomain`, `mondo`, `mondo_version`,
-    `mondo_branch`, `min_positives`, `dag_collapse`, `mondo_native`) that name
+    `mondo_branch`, `min_positives`, `mondo_native`) that name
     WHICH corpus this is without being something the assembler is called with.
     """
     from charmpheno.omop.case_finding_assembly import assemble_case_finding_corpus

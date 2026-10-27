@@ -9,7 +9,7 @@ the layout's K and blocks and the gate's allowed set.
 """
 import numpy as np
 
-from spark_vi.models.topic.dag_placement import DagLayout
+from spark_vi.dag import DagLayout
 from spark_vi.models.topic.dag_gated_lda import GatedBOWDocument, DagGatedOnlineLDA
 
 PARENT = {1: [0], 2: [0], 3: [1], 4: [1, 2]}

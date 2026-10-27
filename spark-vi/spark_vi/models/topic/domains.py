@@ -12,7 +12,7 @@ interchangeable objects:
 
 `domains_to_bounds` is the one conversion between them, and
 `validate_domain_bounds` is the one validator: before it existed, only
-`dag_placement.fit_gated` checked its bounds and every other consumer accepted a
+`the test-suite oracle _gibbs_oracle.fit_gated` checked its bounds and every other consumer accepted a
 malformed sequence and produced a SILENT WRONG ANSWER instead of an error --
 `find_anchors(Q, 4, domain_bounds=[0, 3])` on a V=6 vocabulary returned 3 anchors
 with columns 3..5 permanently ineligible, and `split_domains(beta, [0, 3])`

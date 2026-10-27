@@ -323,7 +323,7 @@ def run_local(run_dir, parquet_dir, *, top_n=10, domains=(0,), tag=None,
     (`hdfs dfs -get`, an HDFS client read, no YARN), streamed with pyarrow. Layout,
     vocab maps and names from `<run>/bundle_meta.json`; own codes from
     `<run>/code_map.tsv`."""
-    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.dag import DagLayout
     run_dir = Path(run_dir)
     manifest = json.loads((run_dir / "manifest.json").read_text())
     meta = json.loads((run_dir / "bundle_meta.json").read_text())

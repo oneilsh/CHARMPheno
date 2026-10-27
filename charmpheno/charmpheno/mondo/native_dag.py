@@ -26,7 +26,8 @@ THE DESIGN (plan §3, docs/superpowers/plans/2026-08-31-native-mondo-label-space
 ----------------------------------------------------------------------------
   1. **Frontier / attestation.** A document's attested nodes are the MOST
      SPECIFIC mapped Mondo terms its in-window condition codes resolve to, via
-     main's `source_climb` ladder (`mondo_usage_core`): standard-exact first,
+     main's `source_climb` ladder (ported from main's `mondo_usage_cloud.py`; the
+     two functions used are at the end of this module): standard-exact first,
      then a `concept_ancestor` climb to the nearest mapped standard ancestor,
      tie-reduced by `reduce_tie_map` to the most-specific Mondo term(s). This
      replaces `powered_anchor_climb` and the whole OMOP-cid attestation
@@ -39,7 +40,7 @@ THE DESIGN (plan §3, docs/superpowers/plans/2026-08-31-native-mondo-label-space
      enough patients under it", whether or not any code maps to it directly.
      "Directly coded" becomes a node PROPERTY (`coded_cids`), not a node type.
   3. **The label DAG.** `induced_hasse_parents(kept, parent_adj)` — the induced
-     multi-parent Hasse relation over the kept set — then `mondo_collapse`'s
+     multi-parent Hasse relation over the kept set — then `collapse`'s
      splice-to-fixpoint as a generic thin-chain post-pass, with `is_terminal`
      read as the directly-coded PROPERTY instead of exp 0109's positive-concept-id
      sign test. By construction no kept node's sibling set can contain its own
@@ -84,7 +85,7 @@ part** (`MONDO:0004995` -> `4995`), with the forest root at `-1` (the
   * INJECTIVE — Mondo ids are `MONDO:%07d`, so the numeric part identifies the
     term;
   * STABLE — it depends only on the curie, not on the kept set or an enumeration
-    order, unlike `mondo_dag`'s sorted synthetic negatives, so two builds of
+    order, unlike the removed anchor build's sorted synthetic negatives, so two builds of
     different kept sets agree on what node `4995` is;
   * REVERSIBLE — `mondo_curie(cid)` reconstructs the curie for reports, and
     `name_by_id` carries the human label the readout actually renders.
@@ -116,14 +117,10 @@ HPO rung stays off by scope (plan §6).
 
 CACHE-KEY DISCIPLINE
 --------------------
-This module and `mondo_usage_core` are NEW, so their source hashes are free to
-move: `_case_finding_cache.compute_bundle_cache_key` folds them ONLY when
-`dag_source=mondo_native`, exactly as `dag_collapse` folds `mondo_collapse` only
-when it is on. `mondo_dag.py`, `condition_dag.py`, `case_finding_assembly.py`,
-`multi_domain.py` and `cohorts.py` are untouched, so every SNOMED key and every
-legacy-Mondo key (including exp 0104's record bundle and exp 0109's) is
-byte-identical. `mondo_collapse` is folded here too, because this build calls
-its splice unconditionally.
+`_case_finding_cache.compute_bundle_cache_key` folds this module's source hash, and
+those of `collapse`, `omop_mapping`, `ontology` and `spark_vi.dag`, into every bundle
+key: any edit here is a cache drop (AGENTS.md). Until ADR 0051 this module lived at
+`analysis/cloud/mondo_native_dag.py`; the move was itself one announced drop.
 
 BROADCAST DISCIPLINE (ADR 0047)
 -------------------------------
@@ -136,8 +133,13 @@ join against a small `(term, ancestor)` frame built on the driver.
 """
 from __future__ import annotations
 
+# The generic graph primitives (moved to spark_vi.dag with ADR 0051) stay importable
+# from here under the names this module and its callers have always used.
+from spark_vi.dag.ops import (ancestor_closure, nearest_kept_ancestors,  # noqa: F401
+                              parent_adjacency, transitive_reduction_parents)
+
 # The forest root's node id, matching case_finding_assembly._FOREST_ROOT_CID and
-# mondo_dag.MONDO_ROOT_CID so this DAG roots exactly like the others (engine-id 0).
+# the removed anchor build's MONDO_ROOT_CID so this DAG roots exactly like the others (engine-id 0).
 # Mondo numeric ids are positive, so -1 cannot collide with a real term.
 MONDO_NATIVE_ROOT_CID = -1
 
@@ -180,29 +182,6 @@ def mondo_curie(cid) -> str:
 # Pure graph core (no Spark, no pandas — unit-tested in                        #
 # tests/test_mondo_native_dag.py)                                              #
 # --------------------------------------------------------------------------- #
-def parent_adjacency(child_adj) -> dict:
-    """`{child: [parents]}` from Mondo's `{parent: [children]}` adjacency (what
-    `mondo_to_omop_mapping._disease_child_adjacency` returns). Parents are deduped
-    and sorted so every downstream walk is deterministic."""
-    out: dict = {}
-    for parent, children in child_adj.items():
-        for c in children:
-            out.setdefault(c, []).append(parent)
-    return {c: sorted(set(ps)) for c, ps in out.items()}
-
-
-def ancestor_closure(term, parent_adj) -> set:
-    """The REFLEXIVE is-a closure of `term`: itself plus every transitive parent.
-    Set-based, so a diamond is visited once and a (malformed) cycle terminates."""
-    out = {term}
-    stack = list(parent_adj.get(term, ()))
-    while stack:
-        p = stack.pop()
-        if p in out:
-            continue
-        out.add(p)
-        stack.extend(parent_adj.get(p, ()))
-    return out
 
 
 def closure_rows(terms, parent_adj) -> list:
@@ -236,41 +215,10 @@ def closure_support(person_terms, parent_adj) -> dict:
     return {a: len(ps) for a, ps in persons.items()}
 
 
-def nearest_kept_ancestors(term, kept, parent_adj, memo=None) -> set:
-    """Where an attestation of `term` LANDS in a DAG built over `kept`: `{term}`
-    when it is kept, else the nearest kept ancestor on each upward branch (the walk
-    stops climbing a branch at its first kept node), else `set()`.
-
-    The reflexive twin of `nearest_mapped_parents`'s walk and of
-    `condition_dag._nearest_surviving_ancestors`'s rewire, so an attestation lands
-    exactly where the label DAG reattaches its node — the single-source-of-truth
-    property the pruning ledger relies on. Composing it over the Hasse and then the
-    splice is why resolving codes against the FINAL node set is correct: nearest
-    kept ancestor of nearest kept ancestor is nearest kept ancestor."""
-    if term in kept:
-        return {term}
-    if memo is not None and term in memo:
-        return memo[term]
-    found, seen = set(), set()
-    stack = list(parent_adj.get(term, ()))
-    while stack:
-        cur = stack.pop()
-        if cur in seen:
-            continue
-        seen.add(cur)
-        if cur in kept:
-            found.add(cur)
-        else:
-            stack.extend(parent_adj.get(cur, ()))
-    if memo is not None:
-        memo[term] = found
-    return found
-
-
 def roll_terms_to_kept(terms, kept, parent_adj) -> dict:
     """`{term: sorted landing nodes}` over `terms` via `nearest_kept_ancestors`.
 
-    This is the native analogue of `mondo_dag.powered_anchor_climb`'s restriction
+    This is the native analogue of the removed anchor build's `powered_anchor_climb`'s restriction
     to the powered terminals, and it ROLLS UP rather than dropping: a code whose
     most-specific Mondo term missed `min_positives` still attests that term's
     nearest kept ancestors instead of vanishing. Because every attested id is then
@@ -313,60 +261,11 @@ def flat_label_parents(kept_ids, parent_adj) -> dict:
 
 
 def induced_hasse_parents(kept_ids, parent_adj) -> dict:
-    """The TRANSITIVE REDUCTION of Mondo's is-a order restricted to `kept_ids`.
-
-    `mondo_usage_core.nearest_mapped_parents` is the first half: for each kept
-    term, the first kept node on every upward branch. Its docstring calls that
-    "the induced Hasse edges", and on main's dashboard it is — but it is NOT a
-    transitive reduction on a multi-path DAG, and the difference is precisely exp
-    0104's bug. Worked example, from this module's own unit tests:
-
-        A                A, C, D kept; B unpowered and dropped.
-       / \\               D's parents are B and C. Climbing D's LEFT branch stops
-      B   C              at A (past the dropped B); the RIGHT branch stops at C.
-       \\ /               nearest_mapped_parents(D) = {A, C}.
-        D
-
-    A is then a parent of both C and D, so C and D are SIBLINGS — and C is an
-    ANCESTOR of D. Under closure masking a doc that fires D observes its siblings
-    under every parent, C among them, and C is positive on every such doc: an
-    all-positive cell and a constant head. That is the 619-category-anchor
-    mechanism reconstructed inside the very construction meant to make it
-    impossible, and it appears exactly when an intermediate is dropped — i.e. on
-    every unpowered rung of a real ontology.
-
-    So the second half: a parent `p` is REDUNDANT when some other parent `q` of
-    the same node has `p` among its own ancestors. Redundant parents are dropped,
-    which is what "the transitive reduction deletes the redundant sibling edge"
-    means operationally. Ancestry is read from the FULL Mondo graph, which is
-    sound because the induced order on kept nodes is the restriction of the full
-    one: if `p` is an ancestor of `q` in Mondo and both are kept, the edge `p->c`
-    carries no information the path `p ... q -> c` does not.
-
-    Multi-parenthood survives untouched wherever the parents are genuinely
-    incomparable (the orthogonal-axis case, ~50% of Mondo terms): only comparable
-    pairs are reduced. Returns `{kept term: [kept parents]}`; a term with no kept
-    ancestor gets `[]` and attaches to the synthetic root."""
-    from mondo_usage_core import nearest_mapped_parents
-
-    kept = {str(k) for k in kept_ids}
-    nearest = nearest_mapped_parents(kept, parent_adj)
-    memo: dict = {}
-
-    def strict_ancestors(term):
-        if term not in memo:
-            memo[term] = ancestor_closure(term, parent_adj) - {term}
-        return memo[term]
-
-    out: dict = {}
-    for child, parents in nearest.items():
-        if len(parents) <= 1:
-            out[child] = list(parents)
-            continue
-        out[child] = sorted(
-            p for p in parents
-            if not any(p in strict_ancestors(q) for q in parents if q != p))
-    return out
+    """The transitive reduction of Mondo's is-a order restricted to the kept curies
+    (`spark_vi.dag.transitive_reduction_parents`, whose docstring explains why the
+    nearest-kept-parents walk alone is not enough: exp 0104's 619 category anchors).
+    Returns `{kept term: [kept parents]}`; `[]` attaches to the synthetic root."""
+    return transitive_reduction_parents({str(k) for k in kept_ids}, parent_adj)
 
 
 # Mondo `same_as` cross-references found WRONG on inspection (exp 0137 audit), as
@@ -555,16 +454,15 @@ def resolve_code_terms(standard_pairs, climb_pairs, parent_adj) -> dict:
     the term's own `same_as -> Maps to` standard concept). `climb_pairs` are
     `(standard_concept_id, mondo_id)` candidates from rung 3 — the nearest mapped
     standard ANCESTORS produced by
-    `mondo_usage_core.nearest_mapped_standard_ancestors`, mapped through the same
+    `nearest_mapped_standard_ancestors` (below), mapped through the same
     standard->term table. Precedence is main's, verbatim in spirit: an exact hit
     wins outright and is NEVER climbed past; only codes with no exact hit climb,
-    and their tie-set is reduced by `mondo_usage_core.reduce_tie_map` to its
+    and their tie-set is reduced by `reduce_tie_map` (below) to its
     MOST-SPECIFIC Mondo term(s) (nested ancestors dropped, genuine orthogonal ties
     kept).
 
     Returns `{std_cid: sorted[mondo_id]}`. Rung 1 (source-exact) is absent — see
     the module docstring; a `condition_era` frame cannot express it."""
-    from mondo_usage_core import reduce_tie_map
 
     exact: dict = {}
     for cid, mid in standard_pairs:
@@ -599,7 +497,7 @@ def build_native_label_dag(kept_ids, parent_adj, coded_ids, *, names=None,
          terms have more than one parent); only comparable pairs are reduced, and
          a transitive reduction cannot leave a node as a sibling of its own
          descendant.
-      2. `mondo_collapse.collapse_engine_dag` — exp 0109's splice-to-fixpoint,
+      2. `collapse.collapse_engine_dag` — exp 0109's splice-to-fixpoint,
          applied as a generic thin-chain post-pass with `is_terminal` = "directly
          coded". A non-coded node with exactly one kept child is a rung in a
          ladder, not a label, and its would-be attestations simply roll one level
@@ -621,7 +519,7 @@ def build_native_label_dag(kept_ids, parent_adj, coded_ids, *, names=None,
     own `predicted_degenerate` (the number the readout banner then confirms or
     refutes)."""
     from charmpheno.omop.condition_dag import build_condition_dag
-    from mondo_collapse import collapse_engine_dag
+    from charmpheno.mondo.collapse import collapse_engine_dag
 
     names = {str(k): str(v) for k, v in (names or {}).items()}
     kept = {str(k) for k in kept_ids}
@@ -731,7 +629,7 @@ def format_label_set_report(stats) -> str:
 def format_native_build_report(stats) -> str:
     """The one-line DAG-build diagnostic, printed BEFORE any fit so the structural
     claim is on the record ahead of the readout's own banner (the same discipline
-    `mondo_collapse.format_collapse_report` follows)."""
+    `collapse.format_collapse_report` follows)."""
     col = stats["collapse"]
     return (
         f"[mondo-native] label DAG ({stats['version']}): {stats['n_kept']} powered "
@@ -806,7 +704,7 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
                                   condition_source_table="condition_occurrence"):
     """Build the native-Mondo `before_dag` + the per-code attestation map (BQ).
 
-    The native sibling of `mondo_dag.build_mondo_fit_inputs`, same call shape so
+    The native sibling of the removed anchor build's `build_mondo_fit_inputs`, same call shape so
     `gated_pc_cloud.mondo_assemble_fn` can dispatch to either:
 
       1. whole-Mondo -> OMOP mapping (`build_mondo_to_omop`, restrict=None), which
@@ -821,7 +719,7 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
          lands on a node the DAG actually has.
 
     `branch_root` (optional) restricts the kept set to one body-system subtree
-    (the template-branch knob `mondo_dag.branch_mondo_id_set` provides); `None` =
+    (the template-branch knob the removed anchor build's `branch_mondo_id_set` provides); `None` =
     whole Mondo, which is what exp 0110 runs.
 
     `label_set` (optional; spec 2026-10-07 §D1) restricts the kept set to an
@@ -851,10 +749,10 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
     from pyspark.sql.functions import broadcast
 
     from charmpheno.omop.bigquery import load_omop_bigquery
-    from anchor_selection_cloud import _download_cached, _read_bq
-    from mondo_to_omop_mapping import (
+    from charmpheno.mondo.ontology import download_cached as _download_cached
+    from charmpheno.mondo.ontology import read_bq as _read_bq
+    from charmpheno.mondo.omop_mapping import (
         build_mondo_to_omop, seed_source_xrefs, _disease_child_adjacency)
-    from mondo_usage_core import nearest_mapped_standard_ancestors
 
     cache = Path(mondo_cache_dir)
     edges_df = pd.read_csv(_download_cached(mondo_version, "mondo_edges.tsv", cache),
@@ -976,7 +874,7 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
 
     # --- 2. the condition frame + the climb rung -------------------------------
     # Powering reads the WHOLE population (no person_mod): a node's support is a
-    # corpus-independent property, the same convention mondo_dag's power-count uses.
+    # corpus-independent property, the same convention the anchor build's power-count used.
     cond = load_omop_bigquery(
         spark=spark, cdr_dataset=cdr, billing_project=billing,
         source_table=condition_source_table).select("person_id", "concept_id").cache()
@@ -1098,9 +996,9 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
 
 def branch_mondo_id_set(branch_root, *, edges_df, nodes_df) -> set:
     """The Mondo ids of `branch_root` and its is-a descendants — the
-    template-branch node set, same helper `mondo_dag.branch_mondo_id_set`
-    provides, re-exposed here so this module does not import that hashed one."""
-    from mondo_to_omop_mapping import _disease_child_adjacency, _descendants
+    template-branch node set (the removed anchor build had the same helper)."""
+    from charmpheno.mondo.omop_mapping import _disease_child_adjacency
+    from spark_vi.dag.ops import descendants as _descendants
     child_adj = _disease_child_adjacency(edges_df, nodes_df)
     return ({str(branch_root)}
             | {str(x) for x in _descendants(child_adj, str(branch_root))})
@@ -1109,7 +1007,7 @@ def branch_mondo_id_set(branch_root, *, edges_df, nodes_df) -> set:
 def make_mondo_native_attested_provider(code_map_sdf, *, doc_spec,
                                         ancestor_pairs=None):
     """A `provider(events_df) -> attested_df` for the `attested_provider` seam —
-    the native analogue of `mondo_dag.make_mondo_attested_provider`.
+    the native analogue of the removed anchor build's `make_mondo_attested_provider`.
 
     Per document, the attested nodes are the Mondo label nodes the patient's
     in-window condition codes resolve to through the ladder
@@ -1175,3 +1073,84 @@ def make_mondo_native_attested_provider(code_map_sdf, *, doc_spec,
         )
 
     return provider
+
+
+# --------------------------------------------------------------------------- #
+# The code ladder's climb (from analysis/cloud/mondo_usage_core.py, ADR 0051:   #
+# the two functions of that port the native build uses).                       #
+# --------------------------------------------------------------------------- #
+def nearest_mapped_standard_ancestors(edges) -> dict[int, list[int]]:
+    """The ``source_climb`` count-space climb, as pure logic.
+
+    ``edges`` is an iterable of ``(descendant_concept_id, ancestor_concept_id,
+    levels_of_separation)`` triples from OMOP ``concept_ancestor``. The caller
+    pre-filters so that every ``ancestor_concept_id`` is a *mapped* standard
+    concept (a concept some Mondo term carries via ``same_as -> Maps to``) and
+    that ``descendant_concept_id`` is a standard concept with NO exact Mondo match
+    (an exact, distance-0 match wins before any climb and is resolved earlier).
+
+    For each descendant we keep only the ancestor(s) at the SMALLEST
+    ``levels_of_separation >= 1`` — the nearest mapped Mondo term(s) up the SNOMED
+    hierarchy. Ties (>=2 mapped ancestors equally near) are all kept, so the term
+    rows can flag the shared attribution as a collision (a patient with that one
+    code counts under each tied term). A descendant with no mapped ancestor is
+    simply absent (it stays unmatched and is surveyed).
+
+    Returns ``{descendant_concept_id: sorted[ancestor_concept_id, ...]}``.
+    Concept-ancestor is only populated for STANDARD concepts (SNOMED for the
+    condition domain); non-standard source codes (ICD) never appear as
+    descendants here, which is why the ladder climbs the standard concept."""
+    best: dict[int, tuple[int, set]] = {}
+    for d, a, lv in edges:
+        d, a, lv = int(d), int(a), int(lv)
+        if lv < 1:                       # level 0 = self/exact, never a climb
+            continue
+        cur = best.get(d)
+        if cur is None or lv < cur[0]:
+            best[d] = (lv, {a})
+        elif lv == cur[0]:
+            cur[1].add(a)
+    return {d: sorted(anc) for d, (lv, anc) in best.items()}
+
+
+def reduce_tie_map(pairs, parents_of):
+    """Reduce each climb tie-set to its MOST-SPECIFIC members in the Mondo DAG.
+
+    The climb attributes a code to the nearest mapped ancestor(s) by SNOMED distance, but
+    ties can include a specific term AND its more-general Mondo ancestors (e.g. a code that
+    ties to {carbuncle, pyoderma, skin disorder}). The ladder's promise is the MOST SPECIFIC
+    mapped term, so among tied terms we drop any that is a Mondo-ancestor of another tied
+    term — keeping only the "leaves" of the set. Genuine orthogonal ties (neither term an
+    ancestor of the other, e.g. {hereditary disease, endocrine system disorder}) are kept.
+
+    ``pairs`` = iterable of ``(key, mondo_id)`` (key = the climbed descendant concept);
+    ``parents_of`` = Mondo child->parents adjacency. Returns ``{key: [most-specific ids]}``.
+    A shared ancestor-closure memo makes this cheap across many overlapping tie-sets."""
+    from collections import defaultdict
+    groups: dict = defaultdict(set)
+    for k, t in pairs:
+        groups[k].add(str(t))
+    memo: dict[str, set] = {}
+
+    def anc(t):
+        if t in memo:
+            return memo[t]
+        out: set = set()
+        stack = list(parents_of.get(t, ()))
+        while stack:
+            p = stack.pop()
+            if p in out:
+                continue
+            out.add(p)
+            stack.extend(parents_of.get(p, ()))
+        memo[t] = out
+        return out
+
+    out: dict = {}
+    for k, terms in groups.items():
+        if len(terms) <= 1:
+            out[k] = sorted(terms)
+            continue
+        out[k] = sorted(t for t in terms
+                        if not any(t in anc(s) for s in terms if s != t))
+    return out

@@ -26,9 +26,9 @@ ontology data. `--rollup` additionally credits every branch node with the
 union of its branch descendants' profiles (see `rollup_profiles`) — stage 2
 found most profiled nodes sit below the powered label space.
 
-Driver-owned file: it IMPORTS the source-hashed mapping modules
-(`mondo_to_omop_mapping`, `mondo_usage_core`) and never edits them, so no
-bundle/corpus cache key moves.
+Driver-owned file: it IMPORTS the source-hashed Mondo mapping
+(`charmpheno.mondo.omop_mapping`) and never edits it, so no bundle/corpus cache
+key moves.
 """
 from __future__ import annotations
 
@@ -41,8 +41,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from mondo_to_omop_mapping import _descendants, _disease_child_adjacency
-from mondo_usage_core import parse_hpo_dag, parse_hpo_xrefs
+from charmpheno.mondo.omop_mapping import _disease_child_adjacency
+from spark_vi.dag.ops import descendants as _descendants
 
 _MONDO_RELEASE = "https://github.com/monarch-initiative/mondo/releases/download/v{v}/{f}"
 _HPO_RELEASE = (
@@ -68,6 +68,101 @@ _FREQ_TERMS = {
     "HP:0040284": 0.025,   # Very rare (1-4%)
     "HP:0040285": 0.0,     # Excluded (0%)
 }
+
+
+# HPO .obo parsers (from analysis/cloud/mondo_usage_core.py, removed with ADR 0051;
+# this survey is their only user).
+# HPO (Human Phenotype Ontology) cross-reference vocab prefixes -> the OMOP vocabulary_id
+# they correspond to. HPO's `xref:` values look like ``SNOMEDCT_US:190855004`` /
+# ``UMLS:C0151723`` / ``ICD-10:E83.42``. SNOMED is the bridge that matters most (it is
+# OMOP's standard Condition vocabulary); ICD lets a source code match directly. UMLS has no
+# native OMOP key, so it is carried but not matched here.
+_XREF_VOCAB = {
+    "SNOMEDCT_US": "SNOMED", "SNOMEDCT": "SNOMED", "SNOMED_CT": "SNOMED", "SCTID": "SNOMED",
+    "ICD10": "ICD10CM", "ICD-10": "ICD10CM", "ICD10CM": "ICD10CM", "ICD-10-CM": "ICD10CM",
+    "ICD9": "ICD9CM", "ICD-9": "ICD9CM", "ICD9CM": "ICD9CM", "ICD-9-CM": "ICD9CM",
+    "MSH": "MeSH", "MESH": "MeSH", "UMLS": "UMLS",
+}
+
+
+def normalize_xref_vocab(prefix: str):
+    """Map an ontology xref prefix (e.g. ``SNOMEDCT_US``) to the OMOP ``vocabulary_id``
+    (``SNOMED``), or ``None`` when it is not one we match on. Pure."""
+    return _XREF_VOCAB.get(str(prefix).strip().upper())
+
+
+def parse_hpo_xrefs(obo_text: str) -> "list[tuple]":
+    """Parse an HPO ``hp.obo`` into ``(hp_id, hp_label, vocab, code)`` rows for the xref
+    vocabularies we recognise (see ``_XREF_VOCAB``). One row per (term, mapped xref); a
+    term with several xrefs yields several rows. Trailing OBO qualifiers/comments on an
+    xref line (``{source=...}`` or `` ! label``) are stripped. Pure — no I/O."""
+    rows = []
+    hp_id = hp_name = None
+    in_term = False
+    for raw in obo_text.splitlines():
+        line = raw.rstrip()
+        if line == "[Term]":
+            in_term, hp_id, hp_name = True, None, None
+            continue
+        if line.startswith("[") and line.endswith("]"):   # a different stanza (Typedef, ...)
+            in_term = False
+            continue
+        if not in_term:
+            continue
+        if line.startswith("id:"):
+            hp_id = line[3:].strip()
+        elif line.startswith("name:"):
+            hp_name = line[5:].strip()
+        elif line.startswith("xref:") and hp_id and hp_id.startswith("HP:"):
+            x = line[5:].strip().split("{")[0].split(" ! ")[0].strip()
+            if ":" not in x:
+                continue
+            prefix, code = x.split(":", 1)
+            vocab = normalize_xref_vocab(prefix)
+            if vocab:
+                rows.append((hp_id, hp_name, vocab, code.strip()))
+    return rows
+
+
+def parse_hpo_dag(obo_text: str) -> "tuple[dict, dict]":
+    """Parse ``hp.obo`` into ``(labels, parents)``: ``labels`` maps ``HP:id`` -> name,
+    ``parents`` maps ``HP:id`` -> list of ``is_a`` parent ids. Obsolete terms are dropped.
+    Pure — no I/O. Mirrors Mondo's (nodes, edges) shape so the DAG machinery is reused."""
+    labels, parents = {}, {}
+    hp_id = hp_name = None
+    par: list = []
+    obsolete = False
+    in_term = False
+
+    def _flush():
+        if in_term and hp_id and hp_id.startswith("HP:") and not obsolete:
+            labels[hp_id] = hp_name or hp_id
+            parents[hp_id] = list(par)
+
+    for raw in obo_text.splitlines():
+        line = raw.rstrip()
+        if line == "[Term]":
+            _flush()
+            in_term, hp_id, hp_name, par, obsolete = True, None, None, [], False
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            _flush()
+            in_term = False
+            continue
+        if not in_term:
+            continue
+        if line.startswith("id:"):
+            hp_id = line[3:].strip()
+        elif line.startswith("name:"):
+            hp_name = line[5:].strip()
+        elif line.startswith("is_obsolete:") and line.split(":", 1)[1].strip() == "true":
+            obsolete = True
+        elif line.startswith("is_a:"):
+            p = line[5:].strip().split("{")[0].split(" ! ")[0].strip()
+            if p.startswith("HP:"):
+                par.append(p)
+    _flush()
+    return labels, parents
 
 
 def normalize_frequency(raw) -> float | None:

@@ -47,7 +47,7 @@ def test_ledger_counts_and_coarsening():
     assert abs(led["mean_depth_drop"] - 1.0) < 1e-9
 
 def test_to_engine_maps_anchor_to_zero_and_loads_into_daglayout():
-    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.dag import DagLayout
     dag = build_condition_dag(DIAMOND_EDGES, ANCHOR, DIAMOND_NODES)
     parent_int, int2cid, cid2int = dag.to_engine()
     assert cid2int[ANCHOR] == 0                          # anchor -> root 0
@@ -59,7 +59,7 @@ def test_to_engine_maps_anchor_to_zero_and_loads_into_daglayout():
 def test_real_diabetes_subtree_structure():
     import csv
     from pathlib import Path
-    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.dag import DagLayout
     path = Path(__file__).parent / "data" / "diabetes_subtree_edges.csv"
     with open(path) as fh:
         rows = list(csv.reader(fh))[1:]                 # skip header

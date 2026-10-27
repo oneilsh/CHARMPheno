@@ -33,22 +33,16 @@ actually attest — are never touched, so the corpus's label content is unchange
 only the abstract scaffolding between them shrinks. The root stays even though it
 remains degenerate: it is one node, and it is what makes the forest connected.
 
-WHY IT IS A SEPARATE MODULE (and not a few lines inside `mondo_dag`)
--------------------------------------------------------------------
-`_case_finding_cache.compute_bundle_cache_key` folds
-``_module_source_hash(mondo_dag)`` into every Mondo bundle key — the
-auto-invalidation discipline that guarantees a hierarchy edit can never be served
-from a stale cache. That is exactly right, and it also means ANY edit to
-`mondo_dag.py` — a comment, a docstring — moves every Mondo key and orphans every
-cached bundle in every bucket, including exp 0104's record run (~20 min of
-BigQuery per rebuild, mid-flight as this lands). The reduction therefore lives
-here, `mondo_dag.py` is untouched, and the key folds this module ONLY when the
-collapse is switched on. Collapse OFF ⇒ byte-identical keys to today.
-
-Everything here is pure integer-id graph work over the id space `mondo_dag`
-documents: terminals are POSITIVE OMOP standard-condition concept ids, class
-nodes are SYNTHETIC NEGATIVES, and the forest root is ``-1``. That sign
-convention IS the terminal test (overridable for tests / other id spaces).
+HOW THE NATIVE BUILD USES IT
+----------------------------
+`native_dag.build_native_label_dag` applies the splice after the transitive
+reduction, with `is_terminal` = "some condition code resolves to this term
+directly". The default terminal test (positive ids are terminals, class nodes are
+synthetic negatives, the root is ``-1``) is the id convention of the removed
+SNOMED-anchor Mondo build (exp 0104/0109) and is kept for the unit tests that use
+it. Moved from `analysis/cloud/mondo_collapse.py` with ADR 0051; it was a separate
+module so that its edits would not move that anchor build's cache key, and stays
+one because it is a self-contained algorithm.
 """
 from __future__ import annotations
 
@@ -61,8 +55,8 @@ DAG_COLLAPSE_VERSION = "splice-fixpoint-v1"
 
 
 def _default_is_terminal(cid) -> bool:
-    """Terminals are the powered OMOP anchors: positive concept ids (`mondo_dag`'s
-    id-space contract). Class nodes and the root are synthetic negatives."""
+    """The anchor-build id convention: terminals are positive concept ids; class
+    nodes and the root are synthetic negatives. The native build passes its own."""
     return cid > 0
 
 

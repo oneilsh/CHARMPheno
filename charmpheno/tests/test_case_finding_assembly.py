@@ -11,7 +11,7 @@ def test_disease_registry_has_diabetes_anchor_201820():
 
 
 from charmpheno.omop.condition_dag import build_condition_dag
-from spark_vi.models.topic.dag_placement import DagLayout
+from spark_vi.dag import DagLayout
 
 
 def _diamond_dag():
@@ -252,7 +252,7 @@ def test_attach_frontiers_emits_engine_ids_and_empty_for_background(spark):
         doc_attested_nodes, attach_frontiers,
     )
     from charmpheno.omop.condition_dag import build_condition_dag
-    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.dag import DagLayout
     edges = [(100, 200), (200, 400)]
     dag = build_condition_dag(edges, anchor=100, node_ids=[200, 400])
     parent_int, int2cid, cid2int = dag.to_engine()
@@ -305,7 +305,7 @@ def test_assemble_from_events_end_to_end(spark):
     leakage strip on TEST only, and a DagLayout-loadable bundle."""
     from charmpheno.omop.case_finding_assembly import assemble_from_events
     from charmpheno.omop.condition_dag import build_condition_dag
-    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.dag import DagLayout
 
     # DAG: anchor 100 -> 200 (T2), 300 (T1); 200 -> 400 (T2-with-complication node).
     edges = [(100, 200), (100, 300), (200, 400)]
@@ -457,7 +457,7 @@ def test_assemble_prunes_and_fits_vocab_on_train_only(spark):
     assert 0.0 <= bundle.ledger["test_coarsening_rate"] <= 1.0
 
     # DagLayout loads; K emergent from TRAIN-surviving nodes.
-    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.dag import DagLayout
     DagLayout(bundle.parent_int, n_bg=2, tpn=1)
 
 

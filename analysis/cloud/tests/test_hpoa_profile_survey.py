@@ -299,3 +299,80 @@ def test_rollup_off_emission_columns_and_rows_unchanged():
     # may change a self row's freq/neg when descendants share the term)
     assert old.equals(new[new["inherited"] == False]  # noqa: E712
                       [old.columns].reset_index(drop=True))
+
+
+# The HPO .obo parsers (moved here with the parsers from test_mondo_usage_core.py).
+def test_parse_hpo_dag():
+    obo = """format-version: 1.2
+
+[Term]
+id: HP:0000118
+name: Phenotypic abnormality
+
+[Term]
+id: HP:0002917
+name: Hypomagnesemia
+is_a: HP:0004363 ! Abnormal circulating metabolite concentration
+is_a: HP:0012418 ! Hypomagnesemia parent two
+
+[Term]
+id: HP:0000001
+name: All
+
+[Term]
+id: HP:9999999
+name: obsolete thing
+is_a: HP:0000118 ! Phenotypic abnormality
+is_obsolete: true
+
+[Typedef]
+id: part_of
+"""
+    labels, parents = s.parse_hpo_dag(obo)
+    assert labels["HP:0002917"] == "Hypomagnesemia"
+    assert labels["HP:0000118"] == "Phenotypic abnormality"
+    assert sorted(parents["HP:0002917"]) == ["HP:0004363", "HP:0012418"]
+    assert parents.get("HP:0000118", []) == []          # a root: no is_a
+    assert "HP:9999999" not in labels                    # obsolete excluded
+    assert "HP:9999999" not in parents
+
+
+def test_normalize_xref_vocab():
+    assert s.normalize_xref_vocab("SNOMEDCT_US") == "SNOMED"
+    assert s.normalize_xref_vocab("snomedct_us") == "SNOMED"     # case-insensitive
+    assert s.normalize_xref_vocab("ICD-10") == "ICD10CM"
+    assert s.normalize_xref_vocab("ICD9CM") == "ICD9CM"
+    assert s.normalize_xref_vocab("UMLS") == "UMLS"
+    assert s.normalize_xref_vocab("ORPHA") is None              # not one we match
+
+
+def test_parse_hpo_xrefs():
+    obo = """format-version: 1.2
+
+[Term]
+id: HP:0002917
+name: Hypomagnesemia
+def: "A decreased magnesium level." []
+xref: SNOMEDCT_US:190855004
+xref: UMLS:C0151723 {source="MONDO"}
+xref: ICD-10:E83.42 ! Disorders of magnesium metabolism
+
+[Term]
+id: HP:0000001
+name: All
+xref: UMLS:C0444868
+
+[Typedef]
+id: part_of
+xref: SNOMEDCT_US:9999999
+"""
+    rows = s.parse_hpo_xrefs(obo)
+    # SNOMED + normalized ICD-10 + UMLS captured for the real term; comments/qualifiers stripped
+    assert ("HP:0002917", "Hypomagnesemia", "SNOMED", "190855004") in rows
+    assert ("HP:0002917", "Hypomagnesemia", "ICD10CM", "E83.42") in rows
+    assert ("HP:0002917", "Hypomagnesemia", "UMLS", "C0151723") in rows
+    # Typedef xref is NOT a term xref (ignored)
+    assert all(r[0] == "HP:0002917" or r[0] == "HP:0000001" for r in rows)
+    assert not any(r[3] == "9999999" for r in rows)
+    # a term with only an unmatched-vocab xref contributes nothing matchable... UMLS is kept
+    assert ("HP:0000001", "All", "UMLS", "C0444868") in rows

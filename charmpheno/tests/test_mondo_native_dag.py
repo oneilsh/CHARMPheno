@@ -15,8 +15,8 @@ modules are source-hashed into every bundle cache key and are not to be touched.
 """
 import pytest
 
-import mondo_native_dag as mn
-from mondo_collapse import collapse_only_child_classes
+from charmpheno.mondo import native_dag as mn
+from charmpheno.mondo.collapse import collapse_only_child_classes
 
 
 # --------------------------------------------------------------------------- #
@@ -143,7 +143,7 @@ def test_nearest_mapped_parents_alone_would_reintroduce_a_subsumed_sibling():
     unification cannot quietly drop the extra step: with B unpowered, D's nearest
     mapped parents are {A, C} — and C is an ancestor of D, so under A they are
     siblings. This is exp 0104's 619-category-anchor shape, rebuilt."""
-    from mondo_usage_core import nearest_mapped_parents
+    from spark_vi.dag.ops import nearest_kept_parents as nearest_mapped_parents
 
     pa = _diamond_parents()
     assert nearest_mapped_parents({_A, _C, _D}, pa)[_D] == [_A, _C]
@@ -318,7 +318,7 @@ def test_resolve_code_terms_maps_one_code_to_several_exact_terms():
 # --------------------------------------------------------------------------- #
 def _diamond_layout():
     """Engine-id diamond: 0=root, 1=B, 2=C, 3=D(under both), 4=E(under C)."""
-    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.dag import DagLayout
     return DagLayout({1: [0], 2: [0], 3: [1, 2], 4: [2]}, n_bg=2, tpn=1)
 
 
@@ -375,7 +375,7 @@ def test_frontier_to_label_single_parent_arm_does_not_see_the_other_arm():
 def test_dag_children_and_depth_is_multi_parent_safe():
     """`_dag_children_and_depth` feeds the conditional readout's cohorts; a child
     with two kept parents must appear under BOTH."""
-    from gated_pc_cloud import _dag_children_and_depth
+    from spark_vi.dag.ops import children_and_depth as _dag_children_and_depth
 
     children, depth = _dag_children_and_depth(
         {0: [], 1: [0], 2: [0], 3: [1, 2], 4: [2]}, 5)
@@ -441,3 +441,44 @@ def test_native_attested_ids_are_bigints_the_assembler_can_cast(spark):
         code_map, doc_spec=PatientCohortDocSpec())(events)
     assert dict(out.dtypes)["attested_cids"] == "array<bigint>"
     assert [int(c) for c in out.collect()[0]["attested_cids"]] == [mn.mondo_cid(_D)]
+
+
+# --------------------------------------------------------------------------- #
+# The code ladder's climb (moved from analysis/cloud/tests/test_mondo_usage_core.py). #
+# --------------------------------------------------------------------------- #
+def test_nearest_mapped_standard_ancestors_picks_min_distance():
+    # concept_ancestor climb (source_climb space): descendant 100 has mapped
+    # standard ancestors at levels 1 and 2; only the NEAREST is kept.
+    edges = [(100, 10, 1), (100, 20, 2)]
+    assert mn.nearest_mapped_standard_ancestors(edges) == {100: [10]}
+
+
+def test_nearest_mapped_standard_ancestors_keeps_ties():
+    # two mapped ancestors equally near (both level 2) -> keep BOTH so the term
+    # rows can be flagged as a shared-attribution collision. Level-3 dropped.
+    edges = [(100, 10, 2), (100, 20, 2), (100, 30, 3)]
+    assert mn.nearest_mapped_standard_ancestors(edges) == {100: [10, 20]}
+
+
+def test_nearest_mapped_standard_ancestors_excludes_distance_zero_and_empty():
+    # a self/exact edge (level 0) is NOT a climb; no mapped ancestor -> absent.
+    assert mn.nearest_mapped_standard_ancestors([(100, 100, 0)]) == {}
+    assert mn.nearest_mapped_standard_ancestors([]) == {}
+    # independent descendants are resolved separately
+    assert mn.nearest_mapped_standard_ancestors(
+        [(1, 5, 1), (2, 6, 4), (2, 7, 4)]) == {1: [5], 2: [6, 7]}
+
+
+def test_reduce_tie_map_keeps_most_specific():
+    # Mondo child->parents: carbuncle -> pyoderma -> skin; hereditary & endocrine are roots.
+    parents = {"carbuncle": ["pyoderma"], "pyoderma": ["skin"], "skin": [],
+               "hereditary": [], "endocrine": []}
+    pairs = [
+        (1, "carbuncle"), (1, "pyoderma"), (1, "skin"),   # nested chain -> just carbuncle
+        (2, "hereditary"), (2, "endocrine"),              # orthogonal tie -> both kept
+        (3, "skin"),                                       # single -> unchanged
+    ]
+    out = mn.reduce_tie_map(pairs, parents)
+    assert out[1] == ["carbuncle"]                         # ancestors pyoderma/skin dropped
+    assert out[2] == ["endocrine", "hereditary"]           # neither is the other's ancestor
+    assert out[3] == ["skin"]

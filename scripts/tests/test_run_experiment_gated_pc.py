@@ -115,29 +115,6 @@ def test_config_round_trips_frontmatter_to_the_estimator(monkeypatch):
     assert est.getOrDefault("maxIter") == 100
 
 
-def test_anchor_select_route(monkeypatch):
-    """model_class=anchor_select validates, resolves to the anchor-selection driver,
-    and builds argv (cdr/billing from workspace env + seed/min-positives)."""
-    mod = _run_exp(monkeypatch)
-    mod.validate_frontmatter({
-        "id": 86, "slug": "mondo-coverage", "cohort": "population_rare_priority",
-        "model_class": "anchor_select"})
-    assert mod.build_fit_driver_path({"model_class": "anchor_select"}) \
-        == "analysis/cloud/anchor_selection_cloud.py"
-    eff = {"model_class": "anchor_select", "min_positives": 100,
-           "mondo_version": "2026-06-02"}
-    args = mod.build_fit_args(eff, "/out")
-    assert args[args.index("--cdr") + 1] == "proj.ds"
-    assert args[args.index("--billing") + 1] == "bill"
-    assert args[args.index("--min-positives") + 1] == "100"
-    assert args[args.index("--mondo-version") + 1] == "2026-06-02"
-    assert args[args.index("--out") + 1] == "/out/candidates_with_counts.tsv"
-    assert args[args.index("--seed-tsv") + 1].endswith("priority_seed.tsv")
-
-
-
-
-
 def test_mondo_native_dag_source_threads_end_to_end(monkeypatch):
     """exp 0110: `dag_source: mondo_native` front matter -> --dag-source ->
     the driver parses it -> the corpus spec routes it through the Mondo branch of

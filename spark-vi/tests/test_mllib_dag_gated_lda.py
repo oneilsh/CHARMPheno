@@ -108,7 +108,7 @@ def test_doc_concentration_scalar_and_vector(spark):
 def test_optimize_alpha_learns_asymmetric(spark):
     # node 1 common, node 2 rare: the empirical-Bayes alpha learns a(1) > a(2).
     from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
-    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.dag import DagLayout
     parent = {1: 0, 2: 0}
     V = 24
     rng = np.random.default_rng(0)
@@ -241,7 +241,7 @@ def test_resume_continues_the_iteration_counter(tmp_path, spark):
 def test_profile_seed_lands_in_the_primary_domain_slice():
     """gateSeedDomain names the domain the profile / own codes index; its local ids
     are shifted to that domain's span of the concatenated vocabulary."""
-    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.dag import DagLayout
     lay = DagLayout(PARENT, n_bg=2, tpn=1)
     sizes = [4, 3]
     for d, (lo, hi) in ((0, (0, 4)), (1, (4, 7))):

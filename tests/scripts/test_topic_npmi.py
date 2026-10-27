@@ -17,7 +17,7 @@ os.environ["PYTHONPATH"] = os.pathsep.join(
     if p)
 
 import topic_npmi as tn  # noqa: E402
-from spark_vi.models.topic.dag_placement import DagLayout  # noqa: E402
+from spark_vi.dag import DagLayout  # noqa: E402
 
 PARENT = {1: 0, 2: 1, 3: 1}          # 1 -> {2, 3}
 

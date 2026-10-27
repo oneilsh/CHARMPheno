@@ -23,6 +23,7 @@ os.environ["PYTHONPATH"] = os.pathsep.join(
     p for p in (str(REPO_ROOT), str(CLOUD), os.environ.get("PYTHONPATH", "")) if p)
 
 import gated_pc_cloud as gpc  # noqa: E402
+from spark_vi.dag.ops import parents_over_range  # noqa: E402
 from spark_vi.readout import stacked as stk  # noqa: E402
 
 # Root 0; 1, 2, 6 under the root; 3 under 1; 4 is a DIAMOND child of 1 and 2;
@@ -138,5 +139,5 @@ def test_a_constant_root_leaves_depth_one_ranking_tied_with_the_flat_arm():
     assert blk["root_only_detection"]["skipped"]           # a constant column
 
 
-def test_dag_closure_parents_densifies_over_range_C():
-    assert stk.dag_closure_parents(PARENT, C) == [[], [0], [0], [1], [1, 2], [4], [0]]
+def test_parents_over_range_densifies_over_range_C():
+    assert parents_over_range(PARENT, C) == [[], [0], [0], [1], [1, 2], [4], [0]]

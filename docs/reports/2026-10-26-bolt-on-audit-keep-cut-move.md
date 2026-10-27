@@ -303,6 +303,26 @@ marked `slow` by a conftest hook, plus explicit marks on the pure-numpy tests ov
 from ~98 s to 1.1 s (148). AGENTS.md "Testing expectations" states the tiers and
 when to run each.
 
+**ADR 0051 step 3 (spark_vi.dag, charmpheno.mondo; the cache drop), 2026-10-27 —
+done.** `spark_vi.dag`: `layout` (`DagLayout`, `frontier_from_coded`, from
+`models/topic/dag_placement.py`) and `ops` (closure, descendants, depth, the transitive
+reduction, nearest-kept walks, the closure matrix; verbatim from the Mondo builders,
+the readout and the fit driver). The collapsed-Gibbs oracle went to
+`spark-vi/tests/_gibbs_oracle.py`, so `dag_placement.py` is gone. `charmpheno.mondo`:
+`native_dag` (with the two live functions of `mondo_usage_core`), `collapse`,
+`omop_mapping`, `ontology` (the release fetch and CDR reader out of
+`anchor_selection_cloud.py`). Removed: `mondo_dag.py` (the anchor build), the
+anchor-selection trio and `anchor_hierarchy*`, the `anchor_select` model class,
+`priority_seed.tsv`, the rest of `mondo_usage_core` (the HPO parsers went to
+`hpoa_profile_survey.py`); the ribbon TSV moved to `analysis/cloud/label_sets/`.
+**The cache drop** (one commit): the bundle key folds the moved modules,
+`spark_vi.dag` and the new `corpus_code_version()` (bigquery / measurement_tokens /
+topic_prep, unhashed before), drops the anchor-Mondo, `dag_collapse`, `label_set` and
+pre-index folds (refused by the driver since step 1) and goes to payload v5; the
+corpus and covariate keys fold `corpus_code` too. The conversion sidecar's key also
+moved (its legacy anchor branch was removed), so it rebuilds once. Tripwires
+re-pinned.
+
 ## Questions for the maintainer
 
 1. Antidepressant/MDD (Hughes) line, including its `cohorts.py` block and the

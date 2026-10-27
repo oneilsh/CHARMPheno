@@ -5,7 +5,7 @@ compute_elbo, infer_local and iteration_summary are ALSO overridden, but only br
 from the inherited OnlineLDA behavior in multi-domain mode — with domains=None they
 delegate to super().
   * local_update — restrict each training doc's CAVI to DagLayout.allowed_set(frontier)
-    (the exact variational analogue of the Gibbs gate in dag_placement.fit_gated); sstats
+    (the exact variational analogue of the Gibbs gate in the test-suite oracle _gibbs_oracle.fit_gated); sstats
     for disallowed topics stay zero, welding each node's topic to its subtree's documents.
     An empty frontier is a labeled background doc, gated to the background block only (NOT
     full-K) — the same convention as the Gibbs oracle and the gated STM.
@@ -25,7 +25,7 @@ TRAINING is gated (above); DEPLOYMENT is different — the MLlib model's transfo
 docs in UNGATED full-K CAVI (the label is unknown at scoring time, which is the whole point)
 -> theta.
 
-Validated against the collapsed-Gibbs oracle (dag_placement.fit_gated): placement (node-AUC by
+Validated against the collapsed-Gibbs oracle (the test-suite oracle _gibbs_oracle.fit_gated): placement (node-AUC by
 depth, MRR, top2) matches at every depth; the DAG gate supplies the identifiability a
 spectral init provides in ungated LDA, so lambda starts from the random draw (plus the
 data-driven gate seeds). References: Hoffman, Blei, Bach (2010) Online LDA; Griffiths &
@@ -40,7 +40,7 @@ import numpy as np
 from scipy.special import digamma
 
 from spark_vi.inference.concentration_optimization import gated_alpha_newton_step
-from spark_vi.models.topic.dag_placement import DagLayout
+from spark_vi.dag import DagLayout
 from spark_vi.models.topic.domains import domains_to_bounds
 from spark_vi.models.topic.lda import OnlineLDA, _cavi_doc_inference, _dirichlet_kl
 from spark_vi.models.topic.types import GatedBOWDocument
@@ -313,7 +313,7 @@ class DagGatedOnlineLDA(OnlineLDA):
         allowed = lay.allowed_set(frontier) = background ∪ closure blocks of the frontier.
         An EMPTY frontier is a labeled background document (a known negative: this item
         belongs to no node), so it is gated to the BACKGROUND block only — NOT full-K.
-        This matches both the collapsed-Gibbs oracle (dag_placement.fit_gated, which gates
+        This matches both the collapsed-Gibbs oracle (the test-suite oracle _gibbs_oracle.fit_gated, which gates
         every training doc via allowed_set, so empty -> background-only) and the gated STM
         (partition.TopicBlockPartition.allowed_indices: a group with no foreground block
         contributes to the background only). Letting background docs go full-K instead

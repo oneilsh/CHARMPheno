@@ -1578,8 +1578,9 @@ def case_finding_population_index_table(cond_df, *, spark, cdr_dataset,
     observed window — the BACKGROUND arm of :func:`case_finding_index_table`
     applied to everyone, with no disease foreground. Used by the whole-Mondo /
     template-branch case-finding fit, where the label DAG is the Mondo hierarchy
-    and a patient's frontier is read from their label window via SNOMED-climb
-    (`mondo_dag`), so there is no single disease anchoring the index. The same
+    and a patient's frontier is read from their label window via the native Mondo
+    code ladder (`charmpheno.mondo.native_dag`), so there is no single disease
+    anchoring the index. The same
     ``[index - prior_obs_days, index + label_window_days)`` observation gate as the
     disease arms applies (via `_random_event_windows`), and events are windowed
     downstream by `lookback_feature_label_events`. Every row is tagged

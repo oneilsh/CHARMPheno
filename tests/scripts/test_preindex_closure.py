@@ -51,7 +51,7 @@ os.environ["PYTHONPATH"] = os.pathsep.join(
 
 import preindex_closure as pic  # noqa: E402
 from charmpheno.omop.condition_dag import ConditionDag  # noqa: E402
-from spark_vi.models.topic.dag_placement import DagLayout  # noqa: E402
+from spark_vi.dag import DagLayout  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
