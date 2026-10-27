@@ -65,7 +65,7 @@ def test_auto_checkpoint_writes_per_interval(spark, tmp_path):
         checkpoint_interval=2,
         checkpoint_dir=ckpt,
     )
-    runner = VIRunner(CountingModel(), cfg)
+    runner = VIRunner(CountingModel(early_stop=False), cfg)
     result = runner.fit(rdd)
 
     # Last on-disk write reflects the final loop state (iter 4); after the
@@ -91,7 +91,7 @@ def test_auto_checkpoint_then_resume_via_kwarg(spark, tmp_path):
     ckpt = tmp_path / "ckpt"
 
     cfg6 = VIConfig(max_iterations=6, convergence_tol=1e-12)
-    continuous = VIRunner(CountingModel(), cfg6).fit(rdd)
+    continuous = VIRunner(CountingModel(early_stop=False), cfg6).fit(rdd)
 
     # Session 1: fit with auto-checkpoint at the final iteration.
     cfg3_with_ckpt = VIConfig(
@@ -100,11 +100,11 @@ def test_auto_checkpoint_then_resume_via_kwarg(spark, tmp_path):
         checkpoint_interval=3,
         checkpoint_dir=ckpt,
     )
-    VIRunner(CountingModel(), cfg3_with_ckpt).fit(rdd)
+    VIRunner(CountingModel(early_stop=False), cfg3_with_ckpt).fit(rdd)
 
     # Session 2: a fresh runner resumes from the checkpoint and runs 3 more.
     cfg3 = VIConfig(max_iterations=3, convergence_tol=1e-12)
-    resumed = VIRunner(CountingModel(), cfg3).fit(rdd, resume_from=ckpt)
+    resumed = VIRunner(CountingModel(early_stop=False), cfg3).fit(rdd, resume_from=ckpt)
 
     np.testing.assert_allclose(
         resumed.global_params["alpha"],

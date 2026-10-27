@@ -143,11 +143,33 @@ def run_svi_loop(
         else:
             target_stats = aggregated
 
-        # M-step (Robbins-Monro step size).
-        # Hoffman et al. 2013 index t from 1 so the first rho is (tau0+1)^-kappa
-        # rather than (tau0)^-kappa — the latter can collapse to 1.0 and
-        # force a full jump on the first step (see SVI paper §3).
-        rho_t = (cfg.learning_rate_tau0 + t + 1) ** -cfg.learning_rate_kappa
+        # M-step step size. MINI-BATCH uses the decaying Robbins-Monro
+        # schedule; FULL BATCH uses rho = 1 (batch variational EM).
+        #
+        # Why full batch must NOT decay: with the whole corpus every iteration,
+        # `target_stats` is a DETERMINISTIC map T(params) of the current
+        # parameters, so update_global's `new = (1 - rho)·old + rho·T(old)` moves
+        # by rho·‖T(old) - old‖. As rho_t -> 0 the parameters freeze while the
+        # fixed-point residual is still large, so (a) the fit lands short of the
+        # batch-VB fixed point at any finite budget and (b) the relative-ELBO early
+        # stop fires on the vanishing step rather than on convergence. A finite-
+        # budget defect (sum_t rho_t diverges for kappa < 1), which is why it went
+        # unnoticed. Measured on a 1600-doc gated synthetic at 200 iterations
+        # (commit 3f71de55's message): placement MRR 0.856 / top2 0.828 damped
+        # vs 0.910 / 0.988 at rho = 1; early stop at iteration 15 with 760 nats
+        # still to gain.
+        # rho = 1 is also the only full-batch regime the SVI-vs-Gibbs gates
+        # validate (tests/_stm_synth.fit_gated_svi_local: "full-batch lr=1.0").
+        # (Fix 3f71de55, from a sibling branch; ported with ADR 0051.)
+        #
+        # Mini-batch: Hoffman et al. 2013 index t from 1 so the first rho is
+        # (tau0+1)^-kappa rather than (tau0)^-kappa — the latter can collapse to
+        # 1.0 and force a full jump on the first step (see SVI paper §3).
+        #
+        # optimize_alpha / optimize_eta models apply this same rate to their
+        # Newton step, so a full-batch fit takes an UNDAMPED Newton step.
+        rho_t = (1.0 if not minibatch else
+                 (cfg.learning_rate_tau0 + t + 1) ** -cfg.learning_rate_kappa)
         global_params = model.update_global(global_params, target_stats, learning_rate=rho_t)
 
         # 6. ELBO. Pass the *raw* aggregated stats (not the pre-scaled

@@ -323,6 +323,16 @@ corpus and covariate keys fold `corpus_code` too. The conversion sidecar's key a
 moved (its legacy anchor branch was removed), so it rebuilds once. Tripwires
 re-pinned.
 
+**Found while verifying step 3: the full-batch step-size fix was never on this
+branch.** `3f71de55` ("full-batch VI must use rho=1", 2026-07-29) lives only on sibling
+branches; its slow gate test was cherry-picked here (`43689f35`) without it and has
+failed ever since, unnoticed because nothing ran the slow tier. Ported into the shared
+loop (`spark_vi.core.loop`), so VIRunner and LocalRunner both take rho = 1 on full
+batches. Production fits are mini-batch (subsampling 0.1) and unaffected; any
+full-batch fit made on this branch under-converged. Four runner tests that leaned on
+the damped step to keep a conjugate model from converging now use
+`CountingModel(early_stop=False)`.
+
 ## Questions for the maintainer
 
 1. Antidepressant/MDD (Hughes) line, including its `cohorts.py` block and the

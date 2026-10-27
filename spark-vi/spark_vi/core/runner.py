@@ -89,6 +89,11 @@ class VIRunner:
     ) -> VIResult:
         """Run the distributed VI loop until convergence (full-batch) or max_iterations.
 
+        The same distinction sets the M-step STEP SIZE: full batch uses rho = 1
+        (batch variational EM), mini-batch uses the decaying Robbins-Monro
+        rho_t = (tau0 + t + 1)^-kappa (see `spark_vi.core.loop`); so
+        learning_rate_tau0/kappa have NO effect on a full-batch fit.
+
         Mini-batch fits never early-stop — the per-minibatch ELBO is too noisy for
         a valid convergence test, so they run the full max_iterations, matching
         Spark MLlib's online LDA. Only full-batch fits use the ELBO relative-change

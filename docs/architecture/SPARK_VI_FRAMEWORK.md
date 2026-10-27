@@ -353,7 +353,10 @@ result = runner.fit(df, **data_kwargs)
    for our associative + commutative combiner, with a slightly simpler API.
 5. Pre-scale aggregated stats by `stats_scale` to form `target_stats`; the raw
    aggregated stats are also retained for ELBO computation.
-6. `model.update_global(global_params, target_stats, learning_rate)` on driver
+6. `model.update_global(global_params, target_stats, learning_rate)` on driver: `learning_rate` is
+   the Robbins–Monro ρ_t = (τ0 + t + 1)^-κ in mini-batch mode and **1** in full-batch
+   mode (batch variational EM: a decaying step toward a deterministic target freezes
+   the parameters short of the fixed point; fix `3f71de55`, ported with ADR 0051)
 7. `model.compute_elbo(global_params, aggregated_stats)` for diagnostics; log
    metrics (parameter deltas, ELBO if available, wall time)
 8. Push metrics to notebook display (or logger in batch mode)
