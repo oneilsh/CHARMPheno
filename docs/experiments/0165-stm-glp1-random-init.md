@@ -1,7 +1,7 @@
 ---
 id: 165
 slug: stm-glp1-random-init
-status: planned
+status: done
 model_class: stm
 cohort: population_glp1
 cohort_def: population_glp1
@@ -61,3 +61,28 @@ If 0165 matches 0164 on all four, the flat spectral init is removed from the STM
 (ADR 0050); if random init loses topics, it stays as the STM default.
 
 ## Run log
+
+**2026-10-28 — done. Spectral init still earns its place in the STM.** Against 0164
+(final iteration, same corpus and code):
+
+| | 0164 spectral | 0165 random |
+|---|--:|--:|
+| ELBO | −5.48e6 | **−7.21e6** (32% worse) |
+| foreground mass glp1_ra / sglt2i | 1.45e5 / 7.76e4 | **6.0e4 / 4.25e4** |
+| background mass | 7.69e6 | 7.82e6 |
+| largest topic Σλ | 1.56e6 | 2.46e6 |
+| Σ_var | [1, 1] | [1, 1] |
+| Σ eigenvalue max | 22.7 | 54.7 |
+| doc concentration top_mass p50 / eff_topics p50 | 0.141 / 24.7 | 0.206 / 18.7 |
+| s/iter | ~11 | ~32 |
+
+The unit-diagonal Σ does its job either way (variances pinned, no runaway), so that
+half of insight 0030 is now structural. The other half is not: from random init the fit
+settles in a much worse optimum. The foreground blocks lose more than half their mass to
+the background, one background topic grows into a larger catch-all, topics are more
+strongly correlated, documents spread over fewer topics, and each iteration is ~3x
+slower. No topic is strictly dead (smallest Σλ 1.83e3 vs 2.11e3); the loss is in how the
+mass is divided, not in empty topics. Decision: the flat spectral init stays the STM
+default (ADR 0050). The per-topic mass grep used for this read counted every iteration,
+so dead-topic counts and NPMI were not read; the ELBO and block masses decide it.
+

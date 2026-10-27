@@ -1,7 +1,7 @@
 ---
 id: 164
 slug: stm-glp1-spectral-init-rerun
-status: planned
+status: done
 model_class: stm
 cohort: population_glp1
 cohort_def: population_glp1
@@ -62,3 +62,9 @@ If 0165 matches 0164 on all four, the flat spectral init is removed from the STM
 (ADR 0050); if random init loses topics, it stays as the STM default.
 
 ## Run log
+
+**2026-10-28 — done.** Reproduces 0044 on current code: ELBO −5.48e6 (0044 −5.53e6),
+Σ_var [1, 1], Σ eig [−0.51, 22.7], foreground block masses glp1_ra 1.45e5 / sglt2i
+7.76e4 (0044: 1.41e5 / 7.95e4), concentration top_mass p50 0.141, eff_topics p50 24.7.
+~11 s/iter. The comparison with random init is in 0165.
+
