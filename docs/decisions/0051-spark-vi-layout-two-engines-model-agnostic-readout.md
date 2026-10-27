@@ -42,8 +42,9 @@ representation), a multi-label target and a DAG. `dag` knows nothing of Mondo.
 
 **2. Two engines, one model contract.** `LocalRunner` runs the same `VIModel`
 (`initialize_global` / `local_update` / `update_global`) over an in-memory or
-Arrow-chunked corpus. Fidelity target: each iteration's minibatch is a Bernoulli
-sample at the configured rate, the Robbins–Monro schedule and the gate schedule are
+Arrow-chunked corpus. Fidelity target: each iteration's minibatch is drawn per row
+as `RDD.sample` draws it at the configured rate (Poisson copies with replacement,
+the default; Bernoulli without), the Robbins–Monro schedule and the gate schedule are
 identical, so a local fit is the Spark fit in distribution (not bit for bit: partition
 order and RNG streams differ). The readout's solver is already backend-agnostic (a
 stats function per pass); the local backend computes it with numpy over θ held once.

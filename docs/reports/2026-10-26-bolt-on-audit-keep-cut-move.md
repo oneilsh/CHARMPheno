@@ -270,6 +270,17 @@ Tests: spark-vi 663 passed (884 before; the difference is removed-feature tests,
 failed / 8 errors, exactly the pre-existing environmental local-Spark set (no new failure
 by test id). `make zip` and `make build` succeed for both packages.
 
+**ADR 0051 step 1 (LocalRunner), 2026-10-27 — done.** The iteration loop moved out of
+`VIRunner.fit` into `spark_vi.core.loop.run_svi_loop` (schedule, scaling, ELBO,
+diagnostics, checkpoint, resume, early stop), which both engines call; `VIRunner` keeps
+only the Spark E-step, now destroying each iteration's broadcast as soon as its
+treeReduce returns (same destroy count). `LocalRunner` (`spark_vi.core`) samples rows as
+`RDD.sample` does (Poisson with replacement, Bernoulli without) and runs `local_update`
+in optional chunks merged by `combine_stats`. Eight fast tests
+(`test_local_runner.py`, ~1 s) and one slow agreement test against local Spark on the
+gated LDA with the leaves-first schedule: full batch equal to 1e-8, minibatch topic
+distance Spark-vs-local 0.096 against local-vs-local 0.071.
+
 ## Questions for the maintainer
 
 1. Antidepressant/MDD (Hughes) line, including its `cohorts.py` block and the

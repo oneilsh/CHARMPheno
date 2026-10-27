@@ -12,6 +12,7 @@
   - [The VIModel Base Class](#the-vimodel-base-class)
   - [Data Contract: User-Facing vs. Internal](#data-contract-user-facing-vs-internal)
   - [The VIRunner](#the-virunner)
+  - [The LocalRunner (in-memory engine)](#the-localrunner-in-memory-engine)
   - [VIConfig](#viconfig)
   - [VIResult and Model Export](#viresult-and-model-export)
 - [Notebook Diagnostics and Output](#notebook-diagnostics-and-output)
@@ -363,6 +364,28 @@ global params, maps `model.infer_local` over the RDD, and unpersists
 the broadcast on completion. Models that don't implement `infer_local`
 produce a clear NotImplementedError when the resulting RDD is collected.
 
+### The LocalRunner (in-memory engine)
+
+`LocalRunner(model, config, chunk_size=None)` runs the same `VIModel` without
+Spark, over a Python sequence of rows held in memory (ADR 0051 §2): a corpus that
+fits in one large machine's memory needs no cluster. Steps 5–9 above, and all
+bookkeeping (resume, checkpoint, diagnostics, the `on_iteration` hook, the
+full-batch early stop), are one function, `spark_vi.core.loop.run_svi_loop`, which
+both runners call; each runner supplies only its E-step (steps 1–4). The local
+E-step draws the minibatch the way `RDD.sample` does — each row independently,
+`Poisson(fraction)` copies with replacement (the default) or kept with probability
+`fraction` without — from the same per-iteration seed stream, then calls
+`local_update` on chunks of at most `chunk_size` rows (the local analogue of
+partitions) merged by `combine_stats`. Model-held schedules ride `global_params`
+(e.g. the DAG gate's `gate_iter`), so they advance identically.
+
+Fidelity: a full-batch local fit equals the Spark fit up to summation order; a
+minibatch fit is the Spark fit in distribution (NumPy's stream draws different
+batches than Spark's per-partition samplers). One `@pytest.mark.slow` test,
+`tests/test_local_runner_agreement.py`, checks both on the DAG-gated LDA with the
+leaves-first schedule. `LocalRunner.transform(rows, global_params)` maps
+`infer_local` eagerly and returns a list.
+
 **Output modes:**
 
 - `VIRunner(spark, model, output="notebook")` — **default.** Live-updating display
@@ -593,7 +616,9 @@ underexercised after the HDP and OU. Candidates:
 spark_vi/
 ├── core/
 │   ├── model.py            # VIModel base class
-│   ├── runner.py           # VIRunner orchestration + training loop
+│   ├── loop.py             # run_svi_loop: the iteration loop both runners share
+│   ├── runner.py           # VIRunner: the Spark E-step (sample, broadcast, treeReduce)
+│   ├── local_runner.py     # LocalRunner: the in-memory E-step (ADR 0051)
 │   ├── config.py           # VIConfig
 │   └── result.py           # VIResult, save/load
 ├── models/
