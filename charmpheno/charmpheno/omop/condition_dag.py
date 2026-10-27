@@ -3,7 +3,7 @@
 Pure transformation over a small in-memory edge list in concept-id space, plus an attestation
 prune (the principled size cap: a node no patient populates has no learnable topic) and a pruning
 ledger that makes the granularity cost of pruning visible. `ConditionDag.to_engine()` remaps to the
-integer `{child: [parents]}` map consumed by spark_vi.models.topic.dag_placement.DagLayout.
+integer `{child: [parents]}` map consumed by spark_vi.dag.DagLayout.
 
 See docs/superpowers/specs/2026-07-15-condition-dag-builder-design.md."""
 from collections import defaultdict, Counter

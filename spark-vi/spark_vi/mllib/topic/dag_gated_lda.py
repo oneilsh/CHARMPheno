@@ -40,7 +40,7 @@ from spark_vi.models.topic.dag_gated_lda import (
     DagGatedOnlineLDA,
     expElogbeta_from_lambda,
 )
-from spark_vi.models.topic.dag_placement import DagLayout
+from spark_vi.dag import DagLayout
 from spark_vi.models.topic.types import GatedBOWDocument
 
 

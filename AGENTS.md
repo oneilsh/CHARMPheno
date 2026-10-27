@@ -41,8 +41,9 @@ the label-DAG / assembler modules.
 ### The cache-key landmine (source-hashed modules)
 
 **Bundle, corpus, and covariate** cache keys fold in the **source hash of whole
-modules** (`cohort_defs_version()` over `cohorts.py`, folded at
-`_case_finding_cache.py:147` / `_corpus_cache.py:77` / `_covariates_cache.py:61`;
+modules** (`cohort_defs_version()` over `cohorts.py` and `corpus_code_version()`
+over the loaders/tokens/BOW prep, folded into all three keys in
+`_case_finding_cache.py` / `_corpus_cache.py` / `_covariates_cache.py`;
 `_module_source_hash` over the assembler and label-DAG modules). Editing one
 **silently invalidates every bundle/corpus/covariate cache key, or poisons a
 cache under a byte-identical key** — a wrong-results hazard, not merely a rebuild
@@ -51,26 +52,26 @@ cost. Several of those keys also carry **byte-pinned tripwire hashes** in
 
 **NOT everything is invalidated (mechanism-verified, do not overstate):** the
 **conversion sidecar** is keyed *independently* — `conversion_sidecar_key`
-(`conversion_sidecar.py:159-170`) folds only its own module source + `(cdr,
+(`conversion_sidecar.py`) folds only its own module source + `(cdr,
 person_mod, DAG identity, code_map)`, deliberately **not** `cohort_defs_version`
 — so an assembler/cohorts edit does NOT orphan it (its docstring: "a bundle-key
-move does not orphan the sidecar"). The raw Mondo ontology download
+move does not orphan the sidecar"). Editing `conversion_sidecar.py` itself DOES
+move the sidecar key (last: ADR 0051 step 3). The raw Mondo ontology download
 (keyed by `mondo_version`) likewise survives. So a source-hashed edit rebuilds
 the bundle/corpus/covariates but leaves the expensive sidecar a HIT.
 
 **Treat as source-hashed / do-not-edit-casually:**
-`charmpheno/charmpheno/omop/{cohorts,multi_domain,case_finding_assembly,condition_dag}.py`;
-`analysis/cloud/{mondo_dag,mondo_native_dag,mondo_usage_core,mondo_collapse}.py`
-(`mondo_dag.py` is folded into every Mondo key, native included, though only the
-removed anchor path ran it). `preindex_closure.py` is folded only into keys that
-asked for the column (last exp 0110), and `mondo_to_omop_mapping.py` is not hashed
-but is imported by the hashed DAG builders. The **authoritative check** is that
-tripwire suite passing byte-identical.
+`charmpheno/charmpheno/omop/{cohorts,multi_domain,case_finding_assembly,condition_dag,bigquery,measurement_tokens,topic_prep}.py`;
+`charmpheno/charmpheno/mondo/{native_dag,collapse,omop_mapping,ontology}.py`;
+`spark-vi/spark_vi/dag/{layout,ops}.py` (layout folds into every bundle key, ops into
+the Mondo ones). The **authoritative check** is that tripwire suite passing
+byte-identical.
 
-**The opposite hazard: corpus-shaping modules that are NOT hashed.**
-`charmpheno/charmpheno/omop/{bigquery,measurement_tokens,topic_prep}.py`
-change the corpus without moving the key, so an edit there serves a stale bundle
-under an unchanged key until they are folded in (audit 2026-10-26 §6).
+**A module that shapes the corpus must be folded in.** If you add one (a new
+loader, a new tokenizer), fold its source hash into the keys in the same commit;
+otherwise an edit there serves a stale bundle under an unchanged key. The last
+gap of this kind (`bigquery` / `measurement_tokens` / `topic_prep`) was closed
+with ADR 0051 step 3.
 
 **Cost, in practice:** caches live on HDFS and clusters are recreated near-daily,
 so a key move costs little beyond the rebuild a fresh cluster pays anyway. The
@@ -79,8 +80,7 @@ and after a refactor-only hashed edit check that a `--bundle-only` rebuild
 reproduces the corpus counts in the previous run's `bundle_meta.json`.
 
 - **Driver-owned files are free to edit:** `analysis/cloud/{gated_pc_cloud,
-  gated_pc_readout,doc_key,readout_dag,conversion_sidecar,prevalence_check,
-  topic_npmi,inspect_topics}.py`,
+  gated_pc_readout,doc_key,readout_dag,prevalence_check,topic_npmi,inspect_topics}.py`,
   `scripts/run_experiment.py`, the `Makefile`, tests. Prefer solving at a driver
   **seam** (the `attested_provider` / injection-parameter pattern) over editing
   a hashed module.

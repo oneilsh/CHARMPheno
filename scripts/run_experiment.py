@@ -280,12 +280,12 @@ def validate_frontmatter(fm: dict) -> None:
             sys.exit(2)
 
     model_class = fm["model_class"]
-    if model_class not in ("lda", "stm", "gated_pc", "anchor_select"):
+    if model_class not in ("lda", "stm", "gated_pc"):
         print(f"[run-exp] ERROR: model_class {model_class!r} not supported "
-              f"(currently: lda, stm, gated_pc, anchor_select; the pc / "
-              f"mondo_completeness / mondo_hierarchy drivers were removed in the "
-              f"2026-10 cleanup, last at commit fff7bf4067, and dag_placement by "
-              f"ADR 0050)", flush=True)
+              f"(currently: lda, stm, gated_pc; the pc / mondo_completeness / "
+              f"mondo_hierarchy drivers were removed in the 2026-10 cleanup, last at "
+              f"commit fff7bf4067, dag_placement by ADR 0050 and anchor_select with "
+              f"ADR 0051)", flush=True)
         sys.exit(2)
 
     if model_class == "stm":
@@ -318,8 +318,6 @@ def build_fit_driver_path(effective: dict) -> str:
         return f"{base}/stm_bigquery_cloud.py"
     if model_class == "gated_pc":
         return f"{base}/gated_pc_cloud.py"
-    if model_class == "anchor_select":
-        return f"{base}/anchor_selection_cloud.py"
     raise ValueError(f"no fit driver for model_class={model_class!r}")
 
 
@@ -339,31 +337,7 @@ def build_fit_args(
         return build_stm_args(effective, out_dir, resume_from)
     if model_class == "gated_pc":
         return build_gated_pc_args(effective, out_dir, resume_from)
-    if model_class == "anchor_select":
-        return build_anchor_select_args(effective, out_dir)
     raise ValueError(f"unknown model_class: {model_class!r}")
-
-
-
-
-def build_anchor_select_args(effective: dict, out_dir: str) -> list[str]:
-    """argv for analysis/cloud/anchor_selection_cloud.py — the expanded-SNOMED
-    anchor-selection pipeline (faithful mondo2omop port + per-node person counts +
-    the whole-population coverage ladder). cdr/billing from the workspace env; the
-    Mondo release is auto-downloaded by the driver."""
-    cdr, billing = _require_workspace_env()
-    seed = str(effective.get(
-        "seed_tsv",
-        REPO_ROOT / "analysis" / "cloud" / "anchor_selection_data" / "priority_seed.tsv"))
-    return [
-        "--cdr", cdr,
-        "--billing", billing,
-        "--seed-tsv", seed,
-        "--out", str(Path(out_dir) / "candidates_with_counts.tsv"),
-        "--min-positives", str(effective.get("min_positives", 100)),
-        "--mondo-version", str(effective.get("mondo_version", "2026-06-02")),
-        "--mondo-cache-dir", str(effective.get("mondo_cache_dir", "data/mondo")),
-    ]
 
 
 def _norm_cohort(c):
@@ -762,7 +736,6 @@ def build_gated_pc_args(
         if effective.get("gate_seed_profile"):
             args.extend(["--gate-seed-profile", str(effective["gate_seed_profile"])])
     return args
-
 
 
 def build_eval_args(checkpoint_dir: Path, effective: dict) -> list[str]:
@@ -1501,15 +1474,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.build_only:
         print("[run-exp] --build-only: skipping eval dispatch", flush=True)
         # Fall through to the build-dispatch block below.
-    elif effective.get("model_class") in ("gated_pc", "anchor_select"):
-        # These write their own self-contained result (gated_pc: npz + manifest;
-        # anchor_select: candidates_with_counts.tsv + the coverage ladder), not a
+    elif effective.get("model_class") == "gated_pc":
+        # gated_pc writes its own self-contained result (npz + manifest), not a
         # topic-word bundle the NPMI eval driver can read.
-        _mc = effective.get("model_class")
-        _artifact = ("candidates_with_counts.tsv" if _mc == "anchor_select"
-                     else "manifest.json")
-        print(f"[run-exp] model_class={_mc}: NPMI eval not wired for the "
-              f"self-contained result; skipping eval (see {_artifact} + fit log).",
+        print("[run-exp] model_class=gated_pc: NPMI eval not wired for the "
+              "self-contained result; skipping eval (see manifest.json + fit log).",
               flush=True)
     else:
         # 6. Dispatch eval (capture stdout into a string for sanitized append)

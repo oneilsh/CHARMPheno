@@ -22,7 +22,7 @@ import gated_pc_cloud as gpc  # noqa: E402
 from charmpheno.omop.case_finding_assembly import (  # noqa: E402
     doc_frontier_engine_ids, frontier_to_label)
 from charmpheno.omop.condition_dag import ConditionDag  # noqa: E402
-from spark_vi.models.topic.dag_placement import DagLayout  # noqa: E402
+from spark_vi.dag import DagLayout  # noqa: E402
 
 # A toy label DAG: concept ids 100/200/300/400 under the forest root -1, with
 # 300 under 100 and 400 under 200 (two incomparable frontier nodes).

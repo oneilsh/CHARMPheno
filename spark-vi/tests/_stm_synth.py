@@ -581,7 +581,7 @@ def dag_placement_corpus(*, parent, node_prev, V, doc_len, seed):
     block plus a single exact 'node code'; an item at node v emits a shared common pool + the
     signature blocks along closure(v). Returns (docs, labels, node_codes)."""
     import numpy as np
-    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.dag import DagLayout
     rng = np.random.default_rng(seed)
     lay = DagLayout(parent, n_bg=2, tpn=1)
     nodes = lay.nodes
@@ -709,7 +709,7 @@ def two_domain_dag_corpus(*, parent, node_prev, V_a, V_b, doc_len, seed,
       - node_codes: {node id -> exact domain-0 marker token id}, mirrors
         dag_placement_corpus, for strip_dag_node_codes at eval.
     """
-    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.dag import DagLayout
     rng = np.random.default_rng(seed)
     lay = DagLayout(parent, n_bg=2, tpn=1)
     nodes = lay.nodes
@@ -797,7 +797,7 @@ def dag_placement_corpus_multi(*, parent, leaf_prev, comorbid_rate, V, doc_len, 
     signature blocks along the union of its frontier's closures. Labels are frozensets (the frontier
     truth). Returns (docs, labels, node_codes)."""
     import numpy as np
-    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.dag import DagLayout
     rng = np.random.default_rng(seed)
     lay = DagLayout(parent, n_bg=2, tpn=1)
     nodes = lay.nodes
@@ -845,7 +845,7 @@ def fit_gated_svi_local(model, gated_docs, *, n_iter=200, seed=0, data_summary=N
 
 def node_affinity(theta, lay):
     """Per-node affinity from a full-K theta: the mass on each node's topic block (the
-    SVI analogue of dag_placement.profile's per-node readout). Test oracle only."""
+    SVI analogue of _gibbs_oracle.profile's per-node readout). Test oracle only."""
     return {u: float(theta[lay.block[u]].sum()) for u in lay.nodes}
 
 
@@ -889,7 +889,7 @@ def placement_metrics(profiles, test_labels, lay):
 
 def svi_node_profiles(model, gp, docs, lay):
     """Ungated full-K fold-in of each held-out doc -> theta -> node_affinity dict. The SVI
-    analogue of [dag_placement.profile(...) for d in docs]; scored by `placement_metrics`.
+    analogue of [_gibbs_oracle.profile(...) for d in docs]; scored by `placement_metrics`.
 
     The fold-in is intentionally UNGATED and stochastic (infer_local draws gamma_init from
     the global RNG, not a content-deterministic seed); determinism across the equivalence

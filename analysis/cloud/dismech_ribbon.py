@@ -12,7 +12,7 @@ This module is PURE and driver-side: it reads a checkout of DisMech's
 `kb/disorders/*.yaml` (public data, no CDR) into a small TSV, and reads that TSV
 back into the `label_set` the native-Mondo build filters its kept terms by. The
 TSV, not the 3,300-file checkout, is the committed, reproducible artifact — the
-same convention `anchor_selection_data/priority_seed.tsv` set — and it carries the
+same convention as the other committed label inputs — and it carries the
 DisMech commit it was cut from in its header so the pin is citable per experiment.
 
 The classification columns (`category`, `harrisons_chapter`, and the specialist

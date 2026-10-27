@@ -46,7 +46,7 @@ os.environ["PYTHONPATH"] = os.pathsep.join(
 import _case_finding_cache as ccache  # noqa: E402
 import gated_pc_cloud as gpc  # noqa: E402
 import gated_pc_readout as gpr  # noqa: E402
-from mondo_native_dag import MONDO_NATIVE_VERSION  # noqa: E402
+from charmpheno.mondo.native_dag import MONDO_NATIVE_VERSION  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -72,10 +72,16 @@ _SNOMED_BASE = dict(
 # the antidepressant/MDD (Hughes) block from `cohorts.py` moves
 # `cohort_defs_version()`, which folds into EVERY key, so all four hashes shifted
 # at once. A deliberate, announced full cache drop; the caches are HDFS-local and
-# rebuilt per cluster anyway. These are the post-drop values.
-_SNOMED_KEY = "b93156d313311c55"
-_SNOMED_LABELED_KEY = "432529d7a57633da"          # emit_labels + closure mask
-_SNOMED_LOOKBACK_KEY = "a182bab9d8254751"         # lookback windowing + strip both
+# rebuilt per cluster anyway.
+#
+# RE-PINNED by ADR 0051 step 3 (the spark_vi.dag / charmpheno.mondo move): every
+# key now folds `corpus_code` (bigquery / measurement_tokens / topic_prep, unhashed
+# before) and `dag_layout_src`, `case_finding_assembly.py` changed its import of
+# `frontier_from_coded`, and the payload version went 4 -> 5. Announced full drop;
+# these are the post-drop values.
+_SNOMED_KEY = "c39141d38eb987b3"
+_SNOMED_LABELED_KEY = "ce2528450f08d1c2"          # emit_labels + closure mask
+_SNOMED_LOOKBACK_KEY = "f52f1772e8d2fc52"         # lookback windowing + strip both
 
 
 def test_existing_snomed_keys_are_byte_identical():
@@ -97,97 +103,46 @@ def test_multidomain_flag_alone_changes_the_key():
 
 _MD_BASE = dict(_SNOMED_BASE, multidomain=True, extra_domains=("drug",),
                 index_mode="population", mondo=True, mondo_version="2026-06-02",
-                mondo_branch="", min_positives=100)
-# The MONDO key with the exp-0109 collapse OFF, pinned the same way the SNOMED
-# keys above are and for the same reason: exp 0104's record bundle (~20 min of
-# BigQuery to rebuild) lives under it. It folds `_module_source_hash(mondo_dag)`,
-# so this hash is a deliberate TRIPWIRE — any edit to `analysis/cloud/mondo_dag.py`
-# moves it and orphans every cached Mondo bundle in every bucket. That may be the
-# right call (an actual hierarchy change SHOULD invalidate), but it must be a
-# decision: re-pin this only alongside a note saying why the caches were dropped.
-# It is also why the 0109 reduction lives in `mondo_collapse.py` instead.
+                mondo_branch="", min_positives=100, mondo_native=True,
+                mondo_native_version="native-mondo-v1")
+# The native-Mondo key, pinned the same way the SNOMED keys above are: the whole-
+# Mondo record bundles live under keys of this shape. It folds the source hashes of
+# `charmpheno.mondo.{native_dag,collapse,omop_mapping,ontology}` and
+# `spark_vi.dag.{layout,ops}`, so it is a deliberate TRIPWIRE: any edit to those
+# modules moves it, which is right (a hierarchy change must invalidate) but must be
+# a decision, re-pinned here with a note.
 #
-# RE-PINNED by exp-0111 WP-C alongside the three SNOMED keys above: this key ALSO
-# folds `multi_domain_src`, which WP-C moved by opening the `index_df` / `doc_spec`
-# injection seams — but it would have shifted regardless, since `cohort_defs` and
-# `assembly_src` (both moved by WP-C) fold into every key. Post-drop value.
-# RE-PINNED again by the 2026-10 cleanup with the SNOMED keys above (cohorts.py).
-_MONDO_KEY_NO_COLLAPSE = "6cc996e588c886ca"
+# History: until ADR 0051 step 3 this was `_MONDO_NATIVE_KEY`, the anchor-Mondo
+# key (exp 0104/0109), folding `analysis/cloud/mondo_dag.py`; the anchor flavour,
+# the exp-0109 `dag_collapse` option, the DisMech `label_set` and E1's
+# `preindex_closure` fold were removed with it (the driver had refused them since
+# the 2026-10 cleanup). Post-drop value.
+_MONDO_NATIVE_KEY = "5a2ff6e17eff6b98"
 
 
-def test_mondo_key_with_collapse_off_is_byte_identical():
-    """exp 0109 is OPT-IN, so a spec that does not ask for the collapse must key
-    exactly where it keyed before the flag existed."""
-    k = ccache.compute_bundle_cache_key
-    assert k(**_MD_BASE) == _MONDO_KEY_NO_COLLAPSE
-    assert k(**_MD_BASE, dag_collapse=False) == _MONDO_KEY_NO_COLLAPSE
-    # ...and the version string is inert while the flag is off (nothing to name).
-    assert k(**_MD_BASE, dag_collapse=False,
-             dag_collapse_version="whatever") == _MONDO_KEY_NO_COLLAPSE
+def test_the_native_mondo_key_is_byte_identical():
+    assert ccache.compute_bundle_cache_key(**_MD_BASE) == _MONDO_NATIVE_KEY
 
 
-def test_dag_collapse_on_is_a_different_corpus():
-    """The collapsed DAG has ~763 fewer label nodes at whole-Mondo — a different
-    C, a different K, different label/frontier columns. It cannot share a bundle."""
-    k = ccache.compute_bundle_cache_key
-    on = k(**_MD_BASE, dag_collapse=True, dag_collapse_version="splice-fixpoint-v1")
-    assert on != _MONDO_KEY_NO_COLLAPSE
+def test_the_anchor_mondo_flavour_is_refused():
+    """`mondo=True` without `mondo_native` was the anchor build, removed with
+    ADR 0051; keying it as if it existed would name a corpus nothing can build."""
+    with pytest.raises(ValueError, match="mondo_native"):
+        ccache.compute_bundle_cache_key(**dict(_MD_BASE, mondo_native=False))
 
 
-def test_dag_collapse_version_is_folded_into_the_key():
-    """A reduction whose OUTPUT changes must not be served a bundle built by the
-    old one; bumping the version string is the manual lever that guarantees it."""
-    k = ccache.compute_bundle_cache_key
-    v1 = k(**_MD_BASE, dag_collapse=True, dag_collapse_version="splice-fixpoint-v1")
-    v2 = k(**_MD_BASE, dag_collapse=True, dag_collapse_version="splice-fixpoint-v2")
-    assert v1 != v2
-
-
-def test_dag_collapse_does_not_leak_into_the_snomed_key():
-    """The reduction names Mondo CLASS nodes; the SNOMED path has none, and its
-    keys must stay frozen even if a caller passes the flag by accident."""
-    k = ccache.compute_bundle_cache_key
-    assert k(**_SNOMED_BASE, dag_collapse=True,
-             dag_collapse_version="splice-fixpoint-v1") == _SNOMED_KEY
-
-
-
-# --------------------------------------------------------------------------- #
-# exp 0110: the NATIVE Mondo label space is its own corpus, and folds only when  #
-# it is selected — the same discipline `dag_collapse` follows.                   #
-# --------------------------------------------------------------------------- #
-def test_mondo_native_is_a_different_corpus_from_the_anchor_hierarchy():
-    """Different attestation (frontier, not every powered ancestor), different
-    powering (closure support, not terminal counts) and a different label DAG
-    (Mondo's own hierarchy, Mondo ids) — so a different C, a different K and
-    different label/frontier columns. It cannot share a bundle with exp 0104's."""
-    k = ccache.compute_bundle_cache_key
-    native = k(**_MD_BASE, mondo_native=True,
-               mondo_native_version="native-mondo-v1")
-    assert native != _MONDO_KEY_NO_COLLAPSE
-    assert native != k(**_MD_BASE, dag_collapse=True,
-                       dag_collapse_version="splice-fixpoint-v1")
-
-
-def test_mondo_native_off_leaves_every_existing_key_byte_identical():
-    """The compatibility half. `mondo_native=False` (and an inert version string)
-    must reproduce the pinned hashes exactly, on both the Mondo and SNOMED paths —
-    which is what keeps exp 0104's and 0109's cached bundles findable."""
-    k = ccache.compute_bundle_cache_key
-    assert k(**_MD_BASE, mondo_native=False) == _MONDO_KEY_NO_COLLAPSE
-    assert k(**_MD_BASE, mondo_native=False,
-             mondo_native_version="whatever") == _MONDO_KEY_NO_COLLAPSE
-    assert k(**_SNOMED_BASE, mondo_native=True,
-             mondo_native_version="native-mondo-v1") == _SNOMED_KEY
+def test_the_removed_key_options_are_gone_from_the_signature():
+    for gone in ("dag_collapse", "label_set", "preindex_closure"):
+        with pytest.raises(TypeError):
+            ccache.compute_bundle_cache_key(**_MD_BASE, **{gone: True})
 
 
 def test_mondo_native_version_is_folded_into_the_key():
     """The manual lever: a build whose OUTPUT changes bumps the version, and a
     bundle from the old construction can never be served to the new one."""
     k = ccache.compute_bundle_cache_key
-    v1 = k(**_MD_BASE, mondo_native=True, mondo_native_version="native-mondo-v1")
-    v2 = k(**_MD_BASE, mondo_native=True, mondo_native_version="native-mondo-v2")
-    assert v1 != v2
+    assert (k(**dict(_MD_BASE, mondo_native_version="native-mondo-v2"))
+            != _MONDO_NATIVE_KEY)
 
 
 def test_mondo_native_key_threads_from_the_spec():
@@ -198,10 +153,9 @@ def test_mondo_native_key_threads_from_the_spec():
     native_spec = dict(_MONDO_SPEC, dag_source="mondo_native")
     assert gpr.spec_is_multidomain(native_spec)
     key = gpc.multidomain_cache_key(native_spec)
-    # and it is stable under the flag exp 0109 owned, which the native path pins off
-    assert key == gpc.multidomain_cache_key(
-        dict(native_spec, dag_collapse=False))
-    # the removed sources/options are refused, never keyed as if absent (2026-10)
+    # the removed options' OFF values are inert...
+    assert key == gpc.multidomain_cache_key(dict(native_spec, dag_collapse=False))
+    # ...and asking for them is refused, never keyed as if absent (2026-10)
     for over in ({"dag_source": "mondo"}, {"dag_source": "snomed"},
                  {"dag_collapse": True}, {"preindex_closure": True},
                  {"label_set": "ribbon@x"}, {"index_mode": "external"}):
@@ -209,27 +163,56 @@ def test_mondo_native_key_threads_from_the_spec():
             gpc.multidomain_cache_key(dict(native_spec, **over))
 
 
-def test_mondo_native_folds_its_own_module_sources():
-    """Auto-invalidation, the discipline `dag_src`/`mondo_src` give every other
-    path: an edit to either NEW module changes the key, so a stale native bundle
-    can never be served. Checked by monkeypatching the hash helper rather than by
-    pinning a hash, because these modules are expected to keep changing."""
-    import mondo_native_dag
-    import mondo_usage_core
-
+def _moves_the_key(module, **base):
+    """True when replacing `module`'s source hash changes the key built from `base`."""
     k = ccache.compute_bundle_cache_key
-    base = k(**_MD_BASE, mondo_native=True,
-             mondo_native_version="native-mondo-v1")
+    before = k(**base)
     real = ccache._module_source_hash
-    for target in (mondo_native_dag, mondo_usage_core):
-        ccache._module_source_hash = (
-            lambda m, _t=target: "moved" if m is _t else real(m))
-        try:
-            moved = k(**_MD_BASE, mondo_native=True,
-                      mondo_native_version="native-mondo-v1")
-        finally:
-            ccache._module_source_hash = real
-        assert moved != base, f"{target.__name__} is not folded into the key"
+    ccache._module_source_hash = (
+        lambda m, _t=module: "moved" if m is _t else real(m))
+    try:
+        return k(**base) != before
+    finally:
+        ccache._module_source_hash = real
+
+
+def test_every_module_the_native_build_runs_is_folded_into_the_key():
+    """Auto-invalidation: an edit to any module that shapes the label DAG changes
+    the key, so a stale native bundle can never be served. Checked by
+    monkeypatching the hash helper rather than by pinning one hash per module."""
+    from charmpheno.mondo import collapse, native_dag, omop_mapping, ontology
+    from spark_vi.dag import layout, ops
+
+    for module in (native_dag, collapse, omop_mapping, ontology, ops, layout):
+        assert _moves_the_key(module, **_MD_BASE), module.__name__
+    # the generic layout shapes every frontier, so it folds on the SNOMED path too
+    assert _moves_the_key(layout, **_SNOMED_BASE)
+    assert not _moves_the_key(native_dag, **_SNOMED_BASE)
+
+
+def test_the_corpus_shaping_modules_are_folded_into_every_key(monkeypatch):
+    """bigquery / measurement_tokens / topic_prep shape every corpus and were not
+    hashed before (audit 2026-10-26 §6): an edit there must move the bundle,
+    corpus and covariate keys alike."""
+    import _corpus_cache
+    import _covariates_cache
+    from charmpheno.omop import source_identity
+
+    corpus_args = dict(source_table="condition_era", person_mod=10, vocab_size=5000,
+                       min_df=20, doc_spec_manifest={}, cohort="c",
+                       prior_obs_days=365)
+    cov_args = dict(covariate_formula="~ age", person_mod=10, cdr="p.d",
+                    source_table="condition_era", cohort="c", prior_obs_days=365)
+    before = (ccache.compute_bundle_cache_key(**_SNOMED_BASE),
+              ccache.compute_bundle_cache_key(**_MD_BASE),
+              _corpus_cache.compute_cache_key(**corpus_args),
+              _covariates_cache.compute_cache_key(**cov_args))
+    monkeypatch.setattr(source_identity, "corpus_code_version", lambda: "moved")
+    after = (ccache.compute_bundle_cache_key(**_SNOMED_BASE),
+             ccache.compute_bundle_cache_key(**_MD_BASE),
+             _corpus_cache.compute_cache_key(**corpus_args),
+             _covariates_cache.compute_cache_key(**cov_args))
+    assert all(b != a for b, a in zip(before, after))
 
 
 def test_native_spec_mismatch_catches_a_contradicting_override():
@@ -309,89 +292,6 @@ def test_single_domain_key_still_requires_the_forward_window_knobs():
 
 
 # --------------------------------------------------------------------------- #
-# E1: the pre-index closure column is corpus identity, folded ONLY when on — the  #
-# same discipline `dag_collapse` and `mondo_native` follow, and the flag-off half  #
-# is what keeps every cached bundle in every bucket findable.                     #
-# --------------------------------------------------------------------------- #
-def test_preindex_closure_off_leaves_all_four_pinned_hashes_byte_identical():
-    """The compatibility half, and the acceptance criterion of the whole WP: a
-    spec that does not ask for the column keys exactly where it keyed before the
-    flag existed — explicitly off, and with an inert version string."""
-    k = ccache.compute_bundle_cache_key
-    assert k(**_MD_BASE, preindex_closure=False) == _MONDO_KEY_NO_COLLAPSE
-    assert k(**_MD_BASE, preindex_closure=False,
-             preindex_closure_version="whatever") == _MONDO_KEY_NO_COLLAPSE
-    assert k(**_SNOMED_BASE, preindex_closure=False) == _SNOMED_KEY
-    assert k(**_SNOMED_BASE, emit_labels=True, label_mask_mode="closure",
-             preindex_closure=False) == _SNOMED_LABELED_KEY
-    assert k(**dict(_SNOMED_BASE, window_mode="lookback", strip_mode="both",
-                    lookback_days=730, label_window_days=180),
-             preindex_closure=False) == _SNOMED_LOOKBACK_KEY
-
-
-def test_preindex_closure_on_is_a_different_bundle():
-    """A bundle carrying `R_d` is a different ARTIFACT: a readout can ask for the
-    column and a diagnostic refuses a bundle that lacks it, so the two cannot
-    share a cache entry."""
-    k = ccache.compute_bundle_cache_key
-    on = k(**_MD_BASE, preindex_closure=True,
-           preindex_closure_version="preindex-closure-v1")
-    assert on != _MONDO_KEY_NO_COLLAPSE
-    assert on != k(**_MD_BASE, mondo_native=True,
-                   mondo_native_version="native-mondo-v1")
-
-
-def test_preindex_closure_version_is_folded_into_the_key():
-    """A primitive whose OUTPUT changes must not be served a bundle built by the
-    old one; the version string is the manual lever that guarantees it."""
-    k = ccache.compute_bundle_cache_key
-    v1 = k(**_MD_BASE, preindex_closure=True, preindex_closure_version="v1")
-    v2 = k(**_MD_BASE, preindex_closure=True, preindex_closure_version="v2")
-    assert v1 != v2
-
-
-def test_preindex_closure_does_not_leak_into_the_snomed_key():
-    """The column is built by re-running a MONDO provider over the feature window;
-    the SNOMED path has none, and its keys stay frozen even if a caller passes the
-    flag by accident."""
-    k = ccache.compute_bundle_cache_key
-    assert k(**_SNOMED_BASE, preindex_closure=True,
-             preindex_closure_version="preindex-closure-v1") == _SNOMED_KEY
-
-
-def test_preindex_closure_folds_its_module_source():
-    """Auto-invalidation, the discipline every other folded module gets: an edit to
-    `preindex_closure.py` changes the key, so a bundle built by an older closure
-    rule can never be served to a newer one. Checked by monkeypatching the hash
-    helper — the module is expected to keep changing."""
-    import preindex_closure as pic
-
-    k = ccache.compute_bundle_cache_key
-    base = k(**_MD_BASE, preindex_closure=True,
-             preindex_closure_version="preindex-closure-v1")
-    real = ccache._module_source_hash
-    ccache._module_source_hash = (
-        lambda m, _t=pic: "moved" if m is _t else real(m))
-    try:
-        moved = k(**_MD_BASE, preindex_closure=True,
-                  preindex_closure_version="preindex-closure-v1")
-    finally:
-        ccache._module_source_hash = real
-    assert moved != base
-    # ...and with the flag OFF the module's hash is not consulted at all, so the
-    # pinned key cannot move when this module is edited.
-    ccache._module_source_hash = (
-        lambda m, _t=pic: "moved" if m is _t else real(m))
-    try:
-        assert k(**_MD_BASE) == _MONDO_KEY_NO_COLLAPSE
-    finally:
-        ccache._module_source_hash = real
-
-
-
-
-
-# --------------------------------------------------------------------------- #
 # The DOC-SPEC hole (audit seam 4 / R5.3): the doc unit is hard-coded in the      #
 # assembler and in the driver's provider construction and was absent from every   #
 # cache key, so a driver-side doc-unit change would have produced a DIFFERENT     #
@@ -410,7 +310,7 @@ def test_doc_spec_default_leaves_all_four_pinned_hashes_byte_identical():
     assert k(**dict(_SNOMED_BASE, window_mode="lookback", strip_mode="both",
                     lookback_days=730, label_window_days=180),
              doc_spec=d) == _SNOMED_LOOKBACK_KEY
-    assert k(**_MD_BASE, doc_spec=d) == _MONDO_KEY_NO_COLLAPSE
+    assert k(**_MD_BASE, doc_spec=d) == _MONDO_NATIVE_KEY
 
 
 def test_a_different_doc_spec_moves_the_key_on_both_paths():
@@ -419,7 +319,7 @@ def test_a_different_doc_spec_moves_the_key_on_both_paths():
     different base rates) and must never be served a patient-cohort bundle."""
     k = ccache.compute_bundle_cache_key
     assert k(**_SNOMED_BASE, doc_spec="patient_year") != _SNOMED_KEY
-    assert k(**_MD_BASE, doc_spec="episode") != _MONDO_KEY_NO_COLLAPSE
+    assert k(**_MD_BASE, doc_spec="episode") != _MONDO_NATIVE_KEY
     # ...and two different non-default units do not alias onto each other either.
     assert (k(**_MD_BASE, doc_spec="episode")
             != k(**_MD_BASE, doc_spec="patient_year"))
@@ -629,7 +529,7 @@ def _fake_build_inputs(spark, **kw):
 
 @pytest.fixture
 def _quiet_native_reports(monkeypatch):
-    import mondo_native_dag as mnd
+    from charmpheno.mondo import native_dag as mnd
     monkeypatch.setattr(mnd, "format_native_build_report", lambda s: "build")
     monkeypatch.setattr(mnd, "format_native_powering_report", lambda s: "power")
 

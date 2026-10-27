@@ -8,6 +8,7 @@ For topic modeling, use the spark_vi MLlib shims directly
 (`spark_vi.mllib.OnlineHDPEstimator`, `spark_vi.mllib.OnlineLDAEstimator`)
 or the underlying models with `VIRunner` — there is no clinical wrapper
 class; clinical concerns live in the analysis driver scripts and in
-`charmpheno.evaluate` / `charmpheno.omop`.
+`charmpheno.evaluate` / `charmpheno.omop` / `charmpheno.mondo` (the native Mondo
+label space, ADR 0051).
 """
 __version__ = "0.1.0"

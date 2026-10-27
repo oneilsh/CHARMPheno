@@ -309,7 +309,7 @@ def preindex_closure_frame(feature_events, *, attested_provider, before_dag,
     on the feature frame is the only difference between this and the label path.
     """
     from charmpheno.omop.case_finding_assembly import attach_frontiers
-    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.dag import DagLayout
 
     lay = DagLayout(bundle.parent_int, n_bg=n_bg, tpn=tpn)
     C = len(bundle.int2cid)

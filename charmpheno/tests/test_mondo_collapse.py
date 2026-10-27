@@ -12,7 +12,7 @@ because the property being asserted is graph-structural.
 """
 import pytest
 
-from mondo_collapse import (DAG_COLLAPSE_VERSION, collapse_engine_dag,
+from charmpheno.mondo.collapse import (DAG_COLLAPSE_VERSION, collapse_engine_dag,
                             collapse_only_child_classes, format_collapse_report)
 
 ROOT = -1
@@ -159,7 +159,7 @@ def test_everything_collapses_to_a_bare_root_when_there_is_one_terminal():
 
 
 def test_is_terminal_override_lets_a_caller_name_its_own_id_space():
-    """The positive/negative convention is `mondo_dag`'s, not the algorithm's."""
+    """The positive/negative convention is the anchor build's, not the algorithm's."""
     parent_of = {"a": [], "b": ["a"], "t": ["b"]}
     out, stats = collapse_only_child_classes(
         parent_of, "root", is_terminal=lambda n: n == "t")
@@ -172,14 +172,13 @@ def test_is_terminal_override_lets_a_caller_name_its_own_id_space():
 # 3. the ConditionDag wrapper + the diagnostic line                            #
 # --------------------------------------------------------------------------- #
 def test_collapse_engine_dag_preserves_names_and_terminals():
-    from mondo_dag import build_mondo_engine_dag
+    from charmpheno.omop.condition_dag import build_condition_dag
 
-    # anchor:1001 under a chain MONDO:A -> MONDO:B; anchor:1002 beside it.
-    parent_of = {"anchor:1001": ["MONDO:B"], "MONDO:B": ["MONDO:A"],
-                 "MONDO:A": [], "anchor:1002": []}
-    dag = build_mondo_engine_dag(
-        parent_of, anchor_names={1001: "a1", 1002: "a2"},
-        class_names={"MONDO:A": "class a", "MONDO:B": "class b"})
+    # anchor 1001 under a class chain A(-2) -> B(-3); anchor 1002 beside it.
+    dag = build_condition_dag(
+        [(ROOT, -2), (-2, -3), (-3, 1001), (ROOT, 1002)], ROOT,
+        [-2, -3, 1001, 1002],
+        {1001: "a1", 1002: "a2", -2: "class a", -3: "class b"})
     assert len(dag.nodes()) == 5                       # root + 2 classes + 2 anchors
 
     collapsed, stats = collapse_engine_dag(dag)

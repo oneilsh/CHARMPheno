@@ -32,6 +32,7 @@ from disk_telemetry import start_disk_telemetry
 # driver keeps the clinical seams: the doc key (`doc_key.py`, driver-side only),
 # the metrics and their formatting.
 import doc_key as _dk
+from spark_vi.dag import children_and_depth
 from spark_vi.readout import (LocalReadoutData, SparkReadoutData, closure_matrix,
                               collect_lean_proba, fit_heads, stacked_proba,
                               write_heads)
@@ -342,7 +343,7 @@ def stacked_readout(proba, y_te, m_te, parent_int, C, *, recall_targets,
     root_col = np.asarray(proba[:, 0], dtype=np.float32)
     root_det = detection_readout(np.stack([root_col, root_col], axis=1), y_te,
                                  recall_targets, doc_keys=doc_keys)
-    _, depth = _dag_children_and_depth(parent_int, C)
+    _, depth = children_and_depth(parent_int, C)
     n_terms = M.sum(axis=1)
     # HSLDA's own read — per-node AUC over ALL test docs (y_c vs everyone, no
     # cohort): the de-novo case-finding question the within-cohort ranking never
@@ -503,32 +504,6 @@ def format_arm_readout(name, arm):
         lines.append(f"{name}: detection (case vs bg){units} AUC={det['auc']:.4f} "
                      f"AP={det['ap']:.4f} prev={det['prevalence']:.3f}  {dpar}{const}")
     return "\n".join(highlight_line("[driver]   " + ln) for ln in lines)
-
-
-def _dag_children_and_depth(parent_int, C):
-    """(children map {node: [children]}, depth {node: int}) over engine ids [0, C).
-
-    ``parent_int`` maps child -> [parent engine-ids] (parentless/root -> []). Depth
-    is the BFS distance from the parentless roots (the synthetic forest root is
-    depth 0; the disease anchors depth 1; their Mondo/SNOMED subtypes deeper)."""
-    from collections import deque
-    children = {c: [] for c in range(C)}
-    for child in range(C):
-        for p in parent_int.get(child, []):
-            p = int(p)
-            if 0 <= p < C:
-                children[p].append(child)
-    depth = {c: None for c in range(C)}
-    roots = [c for c in range(C) if not parent_int.get(c)]
-    dq = deque((r, 0) for r in roots)
-    while dq:
-        n, d = dq.popleft()
-        if depth[n] is not None and depth[n] <= d:
-            continue
-        depth[n] = d
-        for ch in children[n]:
-            dq.append((ch, d + 1))
-    return children, depth
 
 
 def _ece(y, p, n_bins=10):
@@ -992,7 +967,7 @@ def _multidomain_params(spec):
     # Label redesign R2: the all-ever train gate, folded only when on.
     if spec.get("gate_attestation") and str(spec["gate_attestation"]) != "label":
         key_extra["gate_attestation"] = str(spec["gate_attestation"])
-    from mondo_native_dag import MONDO_NATIVE_VERSION
+    from charmpheno.mondo.native_dag import MONDO_NATIVE_VERSION
     key_extra.update(mondo=True, mondo_version=spec["mondo_version"],
                      mondo_branch=spec.get("mondo_branch") or "",
                      min_positives=spec["min_positives"])
@@ -1061,7 +1036,7 @@ def _attach_gate_ever(spark, bundle, *, provider, before_dag, cdr, billing,
     Why the future may gate a TRAIN document: the gate shapes topics on the train
     split only; test documents are folded in ungated, so no test outcome reaches
     them (spec 2026-10-13, Why)."""
-    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.dag import DagLayout
     from charmpheno.omop.case_finding_assembly import attach_frontiers
 
     keep = set(bundle.cid2int)
@@ -1145,7 +1120,7 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
     assemble seam, where `load_or_build_case_finding_bundle` reaches it only after
     `try_load` has missed. A HIT pays for none of it.
 
-    `mondo_native_dag` builds the label DAG out of Mondo's own is-a graph (closure-
+    `charmpheno.mondo.native_dag` builds the label DAG out of Mondo's own is-a graph (closure-
     support powering, induced Hasse, splice) and hands back a per-code attestation
     map; the assembler takes it through the `before_dag` / `attested_provider` pair.
     `spec["gate_attestation"] == "ever"` (exp 0146) then overwrites each TRAIN
@@ -1162,7 +1137,7 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
         from charmpheno.omop.doc_spec import PatientCohortDocSpec
         from charmpheno.omop.multi_domain import (
             assemble_multidomain_case_finding_corpus)
-        from mondo_native_dag import (
+        from charmpheno.mondo.native_dag import (
             build_mondo_native_fit_inputs, format_native_build_report,
             format_native_powering_report, make_mondo_native_attested_provider)
         build = _build_inputs or build_mondo_native_fit_inputs
@@ -1355,7 +1330,7 @@ def parse_args(argv=None):
 
 
 def main() -> int:
-    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.dag import DagLayout
 
     args = parse_args()
     configure_logging()
@@ -1435,7 +1410,7 @@ def main() -> int:
                 raise ValueError("--gate-seed-profile requires --gate-warm > 0")
             with _phase("build the profile seed (driver-side)"):
                 import pandas as pd
-                from mondo_native_dag import mondo_cid
+                from charmpheno.mondo.native_dag import mondo_cid
                 from profile_eta import build_profile_seed
                 gs_df = pd.read_csv(args.gate_seed_profile, sep="\t")
                 gs_eid = {}

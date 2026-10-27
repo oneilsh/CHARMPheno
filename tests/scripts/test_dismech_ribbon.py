@@ -1,6 +1,8 @@
 """The DisMech ribbon as an explicit native-Mondo label set (spec 2026-10-07 §D1).
 
-Three claims:
+Two claims (the third, the fit-time `label_set` key fold, went with the option in
+the 2026-10 cleanup and ADR 0051; the ribbon is now read post hoc, e.g.
+`gated_pc_readout --readout-nodes`):
 
   1. **The reader is faithful and the artifact is pinned.** `kb/disorders/*.yaml`
      -> rows -> TSV -> rows round-trips; a disorder without a MONDO disease_term is
@@ -11,11 +13,6 @@ Three claims:
      keeps `powered & ribbon` and accounts for every member that did not make it
      (unknown to this Mondo release / unpowered), and reports how flat the ribbon
      really is (nested pairs within the kept set) without acting on it.
-
-  3. **No existing key moves.** `label_set` folds into the bundle key ONLY on the
-     native path and ONLY when non-empty; the pinned SNOMED and Mondo hashes in
-     test_case_finding_cache_mondo.py stay the authoritative tripwire, and the
-     spec -> key path the fit and the re-readout share threads the field.
 
 Pure; no Spark.
 """
@@ -31,14 +28,8 @@ for _p in (str(REPO_ROOT), str(CLOUD), str(REPO_ROOT / "charmpheno"),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import _case_finding_cache as ccache  # noqa: E402
 import dismech_ribbon as dr  # noqa: E402
-import gated_pc_cloud as gpc  # noqa: E402
-import gated_pc_readout as gpr  # noqa: E402
-import mondo_native_dag as mnd  # noqa: E402
-from test_case_finding_cache_mondo import (  # noqa: E402
-    _MD_BASE, _MONDO_KEY_NO_COLLAPSE, _MONDO_SPEC, _SNOMED_BASE, _SNOMED_KEY,
-    _mondo_manifest)
+from charmpheno.mondo import native_dag as mnd  # noqa: E402
 
 _YAML_EDS = """
 name: Ehlers-Danlos Syndrome
@@ -193,27 +184,8 @@ def test_filter_reports_unpowered_members_and_a_flat_ribbon_has_no_pairs():
         "(whole powered set)")
 
 
-# --------------------------------------------------------------------------- #
-# 3. the key                                                                    #
-# --------------------------------------------------------------------------- #
-def test_label_set_folds_only_on_the_native_path_and_only_when_set():
-    k = ccache.compute_bundle_cache_key
-    native = dict(_MD_BASE, mondo_native=True, mondo_native_version="native-mondo-v1")
-    base = k(**native)
-    assert k(**native, label_set="") == base
-    assert k(**native, label_set="dismech:71cd04523580:3218:abc") != base
-    assert (k(**native, label_set="dismech:71cd04523580:3218:abc")
-            != k(**native, label_set="dismech:71cd04523580:3217:def"))
-    # anchor-hierarchy and SNOMED keys are frozen even if a caller passes it
-    assert k(**_MD_BASE, label_set="dismech:x:1:y") == _MONDO_KEY_NO_COLLAPSE
-    assert k(**_SNOMED_BASE, label_set="dismech:x:1:y") == _SNOMED_KEY
-
-
-
-
-
 def test_the_committed_ribbon_loads_and_matches_the_spec_pin():
-    rb = dr.load_ribbon(REPO_ROOT / "analysis/cloud/anchor_selection_data/dismech_ribbon.tsv")
+    rb = dr.load_ribbon(REPO_ROOT / "analysis/cloud/label_sets/dismech_ribbon.tsv")
     assert rb.commit == "71cd0452358b01ef7d0b3cc213297f9837be7e54"
     assert len(rb.mondo_ids) == 3226 and len(rb.rows) == 3245
     assert dr.label_set_identity(rb) == "dismech:71cd0452358b:3226:f27a6b36ca62"
@@ -277,7 +249,7 @@ def test_provider_keeps_the_descendant_only_when_a_doc_attests_both(spark):
 # exp 0136: the multi-map guard (peripartum CM <- "Finding related to pregnancy") #
 # --------------------------------------------------------------------------- #
 def test_multimap_guard_drops_the_broad_target_and_keeps_the_disorder():
-    from mondo_native_dag import (drop_ancestor_multimap_targets,
+    from charmpheno.mondo.native_dag import (drop_ancestor_multimap_targets,
                                   format_native_powering_report)
     O903, PPCM, PREG = 45576878, 4037495, 444094
     J45, ASTHMA = 1, 317009
@@ -299,7 +271,7 @@ def test_multimap_guard_fan_in_drops_a_context_concept_shared_by_unrelated_terms
     preeclampsia (unrelated in Mondo) — dropped even when SNOMED does not place it
     above the disorder. A concept shared by NESTED terms is kept, and a 1:1 map is
     never touched."""
-    from mondo_native_dag import drop_ancestor_multimap_targets
+    from charmpheno.mondo.native_dag import drop_ancestor_multimap_targets
     O903, PPCM, PREG, O14, PREE = 1, 4037495, 444094, 2, 439393
     PCM, PRE, HYP = "MONDO:0018920", "MONDO:0005081", "MONDO:0001134"
     padj = {PRE: [HYP], PCM: []}
@@ -317,7 +289,7 @@ def test_multimap_guard_fan_in_drops_a_context_concept_shared_by_unrelated_terms
 
 
 def test_code_map_audit_counts_shared_codes_by_mechanism():
-    from mondo_native_dag import code_map_audit, format_code_map_audit
+    from charmpheno.mondo.native_dag import code_map_audit, format_code_map_audit
     rows = [(1, 10), (2, 10), (3, 10), (3, 20), (4, 20), (4, 30), (5, 30)]
     a = code_map_audit(rows, exact_codes={1, 3}, names={10: "PPCM", 20: "DCM"}, top=2)
     assert a["n_codes"] == 5 and a["n_nodes"] == 3
@@ -333,7 +305,7 @@ def test_hierarchy_test_drops_overbroad_targets_and_spares_consistent_ones():
     (tularemia <- 'Disorder of gastrointestinal tract'); a target whose subsumed
     terms are all Mondo descendants is kept (DCM's concept over peripartum and
     familial DCM); SNOMED same_as rows are never dropped."""
-    from mondo_native_dag import overbroad_exact_rows
+    from charmpheno.mondo.native_dag import overbroad_exact_rows
     TUL, CROHN, DIVERT, GERD = "MONDO:1", "MONDO:2", "MONDO:3", "MONDO:4"
     DCM, PPCM, FDCM, ALC = "MONDO:10", "MONDO:11", "MONDO:12", "MONDO:13"
     GI, DCM_C = 500, 600
@@ -356,7 +328,7 @@ def test_curated_xref_exclusion_and_snomed_suspects():
     thrombosis' is excluded by name; a SNOMED row that fails the hierarchy test is
     reported as a suspect and never dropped."""
     import pandas as pd
-    from mondo_native_dag import (EXCLUDED_MONDO_XREFS, drop_excluded_xrefs,
+    from charmpheno.mondo.native_dag import (EXCLUDED_MONDO_XREFS, drop_excluded_xrefs,
                                   overbroad_exact_rows)
     assert ("MONDO:0008559", "SNOMED", "111293003") in EXCLUDED_MONDO_XREFS
     df = pd.DataFrame({"mondo_id": ["MONDO:0008559", "MONDO:0008559", "MONDO:0002305"],

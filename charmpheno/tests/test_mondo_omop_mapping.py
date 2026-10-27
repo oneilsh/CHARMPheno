@@ -55,7 +55,7 @@ def _concept_relationship():
 
 
 def test_maps_disease_to_standard_condition_with_rare_flags():
-    from mondo_to_omop_mapping import build_mondo_to_omop
+    from charmpheno.mondo.omop_mapping import build_mondo_to_omop
 
     out = build_mondo_to_omop(
         mondo_edges_df=_edges(),
@@ -74,7 +74,7 @@ def test_maps_disease_to_standard_condition_with_rare_flags():
 
 
 def test_obsolete_susceptibility_and_nondisease_are_excluded():
-    from mondo_to_omop_mapping import build_mondo_to_omop
+    from charmpheno.mondo.omop_mapping import build_mondo_to_omop
 
     out = build_mondo_to_omop(
         mondo_edges_df=_edges(),
@@ -89,7 +89,7 @@ def test_obsolete_susceptibility_and_nondisease_are_excluded():
 
 
 def test_restrict_mondo_ids_prefilters():
-    from mondo_to_omop_mapping import build_mondo_to_omop
+    from charmpheno.mondo.omop_mapping import build_mondo_to_omop
 
     out = build_mondo_to_omop(
         mondo_edges_df=_edges(),

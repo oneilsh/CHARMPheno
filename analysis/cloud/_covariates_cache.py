@@ -51,6 +51,8 @@ def compute_cache_key(
     # change (which shifts the covariate person set) auto-invalidates this cache
     # without a manual `v` bump. `v` stays as the fallback / non-cohort knob.
     from charmpheno.omop.cohorts import cohort_defs_version
+    # corpus_code: the loaders that build the person/covariate frame (ADR 0051).
+    from charmpheno.omop.source_identity import corpus_code_version
     payload = json.dumps({
         "covariate_formula": covariate_formula,
         "person_mod": person_mod,
@@ -59,6 +61,7 @@ def compute_cache_key(
         "cohort": cohort,
         "prior_obs_days": int(prior_obs_days),
         "cohort_defs": cohort_defs_version(),
+        "corpus_code": corpus_code_version(),
         "v": 3,
     }, sort_keys=True).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()[:16]

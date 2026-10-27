@@ -16,38 +16,7 @@ from __future__ import annotations
 
 import numpy as np
 
-
-def dag_closure_parents(parent_int, C):
-    """Length-C list of parent-LABEL-index lists over the [0, C) engine-id label
-    space (root and any parentless node -> []): `parent_int` (root omitted)
-    densified over range(C)."""
-    return [[int(p) for p in parent_int.get(c, [])] for c in range(C)]
-
-
-def closure_matrix(parent_int, C):
-    """(C, C) float64 `M[c, a] = 1` iff `a ∈ closure(c)` — c itself plus every
-    ancestor, each ONCE under diamonds, root included.
-
-    A memoized DFS over the direct-parent lists. `parent_int` is the bundle's
-    `{child: [parents]}` over engine ids."""
-    C = int(C)
-    parents = dag_closure_parents(parent_int, C)
-    clo = [None] * C
-
-    def _closure(node):
-        if clo[node] is None:
-            acc = {node}
-            for p in parents[node]:
-                if 0 <= p < C and p != node:
-                    acc |= _closure(p)
-            clo[node] = acc
-        return clo[node]
-
-    M = np.zeros((C, C), dtype=np.float64)
-    for c in range(C):
-        for a in _closure(c):
-            M[c, a] = 1.0
-    return M
+from spark_vi.dag.ops import closure_matrix  # noqa: F401  (re-exported: the product's M)
 
 
 def stacked_proba(proba, M, *, chunk_rows=8192, floor=1e-12):

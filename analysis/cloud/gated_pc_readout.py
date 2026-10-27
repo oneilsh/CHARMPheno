@@ -1644,7 +1644,7 @@ def native_spec_mismatch(spec, manifest) -> bool:
 
     The sibling of `mondo_spec_mismatch` for the native label space, and it needs
     its own witness: a native fit's `int2cid` values are plain ints (the Mondo
-    curie's numeric part — see `mondo_native_dag`'s docstring on why they cannot
+    curie's numeric part — see `charmpheno.mondo.native_dag`'s docstring on why they cannot
     be curie strings), so the `MONDO:`-prefix test cannot see it. The manifest's
     own `corpus_manifest.dag_source` is the witness instead, which every native
     run records; the only way to reach here is a CLI override that contradicts
@@ -2071,7 +2071,7 @@ def main(argv=None) -> int:
             # Exp 0159: gated NPMI from the saved topics + the bundle's documents;
             # no transform, no heads.
             with _phase("gated NPMI"):
-                from spark_vi.models.topic.dag_placement import DagLayout
+                from spark_vi.dag import DagLayout
                 from topic_npmi import run_npmi
                 _npz = np.load(run_dir / "gated_pc_result.npz")
                 _lk = sorted((k for k in _npz.files if k.startswith("lambda_")),
@@ -2225,7 +2225,7 @@ def main(argv=None) -> int:
                             f"in the frequency top {args.raw_baseline}", flush=True)
                 elif args.raw_select == "relevance":
                     import inspect_topics as _it
-                    from spark_vi.models.topic.dag_placement import DagLayout
+                    from spark_vi.dag import DagLayout
                     from topic_npmi import own_code_exclusions
                     _freq = set(_sel)
                     _quota = {}

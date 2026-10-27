@@ -408,38 +408,28 @@ def code_map_from_manifest(spark, corpus_manifest):
     Mondo→OMOP mapping and the powering pass, minutes of BigQuery, which is why the
     sidecar is cached rather than recomputed per analysis.
 
-    Both flavours are handled and NORMALIZED to `(concept_id, node_cid)`: the
-    legacy climb keys on `(descendant_concept_id, ancestor_concept_id)`, the native
-    build on `(std_cid, node_cid)`. Returns `(code_map, identity)`, where
+    The native build's `(std_cid, node_cid)` map is NORMALIZED to
+    `(concept_id, node_cid)`. Returns `(code_map, identity)`, where
     `identity` is the token the sidecar key folds for a map whose content the four
     DAG fields do not fully determine."""
     cm = corpus_manifest
     dag_source = str(cm.get("dag_source") or "")
-    if dag_source not in ("mondo", "mondo_native"):
+    if dag_source != "mondo_native":
         raise ValueError(
             f"conversion sidecar: dag_source={dag_source!r} has no driver-side "
-            "code map. E4 is defined over the Mondo label space (`mondo` or "
-            "`mondo_native`); a SNOMED-anchor corpus would need its own map.")
-    kwargs = dict(cdr=cm["cdr"], billing=cm["billing"],
-                  mondo_version=cm.get("mondo_version") or "",
-                  mondo_cache_dir=cm.get("mondo_cache_dir") or "data/mondo",
-                  min_positives=int(cm.get("min_positives") or 0),
-                  branch_root=(cm.get("mondo_branch") or None))
-    if dag_source == "mondo_native":
-        from mondo_native_dag import (MONDO_NATIVE_VERSION,
-                                      build_mondo_native_fit_inputs)
-        _dag, code_map_sdf, kept, _support, _stats = build_mondo_native_fit_inputs(
-            spark, **kwargs)
-        return (normalize_code_map(code_map_sdf, concept_col="std_cid",
-                                   node_col="node_cid"),
-                f"mondo_native:{MONDO_NATIVE_VERSION}:{len(kept)}")
-    from mondo_dag import build_mondo_fit_inputs
-    _dag, climb_sdf, terminals, _count, _red = build_mondo_fit_inputs(
-        spark, **kwargs)
-    return (normalize_code_map(climb_sdf,
-                               concept_col="descendant_concept_id",
-                               node_col="ancestor_concept_id"),
-            f"mondo:{len(terminals)}")
+            "code map. E4 is defined over the native Mondo label space "
+            "(`mondo_native`); the anchor-Mondo and SNOMED label spaces were removed.")
+    from charmpheno.mondo.native_dag import (MONDO_NATIVE_VERSION,
+                                             build_mondo_native_fit_inputs)
+    _dag, code_map_sdf, kept, _support, _stats = build_mondo_native_fit_inputs(
+        spark, cdr=cm["cdr"], billing=cm["billing"],
+        mondo_version=cm.get("mondo_version") or "",
+        mondo_cache_dir=cm.get("mondo_cache_dir") or "data/mondo",
+        min_positives=int(cm.get("min_positives") or 0),
+        branch_root=(cm.get("mondo_branch") or None))
+    return (normalize_code_map(code_map_sdf, concept_col="std_cid",
+                               node_col="node_cid"),
+            f"mondo_native:{MONDO_NATIVE_VERSION}:{len(kept)}")
 
 
 def main(argv=None) -> int:

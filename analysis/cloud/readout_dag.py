@@ -54,7 +54,7 @@ __all__ = [
 ]
 
 ROOT = 0
-FIT_ROOT_CID = -1          # mondo_native_dag.MONDO_NATIVE_ROOT_CID
+FIT_ROOT_CID = -1          # charmpheno.mondo.native_dag.MONDO_NATIVE_ROOT_CID
 _PREFIX = "MONDO:"
 
 
@@ -111,13 +111,13 @@ class ReadoutDag:
 
 def load_mondo_parent_adj(mondo_version, mondo_cache_dir="data/mondo"):
     """Mondo's `{child: [parents]}` disease adjacency + `{curie: name}` from the
-    SAME version-keyed download the fit used (`anchor_selection_cloud
-    ._download_cached`; cache hit on the fit's cluster, re-fetched elsewhere).
-    Import-only use of the hashed mapping module, as `mondo_native_dag` does."""
+    SAME version-keyed download the fit used (`charmpheno.mondo.ontology
+    .download_cached`; cache hit on the fit's cluster, re-fetched elsewhere).
+    Import-only use of the hashed mapping module, as `charmpheno.mondo.native_dag` does."""
     import pandas as pd
-    from anchor_selection_cloud import _download_cached
-    from mondo_to_omop_mapping import _disease_child_adjacency
-    from mondo_native_dag import parent_adjacency
+    from charmpheno.mondo.ontology import download_cached as _download_cached
+    from charmpheno.mondo.omop_mapping import _disease_child_adjacency
+    from charmpheno.mondo.native_dag import parent_adjacency
 
     cache = Path(mondo_cache_dir)
     edges = pd.read_csv(_download_cached(mondo_version, "mondo_edges.tsv", cache),
@@ -133,7 +133,7 @@ def build_readout_dag(int2cid_fit, parent_adj, *, names=None, min_descendants=2,
     """The readout DAG over the fit's label nodes (`int2cid_fit`: engine id ->
     Mondo cid, root included) from Mondo's full `parent_adj`. Pure; see the
     module docstring for the construction and the two redundancy rules."""
-    from mondo_native_dag import ancestor_closure, induced_hasse_parents
+    from charmpheno.mondo.native_dag import ancestor_closure, induced_hasse_parents
 
     names = dict(names or {})
     label_eng = {int(e): int(c) for e, c in int2cid_fit.items()

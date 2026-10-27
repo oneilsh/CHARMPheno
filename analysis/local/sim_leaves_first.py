@@ -47,7 +47,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "spark-vi"))
 
-from spark_vi.models.topic.dag_placement import DagLayout  # noqa: E402
+from spark_vi.dag import DagLayout  # noqa: E402
 from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA  # noqa: E402
 from spark_vi.models.topic.types import GatedBOWDocument  # noqa: E402
 

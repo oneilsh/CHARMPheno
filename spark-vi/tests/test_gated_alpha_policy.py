@@ -5,7 +5,7 @@ does). The equalized initial alpha (exp 0121) was removed by ADR 0050. Spark-fre
 """
 import numpy as np
 
-from spark_vi.models.topic.dag_placement import DagLayout
+from spark_vi.dag import DagLayout
 from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
 
 
