@@ -13,27 +13,9 @@ from __future__ import annotations
 import logging
 
 import numpy as np
+from spark_vi.core.broadcast import destroy_broadcast as _destroy_broadcast
 
 logger = logging.getLogger(__name__)
-
-
-def _destroy_broadcast(bcast) -> None:
-    """Fully release a broadcast: executor blocks, the driver block-manager copy,
-    AND the driver-local pickled temp file.
-
-    ``unpersist`` frees only the executor copies, so a broadcast that is merely
-    unpersisted (or never cleaned) leaves one driver-side pickle behind — the leak
-    class that filled the master's disk and killed a run with ENOSPC (exp 0104; see
-    ``core/runner._destroy_broadcast``). Cleanup must never outrank the work it
-    follows, so failures degrade to unpersist and a log line rather than raising."""
-    try:
-        bcast.destroy()
-    except Exception as exc:
-        try:
-            bcast.unpersist(blocking=False)
-        except Exception:
-            pass
-        logger.warning("broadcast destroy fell back to unpersist: %s", exc)
 
 
 def _seed_reduce_depth(n_rows: int, V: int) -> int:
@@ -65,8 +47,10 @@ def gate_open_seed_counts(rdd, lay, V: int, *, mode: str = "subtree",
     subtree word distribution plus one share for the documents coded at the parent
     itself (frontier contains it), so a word specific to one child weighs about
     1/(children + 1) and a word all children share keeps full weight. `own_idx`
-    ({node: [vocab idx]}, the native code map's attesting codes) removes every
-    proper descendant's own codes from the parent's row before normalization. This
+    ({node: [vocab idx]}, each node's own attesting codes as ids in the
+    CONCATENATED vocabulary — the estimator shifts the primary domain's local ids
+    by that domain's offset) removes every proper descendant's own codes from the
+    parent's row before normalization. This
     accumulates float32 (rows, V) arrays per partition — the late nodes' children and
     the late nodes only — with a deeper reduction tree when they are large, so a
     whole-Mondo pass stays at about 200 MB a task and well under 1 GB on the driver.

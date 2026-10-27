@@ -65,9 +65,8 @@ class ModelEngine:
                  cavi_tol=1e-3, cand_iters=5):
         sizes = [int(l.shape[1]) for l in lams]
         self.offsets = np.concatenate([[0], np.cumsum(sizes)[:-1]]).astype(np.int64)
-        self.eb = np.concatenate(
-            [np.exp(digamma(l) - digamma(l.sum(axis=1, keepdims=True))) for l in lams],
-            axis=1)
+        from spark_vi.models.topic.dag_gated_lda import expElogbeta_from_lambda
+        self.eb = expElogbeta_from_lambda(dict(enumerate(lams)))
         # E[β] is needed only at pool columns (the predictive presence); keeping the
         # λ blocks and their row sums avoids a second dense (K, V) float64 copy.
         self._lams = [np.asarray(l) for l in lams]

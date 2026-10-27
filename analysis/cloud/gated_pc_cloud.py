@@ -2217,7 +2217,7 @@ def parse_args(argv=None):
     p.add_argument("--gate-seed-profile", default="", metavar="TSV",
                    help="With --gate-warm: an external phenotype profile table "
                         "(mondo_id, concept_id, neg; e.g. hpo_profile_marks.py output) "
-                        "that REPLACES a profiled node's condition-domain seed (leaves "
+                        "that REPLACES a profiled node's primary-domain seed (leaves "
                         "at iteration 0, later blocks at opening); unprofiled nodes "
                         "keep the histogram seed. Fit-only.")
     p.add_argument("--gate-attestation", choices=("label", "ever"), default="label",
@@ -2337,7 +2337,8 @@ def main() -> int:
 
         # Profile seed for the leaves-first schedule (exp 0157/0158): an external
         # phenotype profile (the marks TSV from hpo_profile_marks.py) replaces a
-        # profiled node's condition-domain seed. Fit-only; counts-only stats.
+        # profiled node's primary-domain seed (domain 0, the condition vocabulary
+        # here). Fit-only; counts-only stats.
         args._gate_seed_profile = None
         if getattr(args, "gate_seed_profile", ""):
             if int(getattr(args, "gate_warm", 0) or 0) <= 0:

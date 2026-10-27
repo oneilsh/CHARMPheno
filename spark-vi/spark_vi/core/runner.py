@@ -40,6 +40,7 @@ from spark_vi.core.model import VIModel
 from spark_vi.core.result import VIResult
 from spark_vi.diagnostics.persist import assert_persisted
 from spark_vi.io.export import load_result, save_result
+from spark_vi.core.broadcast import destroy_broadcast as _destroy_broadcast
 
 log = logging.getLogger(__name__)
 
@@ -78,26 +79,6 @@ def _agg_depth(global_params: dict) -> int:
         return int(getattr(v, "nbytes", 0))
 
     return 3 if _nbytes(global_params) > _AGG_DEPTH_THRESHOLD_BYTES else 2
-
-
-def _destroy_broadcast(bcast) -> None:
-    """Fully release a per-iteration broadcast: executor blocks, the driver
-    block-manager copy, AND the driver-local pickled temp file.
-
-    ``unpersist`` frees only the executor copies; the other two survive until
-    ``destroy`` and accumulate at one λ-sized pickle per fit iteration — which at
-    whole-Mondo scale (~355 MB each) filled the master's disk over a 100-iteration
-    fit and killed the run's post-fit readout with ENOSPC (exp 0104, 2026-08-30).
-    Cleanup must never outrank the fit itself, so failures degrade to unpersist
-    and a log line rather than raising."""
-    try:
-        bcast.destroy()
-    except Exception as exc:
-        try:
-            bcast.unpersist(blocking=False)
-        except Exception:
-            pass
-        log.warning("broadcast destroy fell back to unpersist: %s", exc)
 
 
 def _fmt_diagnostic(value: object) -> str:

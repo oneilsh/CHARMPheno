@@ -56,28 +56,9 @@ import numpy as np
 from scipy.optimize import nnls
 
 from .spectral_init import _preferred_mask, greedy_anchors
+from spark_vi.core.broadcast import destroy_broadcast as _destroy_broadcast
 
 log = logging.getLogger(__name__)
-
-
-def _destroy_broadcast(bcast) -> None:
-    """Fully release a broadcast: executor blocks, the driver block-manager copy,
-    AND the driver-local pickled temp file.
-
-    ``unpersist`` frees only the executor copies, so a per-pass broadcast leaks one
-    driver-side pickle every time — the leak class that filled the master's disk and
-    killed a run with ENOSPC (exp 0104; see ``core/runner._destroy_broadcast``). This
-    matters here because the gated init calls the pass below once per node. Cleanup
-    must never outrank the work it follows, so failures degrade to unpersist and a
-    log line rather than raising."""
-    try:
-        bcast.destroy()
-    except Exception as exc:
-        try:
-            bcast.unpersist(blocking=False)
-        except Exception:
-            pass
-        log.warning("broadcast destroy fell back to unpersist: %s", exc)
 
 
 def default_projection_dim(K: int, V: int, target_dim: int = 1000) -> int:

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from spark_vi.eval.topic.types import CoherenceReport
+from spark_vi.core.broadcast import destroy_broadcast as _destroy_broadcast
 
 if TYPE_CHECKING:
     from pyspark import RDD
@@ -24,25 +25,6 @@ if TYPE_CHECKING:
     from spark_vi.models.topic.types import BOWDocument
 
 log = logging.getLogger(__name__)
-
-
-def _destroy_broadcast(bcast) -> None:
-    """Fully release a broadcast: executor blocks, the driver block-manager copy,
-    AND the driver-local pickled temp file.
-
-    ``unpersist`` frees only the executor copies, so a per-call broadcast leaks one
-    driver-side pickle every time — the leak class that filled the master's disk and
-    killed a run with ENOSPC (exp 0104; see ``core/runner._destroy_broadcast``).
-    Cleanup must never outrank the work it follows, so failures degrade to unpersist
-    and a log line rather than raising."""
-    try:
-        bcast.destroy()
-    except Exception as exc:
-        try:
-            bcast.unpersist(blocking=False)
-        except Exception:
-            pass
-        log.warning("broadcast destroy fell back to unpersist: %s", exc)
 
 
 def _npmi_pair(p_i: float, p_j: float, p_ij: float) -> float:

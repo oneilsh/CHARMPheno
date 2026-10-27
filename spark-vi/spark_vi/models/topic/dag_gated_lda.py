@@ -150,8 +150,8 @@ class DagGatedOnlineLDA(OnlineLDA):
         `init_seed` (K, V), optional: rows applied at iteration 0 to the blocks that
         are open from the start (the leaves), e.g. an external phenotype profile
         (HPO) where one exists. In either seed a row with no mass in a domain leaves
-        that domain's lambda as it was, so a profile that covers only the condition
-        domain replaces only the condition-domain start.
+        that domain's lambda as it was, so a profile that covers only the primary
+        domain replaces only that domain's start.
 
         The state rides global_params (`gate_iter`, `gate_open_at`), so executors see
         the round every iteration; the seeds are driver-only (`__getstate__` drops
