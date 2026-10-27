@@ -1933,18 +1933,6 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
         gateOpenSeed=True,
         localizeHead=bool(getattr(args, "localize_head", False)),
         headSupport=str(getattr(args, "head_support", "siblings")),
-        # Spectral (anchor-word) lambda seed for the gated engine (insight 0079
-        # deep-node flat-start remedy). Default "random" preserves prior behavior;
-        # getattr guards a manifest/older-driver that never set these.
-        init=str(getattr(args, "init", "random")),
-        spectralMethod=str(getattr(args, "spectral_method", "auto")),
-        spectralMaxVocab=int(getattr(args, "spectral_max_vocab", 8000)),
-        spectralD=int(getattr(args, "spectral_d", 0)),
-        spectralMarginalFloor=str(getattr(args, "spectral_marginal_floor", "none")),
-        spectralMinDocFreq=int(getattr(args, "spectral_min_doc_freq", 5)),
-        spectralBgAnchors=int(getattr(args, "spectral_bg_anchors", 0) or 0),
-        anchorScope=str(getattr(args, "anchor_scope", "closure")),
-        spectralTopoOrder=str(getattr(args, "spectral_topo_order", "forward")),
         countTransform=str(getattr(args, "count_transform", "none")),
         alphaInit=str(getattr(args, "alpha_init", "uniform")),
         # Profile-eta word-side prior (plan WP-3): the four Params are the
@@ -2402,42 +2390,6 @@ def parse_args(argv=None):
                         "siblings, default); 'path_cousins' (also the siblings of every ancestor "
                         "on the root-path); 'path_cousins_kids' (also v's own children's blocks, "
                         "the subtype signal). All bounded; exact Newton kept.")
-    # Spectral (anchor-word) lambda init for the gated engine (insight 0079 deep-node
-    # flat-start remedy). Default 'random' preserves prior behavior; 'spectral' seeds
-    # each node's block from block-aligned anchor recovery (gated_init.py, Arora 2013).
-    p.add_argument("--init", choices=["random", "spectral"], default="random",
-                   help="gated-engine lambda init: 'random' (default) or 'spectral' "
-                        "(block-aligned anchor-word seed — breaks the deep-node "
-                        "flat-start starvation trap, insight 0079). Requires the gate.")
-    p.add_argument("--spectral-method", choices=["auto", "dense", "scalable"],
-                   default="auto",
-                   help="spectral routing: auto (dense below --spectral-max-vocab, "
-                        "scalable at/above), dense (driver V×V, exact, small V), or "
-                        "scalable (distributed random-projection, ADR 0032).")
-    p.add_argument("--spectral-max-vocab", type=int, default=8000,
-                   help="'auto' threshold: dense below this total vocab, scalable "
-                        "at/above (a concatenated multi-domain V crosses it easily).")
-    p.add_argument("--spectral-d", type=int, default=0,
-                   help="random-projection dim for scalable init (0 = auto).")
-    p.add_argument("--spectral-min-doc-freq", type=int, default=5,
-                   help="min within-group doc frequency for a scalable anchor candidate.")
-    p.add_argument("--spectral-bg-anchors", type=int, default=0,
-                   help="how many of the n_bg background topics the spectral seed "
-                        "ANCHORS (0 = all, the historical behaviour). The rest are "
-                        "seeded by the random Gamma init: a wide shared background "
-                        "(exp 0134, n_bg=1200) is not anchorable — the greedy and the "
-                        "per-word recovery both scale with the anchor count — and "
-                        "0132 showed a flat background forms its strata from a random "
-                        "start. The anchored few are the deflation seeds (0133's 8).")
-    p.add_argument("--anchor-scope", choices=["closure", "frontier"], default="closure",
-                   help="docs feeding each node's anchor set: 'closure' (default) or "
-                        "'frontier' (node only from docs where it is most-specific — "
-                        "stops ancestors/background stealing a descendant's anchor).")
-    p.add_argument("--spectral-topo-order", choices=["forward", "reverse"],
-                   default="forward",
-                   help="deflation order: 'forward' (ancestors-first, node = increment "
-                        "over ancestors) or 'reverse' (leaves-first, node = residual "
-                        "after descendants).")
     p.add_argument("--alpha-init", choices=["uniform", "equalized"], default="uniform",
                    help="initial doc-concentration policy for the gated engine: "
                         "'uniform' (doc_concentration everywhere) or 'equalized' "
@@ -2453,17 +2405,6 @@ def parse_args(argv=None):
                         "anchors/evidence off utilization volume, insight 0077 extended "
                         "to all domains), or 'log1p' (softer damping). In-memory; the "
                         "cached bundle stays raw (no cache-key change).")
-    # Profile-eta word-side prior (plan 2026-09-06 D1-D5, exp 0116). The TSV is
-    # hpoa_stage2_probe's --emit-eta output (concept ids, bundle-agnostic,
-    # WORKSPACE-INTERNAL — its coverage column is train-derived); the driver
-    # maps it into the bundle's condition vocab / gate blocks and hands the
-    # built boost to the estimator. A fit parameter only: no bundle/corpus
-    # cache-key change. Default '' preserves prior behavior byte-identically.
-    p.add_argument("--spectral-marginal-floor", choices=["none", "guided", "all"],
-                   default="none",
-                   help="scalable spectral candidate floor (exps 0125/0128): 'guided' "
-                        "= profile candidates must be at least as common as the node's "
-                        "average word; 'all' = every candidate must. Derived, no knob.")
     p.add_argument("--dag-source", choices=["mondo_native"], default="mondo_native",
                    help="the label space: exp 0110's NATIVE Mondo terms, powered by "
                         "is-a CLOSURE support, the DAG Mondo's own hierarchy "
@@ -2499,9 +2440,7 @@ def parse_args(argv=None):
                         "documents, descendants' own codes removed (exp 0160).")
     p.add_argument("--gate-seed-leaves", action="store_true",
                    help="With --gate-warm: seed every leaf block at iteration 0 from "
-                        "its own documents' word counts (exp 0162). With every node "
-                        "block data-seeded, use --init random: the spectral seed's "
-                        "per-node scans are then pure cost.")
+                        "its own documents' word counts (exp 0162).")
     p.add_argument("--gate-seed-profile", default="", metavar="TSV",
                    help="With --gate-warm: an external phenotype profile table "
                         "(mondo_id, concept_id, neg; e.g. hpo_profile_marks.py output) "
@@ -2821,17 +2760,6 @@ def main() -> int:
                 "int2cid": {str(i): c for i, c in bundle.int2cid.items()},
                 "name_by_id": {str(c): n for c, n in bundle.name_by_id.items()}},
         }
-        # Init provenance: the spectral seed's settings, so `inspect_topics
-        # --digest` can say how a block was seeded without the experiment doc.
-        # Added ONLY for spectral fits (random-init manifests stay byte-identical).
-        if str(getattr(args, "init", "random")) == "spectral":
-            manifest_fields["init"] = {
-                "init": "spectral",
-                "spectral_method": str(getattr(args, "spectral_method", "auto")),
-                "spectral_d": int(getattr(args, "spectral_d", 0)),
-                "anchor_scope": str(getattr(args, "anchor_scope", "closure")),
-                "spectral_topo_order": str(getattr(args, "spectral_topo_order",
-                                                   "forward"))}
         if int(getattr(args, "gate_warm", 0) or 0) > 0:
             # Fit parameter; added only when set (byte-identical manifests otherwise).
             manifest_fields["gate_schedule"] = {
@@ -2845,9 +2773,6 @@ def main() -> int:
                 manifest_fields["gate_schedule"]["seed_profile"] = {
                     "path": args.gate_seed_profile,
                     **getattr(args, "_gate_seed_profile_stats", {})}
-        if int(getattr(args, "spectral_bg_anchors", 0) or 0) > 0:
-            manifest_fields["spectral_bg_anchors"] = int(args.spectral_bg_anchors)
-
 
         with _phase(f"gated_pc fit (weightY={args.weight_y}, K={lay.K})"):
             pc_est = _build_pc_estimator(args, weight_y=args.weight_y, gated=True)
@@ -2905,27 +2830,6 @@ def main() -> int:
             finally:
                 if _cofit_provider.get("provider") is not None:
                     _cofit_provider["provider"].close()
-            # Per-node spectral anchors -> <run>/spectral_anchors.json (vocab
-            # indices + ontology names only; no patient data). Written for every
-            # spectral fit, guided or not, so a block's anchor word is on record
-            # (exp 0124 had to infer DCM's anchor from its recovered topic).
-            _ast = getattr(pc_est, "_anchor_stats", None)
-            if _ast:
-                from spark_vi.models.topic.gated_init import anchor_dump_payload
-                _payload = anchor_dump_payload(
-                    _ast, int2cid=bundle.int2cid, name_by_id=bundle.name_by_id)
-                Path(out).mkdir(parents=True, exist_ok=True)   # out = the run dir
-                _ap = Path(out) / "spectral_anchors.json"
-                with open(_ap, "w") as _fh:
-                    # Anchor ids index the seed's vocabulary: for a multi-domain
-                    # fit the CONCATENATED [domain 0; domain 1; ...] space.
-                    json.dump({"vocab_domain": 0,
-                               "vocab_space": ("concat" if len(vocab_maps) > 1
-                                               else "domain0"),
-                               "domain_vocab_sizes": [len(vm) for vm in vocab_maps],
-                               "nodes": _payload}, _fh)
-                _cprint(f"[driver]   wrote spectral anchors for {len(_payload)} node(s) "
-                        f"-> {_ap}", flush=True)
             # EARLY SAVE, before any readout work touches the cluster: the fit is
             # the hours-long unrepeatable half and the readout is where runs die,
             # so the model reaches durable storage the moment it exists. The final

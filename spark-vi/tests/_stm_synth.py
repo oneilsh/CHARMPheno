@@ -835,13 +835,7 @@ def fit_gated_svi_local(model, gated_docs, *, n_iter=200, seed=0, data_summary=N
     SVI-vs-Gibbs placement equivalence gate. `model` is a GatedOnlineLDA; `gated_docs` are
     GatedBOWDocuments (frontier tags drive the gate).
 
-    `data_summary` (default None) is passed straight through to `initialize_global`, so a
-    caller whose model was built with `init="spectral"` can hand over the
-    {"train_docs": [...], "train_labels": [...], "anchor_scope": ...} dict the spectral
-    seed needs (see `gated_init.py`); every existing caller passes nothing and keeps
-    getting `initialize_global(None)` exactly as before (random init, or a spectral model
-    falling back to its own None-handling) — this parameter only ADDS a path, it does not
-    change the None one."""
+    `data_summary` (default None) is passed straight through to `initialize_global`."""
     np.random.seed(seed)
     gp = model.initialize_global(data_summary)
     for _ in range(n_iter):

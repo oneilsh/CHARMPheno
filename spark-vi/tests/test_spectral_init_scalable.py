@@ -524,3 +524,38 @@ class TestScalableSpectralInitBeta:
         assert foreground_recovers_group(
             beta, partition, "rare", planted, thresh=0.4
         )
+
+
+def test_projected_cooccurrence_pooled_false_matches_groups_and_drops_pooled(spark):
+    # pooled=False must yield byte-identical GROUP sketches (a doc in no group adds
+    # nothing to any group anyway) while skipping the corpus-pooled sketch — that is
+    # what lets a deep-level batch skip projecting the docs it does not train.
+    import numpy as np
+    from types import SimpleNamespace
+    from spark_vi.models.topic.spectral_init_scalable import (
+        projected_cooccurrence_rdd,
+    )
+
+    def gd(idx, groups):
+        idx = sorted(idx)
+        return SimpleNamespace(indices=np.asarray(idx, dtype=np.int32),
+                               counts=np.ones(len(idx), dtype=np.float64),
+                               groups=frozenset(groups))
+
+    rows = []
+    for _ in range(20):
+        rows.append(gd([0, 1, 2], {1}))          # trains node 1
+        rows.append(gd([3, 4, 5], {2}))          # trains node 2
+        rows.append(gd([6, 7], set()))           # trains NEITHER (skipped when lean)
+    rdd = spark.sparkContext.parallelize(rows, 3)
+    V, d = 10, 8
+    full = projected_cooccurrence_rdd(rdd, SimpleNamespace(groups=(1, 2)), V, d, seed=0,
+                                      pooled=True)
+    lean = projected_cooccurrence_rdd(rdd, SimpleNamespace(groups=(1, 2)), V, d, seed=0,
+                                      pooled=False)
+    for g in (1, 2):
+        assert np.array_equal(full.group_QR[g], lean.group_QR[g])
+        assert np.array_equal(full.group_p_w[g], lean.group_p_w[g])
+        assert np.array_equal(full.group_df_w[g], lean.group_df_w[g])
+    assert full.pooled_QR.shape == (V, d)        # pooled present when requested
+    assert lean.pooled_QR.shape[1] == 0          # ... and dropped when not

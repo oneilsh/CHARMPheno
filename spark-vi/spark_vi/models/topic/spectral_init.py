@@ -96,8 +96,8 @@ def _domain_candidate_mask(marginal, min_marginal_frac, domain_bounds):
     0 and ending at V; domain d spans [domain_bounds[d], domain_bounds[d+1]).
     None -> a single pooled domain, reproducing the original pooled floor exactly.
     It is VALIDATED here (`domains.validate_domain_bounds`), which is what makes
-    every `find_anchors` caller -- including `spectral_init_beta` and
-    `gated_init.spectral_block_aligned_lambda` -- raise on malformed bounds
+    every `find_anchors` caller -- including `spectral_init_beta` -- raise on
+    malformed bounds
     instead of silently leaving the uncovered tail of the vocabulary ineligible
     to anchor.
     """
@@ -369,8 +369,8 @@ def spectral_init_beta(docs, partition, V: int, *, domain_bounds=None) -> np.nda
     inside the first ``find_anchors`` call.
 
     No in-repo caller passes ``domain_bounds`` here yet: this is the BLOCK-AWARE
-    STM entry point, while the multi-domain gated arc seeds through
-    ``gated_init.multidomain_spectral_lambda``. The passthrough is kept because a
+    STM entry point (the DAG-gated multi-domain spectral seed that used it was
+    removed by ADR 0050). The passthrough is kept because a
     multi-domain STM would need exactly it, and it is covered by
     ``test_spectral_init_beta_threads_domain_bounds_to_both_anchor_passes`` (which
     asserts both anchor passes receive it), not left as untested surface.

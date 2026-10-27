@@ -39,7 +39,6 @@ cache_uri: hdfs:///user/dataproc/charm/case_finding_cache
 # --- model ---
 n_bg: 200                       # exp 0157: 1,200 costs AUC with no legibility gain
 tpn: 1
-init: random                    # exp 0162/0163: every block is data-seeded
 doc_concentration: 0.5
 optimize_doc_concentration: false   # insight 0091
 weight_y: 0.0                   # no supervision during the fit

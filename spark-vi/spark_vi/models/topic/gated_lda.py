@@ -12,7 +12,8 @@ the micro-design comment above `_resolve_eta_boost`.
     for disallowed topics stay zero, welding each node's topic to its subtree's documents.
     An empty frontier is a labeled background doc, gated to the background block only (NOT
     full-K) — the same convention as the Gibbs oracle and the gated STM.
-  * initialize_global — dispatch on a pluggable init strategy (default "random").
+  * initialize_global — the random Gamma draw (per domain when multi-domain), plus the
+    leaves-first schedule's gate seeds when set.
 
 Multi-domain (MixEHR-style; Li, Nair, Lu et al. 2020, Nat. Commun.), keyed on the `domains`
 constructor arg (a sequence of per-domain vocab sizes summing to vocab_size): global_params
@@ -313,7 +314,7 @@ def equalized_alpha(lay, frontier_histogram, mean_alpha):
     return alpha
 
 class GatedOnlineLDA(OnlineLDA):
-    def __init__(self, lay: DagLayout, vocab_size: int, *, init: str = "random",
+    def __init__(self, lay: DagLayout, vocab_size: int, *,
                  optimize_alpha: bool = False,
                  frontier_histogram: dict | None = None,
                  domains: list[int] | None = None,
@@ -359,7 +360,6 @@ class GatedOnlineLDA(OnlineLDA):
         super().__init__(K=lay.K, vocab_size=vocab_size, optimize_alpha=False,
                           eta=forward_eta, **kw)
         self.lay = lay
-        self.init = init
         # Multi-domain (MixEHR-style, Li, Nair, Lu et al. 2020, Nat. Commun.) storage:
         # `domains` is a sequence of per-domain vocab sizes [V_0, V_1, ...] that MUST
         # sum to vocab_size. `domains=None` (default) keeps the single-domain (K, V)
@@ -559,112 +559,21 @@ class GatedOnlineLDA(OnlineLDA):
         return out
 
     def _initialize_global_base(self, data_summary: Any | None) -> dict[str, np.ndarray]:
-        """Random Gamma lambda (default), or a pluggable init strategy's lambda.
+        """Random Gamma lambda: the inherited OnlineLDA draw, or one block per domain.
 
-        "random": inherited OnlineLDA Gamma init — the validated default (the gate already
-        welds topics to nodes, so no symmetry-breaking seed is needed). Other strategies
-        resolve from gated_init.INIT_STRATEGIES and need the training corpus in data_summary.
-        An unknown name raises ValueError.
-
-        Multi-domain (self.domains set, MixEHR-style, Li, Nair, Lu et al. 2020, Nat.
-        Commun.): global_params["lambda"] is a per-domain dict {m: (K, V_m)} instead of
-        a single (K, V) array; alpha/eta are unaffected (they live in the shared
-        DAG-gated theta, not per-domain). "random" draws one Gamma(gamma_shape,
-        1/gamma_shape) block per domain (see `_random_domain_lambda`, the per-domain
-        analogue of OnlineLDA.initialize_global's single draw). domains=None keeps the
-        single-array path below UNCHANGED (byte-identical).
-
-        The init NAME is validated FIRST in both modes, before the precomputed-lambda
-        shortcut. It used to be checked only on the recipe branch, so multi-domain
-        init="banana" with a precomputed spectral_lambda silently succeeded where
-        single-domain raised. Dispatch is then through
-        gated_init.MULTIDOMAIN_INIT_STRATEGIES, so a strategy with no multi-domain
-        implementation raises NotImplementedError rather than quietly getting the
-        spectral recipe run under its name."""
-        if self.domains is not None:
-            if self.init == "random":
-                lam = self._random_domain_lambda()
-            else:
-                from spark_vi.models.topic.gated_init import (
-                    INIT_STRATEGIES, MULTIDOMAIN_INIT_STRATEGIES)
-                if self.init not in INIT_STRATEGIES:
-                    raise ValueError(
-                        f"unknown init strategy {self.init!r}; "
-                        f"known: {['random'] + sorted(INIT_STRATEGIES)}")
-                if data_summary is not None and "spectral_lambda" in data_summary:
-                    # Scalable/shim path (SP3): the per-domain dict lambda is
-                    # precomputed on the RDD and handed over (mirrors the
-                    # single-domain spectral_lambda handoff below); use it directly.
-                    sl = data_summary["spectral_lambda"]
-                    lam = {int(m): np.asarray(v, dtype=np.float64)
-                           for m, v in sl.items()}
-                elif self.init not in MULTIDOMAIN_INIT_STRATEGIES:
-                    raise NotImplementedError(
-                        f"init strategy {self.init!r} has no multi-domain "
-                        f"(per-domain dict lambda) implementation; known "
-                        f"multi-domain strategies: "
-                        f"{['random'] + sorted(MULTIDOMAIN_INIT_STRATEGIES)}")
-                else:
-                    # Multi-domain spectral seed: block-aligned anchor recipe with the
-                    # per-domain candidate floor, split into per-domain lambda_m. Fixes
-                    # the random-init topic-death of insight 0066 (a node anchors on its
-                    # sparse-domain word, defining the topic across both domains via Q_01).
-                    scope = (data_summary or {}).get("anchor_scope", "closure")
-                    topo = (data_summary or {}).get("topo_order", "forward")
-                    lam = MULTIDOMAIN_INIT_STRATEGIES[self.init](
-                        data_summary, self.lay, self.domains,
-                        anchor_scope=scope, topo_order=topo,
-                        anchor_candidates=(data_summary or {}).get("anchor_candidates"),
-                        anchor_stats=(data_summary or {}).get("anchor_stats"),
-                        n_bg_anchors=(data_summary or {}).get("n_bg_anchors"))
-            _rows = (data_summary or {}).get("random_rows")
-            if _rows:
-                # Unanchored background rows (gated_init.resolve_bg_anchors): the
-                # random path's own Gamma draw, row for row, so a 1,200-topic
-                # background seeds exactly as 0132's flat fit did while the
-                # anchored rows and every node block keep their spectral seed.
-                rnd = self._random_domain_lambda()
-                idx = np.asarray(sorted(int(r) for r in _rows), dtype=np.int64)
-                for m in lam:
-                    lam[m][idx] = rnd[int(m)][idx]
-            return {
-                "lambda": lam,
-                "alpha": self.alpha.copy(),         # defensive copy — runner mutates
-                "eta": np.array(self.eta),          # 0-d ndarray for combine_stats type-uniformity
-            }
-        if self.init == "random":
+        The gate welds topics to nodes, so no symmetry-breaking seed is needed; the
+        data-driven gate seeds (`set_gate_schedule`) are applied on top. Multi-domain
+        (self.domains set, MixEHR-style, Li, Nair, Lu et al. 2020, Nat. Commun.):
+        global_params["lambda"] is a per-domain dict {m: (K, V_m)} drawn by
+        `_random_domain_lambda`; alpha/eta are unaffected (they live in the shared
+        DAG-gated theta, not per-domain). domains=None is OnlineLDA's own draw."""
+        if self.domains is None:
             return super().initialize_global(data_summary)
-        from spark_vi.models.topic.gated_init import INIT_STRATEGIES
-        if self.init not in INIT_STRATEGIES:
-            raise ValueError(
-                f"unknown init strategy {self.init!r}; "
-                f"known: {['random'] + sorted(INIT_STRATEGIES)}"
-            )
-        gp = super().initialize_global(data_summary)
-        rnd = np.array(gp["lambda"], dtype=np.float64, copy=True)   # the random draw
-        # Scalable path: the shim precomputed the (K,V) lambda on the RDD and
-        # handed it over via data_summary (mirrors the STM shim's spectral_beta);
-        # use it directly. Dense path: run the collect-to-driver strategy.
-        if data_summary is not None and "spectral_lambda" in data_summary:
-            gp["lambda"] = np.asarray(data_summary["spectral_lambda"], dtype=np.float64)
-        else:
-            scope = (data_summary or {}).get("anchor_scope", "closure")
-            topo = (data_summary or {}).get("topo_order", "forward")
-            # Guided anchors (spec 2026-10-05): the shim passes the per-node
-            # preferred sets and an (optional) stats dict through data_summary,
-            # the same channel as anchor_scope/topo_order; absent -> unguided.
-            gp["lambda"] = INIT_STRATEGIES[self.init](
-                data_summary, self.lay, self.V, anchor_scope=scope, topo_order=topo,
-                anchor_candidates=(data_summary or {}).get("anchor_candidates"),
-                anchor_stats=(data_summary or {}).get("anchor_stats"),
-                n_bg_anchors=(data_summary or {}).get("n_bg_anchors"))
-        _rows = (data_summary or {}).get("random_rows")
-        if _rows:
-            # Unanchored background rows get the random path's Gamma draw (see
-            # the multi-domain branch above); `rnd` is that draw for this seed.
-            idx = np.asarray(sorted(int(r) for r in _rows), dtype=np.int64)
-            gp["lambda"][idx] = rnd[idx]
-        return gp
+        return {
+            "lambda": self._random_domain_lambda(),
+            "alpha": self.alpha.copy(),         # defensive copy — runner mutates
+            "eta": np.array(self.eta),          # 0-d ndarray for combine_stats type-uniformity
+        }
 
     def _random_domain_lambda(self) -> dict[int, np.ndarray]:
         """Per-domain Gamma(gamma_shape, 1/gamma_shape) draw, one (K, V_m) block per

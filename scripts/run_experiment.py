@@ -719,6 +719,32 @@ def build_dag_placement_args(
     return args
 
 
+# Fit options ADR 0050 removed from the gated_pc fit, with the value that meant
+# "off". A spec that still asks for one (any other value) is refused rather than
+# silently fitting without it; the inert value (e.g. `init: random`) is accepted,
+# so a run's old front matter stays readable when it never used the option.
+_GATED_PC_REMOVED_OPTIONS = {
+    "init": "random",
+    "spectral_method": "auto", "spectral_max_vocab": 8000, "spectral_d": 0,
+    "spectral_min_doc_freq": 5, "spectral_bg_anchors": 0,
+    "anchor_scope": "closure", "spectral_topo_order": "forward",
+    "spectral_marginal_floor": "none",
+}
+
+
+def _refuse_removed_gated_pc_options(effective: dict) -> None:
+    """Refuse a gated_pc spec that asks for an option ADR 0050 removed."""
+    for key, inert in _GATED_PC_REMOVED_OPTIONS.items():
+        if key not in effective or effective[key] is None:
+            continue
+        v = effective[key]
+        if v == inert or str(v) == str(inert):
+            continue
+        raise ValueError(
+            f"gated_pc spec sets {key}={v!r}, an option ADR 0050 removed (it stays "
+            f"recoverable from git, commit fff7bf4067); drop it from the spec")
+
+
 def build_gated_pc_args(
     effective: dict, out_dir: str, resume_from: Path | None = None,
 ) -> list[str]:
@@ -730,6 +756,7 @@ def build_gated_pc_args(
     nodes*tpn); --k applies only to the optional --with-dag-head arm. Resume is
     unsupported here (v1); resume_from is ignored.
     """
+    _refuse_removed_gated_pc_options(effective)
     cdr, billing = _require_workspace_env()
     args = [
         "--cdr", cdr,
@@ -791,32 +818,10 @@ def build_gated_pc_args(
         args.append("--head-intercept")
     if effective.get("head_standardize"):
         args.append("--head-standardize")
-    # Spectral (anchor-word) lambda init for the gated engine (insight 0079). Emitted
-    # ONLY for a non-random init: the driver already defaults to "random", so omitting
-    # the flag there keeps every existing gated_pc run's arg string byte-identical (the
-    # shared defaults carry init: random). A spectral run rides its knobs alongside.
-    if str(effective.get("init", "random")) != "random":
-        args.extend([
-            "--init", str(effective["init"]),
-            "--spectral-method", str(effective.get("spectral_method", "auto")),
-            "--spectral-max-vocab", str(effective.get("spectral_max_vocab", 8000)),
-            "--spectral-d", str(effective.get("spectral_d", 0)),
-            "--spectral-min-doc-freq", str(effective.get("spectral_min_doc_freq", 5)),
-            "--anchor-scope", str(effective.get("anchor_scope", "closure")),
-            "--spectral-topo-order", str(effective.get("spectral_topo_order", "forward")),
-        ])
     if str(effective.get("count_transform", "none")) != "none":
         args.extend(["--count-transform", str(effective["count_transform"])])
     if str(effective.get("alpha_init", "uniform")) != "uniform":
         args.extend(["--alpha-init", str(effective["alpha_init"])])
-    # HPO-guided spectral anchors (spec 2026-10-05, exp 0124). Emitted ONLY
-    # when set — the driver defaults to '' — so every existing arg string stays
-    # byte-identical. The value is a path to the profile-eta TSV.
-    if str(effective.get("spectral_marginal_floor", "none")) != "none":
-        args.extend(["--spectral-marginal-floor", str(effective["spectral_marginal_floor"])])
-    if int(effective.get("spectral_bg_anchors", 0) or 0) > 0:
-        # exp 0134: anchor only the first N background topics (0 = all, omitted).
-        args.extend(["--spectral-bg-anchors", str(int(effective["spectral_bg_anchors"]))])
     if effective.get("doc_concentration") is not None:
         args.extend(["--doc-concentration", str(effective["doc_concentration"])])
     if effective.get("dag_source"):

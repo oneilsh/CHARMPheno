@@ -948,63 +948,34 @@ def _digest_words(t, lams, sh, inv_maps, names, name_by_id, dom_names, *,
     return parts
 
 
-def load_spectral_anchors(run_dir):
-    """`<run>/spectral_anchors.json` (written for every spectral fit since exp
-    0125) -> {engine node id: {"anchors": [vocab idx], "from_profile": [bool]}};
-    None when the run has none (random init, or a pre-0125 fit)."""
-    p = Path(run_dir) / "spectral_anchors.json"
-    if not p.exists():
-        return None
-    doc = json.load(open(p))
-    return {int(e): {"anchors": [int(a) for a in r.get("anchors", [])],
-                     "from_profile": [bool(f) for f in r.get("from_profile", [])]}
-            for e, r in doc.get("nodes", {}).items()}
-
-
-def _anchor_word(idx, from_profile, inv_maps, names, name_by_id, dom_names,
-                 maxlen=28):
-    """Name one spectral anchor. A multi-domain seed runs over the CONCATENATED
-    vocabulary [domain 0; domain 1; ...] (gated_lda `_domain_bounds`), so an
-    anchor index past domain 0 is a measurement or drug token: split it by the
-    per-domain sizes and tag the non-condition domain."""
-    i, d = int(idx), 0
-    while inv_maps and d < len(inv_maps) - 1 and i >= len(inv_maps[d]):
-        i -= len(inv_maps[d])
-        d += 1
-    cid = inv_maps[d].get(i) if inv_maps else None
-    if cid is None:
-        nm = f"idx:{idx}"
-    else:
-        nm = ((names or {}).get(cid) or (name_by_id or {}).get(cid)
-              or f"cid:{cid}")
-        if d > 0:
-            nm = f"[{(dom_names[d] if d < len(dom_names) else d)}] {nm}"
-    return _trunc(nm, maxlen) + ("*" if from_profile else "")
-
-
-def init_provenance(manifest, anchors):
+def init_provenance(manifest):
     """One line: how the topics were seeded, and whether HPO entered anywhere.
 
-    The manifest records the init block from the fit driver's `init` record on
-    (later fits); older fits fall back to what the run dir proves — anchors on
-    file means a spectral seed. HPO enters two ways, both recorded only when
-    set: guided anchors (`spectral_anchor_profile`) and the word-side prior
-    (`profile_eta`); the count of anchors drawn from a profile is read off the
-    anchors file itself."""
+    Read from the manifest alone. A fit records an `init` block only when it was
+    not the random draw (spectral fits up to exp 0161; ADR 0050 removed that
+    init), and a `gate_schedule` block when the leaves-first seeds were on. HPO
+    enters through the profile seed (`gate_schedule.seed_profile`); older fits
+    may also record guided anchors or the profile-eta prior, both since removed."""
     ini = manifest.get("init")
-    if isinstance(ini, dict):
-        parts = [str(ini.get("init", "?"))]
-        if ini.get("init") == "spectral":
-            parts += [f"{k}={ini[k]}" for k in
-                      ("spectral_method", "spectral_d", "anchor_scope",
-                       "spectral_topo_order") if ini.get(k) is not None]
-    elif anchors is not None:
-        parts = ["spectral (anchors on file; settings not in this manifest)"]
+    if isinstance(ini, dict) and ini.get("init") not in (None, "random"):
+        parts = [str(ini.get("init"))]
+        parts += [f"{k}={ini[k]}" for k in
+                  ("spectral_method", "spectral_d", "anchor_scope",
+                   "spectral_topo_order") if ini.get(k) is not None]
     else:
-        parts = ["random or unrecorded (no spectral_anchors.json)"]
+        parts = ["random"]
     if manifest.get("spectral_bg_anchors"):
         parts.append(f"bg_anchors={manifest['spectral_bg_anchors']}")
+    gs = manifest.get("gate_schedule")
+    if isinstance(gs, dict):
+        seed = f"gate seed {gs.get('seed_mode', 'subtree')}"
+        if gs.get("seed_leaves"):
+            seed += " + leaves"
+        parts.append(seed)
     hpo = []
+    if isinstance(gs, dict) and gs.get("seed_profile"):
+        hpo.append("profile seed "
+                   f"({Path(str(gs['seed_profile'].get('path', ''))).name})")
     if manifest.get("spectral_anchor_profile"):
         hpo.append("guided anchors "
                    f"({Path(str(manifest['spectral_anchor_profile'].get('path', ''))).name})")
@@ -1012,9 +983,6 @@ def init_provenance(manifest, anchors):
         pe = manifest["profile_eta"]
         hpo.append(f"profile-eta prior (strength {pe.get('strength')}, "
                    f"{Path(str(pe.get('path', ''))).name})")
-    if anchors:
-        n_prof = sum(1 for r in anchors.values() if any(r["from_profile"]))
-        hpo.append(f"{n_prof}/{len(anchors)} nodes have a profile anchor")
     parts.append("HPO: " + ("; ".join(hpo) if hpo else "none"))
     return " · ".join(parts)
 
@@ -1048,10 +1016,7 @@ def build_digest(run_dir, *, exemplars=8, t_words=6, bundle_meta_path=None,
     section, no borrowed-topics columns -- a few hundred tokens, not thousands.
 
     Init provenance rides along so a block's words can be read against how it
-    was seeded: an `init:` header line (`init_provenance`), and per node line
-    the spectral anchor word(s) from `<run>/spectral_anchors.json` after `⚓`
-    (`*` = the anchor came from the node's HPO profile). A block whose words
-    drifted off its anchor was seeded one way and pulled another by the data.
+    was seeded: an `init:` header line (`init_provenance`).
     With `own_codes_path` (`code_map.tsv`), `†` marks the node's own attesting
     codes among its words — the mapping read: a block with no `†` word is not
     carrying its own diagnosis (insight 0094's parent-claims-child failure).
@@ -1107,8 +1072,6 @@ def build_digest(run_dir, *, exemplars=8, t_words=6, bundle_meta_path=None,
         _, i2c = node_order(manifest)
         own_idx = own_code_vocab_idx(load_code_map(own_codes_path), i2c, vm0i)
 
-    anchors = load_spectral_anchors(run_dir)
-
     def words(t):
         eng = topic2engine[t]
         pidx = prof.get(eng) if (prof and eng is not None) else None
@@ -1118,21 +1081,12 @@ def build_digest(run_dir, *, exemplars=8, t_words=6, bundle_meta_path=None,
                            k=t_words, profile_idx=pidx, own_idx=oidx)
         return (" | " + wl) if wl else ""
 
-    def anchor_tag(t):
-        eng = topic2engine[t]
-        rec = anchors.get(eng) if (anchors and eng is not None) else None
-        if not rec:
-            return ""
-        return " ⚓" + "·".join(
-            _anchor_word(i, f, inv_maps, names, name_by_id, dom_names)
-            for i, f in list(zip(rec["anchors"], rec["from_profile"]))[:3])
-
     def line(t):
         dd = f"d{depth_of(t)} " if depths else ""
         st = "STARVED" if sh["support_frac"][t] > 0.5 else "fed"
         return (f"  {(labels[t] or '')[:34].ljust(34)} {dd}"
                 f"ev{sh['evidence'][t]:.3g} f{sh['support_frac'][t]:.2f} {st}"
-                f"{anchor_tag(t)}{words(t)}")
+                f"{words(t)}")
 
     fg = np.arange(n_bg, K)
     frac = sh["support_frac"][fg]
@@ -1147,7 +1101,7 @@ def build_digest(run_dir, *, exemplars=8, t_words=6, bundle_meta_path=None,
       f"{100 * starved / max(fg.size, 1):.0f}% starved (frac>0.5) · "
       f"ev min {ev.min():.3g} / med {q[0]:.3g} / p90 {q[1]:.3g} / max {ev.max():.3g}")
     w(f"decoder: {decoder_src}")
-    w("init: " + init_provenance(manifest, anchors))
+    w("init: " + init_provenance(manifest))
     if own_idx is not None:
         w(f"`†` = the node's own attesting code ({Path(own_codes_path).name}); "
           f"a fed block with no † word is not carrying its own diagnosis")
