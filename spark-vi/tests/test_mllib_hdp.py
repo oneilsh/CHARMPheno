@@ -9,7 +9,7 @@ import pytest
 # Param-surface defaults & translation
 # ---------------------------------------------------------------------------
 
-def test_shared_param_defaults_match_mllib_lda():
+def test_shared_param_defaults_match_mllib_lda(spark):
     """Each shared Param defaults to the same value pyspark.ml.clustering.LDA uses,
     *except* `k` (HDP uses k=T which is a much bigger upper-bound than LDA's k)
     and the optimize* flags (HDP defers γ/α optimization per ADR 0011).

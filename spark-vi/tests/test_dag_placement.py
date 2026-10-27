@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from spark_vi.models.topic.dag_placement import DagLayout, frontier_from_coded, fit_gated, profile
 
 PARENT = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}   # root 0 -> families 1,2 -> subtypes
@@ -40,6 +41,7 @@ def test_dag_placement_corpus_shapes():
     below3 = [d for d, y in zip(docs, labels) if y in {3}]
     assert any(node_codes[3] in d for d in below3)
 
+@pytest.mark.slow
 def test_fit_gated_learns_node_signatures():
     from tests._stm_synth import dag_placement_corpus
     docs, labels, _ = dag_placement_corpus(
@@ -87,6 +89,7 @@ def test_frontier_from_coded_cases():
     # single-parent tree: ancestor+descendant collapses to the descendant
     assert frontier_from_coded([1, 3], DagLayout(PARENT)) == frozenset({3})
 
+@pytest.mark.slow
 def test_fit_gated_accepts_frontier_sets():
     from tests._stm_synth import dag_placement_corpus
     # comorbid training labels (sets) must be accepted and produce a valid beta_hat

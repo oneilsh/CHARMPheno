@@ -181,6 +181,9 @@ def main(argv=None) -> int:
     cont_cols = [c for c in args.continuous_cols.split(",") if c]
     doc_spec = doc_spec_from_cli("patient_cohort", min_doc_length=None)
 
+    # A session that already exists (a test's, a notebook's) belongs to its
+    # creator: stop only the one this script starts.
+    _owns_spark = SparkSession.getActiveSession() is None
     spark = _build_spark()
     try:
         omop = load_omop_parquet(str(args.omop), spark=spark)
@@ -276,7 +279,8 @@ def main(argv=None) -> int:
                  args.out_dir, args.K, len(vocab_map))
         return 0
     finally:
-        spark.stop()
+        if _owns_spark:
+            spark.stop()
 
 
 if __name__ == "__main__":

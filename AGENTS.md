@@ -79,7 +79,7 @@ and after a refactor-only hashed edit check that a `--bundle-only` rebuild
 reproduces the corpus counts in the previous run's `bundle_meta.json`.
 
 - **Driver-owned files are free to edit:** `analysis/cloud/{gated_pc_cloud,
-  gated_pc_readout,distributed_readout,readout_dag,conversion_sidecar,prevalence_check,
+  gated_pc_readout,doc_key,readout_dag,conversion_sidecar,prevalence_check,
   topic_npmi,inspect_topics}.py`,
   `scripts/run_experiment.py`, the `Makefile`, tests. Prefer solving at a driver
   **seam** (the `attested_provider` / injection-parameter pattern) over editing
@@ -90,7 +90,7 @@ reproduces the corpus counts in the previous run's `bundle_meta.json`.
   `mapPartitions`) must be on `--py-files` in **every** submit path that can
   trigger it, or executors hit `ModuleNotFoundError`.
 - **ADR 0047 closure doctrine:** nothing array-shaped rides a task closure;
-  `treeAggregate` zeros are None-sentinel. Study `distributed_readout.py`'s
+  `treeAggregate` zeros are None-sentinel. Study `spark_vi/readout/spark.py`'s
   `SparkStatsFn` before touching the distributed paths.
 
 ### Egress floor (All of Us)
@@ -142,7 +142,7 @@ Cluster runs happen on the user's Dataproc cluster, checked out at
    sidecar caches default to `hdfs://…`, which dies with the cluster — a fresh
    cluster has empty HDFS and must rebuild. Expensive artifacts (the sidecar,
    the bundle) therefore rebuild per cluster unless pointed at a **persistent,
-   in-boundary GCS bucket** (`GPR_SIDECAR_URI` / `GPR_CACHE_URI` / `LR_CACHE_URI`).
+   in-boundary GCS bucket** (`GPR_SIDECAR_URI` / `GPR_CACHE_URI`).
    Do not guess bucket names — the Makefile defaults may be stale; ask the user
    for the current in-boundary staging bucket before writing to GCS.
    Right-size the master for the driver-collect wall of record runs, not just
@@ -207,8 +207,11 @@ viewed in a Markdown previewer.)
 ## Project layout and boundaries
 
 - `spark-vi/` is a pure-Python, domain-agnostic framework.
-  - Public API: `spark_vi.core.{VIModel, VIRunner, VIConfig, VIResult}`.
-  - Ships generic `spark_vi.models.OnlineHDP` (bag-of-words, not clinical).
+  - Public API: `spark_vi.core.{VIModel, VIRunner, LocalRunner, VIConfig, VIResult}`
+    (two engines, one model contract: ADR 0051).
+  - Ships generic topic models (`spark_vi.models.topic`: LDA, HDP, STM,
+    DAG-gated LDA) and the model-agnostic per-node readout (`spark_vi.readout`:
+    heads over any feature column, Spark and local backends).
   - **Must never import `charmpheno`** or clinical / OMOP / BigQuery code.
 - `charmpheno/` is the clinical specialization.
   - Wraps `spark_vi.models.OnlineHDP` with OMOP semantics, concept vocab,
@@ -277,24 +280,48 @@ Every non-obvious choice or observation leaves a durable, numbered artifact in
 
 ## Testing expectations
 
-- **Package unit tests:** `make test` — unit only, must finish under ~10s.
-- **Package integration:** `make test-all` (`@pytest.mark.slow`: simulator data,
-  local Spark, minutes-scale).
-- **Cluster-driver tests** (`analysis/cloud/`, under `tests/scripts/`) need the
-  framework on the path, and `-m ""` to include the slow local-Spark cases:
-  ```bash
-  PYTHONPATH=spark-vi poetry run pytest tests/scripts/<file> -p no:randomly -m ""
-  ```
-  Some failures are pre-existing/environmental (e.g. `charmpheno.omop` import
-  errors inside PySpark UDF workers) — baseline with `git stash` first; the
-  obligation is no NEW failures, and the tripwire suite stays byte-identical.
-- **Cluster tests:** `@pytest.mark.cluster`, manual only via `make test-cluster`.
+Three tiers, selected by marker. Run from the repo root (the root poetry env has
+pyspark and scikit-learn; the package-local envs may not):
+
+| tier | command | what | wall |
+|---|---|---|---|
+| unit | `make test` | everything not `slow`/`cluster`: pure numpy/Python | seconds |
+| integration | `make test-all` | + `@pytest.mark.slow`: local Spark, simulator fits, agreement tests | ~25 min |
+| cluster | `make test-cluster` | `@pytest.mark.cluster`, needs Dataproc | manual |
+
+One suite directly: `PYTHONPATH=.:spark-vi:charmpheno poetry run pytest <path> -p no:randomly`
+(add `-m ""` to include its slow cases).
+
+**What is slow.** Any test that requests the `spark` fixture is marked `slow`
+automatically (a `pytest_collection_modifyitems` hook in each conftest that defines
+the fixture), so a new Spark test never lands in the unit tier by accident. A
+pure-numpy test that takes more than ~0.3 s (a recovery fit, a simulator sweep)
+gets `@pytest.mark.slow` explicitly. The unit tier's budget is ~10 s per package;
+if it grows past that, find the new slow test (`--durations=20`) and mark it.
+
+**When to run what.**
+- **Every edit loop:** `make test`, or the one unit file you are changing. Cheap
+  enough to run constantly.
+- **Before every commit:** `make test`, plus the slow tests of the files the change
+  touches (`pytest <file> -m ""`). A change to `spark_vi.core`, `spark_vi.readout`
+  or a model's `local_update`/`update_global` also runs that package's slow tier
+  (`make -C spark-vi test-all` equivalent: `pytest spark-vi/tests -m "not cluster"`),
+  because the Spark-vs-local agreement tests live there.
+- **Before handing a cluster command to the user, and at the end of a multi-commit
+  piece of work:** `make test-all`. A cluster run costs hours; a local Spark
+  failure caught first costs minutes.
+- **After editing a hashed module:** the tripwire suite
+  (`tests/scripts/test_case_finding_cache_mondo.py`) must pass byte-identical, in
+  the same commit.
+
+Some driver-suite failures are pre-existing/environmental (e.g. `charmpheno.omop`
+import errors inside PySpark UDF workers) — baseline with `git stash` first; the
+obligation is no NEW failures (compare by test id).
 
 ## When you finish a change
 
 Before declaring work complete:
-- Tests pass (`make test` minimum; `make test-all` if integration surfaced
-  changed; the relevant `tests/scripts/` suite if a driver changed).
+- Tests pass at the tier the change needs (Testing expectations, above).
 - Relevant `docs/architecture/*.md` section updated if the change was
   architectural, or an ADR records the exception. A run that surfaced something
   gets an experiment/insight/report entry.

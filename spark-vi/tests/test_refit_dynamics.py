@@ -12,6 +12,7 @@
    value) -- see scripts/refit_dynamics_synthetic.py for the real experiment.
 """
 from __future__ import annotations
+import pytest
 
 import numpy as np
 
@@ -48,6 +49,7 @@ class TestEtaScaleScalesVariance:
 
 
 class TestOneRefitRoundRuns:
+    @pytest.mark.slow
     def test_one_refit_round_runs(self):
         """TINY smoke: plant -> fit(unit) -> calibrate -> refit(pin=c0) ->
         recalibrate. Not asserting dynamics -- just that the loop wiring

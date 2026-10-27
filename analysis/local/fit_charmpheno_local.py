@@ -48,6 +48,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
+    # A session that already exists (a test's, a notebook's) belongs to its
+    # creator: stop only the one this script starts.
+    _owns_spark = SparkSession.getActiveSession() is None
     spark = _build_spark()
     try:
         from charmpheno.omop import load_omop_parquet, validate
@@ -71,7 +74,8 @@ def main(argv: list[str] | None = None) -> int:
                  args.output, result.n_iterations, result.converged)
         return 0
     finally:
-        spark.stop()
+        if _owns_spark:
+            spark.stop()
 
 
 if __name__ == "__main__":

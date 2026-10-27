@@ -517,6 +517,7 @@ class TestCorpusPredictiveGainGated:
         }
         return docs, part, gp, K
 
+    @pytest.mark.slow
     def test_signature_topic_exceeds_diluted_background_and_shapes_and_within_group(self):
         """Signature check: group a's foreground topic (used by EVERY group-a
         doc) must show higher mean_gain than a background topic (used by only
@@ -557,6 +558,7 @@ class TestCorpusPredictiveGainGated:
 
         assert result["n_docs"] == len(docs)
 
+    @pytest.mark.slow
     def test_depth_is_summed_ratio_not_per_doc_mean(self):
         """Non-vacuous pin on the depth formula: depth[k] must equal
         depth_num[k] / depth_den[k] computed from the RETURNED totals (proves
@@ -572,6 +574,7 @@ class TestCorpusPredictiveGainGated:
         expected = result["depth_num"][mask] / result["depth_den"][mask]
         np.testing.assert_allclose(result["depth"][mask], expected, rtol=1e-10)
 
+    @pytest.mark.slow
     def test_depth_is_nan_iff_depth_den_not_positive(self):
         """Pins the depth_den > 0 guard (not != 0): depth is only defined as
         a SHARE of total predictive structure when that total is positive --
@@ -1080,6 +1083,7 @@ class TestSmoothedPredictiveScore:
         assert np.nanmax(np.abs(nulls)) < 0.5
 
     # -- test 5: the topic ranking is robust to lambda -----------------------
+    @pytest.mark.slow
     def test_ranking_robust_to_smoothing_lambda(self):
         """A good contrast is robust to lambda, not tuned on it (Fable's check):
         the topic ranking by mean_gain is IDENTICAL across
@@ -1105,6 +1109,7 @@ class TestSmoothedPredictiveScore:
         np.testing.assert_array_equal(order_10, order_30)
 
     # -- test 6: presence = fraction(Delta > 0) ------------------------------
+    @pytest.mark.slow
     def test_presence_is_fraction_delta_positive(self):
         """The operating presence definition: a planted signature (foreground)
         topic -- used by EVERY doc in its group -- has presence ~= 1 (nearly all

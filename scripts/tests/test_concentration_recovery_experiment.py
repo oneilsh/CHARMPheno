@@ -6,6 +6,7 @@ driver only orchestrates those calls, so we just check it runs end-to-end on
 a tiny config and returns the expected shape.
 """
 from __future__ import annotations
+import pytest
 
 import numpy as np
 
@@ -14,6 +15,7 @@ import concentration_recovery_experiment as cre
 
 
 class TestRunSmallSmoke:
+    @pytest.mark.slow
     def test_run_small_smoke(self):
         results = cre.run(
             K=4, V=80, D=40, doc_len=30, holdout_frac=0.3, seed=0,

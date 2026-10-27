@@ -114,6 +114,7 @@ class TestPlantCorpus:
 
 
 class TestSTMRecovery:
+    @pytest.mark.slow
     def test_stm_recovers_planted_concentration(self):
         beta = make_shared_beta(K=6, V=300, seed=0)
         docs, theta_true = plant_corpus(
@@ -144,6 +145,7 @@ class TestLDARecovery:
 
         assert _median_top_mass(theta_small_alpha) > _median_top_mass(theta_large_alpha)
 
+    @pytest.mark.slow
     def test_lda_optimize_alpha_runs(self):
         K = 6
         beta = make_shared_beta(K=K, V=300, seed=0)
@@ -238,6 +240,7 @@ class TestPredictiveLoglik:
 
 
 class TestSweepHeldout:
+    @pytest.mark.slow
     def test_sweep_uses_same_split_across_knobs(self, monkeypatch):
         import spark_vi.eval.topic.concentration_recovery as cr
 
@@ -266,6 +269,7 @@ class TestSweepHeldout:
 
 
 class TestHeldoutGoldStandard:
+    @pytest.mark.slow
     def test_heldout_gold_standard_recovers_planted_concentration(self):
         beta = make_shared_beta(K=6, V=300, seed=0)
         docs, theta_true = plant_corpus(
@@ -308,6 +312,7 @@ class TestHeldoutGoldStandard:
 
 
 class TestLDAHeldoutGoldStandard:
+    @pytest.mark.slow
     def test_lda_heldout_gold_standard_recovers_planted_concentration(self):
         beta = make_shared_beta(K=6, V=300, seed=0)
         docs, theta_true = plant_corpus(
@@ -422,6 +427,7 @@ class TestBetaSharpness:
 
 
 class TestCofitBeta:
+    @pytest.mark.slow
     def test_stm_cofit_recovers_planted_beta_better_than_random(self):
         # On an easy clean regime, co-fit STM beta should match the planted
         # topics far better than a random stochastic matrix (permutation-
@@ -444,6 +450,7 @@ class TestCofitBeta:
         assert fit_err < rand_err
         assert fit_err < 0.3
 
+    @pytest.mark.slow
     def test_lda_cofit_alpha_opt_changes_alpha(self):
         K, V = 6, 200
         beta = make_shared_beta(K, V, seed=0)
@@ -462,6 +469,7 @@ class TestCofitBeta:
 
 
 class TestSweepHeldoutCofit:
+    @pytest.mark.slow
     def test_stm_cofit_sweep_smoke(self):
         K, V = 5, 120
         beta = make_shared_beta(K, V, seed=0)
@@ -481,6 +489,7 @@ class TestSweepHeldoutCofit:
         for b in out["beta_hat"].values():
             assert b.shape == (K, V)
 
+    @pytest.mark.slow
     def test_lda_cofit_sweep_smoke(self):
         K, V = 5, 120
         beta = make_shared_beta(K, V, seed=0)

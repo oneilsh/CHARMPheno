@@ -1,11 +1,13 @@
 # tests/scripts/test_build_dashboard_gated.py
 import sys, json
+import pytest
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "analysis" / "local"))
 
 
+@pytest.mark.slow
 def test_local_dashboard_emits_gating_files(tmp_path):
     from simulate_gated_omop import main as sim_main
     from fit_stm_local import main as fit_main

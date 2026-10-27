@@ -94,6 +94,7 @@ def _planted_scale_corpus(*, K_scale, seed=0, D_group=60):
 # ---------------------------------------------------------------------------
 
 class TestScaleBoundedAndClimbs:
+    @pytest.mark.slow
     def test_scale_bounded_and_above_unit_pass(self):
         from spark_vi.mllib.topic.stm import (
             corpus_eta_scale_gated, corpus_eta_variance_gated,
@@ -126,6 +127,7 @@ class TestScaleBoundedAndClimbs:
 # ---------------------------------------------------------------------------
 
 class TestScaleConverges:
+    @pytest.mark.slow
     def test_converges_within_max_iter(self):
         from spark_vi.mllib.topic.stm import corpus_eta_scale_gated
 
@@ -151,6 +153,7 @@ class TestScaleConverges:
 # ---------------------------------------------------------------------------
 
 class TestReferenceExcluded:
+    @pytest.mark.slow
     def test_reference_topic_not_in_pool(self):
         from spark_vi.mllib.topic.stm import corpus_eta_scale_gated
 

@@ -281,6 +281,28 @@ in optional chunks merged by `combine_stats`. Eight fast tests
 gated LDA with the leaves-first schedule: full batch equal to 1e-8, minibatch topic
 distance Spark-vs-local 0.096 against local-vs-local 0.071.
 
+**ADR 0051 step 2 (readout extraction), 2026-10-27 — done.** `spark_vi.readout`:
+`kernels` (the numpy kernels, verbatim from `distributed_readout.py`), `solver` (the
+batched L-BFGS, moved from `models/topic/batched_lr.py`), `heads` (`fit_heads`,
+checkpoints and the heads npz, from `gated_pc_cloud`), `spark` (`SparkReadoutData`,
+the passes and the lean collect), `local` (`LocalReadoutData`, new) and `stacked`
+(the closure product); the Spark-action retry went to `spark_vi.core.retry`. The
+driver keeps the clinical seams: `distributed_readout.py` became `doc_key.py` (the
+doc key only, no longer on `--py-files`), and `gated_pc_cloud.readout_arm(engine=)`
+(was `distributed_score_arm`) runs either backend; `gated_pc_readout
+--readout-engine {spark,local}` replaces the no-op `--readout-mode`. The pre-index
+eligibility run of the lean collect (cut with the pre-index closure) is gone. The
+metrics stay in `analysis/` until step 4 (spark-vi has no scikit-learn). Tests:
+the kernel and heads tests moved into spark-vi; the readout integration test runs
+both engines against the sklearn oracle (it errored in the old baseline and passes
+now); local and Spark backends fit the same heads to 1e-6.
+
+**Test tiers, 2026-10-27.** Every test that requests the `spark` fixture is now
+marked `slow` by a conftest hook, plus explicit marks on the pure-numpy tests over
+~0.3 s: spark-vi's unit suite went from ~9.5 min to 4.7 s (544 tests), charmpheno's
+from ~98 s to 1.1 s (148). AGENTS.md "Testing expectations" states the tiers and
+when to run each.
+
 ## Questions for the maintainer
 
 1. Antidepressant/MDD (Hughes) line, including its `cohorts.py` block and the

@@ -949,6 +949,7 @@ import signal as _signal
 import threading
 
 
+@pytest.mark.slow
 def test_run_subprocess_writes_killed_marker_on_sigterm(tmp_path):
     """SIGTERM during the tee loop writes a killed marker referencing last seen iter."""
     summary_path = tmp_path / "summary.md"

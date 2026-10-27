@@ -22,6 +22,7 @@ def test_gated_corpus_shapes_and_groups():
     assert foreground_recovers_group(planted, part, "a", planted, thresh=0.5)
 
 
+@pytest.mark.slow
 def test_unit_diagonal_bounds_sigma_regardless_of_init():
     """Unit-diagonal M-step structurally removes the sigma_init Sigma-blowup the
     old xfail documented (insight 0033): the diagonal is pinned to 1 every

@@ -45,3 +45,13 @@ def spark():
     )
     yield session
     session.stop()
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(config, items):
+    """Every test that starts local Spark is `slow` (AGENTS.md, Testing); see
+    spark-vi/tests/conftest.py for the rule. `tryfirst` so the mark exists before
+    `-m` deselects."""
+    for item in items:
+        if "spark" in getattr(item, "fixturenames", ()):
+            item.add_marker(pytest.mark.slow)

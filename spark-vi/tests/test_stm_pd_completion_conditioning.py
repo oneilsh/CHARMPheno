@@ -143,6 +143,7 @@ def test_gated_shape_naive_indefinite_pd_complete_well_conditioned():
 
 # --- Layer 2: end-to-end recovery invariance to full-Sigma condition --------
 
+@pytest.mark.slow
 def test_recovery_invariant_to_full_sigma_condition_number():
     """Unit-diagonal M-step: Sigma is a correlation matrix each seed; recovery
     is stable and the diagonal is pinned to 1 (no variance runaway to track)."""

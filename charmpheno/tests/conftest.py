@@ -35,3 +35,17 @@ def spark():
     )
     yield session
     session.stop()
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(config, items):
+    """Every test that starts local Spark is `slow` (AGENTS.md, Testing).
+
+    The session's JVM alone costs seconds and each Spark action ~1 s, so a Spark
+    test cannot live in the unit suite's ~10 s budget. Marking by fixture keeps the
+    rule mechanical: a new Spark test is slow without anyone remembering to say so.
+    Pure-numpy tests that are slow for other reasons carry `@pytest.mark.slow`
+    explicitly. `tryfirst` so the mark exists before `-m` deselects."""
+    for item in items:
+        if "spark" in getattr(item, "fixturenames", ()):
+            item.add_marker(pytest.mark.slow)

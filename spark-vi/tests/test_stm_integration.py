@@ -132,6 +132,7 @@ def test_minibatch_converges_to_neighborhood_of_full_batch():
     )
 
 
+@pytest.mark.slow
 def test_gated_stm_recovers_planted_minority_phenotype():
     """A planted vocabulary cluster expressed ONLY by the rare group must be
     recovered by a foreground topic, and majority docs must not express it."""
@@ -188,6 +189,7 @@ def test_gated_diagnostics_include_block_labels():
     assert "blocks[bg=" in model.iteration_summary(gp)
 
 
+@pytest.mark.slow
 def test_reference_fit_pins_reference_end_to_end():
     """A fitted reference model, gated and non-gated, keeps the reference topic
     pinned (eta=0) through the export path and yields a valid theta. This is the

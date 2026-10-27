@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from spark_vi.models.topic.stm import (
     _stm_neg_log_joint, _stm_neg_log_joint_grad, _stm_neg_log_joint_hessian,
 )
@@ -171,6 +172,7 @@ def test_gated_prior_uses_marginal_subblock_not_conditional():
     assert np.allclose(seen["Sigma_inv"], marginal)
 
 
+@pytest.mark.slow
 def test_nongated_e2e_offdiagonal_sign():
     """End-to-end (token-driven E-step + M-step), the recovered off-diagonal Σ
     has the planted POSITIVE sign for the correlated pair. The magnitude is
@@ -241,6 +243,7 @@ def _fit_block(min_pair_support, n_comorbid):
     return m.update_global(gp, stats, 1.0)["Sigma"], part
 
 
+@pytest.mark.slow
 def test_cross_group_covariance_from_comorbid_docs():
     # 300 comorbid docs >= floor 10 -> the A<->B cross pair is supported, so it
     # is estimated as a standardized correlation (block-wise unit-diagonal),
@@ -252,6 +255,7 @@ def test_cross_group_covariance_from_comorbid_docs():
     assert np.min(np.linalg.eigvalsh(Sig)) > 0  # SPD
 
 
+@pytest.mark.slow
 def test_thin_cross_group_completed_with_zero_precision():
     # 5 comorbid docs < floor 50 -> the A<->B cross pair is unsupported (below
     # min_pair_support). Block-wise: no completion, so it is lazy-kept at its
@@ -342,6 +346,7 @@ def test_marginals_are_spd_block_structured_full_sigma():
         assert np.linalg.eigvalsh(sub).min() > 0
 
 
+@pytest.mark.slow
 def test_update_global_stashes_n_pairs_support():
     """global_params carries the final M-step per-pair support N so reporting
     can build the identified mask without a re-pass."""
