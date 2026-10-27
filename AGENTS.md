@@ -286,7 +286,7 @@ pyspark and scikit-learn; the package-local envs may not):
 | tier | command | what | wall |
 |---|---|---|---|
 | unit | `make test` | everything not `slow`/`cluster`: pure numpy/Python | seconds |
-| integration | `make test-all` | + `@pytest.mark.slow`: local Spark, simulator fits, agreement tests | ~25 min |
+| integration | `make test-all` | + `@pytest.mark.slow`: local Spark, simulator fits, agreement tests | ~2 h (spark-vi ~1.5 h, of which `test_gated_lda.py` ~35 min; drivers ~12 min; charmpheno ~3 min) |
 | cluster | `make test-cluster` | `@pytest.mark.cluster`, needs Dataproc | manual |
 
 One suite directly: `PYTHONPATH=.:spark-vi:charmpheno poetry run pytest <path> -p no:randomly`
@@ -306,7 +306,9 @@ if it grows past that, find the new slow test (`--durations=20`) and mark it.
   touches (`pytest <file> -m ""`). A change to `spark_vi.core`, `spark_vi.readout`
   or a model's `local_update`/`update_global` also runs that package's slow tier
   (`make -C spark-vi test-all` equivalent: `pytest spark-vi/tests -m "not cluster"`),
-  because the Spark-vs-local agreement tests live there.
+  because the Spark-vs-local agreement tests and the full-batch gate
+  (`test_vi_runner_full_batch_matches_local_variational_em`) live there. Run it in the
+  background with a long timeout; it outlives a 30-minute tool limit.
 - **Before handing a cluster command to the user, and at the end of a multi-commit
   piece of work:** `make test-all`. A cluster run costs hours; a local Spark
   failure caught first costs minutes.
