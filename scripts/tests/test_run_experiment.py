@@ -2048,16 +2048,6 @@ class TestMaxIterOverride:
             {"max_iter": 50, "weight_y_warmup_iters": 10}, 2)
         assert out["max_iter"] == 2
 
-    def test_clamps_warmup_that_would_outlast_the_fit(self):
-        out = rx._apply_max_iter_override(
-            {"max_iter": 50, "weight_y_warmup_iters": 10}, 2)
-        assert out["weight_y_warmup_iters"] == 2
-
-    def test_leaves_warmup_below_n_untouched(self):
-        out = rx._apply_max_iter_override(
-            {"max_iter": 50, "weight_y_warmup_iters": 1}, 5)
-        assert out["weight_y_warmup_iters"] == 1
-
     def test_touches_nothing_but_iter_knobs(self):
         eff = {"max_iter": 50, "weight_y_warmup_iters": 1, "seed": 42,
                "vocab_size": 5000, "cache_uri": "hdfs:///x"}

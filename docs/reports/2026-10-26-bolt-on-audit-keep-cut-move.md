@@ -244,6 +244,32 @@ internals (framings stay in `analysis/` for now); the anchor-selection trio
 (`_download_cached`/`_read_bq` are imported by hashed `mondo_native_dag`); the
 `analysis/pc` prototype (it is spark-vi's test oracle, so it goes with step 2).
 
+**Step 2 (spark-vi, ADR 0050), 2026-10-27 — done.** About 24k lines removed across
+~130 files, one commit per ADR item. One estimator, `DagGatedLDAEstimator` /
+`DagGatedLDAModel` over the engine `DagGatedOnlineLDA` (`models/topic/dag_gated_lda.py`),
+with the gate, the leaves-first schedule and seeds (`gateSeedMode` default balanced, new
+`gateSeedDomain` for the primary domain), `docConcentration`, `optimizeDocConcentration`,
+multi-domain columns and the persistence Params; random init plus the gate seeds. Removed:
+`OnlinePCLDA` and its shim, the PC document types, every head/label Param, the localized
+support helpers, the co-fit provider, `warmStartFrom`/`warm_start_from`, the DAG spectral
+init (block-aligned, multi-domain, scalable, bg anchors, guided anchors, anchor dump,
+`name_spectral_anchors.py`, the digest's ⚓), the profile-η prior, `countTransform`,
+equalized α, ω and per-domain η, the `dag_placement` model class with
+`dag_placement_cloud.py`, `lr_readout.py` and the placement scoring, and the `analysis/pc`
+reference except `evaluate.py`'s metric primitives and the `batched_lr` re-export. The fit
+driver builds the new estimator and no longer saves `w_CK`/`b_CK`; `gated_pc_readout`
+rebuilds a `DagGatedLDAModel` from any run's npz (old runs' head arrays are ignored);
+`run_experiment` refuses a spec that sets a removed option to a non-inert value. Kept:
+`resume_from`, `batched_lr.py`, the flat `spectral_init*.py` (STM default), `DagLayout`
+and `frontier_from_coded` at their hashed-module-facing path, and `fit_gated`/`profile`
+as the engine's test oracle. One `destroy_broadcast` in `spark_vi.core`; one dict-λ
+reader (`expElogbeta_from_lambda`). No hashed module edited; the tripwire suite passes
+unchanged (one test of the removed head probe was dropped from that file, no pin moved).
+Tests: spark-vi 663 passed (884 before; the difference is removed-feature tests, the
+`test_pc_lda.py` collection error is gone); charmpheno 250 passed, 1 skipped; drivers 26
+failed / 8 errors, exactly the pre-existing environmental local-Spark set (no new failure
+by test id). `make zip` and `make build` succeed for both packages.
+
 ## Questions for the maintainer
 
 1. Antidepressant/MDD (Hughes) line, including its `cohorts.py` block and the
