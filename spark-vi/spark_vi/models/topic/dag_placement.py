@@ -59,7 +59,7 @@ class DagLayout:
     def height(self, v, _stack=()):
         """Longest path DOWN from v to a leaf (leaves = 0). Memoized; cycle-guarded.
 
-        The clock of the leaves-first gate schedule (`GatedOnlineLDA.set_gate_schedule`):
+        The clock of the leaves-first gate schedule (`DagGatedOnlineLDA.set_gate_schedule`):
         by height, not depth, because leaves sit at very different depths, and a node's
         height is strictly greater than every child's, so on a multi-parent DAG every
         child — a shared one included — opens before any of its parents."""
@@ -112,93 +112,23 @@ class DagLayout:
                 al += self.block[u]
         return np.array(sorted(al), dtype=int)
 
-    def allowed_with_siblings(self, v):
-        """`allowed(v)` PLUS the blocks of v's SIBLINGS (the other children of v's
-        parents). This is the topic support a LOCALIZED conditional head needs: to rank
-        v against the siblings it is scored against (the closure objective's contrast
-        set), the head must read their topics, not just v's own block + ancestors —
-        without them the wide top level collapses to chance (exp 0089 run 1). Still
-        O(depth + local fan-out) ≪ K, so the per-node head stays cheap at whole-Mondo."""
-        al = set(int(k) for k in self.allowed(v))
-        for p in self.parents.get(v, []):
-            for sib in self.children.get(p, []):
-                if sib != v and sib != 0:
-                    al.update(self.block[sib])
-        return np.array(sorted(al), dtype=int)
-
-    def allowed_with_path_cousins(self, v):
-        """`allowed(v)` PLUS the sibling blocks of EVERY node on v's root-path — the
-        path-cousins, not just v's own siblings. Widens the head's contrast set up the
-        whole hierarchy: to rank v against the diseases it competes with at each level, the
-        head reads the cousins at every ancestor, not only the immediate siblings — the
-        out-of-immediate-neighborhood signal a closure+siblings head misses. Still bounded,
-        O(depth * fan-out) << K, so the per-node Fisher (C*S^2) and solve (C*S^3) stay
-        localized-cheap and shuffleable — EXACT Newton is kept, unlike a dense full-K head
-        whose C*K^2 Fisher blows the driver collect and thrashes on preemptible executors."""
-        al = set(int(k) for k in self.allowed(v))
-        for a in self.closure(v):
-            if a == 0:
-                continue
-            for p in self.parents.get(a, []):
-                for sib in self.children.get(p, []):
-                    if sib != 0 and sib != a:
-                        al.update(self.block[sib])
-        return np.array(sorted(al), dtype=int)
-
-    def allowed_with_path_cousins_kids(self, v):
-        """`allowed_with_path_cousins(v)` PLUS v's OWN children's blocks — the subtype signal.
-        A patient coded at a subtype of v is v-positive, and its subtype-specific topics predict
-        v, so the head reading v's children's blocks captures that. Immediate children only
-        (bounded by fan-out); deeper descendants' signal already reaches v's block via the
-        closure gate. Still O(depth*fan-out) << K — exact Newton kept."""
-        al = set(int(k) for k in self.allowed_with_path_cousins(v))
-        for ch in self.children.get(v, []):
-            if ch != 0:
-                al.update(self.block[ch])
-        return np.array(sorted(al), dtype=int)
-
-    def cost_report(self, C, *, vocab_size=None, localized=True):
-        """PRE-FLIGHT size/cost profile for a gated-PC fit over this layout — logged at
-        the data-build boundary so a big (e.g. whole-Mondo) fit's cost is visible BEFORE
-        compute is committed. Reports: fan-out (children/parent), K/C, per-node head
-        SUPPORT sizes (with siblings when localized — the quantity that drives per-node
-        Newton cost and can blow up on a high-fan-out parent), and the head Fisher
-        memory/compute DENSE (C·K²/C·K³) vs LOCALIZED (Σ|s|²/Σ|s|³). Pure numpy; returns
+    def cost_report(self, *, vocab_size=None):
+        """PRE-FLIGHT size profile for a gated fit over this layout, logged at the
+        data-build boundary so a big (e.g. whole-Mondo) fit's shape is visible
+        BEFORE compute is committed: K, the DAG fan-out (children per parent) and,
+        given `vocab_size`, the lambda size (K * V * 8 bytes). Pure numpy; returns
         (metrics dict, formatted str)."""
         K = self.K
         fan = np.array([len(ch) for ch in self.children.values() if ch] or [0],
                        dtype=float)
-        # support over the ACTUAL label nodes (root 0 + non-root nodes), robust to a
-        # non-contiguous id map; in production ids are contiguous so this == range(C).
-        node_ids = [0] + list(self.nodes)
-        supp = np.array(
-            [len(self.allowed_with_siblings(c) if localized else self.allowed(c))
-             for c in node_ids], dtype=float)
-
-        def _q(a, p):
-            return float(np.percentile(a, p))
-
-        smax, sarg = int(supp.max()), int(supp.argmax())
-        dense_mem, dense_flop = C * K * K * 8, float(C) * K ** 3
-        loc_mem, loc_flop = float((supp ** 2).sum()) * 8, float((supp ** 3).sum())
-        # The Fisher stat is actually EMITTED/COLLECTED as a padded (C, S, S) block
-        # stack (S = smax) — this is the size that hits spark.driver.maxResultSize,
-        # so report it alongside the dense wall and the packed Sum|s|^2 floor.
-        pad_mem = C * smax * smax * 8
         lam = (K * int(vocab_size) * 8) if vocab_size else None
-        d = {"C": C, "K": K, "n_nodes": len(self.nodes),
-             "fanout_max": int(fan.max()), "fanout_p90": _q(fan, 90),
-             "fanout_p99": _q(fan, 99), "support_max": smax, "support_argmax": sarg,
-             "support_p50": _q(supp, 50), "support_p90": _q(supp, 90),
-             "support_p99": _q(supp, 99), "dense_head_mem_bytes": dense_mem,
-             "dense_head_flop": dense_flop, "localized_head_mem_bytes": loc_mem,
-             "collected_head_mem_bytes": pad_mem,
-             "localized_head_flop": loc_flop, "per_node_max_flop": float(smax) ** 3,
+        d = {"K": K, "n_nodes": len(self.nodes),
+             "fanout_max": int(fan.max()),
+             "fanout_p90": float(np.percentile(fan, 90)),
+             "fanout_p99": float(np.percentile(fan, 99)),
              "lambda_bytes": lam}
 
         def _hb(b):
-            if b is None:
-                return "n/a"
             for u in ("B", "KB", "MB", "GB", "TB"):
                 if b < 1024:
                     return f"{b:.1f}{u}"
@@ -207,19 +137,10 @@ class DagLayout:
 
         lines = [
             "=" * 74,
-            f"GATED-PC SIZE/COST PROFILE  C={C} labels  K={K} topics "
-            f"({self.n_bg} bg + {len(self.nodes)} nodes x {self.tpn} tpn)  "
-            f"[head={'localized+siblings' if localized else 'dense'}]",
+            f"GATED SIZE PROFILE  K={K} topics "
+            f"({self.n_bg} bg + {len(self.nodes)} nodes x {self.tpn} tpn)",
             f"  fan-out (children/parent):  max={int(fan.max())}  "
-            f"p90={_q(fan, 90):.0f}  p99={_q(fan, 99):.0f}",
-            f"  head support/node:          max={smax} (node {sarg})  "
-            f"p50={_q(supp, 50):.0f}  p90={_q(supp, 90):.0f}  p99={_q(supp, 99):.0f}",
-            f"  head Fisher MEMORY:  dense C*K^2={_hb(dense_mem)}   "
-            f"collected C*S^2={_hb(pad_mem)} (S={smax})   "
-            f"packed Sum|s|^2={_hb(loc_mem)}   "
-            f"({dense_mem / max(pad_mem, 1):.0f}x smaller)",
-            f"  head SOLVE/iter:     dense C*K^3={dense_flop:.2e}   "
-            f"localized Sum|s|^3={loc_flop:.2e}   max node |s|^3={float(smax) ** 3:.2e}",
+            f"p90={d['fanout_p90']:.0f}  p99={d['fanout_p99']:.0f}",
         ]
         if lam is not None:
             lines.append(f"  lambda (K*V*8):             {_hb(lam)}")

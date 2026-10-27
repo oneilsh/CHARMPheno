@@ -10,7 +10,7 @@ the layout's K and blocks and the gate's allowed set.
 import numpy as np
 
 from spark_vi.models.topic.dag_placement import DagLayout
-from spark_vi.models.topic.gated_lda import GatedBOWDocument, GatedOnlineLDA
+from spark_vi.models.topic.dag_gated_lda import GatedBOWDocument, DagGatedOnlineLDA
 
 PARENT = {1: [0], 2: [0], 3: [1], 4: [1, 2]}
 
@@ -21,13 +21,11 @@ def test_tpn0_layout_is_flat():
     assert all(lay.block[u] == [] for u in lay.nodes)
     for fr in (frozenset(), frozenset({3}), frozenset({4, 2})):
         assert sorted(lay.allowed_set(fr).tolist()) == list(range(7))
-    # The localized-head supports are the full range too (dense head).
-    assert all(len(lay.allowed_with_path_cousins_kids(c)) == 7 for c in range(5))
 
 
 def test_tpn0_gated_e_step_touches_every_topic_for_every_doc():
     lay = DagLayout(PARENT, n_bg=6, tpn=0)
-    m = GatedOnlineLDA(lay, 12, alpha=0.1, eta=0.02, random_seed=0)
+    m = DagGatedOnlineLDA(lay, 12, alpha=0.1, eta=0.02, random_seed=0)
     gp = m.initialize_global(None)
     assert gp["lambda"].shape == (6, 12)
     docs = [GatedBOWDocument(indices=np.array([5, 6], dtype=np.int32),

@@ -41,7 +41,6 @@ n_bg: 200                       # exp 0157: 1,200 costs AUC with no legibility g
 tpn: 1
 doc_concentration: 0.5
 optimize_doc_concentration: false   # insight 0091
-weight_y: 0.0                   # no supervision during the fit
 gate_warm: 2                    # leaves-first: iterations per height level
 gate_seed_mode: balanced        # exp 0160
 gate_seed_leaves: true          # exp 0162

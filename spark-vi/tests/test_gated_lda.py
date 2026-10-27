@@ -22,7 +22,7 @@ def test_gated_bow_document_frontier_defaults_empty():
 
 
 from spark_vi.models.topic.dag_placement import DagLayout
-from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
 
 PARENT = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}
 
@@ -34,7 +34,7 @@ def _lay():
 def test_local_update_gates_sstats_to_allowed_rows_only():
     lay = _lay()
     V = 30
-    m = GatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
+    m = DagGatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
     gp = m.initialize_global(None)
     # A doc whose frontier is {3}: allowed = background (0,1) + closure blocks of 3.
     doc = GatedBOWDocument(indices=np.array([5, 6], dtype=np.int32),
@@ -55,7 +55,7 @@ def test_local_update_empty_frontier_is_background_only():
     # (matches the Gibbs oracle and the gated STM's TopicBlockPartition.allowed_indices).
     lay = _lay()
     V = 30
-    m = GatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
+    m = DagGatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
     gp = m.initialize_global(None)
     doc = GatedBOWDocument(indices=np.array([5, 6], dtype=np.int32),
                            counts=np.array([2.0, 1.0]), length=3,
@@ -70,13 +70,13 @@ def test_local_update_empty_frontier_is_background_only():
 
 
 def test_local_update_gamma_init_is_content_deterministic_with_seed():
-    # Regression: GatedOnlineLDA.local_update must inherit OnlineLDA's content-deterministic
+    # Regression: DagGatedOnlineLDA.local_update must inherit OnlineLDA's content-deterministic
     # gamma_init seeding (blake2b hash of random_seed + doc content) so a distributed fit is
     # reproducible regardless of Spark partition/executor/iteration order — not draw gamma_init
     # from the plain global RNG, which would make lambda_stats vary run-to-run for the same docs.
     lay = _lay()
     V = 30
-    m = GatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
+    m = DagGatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
     gp = m.initialize_global(None)
     docs = [
         GatedBOWDocument(indices=np.array([5, 6], dtype=np.int32),
@@ -97,7 +97,7 @@ def test_compute_elbo_is_finite_and_gated_doc_kl_is_positive():
     # VIRunner's convergence check on the production shim path) is a real variational bound.
     lay = _lay()
     V = 30
-    m = GatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
+    m = DagGatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
     gp = m.initialize_global(None)
     doc = GatedBOWDocument(indices=np.array([5, 6], dtype=np.int32),
                            counts=np.array([2.0, 1.0]), length=3,
@@ -137,7 +137,7 @@ def test_svi_matches_gibbs_placement_single_parent():
     # Gated SVI (random init default)
     bow = [GatedBOWDocument(*_bow(d), frontier=frozenset({int(y)}))
            for d, y in zip(tr_d, tr_l)]
-    m = GatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
+    m = DagGatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
     gp = fit_gated_svi_local(m, bow, n_iter=250)
     ev_s = placement_metrics(svi_node_profiles(m, gp, te_d, lay), te_l, lay)
 
@@ -177,7 +177,7 @@ def test_svi_matches_gibbs_placement_multi_parent():
                      for i, d in enumerate(te_d)], te_l, lay)
 
     bow = [GatedBOWDocument(*_bow(d), frontier=f) for d, f in zip(tr_d, tr_l)]
-    m = GatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
+    m = DagGatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
     gp = fit_gated_svi_local(m, bow, n_iter=250)
     ev_s = placement_metrics(svi_node_profiles(m, gp, te_d, lay), te_l, lay)
 
@@ -189,17 +189,17 @@ def test_svi_matches_gibbs_placement_multi_parent():
 def test_gated_optimize_alpha_requires_frontier_histogram():
     import pytest
     from spark_vi.models.topic.dag_placement import DagLayout
-    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
     lay = DagLayout({1: 0, 2: 0}, n_bg=2, tpn=1)
     with pytest.raises(ValueError, match="frontier_histogram"):
-        GatedOnlineLDA(lay, vocab_size=5, optimize_alpha=True)   # no histogram
+        DagGatedOnlineLDA(lay, vocab_size=5, optimize_alpha=True)   # no histogram
 
 def test_gated_tied_layout_shapes():
     import numpy as np
     from spark_vi.models.topic.dag_placement import DagLayout
-    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
     lay = DagLayout({1: 0, 2: 0, 3: 1}, n_bg=2, tpn=1)          # 3 nodes
-    m = GatedOnlineLDA(lay, vocab_size=5, optimize_alpha=True,
+    m = DagGatedOnlineLDA(lay, vocab_size=5, optimize_alpha=True,
                        frontier_histogram={frozenset({3}): 4, frozenset(): 6})
     # tied layout: [bg, node1, node2, node3]
     assert list(m._block_sizes) == [2, 1, 1, 1]
@@ -211,10 +211,10 @@ def test_gated_tied_layout_shapes():
 def test_gated_local_update_emits_node_theta_stat():
     import numpy as np
     from spark_vi.models.topic.dag_placement import DagLayout
-    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
     from spark_vi.models.topic.types import GatedBOWDocument
     lay = DagLayout({1: 0, 2: 0}, n_bg=2, tpn=1)                # B = 1 + 2 = 3
-    m = GatedOnlineLDA(lay, vocab_size=6, optimize_alpha=True, random_seed=0,
+    m = DagGatedOnlineLDA(lay, vocab_size=6, optimize_alpha=True, random_seed=0,
                        frontier_histogram={frozenset({1}): 1, frozenset(): 1})
     gp = m.initialize_global(None)
     docs = [GatedBOWDocument(indices=np.array([0, 3], np.int32),
@@ -234,10 +234,10 @@ def test_gated_local_update_emits_node_theta_stat():
 def test_gated_local_update_no_stat_when_alpha_fixed():
     import numpy as np
     from spark_vi.models.topic.dag_placement import DagLayout
-    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
     from spark_vi.models.topic.types import GatedBOWDocument
     lay = DagLayout({1: 0, 2: 0}, n_bg=2, tpn=1)
-    m = GatedOnlineLDA(lay, vocab_size=6, random_seed=0)        # optimize_alpha False
+    m = DagGatedOnlineLDA(lay, vocab_size=6, random_seed=0)        # optimize_alpha False
     gp = m.initialize_global(None)
     out = m.local_update([GatedBOWDocument(indices=np.array([0], np.int32),
                                            counts=np.array([1.0]), length=1,
@@ -248,9 +248,9 @@ def test_gated_local_update_no_stat_when_alpha_fixed():
 def test_gated_update_global_leaves_alpha_fixed_when_disabled():
     import numpy as np
     from spark_vi.models.topic.dag_placement import DagLayout
-    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
     lay = DagLayout({1: 0, 2: 0}, n_bg=2, tpn=1)
-    m = GatedOnlineLDA(lay, vocab_size=6, random_seed=0)          # alpha fixed
+    m = DagGatedOnlineLDA(lay, vocab_size=6, random_seed=0)          # alpha fixed
     gp = m.initialize_global(None)
     alpha0 = gp["alpha"].copy()
     stats = {"lambda_stats": np.ones((lay.K, 6)), "n_docs": np.array(4.0)}
@@ -261,10 +261,10 @@ def test_gated_update_global_leaves_alpha_fixed_when_disabled():
 def test_gated_update_global_learns_asymmetric_alpha():
     import numpy as np
     from spark_vi.models.topic.dag_placement import DagLayout
-    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
     lay = DagLayout({1: 0, 2: 0}, n_bg=2, tpn=1)                  # B=3: bg,node1,node2
     hist = {frozenset({1}): 30, frozenset({2}): 30, frozenset(): 40}
-    m = GatedOnlineLDA(lay, vocab_size=6, optimize_alpha=True, random_seed=0,
+    m = DagGatedOnlineLDA(lay, vocab_size=6, optimize_alpha=True, random_seed=0,
                        frontier_histogram=hist)
     gp = m.initialize_global(None)
     # Make node1 look 'common' (E[log θ] near 0) and node2 'rare' (very negative):
@@ -289,9 +289,9 @@ def test_gated_update_global_learns_asymmetric_alpha():
 def test_domains_none_is_single_array_unchanged():
     import numpy as np
     from spark_vi.models.topic.dag_placement import DagLayout
-    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
     lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=2, tpn=1)
-    m = GatedOnlineLDA(lay, vocab_size=12, random_seed=7)          # domains=None
+    m = DagGatedOnlineLDA(lay, vocab_size=12, random_seed=7)          # domains=None
     gp = m.initialize_global(None)
     assert isinstance(gp["lambda"], np.ndarray) and gp["lambda"].shape == (lay.K, 12)
 
@@ -299,9 +299,9 @@ def test_domains_none_is_single_array_unchanged():
 def test_multidomain_init_is_per_domain_dict():
     import numpy as np
     from spark_vi.models.topic.dag_placement import DagLayout
-    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
     lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=2, tpn=1)
-    m = GatedOnlineLDA(lay, vocab_size=56, domains=[40, 16], random_seed=7)
+    m = DagGatedOnlineLDA(lay, vocab_size=56, domains=[40, 16], random_seed=7)
     gp = m.initialize_global(None)
     lam = gp["lambda"]
     assert set(lam) == {0, 1}
@@ -311,9 +311,9 @@ def test_multidomain_init_is_per_domain_dict():
 def test_assemble_split_round_trip():
     import numpy as np
     from spark_vi.models.topic.dag_placement import DagLayout
-    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
     lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=2, tpn=1)
-    m = GatedOnlineLDA(lay, vocab_size=7, domains=[4, 3], random_seed=1)
+    m = DagGatedOnlineLDA(lay, vocab_size=7, domains=[4, 3], random_seed=1)
     lam = {0: np.abs(np.random.default_rng(0).normal(size=(lay.K, 4))) + .1,
            1: np.abs(np.random.default_rng(1).normal(size=(lay.K, 3))) + .1}
     eb = m._assemble_expElogbeta(lam)
@@ -340,10 +340,10 @@ def test_assemble_split_round_trip():
 def test_domains_must_sum_to_vocab():
     import pytest
     from spark_vi.models.topic.dag_placement import DagLayout
-    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
     lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=2, tpn=1)
     with pytest.raises(ValueError):
-        GatedOnlineLDA(lay, vocab_size=56, domains=[40, 10])   # 50 != 56
+        DagGatedOnlineLDA(lay, vocab_size=56, domains=[40, 10])   # 50 != 56
 
 
 # --- SP2 Task 2: dict-aware E/M-step + per-domain eta + multi-domain ELBO ---
@@ -371,7 +371,7 @@ def test_multidomain_em_refines_seeded_per_domain_betas():
     import numpy as np
     from tests._stm_synth import two_domain_dag_corpus
     from spark_vi.models.topic.dag_placement import DagLayout
-    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
     from spark_vi.models.topic.types import GatedBOWDocument
     # Flat DAG: every node is a direct child of the root, so each node's signature
     # is node-specific and undiluted by a shared-parent block. b_only_node=None ->
@@ -385,7 +385,7 @@ def test_multidomain_em_refines_seeded_per_domain_betas():
              counts=np.unique(d, return_counts=True)[1].astype(float), length=len(d),
              frontier=frozenset({int(f)}))
              for d, f in zip(docs[:800], labels[:800])]
-    m = GatedOnlineLDA(lay, vocab_size=V, domains=[40, 16], random_seed=0)
+    m = DagGatedOnlineLDA(lay, vocab_size=V, domains=[40, 16], random_seed=0)
     gp = m.initialize_global(None)
     planted = {0: pa, 1: pb}
     # Gentle traction bump on each block topic's OWN planted support (symmetry-break).
@@ -425,7 +425,7 @@ def test_single_domain_fit_byte_identical():
     ]
 
     def run():
-        m = GatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
+        m = DagGatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
         gp = m.initialize_global(None)
         for _ in range(5):
             gp = m.update_global(gp, m.local_update(docs, gp), learning_rate=0.5)
@@ -443,10 +443,10 @@ def test_multidomain_compute_elbo_matches_manual_per_domain_kl():
     decompose that way across a concatenation)."""
     import numpy as np
     from spark_vi.models.topic.dag_placement import DagLayout
-    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
     from spark_vi.models.topic.lda import _dirichlet_kl
     lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=2, tpn=1)
-    m = GatedOnlineLDA(lay, vocab_size=7, domains=[4, 3], eta=0.5, random_seed=3)
+    m = DagGatedOnlineLDA(lay, vocab_size=7, domains=[4, 3], eta=0.5, random_seed=3)
     gp = m.initialize_global(None)
     aggregated_stats = {"doc_loglik_sum": np.array(-12.3), "doc_theta_kl_sum": np.array(1.7)}
     elbo = m.compute_elbo(gp, aggregated_stats)
@@ -466,9 +466,9 @@ def test_multidomain_infer_local_assembles_dict_lambda():
     mode: assemble the concatenated expElogbeta and run the same full-K CAVI."""
     import numpy as np
     from spark_vi.models.topic.dag_placement import DagLayout
-    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
     lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=2, tpn=1)
-    m = GatedOnlineLDA(lay, vocab_size=7, domains=[4, 3], random_seed=2)
+    m = DagGatedOnlineLDA(lay, vocab_size=7, domains=[4, 3], random_seed=2)
     gp = m.initialize_global(None)
     row = GatedBOWDocument(indices=np.array([0, 4], dtype=np.int32),
                            counts=np.array([2.0, 1.0]), length=3)
@@ -509,7 +509,7 @@ def test_iteration_summary_multidomain_surfaces_eta_and_per_domain_lambda():
     outright in multi-domain mode. Deleting the override makes this test raise,
     which is the regression guard."""
     lay = _flat_lay()
-    m = GatedOnlineLDA(lay, 8, domains=[4, 4], eta=0.02, alpha=0.1, random_seed=0)
+    m = DagGatedOnlineLDA(lay, 8, domains=[4, 4], eta=0.02, alpha=0.1, random_seed=0)
     gp = m.initialize_global(None)
     s0 = m.iteration_summary(gp)
     assert isinstance(s0, str) and s0 and "\n" not in s0
@@ -526,7 +526,7 @@ def test_iteration_summary_domains_none_is_byte_identical_to_base():
     import numpy as np
     from spark_vi.models.topic.lda import OnlineLDA
     lay = _flat_lay()
-    m = GatedOnlineLDA(lay, 8, alpha=0.1, eta=0.02, random_seed=0)
+    m = DagGatedOnlineLDA(lay, 8, alpha=0.1, eta=0.02, random_seed=0)
     base = OnlineLDA(K=lay.K, vocab_size=8, alpha=0.1, eta=0.02, random_seed=0)
     gp = m.initialize_global(None)
     assert m.iteration_summary(gp) == base.iteration_summary(gp)
@@ -543,7 +543,7 @@ def test_eta_accepts_a_0d_ndarray_like_the_equivalent_float():
     import numpy as np
     lay = _flat_lay()
     for val in (0.02, np.float64(0.02), np.array(0.02)):
-        m = GatedOnlineLDA(lay, 8, domains=[4, 4], eta=val)
+        m = DagGatedOnlineLDA(lay, 8, domains=[4, 4], eta=val)
         assert float(m.eta) == 0.02
 
 
@@ -552,9 +552,9 @@ def test_multidomain_get_metadata_carries_reconstruction_constants():
     widths have to travel in metadata."""
     import numpy as np
     from spark_vi.models.topic.dag_placement import DagLayout
-    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
     lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=2, tpn=1)
-    m = GatedOnlineLDA(lay, vocab_size=56, domains=[40, 16], eta=0.02,
+    m = DagGatedOnlineLDA(lay, vocab_size=56, domains=[40, 16], eta=0.02,
                        random_seed=0)
     md = m.get_metadata()
     assert md["K"] == lay.K and md["V"] == 56
@@ -568,9 +568,9 @@ def test_single_domain_get_metadata_unchanged():
     """domains=None must return exactly the base contract, so existing archives
     and consumers see no new keys."""
     from spark_vi.models.topic.dag_placement import DagLayout
-    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
     lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=2, tpn=1)
-    m = GatedOnlineLDA(lay, vocab_size=12, random_seed=0)
+    m = DagGatedOnlineLDA(lay, vocab_size=12, random_seed=0)
     assert m.get_metadata() == {"K": lay.K, "V": 12}
 
 
@@ -581,12 +581,12 @@ def test_optimize_eta_rejected_pins_the_eta_provenance_invariant():
     pins that rejection."""
     import pytest
     from spark_vi.models.topic.dag_placement import DagLayout
-    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
     lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=2, tpn=1)
     for kwargs in ({}, {"domains": [40, 16]}):
         vocab = 56 if kwargs else 12
         with pytest.raises(NotImplementedError, match="optimize_eta"):
-            GatedOnlineLDA(lay, vocab_size=vocab, optimize_eta=True, **kwargs)
+            DagGatedOnlineLDA(lay, vocab_size=vocab, optimize_eta=True, **kwargs)
 
 
 # --- Production-path optimizer equivalence -----------------------------------
@@ -635,7 +635,7 @@ def test_vi_runner_full_batch_matches_local_variational_em(spark):
                                   placement_metrics, svi_node_profiles)
     from spark_vi.core import VIConfig, VIRunner
     from spark_vi.models.topic.dag_placement import DagLayout
-    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
     from spark_vi.models.topic.types import GatedBOWDocument
 
     parent = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}
@@ -650,14 +650,14 @@ def test_vi_runner_full_batch_matches_local_variational_em(spark):
            for d, y in zip(tr_d, tr_l)]
 
     # Reference arm: the validated in-memory lr=1.0 variational EM.
-    m_ref = GatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
+    m_ref = DagGatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
     gp_ref = fit_gated_svi_local(m_ref, bow, n_iter=n_iter, seed=0)
     ev_ref = placement_metrics(svi_node_profiles(m_ref, gp_ref, te_d, lay), te_l, lay)
 
     # Production arm: the same model, same budget, through VIRunner's full-batch
     # path (mini_batch_fraction=None).
     np.random.seed(0)
-    m_prod = GatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
+    m_prod = DagGatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
     rdd = spark.sparkContext.parallelize(bow, 4).persist()
     rdd.count()                     # materialize for VIRunner's cache precondition
     res = VIRunner(m_prod, VIConfig(max_iterations=n_iter, convergence_tol=1e-12,

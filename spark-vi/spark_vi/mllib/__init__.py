@@ -9,6 +9,8 @@ subpackage, so users who don't need MLlib integration don't pay the
 pyspark.ml import cost. Per ADR 0009.
 """
 from spark_vi.mllib.topic import (
+    DagGatedLDAEstimator,
+    DagGatedLDAModel,
     OnlineHDPEstimator,
     OnlineHDPModel,
     OnlineLDAEstimator,
@@ -16,6 +18,8 @@ from spark_vi.mllib.topic import (
 )
 
 __all__ = [
+    "DagGatedLDAEstimator",
+    "DagGatedLDAModel",
     "OnlineHDPEstimator",
     "OnlineHDPModel",
     "OnlineLDAEstimator",

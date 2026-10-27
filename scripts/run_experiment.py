@@ -667,6 +667,11 @@ _GATED_PC_REMOVED_OPTIONS = {
     "anchor_scope": "closure", "spectral_topo_order": "forward",
     "spectral_marginal_floor": "none",
     "count_transform": "none", "alpha_init": "uniform", "profile_eta": "",
+    # The supervised head (ADR 0050 §1). weight_y is its switch: 0 was the
+    # unsupervised fit every run since ~0121 made, and at weight_y 0 the other head
+    # knobs (head_*, localize_head, grad_cavi_iters, ...) were inert, so an old
+    # spec that still carries them is accepted and they are ignored.
+    "weight_y": 0.0,
 }
 
 
@@ -714,21 +719,6 @@ def build_gated_pc_args(
         "--label-mask-mode", str(effective.get("label_mask_mode", "full")),
         "--n-bg", str(effective["n_bg"]),
         "--tpn", str(effective["tpn"]),
-        "--weight-y", str(effective.get("weight_y", 50.0)),
-        "--head-optimizer", str(effective.get("head_optimizer", "newton")),
-        "--head-lr", str(effective.get("head_lr", 0.5)),
-        "--head-newton-ridge", str(effective.get("head_newton_ridge", 0.01)),
-        "--head-l2", str(effective.get("head_l2", 1e-3)),
-        "--grad-cavi-iters", str(effective.get("grad_cavi_iters", 20)),
-        "--topic-trust", str(effective.get("topic_trust", 0.1)),
-        "--head-trust-move", str(effective.get("head_trust_move", 0.0)),
-        # lbfgs co-fit head knobs (inert unless head_optimizer=lbfgs). Emitted
-        # unconditionally at their inert defaults, mirroring --head-trust-move: the
-        # driver defaults match, so a non-lbfgs run's behavior is unchanged.
-        "--head-inner-iters", str(effective.get("head_inner_iters", 3)),
-        "--head-history-reset",
-        str(effective.get("head_history_reset", True)).lower(),
-        "--weight-y-warmup-iters", str(effective.get("weight_y_warmup_iters", 10)),
         "--max-iter", str(effective["max_iter"]),
         "--subsampling-rate", str(effective.get("subsampling_rate", 0.05)),
         "--tau0", str(effective.get("tau0", 64.0)),
@@ -745,14 +735,6 @@ def build_gated_pc_args(
         args.extend(["--cache-uri", str(effective["cache_uri"])])
     if effective.get("optimize_doc_concentration"):
         args.append("--optimize-doc-concentration")
-    if effective.get("localize_head"):
-        args.append("--localize-head")
-    if effective.get("head_support"):
-        args.extend(["--head-support", str(effective["head_support"])])
-    if effective.get("head_intercept"):
-        args.append("--head-intercept")
-    if effective.get("head_standardize"):
-        args.append("--head-standardize")
     if effective.get("doc_concentration") is not None:
         args.extend(["--doc-concentration", str(effective["doc_concentration"])])
     if effective.get("dag_source"):
@@ -853,12 +835,11 @@ def _apply_dev_profile(effective: dict) -> dict:
     A run is NOT an experiment: iterate on ONE exp doc with ``CHARM_DEV=1`` for the fast
     ranking loop, then a single ``CHARM_DEV=0`` (default) run for the record — no throwaway
     exp docs per attempt. Touches ONLY iteration counts, never the data / DAG / vocab, so the
-    co-fit head AUC and readout Δ *ranking* between configs is preserved while wall-clock drops
-    ~3-4x. Warmup is cut in proportion to max_iter (else supervision never ramps in — the
-    warmup↔iters coupling). The post-fit readout is capped on the same doctrine
+    readout *ranking* between configs is preserved while wall-clock drops ~3-4x. The post-fit
+    readout is capped on the same doctrine
     (``readout_max_iter``), since at whole-Mondo C its batched solve is a wall-clock item in
     its own right, and its CALIBRATION solve — a pure ECE diagnostic, never a ranking
-    signal — is skipped outright (``readout_calibration``). Only affects pc / gated_pc; the
+    signal — is skipped outright (``readout_calibration``). Only affects gated_pc; the
     iteration knobs use min() so they only ever SHRINK.
     Calibrate once (one config at dev vs full) to confirm the ranking holds before trusting it.
 
@@ -873,12 +854,9 @@ def _apply_dev_profile(effective: dict) -> dict:
         return effective
     dev = dict(effective)
     dev["max_iter"] = min(int(effective.get("max_iter", 100)), 30)
-    dev["weight_y_warmup_iters"] = min(int(effective.get("weight_y_warmup_iters", 0) or 0), 8)
-    dev["grad_cavi_iters"] = min(int(effective.get("grad_cavi_iters", 20)), 10)
     # The distributed readout is its own wall-clock item, AFTER the fit: each arm
     # pays a batched L-BFGS whose every iteration is a full pass over the train
-    # split (C=437: ~200 iterations, ~30 min, and a supervised arm runs three such
-    # solves). Cap it on the same doctrine as the fit iterations — by ~iteration 60
+    # split (C=437: ~200 iterations, ~30 min). Cap it on the same doctrine as the fit iterations — by ~iteration 60
     # the macro AUC RANKING between configs is stable to ~1e-3 while the gradient
     # still has decades to fall, so the dev loop's comparison survives and only the
     # final digits do not. Final numbers come from the full (CHARM_DEV=0) run.
@@ -896,8 +874,6 @@ def _apply_dev_profile(effective: dict) -> dict:
     if bmi > 0:
         dev["baseline_max_iter"] = min(bmi, 30)
     print(f"[run-exp] CHARM_DEV: dev profile — max_iter={dev['max_iter']}, "
-          f"weight_y_warmup_iters={dev['weight_y_warmup_iters']}, "
-          f"grad_cavi_iters={dev['grad_cavi_iters']}, "
           f"readout_max_iter={dev['readout_max_iter']}, "
           f"readout_calibration={dev['readout_calibration']}, "
           f"baseline_max_iter={dev.get('baseline_max_iter', effective.get('baseline_max_iter'))} "
@@ -914,9 +890,7 @@ def _apply_max_iter_override(effective: dict, max_iter: int | None) -> dict:
     run's numbers are irrelevant and all that is wanted is for it to COMPLETE and
     write ``manifest.json`` (e.g. warming a cache-HIT bundle + manifest so the
     ``--emit-eta`` probe has a key to recompute, without paying a full fit). Applied
-    AFTER the dev profile so an explicit N wins over it. weight_y_warmup_iters is
-    clamped to N so the supervision warmup never outlasts the (now shorter) fit;
-    everything else — data, DAG, vocab, spark_conf — is untouched, so the bundle
+    AFTER the dev profile so an explicit N wins over it. Everything else — data, DAG, vocab, spark_conf — is untouched, so the bundle
     cache key is byte-identical (max_iter is not a bundle-key input). NEVER for a
     run of record.
     """
@@ -927,11 +901,7 @@ def _apply_max_iter_override(effective: dict, max_iter: int | None) -> dict:
                          f"got {max_iter}")
     out = dict(effective)
     out["max_iter"] = int(max_iter)
-    warm = int(effective.get("weight_y_warmup_iters", 0) or 0)
-    if warm > max_iter:
-        out["weight_y_warmup_iters"] = int(max_iter)
-    print(f"[run-exp] --max-iter override: max_iter={out['max_iter']} "
-          f"(warmup clamped to {out.get('weight_y_warmup_iters', warm)}); "
+    print(f"[run-exp] --max-iter override: max_iter={out['max_iter']}; "
           f"NOT a run of record", flush=True)
     return out
 
@@ -1321,9 +1291,7 @@ def main(argv: list[str] | None = None) -> int:
                              "final numbers do not matter and you just need it to "
                              "COMPLETE: e.g. bootstrapping a cache-HIT bundle + "
                              "manifest.json for the --emit-eta probe without paying "
-                             "a full 50-iter fit. weight_y_warmup_iters is clamped "
-                             "to N so warmup never outlasts the fit. NEVER use for a "
-                             "run of record.")
+                             "a full 50-iter fit. NEVER use for a run of record.")
     parser.add_argument("--runs-dir", default=DEFAULT_RUNS_DIR,
                         help="Base directory for run output. Default: %(default)s")
     parser.add_argument("--experiments-dir", type=Path, default=EXPERIMENTS_DIR,

@@ -1,4 +1,4 @@
-"""Alpha policy for the gated engine: `GatedOnlineLDA.set_alpha_policy`, the
+"""Alpha policy for the gated engine: `DagGatedOnlineLDA.set_alpha_policy`, the
 post-construction seam the MLlib estimator uses to turn on the per-node tied
 empirical-Bayes alpha (the frontier histogram exists only once the document RDD
 does). The equalized initial alpha (exp 0121) was removed by ADR 0050. Spark-free.
@@ -6,7 +6,7 @@ does). The equalized initial alpha (exp 0121) was removed by ADR 0050. Spark-fre
 import numpy as np
 
 from spark_vi.models.topic.dag_placement import DagLayout
-from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
 
 
 def _lay():
@@ -19,12 +19,12 @@ _HIST = {frozenset({3}): 10, frozenset({2}): 40, frozenset(): 50}   # 100 docs
 
 def test_set_alpha_policy_turns_on_optimization_and_keeps_the_constructor_alpha():
     lay = _lay()
-    m = GatedOnlineLDA(lay, vocab_size=6, alpha=0.5, random_seed=0)
+    m = DagGatedOnlineLDA(lay, vocab_size=6, alpha=0.5, random_seed=0)
     assert m.optimize_alpha is False
     m.set_alpha_policy(_HIST, optimize=True)
     assert m.optimize_alpha is True and m._frontier_histogram == _HIST
     assert np.allclose(m.initialize_global(None)["alpha"], 0.5)
-    m2 = GatedOnlineLDA(lay, vocab_size=6, alpha=0.5, random_seed=0)
+    m2 = DagGatedOnlineLDA(lay, vocab_size=6, alpha=0.5, random_seed=0)
     m2.set_alpha_policy(_HIST, optimize=False)
     assert m2.optimize_alpha is False
     assert np.allclose(m2.initialize_global(None)["alpha"], 0.5)
@@ -35,7 +35,7 @@ def test_optimized_alpha_runs_one_local_global_cycle_after_policy():
     when optimize_alpha is on; setting it post hoc must keep the two in sync."""
     from spark_vi.models.topic.types import GatedBOWDocument
     lay = _lay()
-    m = GatedOnlineLDA(lay, vocab_size=6, alpha=0.5, random_seed=0)
+    m = DagGatedOnlineLDA(lay, vocab_size=6, alpha=0.5, random_seed=0)
     m.set_alpha_policy(_HIST, optimize=True)
     gp = m.initialize_global(None)
     docs = [GatedBOWDocument(indices=np.array([0, 3], np.int32),

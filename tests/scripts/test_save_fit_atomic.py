@@ -24,8 +24,10 @@ def _gp(C=6, K=4, V=10):
     return {
         "lambda": np.random.default_rng(0).random((K, V)),
         "alpha": np.full(K, 0.5),
-        "w_CK": np.zeros((C, K)),
-        "b_CK": np.zeros(C),
+        # The engine's leaves-first schedule state rides global_params too; the
+        # save keeps only the model (lambda, alpha).
+        "eta": np.array(0.1),
+        "gate_iter": np.array(3),
     }
 
 
@@ -44,8 +46,7 @@ def test_save_fit_npz_reloads_and_manifest_marks_partial(tmp_path):
     with np.load(tmp_path / "gated_pc_result.npz") as z:
         assert np.allclose(z["lambda"], gp["lambda"])
         assert np.allclose(z["alpha"], gp["alpha"])
-        assert z["w_CK"].shape == (6, 4)
-        assert z["b_CK"].shape == (6,)
+        assert set(z.files) == {"lambda", "alpha"}
     import json
     man = json.loads((tmp_path / "manifest.json").read_text())
     assert man["partial"] == "fit-only"

@@ -1,13 +1,12 @@
 """Standalone post-hoc case-finding readout on a FINISHED gated_pc run (no re-fit).
 
-Loads a completed run's saved globals (gated_pc_result.npz: lambda/alpha/w_CK) +
-manifest.json, reconstructs the OnlinePCLDAModel, reloads the cached
+Loads a completed run's saved globals (gated_pc_result.npz: lambda/alpha) +
+manifest.json, reconstructs the DagGatedLDAModel, reloads the cached
 CaseFindingBundle the run was fit against, re-transforms train+test, and prints
 the FULL case-finding readout for the gated_pc arm:
 
   - pc_topics_lr:   ranking AUC/AP + per-node precision@recall / recall@FDR +
                     case-vs-background detection (AUC/AP + precision@recall).
-  - co-fit head:    the same readout on the head's own P(node)=sigmoid(w_CK·θ).
 
 The other arms' summary AUC/AP are echoed from manifest["results"] for context
 (only the gated_pc arm's globals are saved, so only it can be re-scored here; a
@@ -1771,13 +1770,15 @@ def bundle_drift_report(bundle, manifest, fit_vocab_sizes) -> list:
 
 
 def reconstruct_model(run_dir: Path, manifest: dict):
-    """Rebuild a scoreable OnlinePCLDAModel from the saved gated_pc_result.npz.
+    """Rebuild a scoreable DagGatedLDAModel from the saved gated_pc_result.npz.
 
-    The driver saves raw globals (lambda/alpha/w_CK), not a persisted model, so we
-    wrap them in a VIResult and an OnlinePCLDAModel and set weightY>0 + numLabels so
-    transform appends both topicDistribution (θ) and the head probability. The CAVI
-    read-out knobs (gammaShape/caviMaxIter/caviTol) come from the model defaults,
-    which match the fit's defaults for this experiment family.
+    The driver saves raw globals (lambda/alpha), not a persisted model, so we wrap
+    them in a VIResult and a DagGatedLDAModel; `transform` appends
+    topicDistribution (θ) by the same ungated full-K CAVI the fit's model uses.
+    The CAVI read-out knobs (gammaShape/caviMaxIter/caviTol) come from the model
+    defaults, which match the fit's defaults for this experiment family. Runs
+    saved before ADR 0050 also carry the co-fit head (`w_CK`, `b_CK`); it is
+    ignored (every readout head is fit post hoc).
 
     MULTI-DOMAIN (the Mondo path): `np.savez` cannot store a dict, so `_save_fit`
     writes a per-domain λ as `lambda_0, lambda_1, ...`; it is reassembled here into
@@ -1785,7 +1786,7 @@ def reconstruct_model(run_dir: Path, manifest: dict):
     the matching `features_0..` so the transform reads the per-domain BOW columns
     instead of a `features` column the multi-domain corpus does not have."""
     from spark_vi.core.result import VIResult
-    from spark_vi.mllib.topic.pc import OnlinePCLDAModel
+    from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAModel
 
     npz = np.load(run_dir / "gated_pc_result.npz")
     files = set(npz.files)
@@ -1798,17 +1799,10 @@ def reconstruct_model(run_dir: Path, manifest: dict):
             raise KeyError(
                 f"{run_dir}/gated_pc_result.npz has no lambda: found {sorted(files)}")
         lam = {m: npz[f"lambda_{m}"] for m in dom}
-    gp = {"lambda": lam, "alpha": npz["alpha"], "w_CK": npz["w_CK"]}
-    if "b_CK" in files:
-        # The per-node intercept (--head-intercept) is part of the head; without it
-        # the head arm's P(node) would be the intercept-free sigmoid of a model that
-        # was fit with one. Absent on runs that predate the save.
-        gp["b_CK"] = npz["b_CK"]
+    gp = {"lambda": lam, "alpha": npz["alpha"]}
     result = VIResult(global_params=gp, elbo_trace=[],
                       n_iterations=int(manifest.get("max_iter", 0)), converged=True)
-    model = OnlinePCLDAModel(result)
-    model._set(weightY=float(manifest.get("weight_y", 1.0)),
-               numLabels=int(manifest["C"]), closureParents="")
+    model = DagGatedLDAModel(result)
     if isinstance(lam, dict):
         model._set(featuresCols=[f"features_{i}" for i in range(len(lam))])
     return model

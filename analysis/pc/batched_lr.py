@@ -1,10 +1,8 @@
 """Batched multi-head logistic regression — re-export shim.
 
-The solver moved to its canonical home in spark-vi
-(:mod:`spark_vi.models.topic.batched_lr`) so the co-fit head (which lives in
-``spark_vi.models.topic.pc``) and the post-hoc readout (this analysis layer)
-share ONE source of truth instead of two diverging copies of a
-numerically-critical solver (plan D1, 2026-09-07). ``analysis -> spark_vi`` is
+The solver lives in spark-vi (:mod:`spark_vi.models.topic.batched_lr`); it was
+moved there so the co-fit head (removed by ADR 0050) and the post-hoc readout
+(this analysis layer) shared one source of truth (plan D1, 2026-09-07). ``analysis -> spark_vi`` is
 the legal dependency direction, so this module is now a thin re-export: every
 existing ``from analysis.pc.batched_lr import ...`` keeps working, byte-for-byte,
 against the lifted implementation.

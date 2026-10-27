@@ -70,28 +70,6 @@ def test_daglayout_multiparent_diamond():
         | set(lay.block[4]) | set(lay.block[5])
     assert set(lay.allowed_set({4, 5}).tolist()) == want   # union of closures over the frontier
 
-def test_daglayout_path_cousins_widens_contrast_set():
-    # path_cousins = closure+siblings PLUS the siblings of every ancestor on the root-path.
-    lay = DagLayout(PARENT, n_bg=2, tpn=1)
-    sib = set(int(k) for k in lay.allowed_with_siblings(3))
-    pc = set(int(k) for k in lay.allowed_with_path_cousins(3))
-    assert sib <= pc                                    # superset of closure+siblings
-    # node 3's ancestor 1 has sibling 2 (the "aunt"); path_cousins adds block[2], siblings does not
-    assert set(lay.block[2]) <= pc
-    assert not set(lay.block[2]).issubset(sib)
-    assert 0 in pc and 1 in pc and len(pc) <= lay.K     # bg included, still bounded < dense K
-    # multi-parent DAG: does not crash, stays a superset of the siblings support
-    d = DagLayout(DIAMOND, n_bg=2, tpn=1)
-    ds = set(int(k) for k in d.allowed_with_siblings(4))
-    dp = set(int(k) for k in d.allowed_with_path_cousins(4))
-    assert ds <= dp and len(dp) <= d.K
-    # +kids adds v's OWN children's blocks (node 1 has children 3,4); superset of path_cousins
-    pck = set(int(k) for k in lay.allowed_with_path_cousins_kids(1))
-    assert set(int(k) for k in lay.allowed_with_path_cousins(1)) <= pck
-    assert set(lay.block[3]) <= pck and set(lay.block[4]) <= pck   # node 1's children
-    assert len(pck) <= lay.K
-
-
 def test_daglayout_singleparent_backward_compat():
     lay = DagLayout(PARENT, n_bg=2, tpn=1)               # scalar-parent map still works
     assert lay.closure(3) == [0, 1, 3]                   # exact old list ordering
@@ -156,52 +134,17 @@ def test_daglayout_descendants_is_proper_and_mirrors_closure():
     assert d == sorted(d, key=lambda x: (lay.depth(x), x))
 
 
-def test_allowed_with_siblings_adds_sibling_blocks():
-    """Localized-head support: allowed(v) + siblings' blocks (the closure contrast
-    set). Layout {1:0,2:0,3:1}, n_bg=2, tpn=1 -> block[1]=[2],block[2]=[3],block[3]=[4]."""
-    from spark_vi.models.topic.dag_placement import DagLayout
-    lay = DagLayout({1: 0, 2: 0, 3: 1}, n_bg=2, tpn=1)
-    def s(v):
-        return set(int(k) for k in lay.allowed_with_siblings(v))
-    # node 1: allowed {0,1,2} + sibling 2's block {3}  (both are root's children)
-    assert s(1) == {0, 1, 2, 3}
-    assert s(2) == {0, 1, 2, 3}
-    # node 3: parent is 1, which has only child 3 -> no siblings -> == allowed(3)
-    assert s(3) == {0, 1, 2, 4} == set(int(k) for k in lay.allowed(3))
-    # root: no parents, no siblings -> background only
-    assert s(0) == {0, 1}
-    # siblings only ADD (superset of allowed), and stay within [0, K)
-    for v in (0, 1, 2, 3):
-        assert set(int(k) for k in lay.allowed(v)) <= s(v)
-        assert max(s(v)) < lay.K
 
-
-def test_cost_report_flags_support_and_dense_vs_localized():
-    """Pre-flight cost profile: support sizes, fan-out, and dense-vs-localized head
-    matrix costs. A deep bounded-fan-out tree localizes well (support << K); a flat
-    high-fan-out DAG does not (a node's siblings ~ K, so localized ~ dense)."""
+def test_cost_report_reports_k_fanout_and_lambda_size():
+    """Pre-flight size profile: K, DAG fan-out and the lambda size."""
     from spark_vi.models.topic.dag_placement import DagLayout
-    # deep, bounded fan-out: root -> A,B ; A -> A1,A2 ; B -> B1,B2  (each node few sibs)
     deep = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}
     lay = DagLayout(deep, n_bg=2, tpn=1)                    # K = 2 + 6 = 8
-    d, s = lay.cost_report(C=7, vocab_size=100, localized=True)
-    assert d["C"] == 7 and d["K"] == 8
-    assert d["support_max"] <= d["K"]                       # never exceeds K
-    assert d["localized_head_mem_bytes"] <= d["dense_head_mem_bytes"]
-    # collected = the padded (C, S, S) actually emitted: packed floor <= collected
-    # <= dense wall (this is the size that hits driver.maxResultSize).
-    assert d["collected_head_mem_bytes"] == 7 * d["support_max"] ** 2 * 8
-    assert (d["localized_head_mem_bytes"] <= d["collected_head_mem_bytes"]
-            <= d["dense_head_mem_bytes"])
+    d, s = lay.cost_report(vocab_size=100)
+    assert d["K"] == 8 and d["n_nodes"] == 6 and d["fanout_max"] == 2
     assert d["lambda_bytes"] == 8 * 100 * 8                 # K*V*8
-    assert "SIZE/COST PROFILE" in s and "support/node" in s and "collected" in s
-
-    # flat high-fan-out: 6 nodes all under root -> each sees ~5 siblings ~ K.
+    assert "SIZE PROFILE" in s and "fan-out" in s and "lambda" in s
     flat = {c: 0 for c in range(1, 7)}
-    lay2 = DagLayout(flat, n_bg=2, tpn=1)                   # K = 8
-    d2, _ = lay2.cost_report(C=7, localized=True)
+    d2, _ = DagLayout(flat, n_bg=2, tpn=1).cost_report()
     assert d2["fanout_max"] == 6
-    # a root child's support = bg + own + 5 siblings = 2+1+5 = 8 = K (localization
-    # gives nothing on a flat DAG — the report makes that visible).
-    assert d2["support_max"] == d2["K"]
     assert d2["lambda_bytes"] is None                       # vocab_size omitted

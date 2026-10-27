@@ -35,16 +35,16 @@ def test_driver_path_for_gated_pc(monkeypatch):
 
 def test_build_gated_pc_args_shape(monkeypatch):
     mod = _run_exp(monkeypatch)
-    eff = {**_base_eff(), "weight_y": 80.0, "seed": 42, "cache_uri": "hdfs:///c",
+    eff = {**_base_eff(), "seed": 42, "cache_uri": "hdfs:///c",
            "num_partitions": 96}
     args = mod.build_gated_pc_args(eff, "/out")
     assert args[args.index("--disease") + 1] == "rare6"
-    assert args[args.index("--weight-y") + 1] == "80.0"
     assert args[args.index("--num-partitions") + 1] == "96"
     assert args[args.index("--out-dir") + 1] == "/out"
     assert args[args.index("--cache-uri") + 1] == "hdfs:///c"
-    assert args[args.index("--head-optimizer") + 1] == "newton"
-    assert args[args.index("--head-l2") + 1] == "0.001"
+    for gone in ("--weight-y", "--head-optimizer", "--head-l2", "--grad-cavi-iters",
+                 "--topic-trust", "--localize-head", "--init"):
+        assert gone not in args                    # removed by ADR 0050
     assert "--resume-from" not in args             # resume unsupported
     for gone in ("--with-dag-head", "--skip-unsup-gated", "--diag-only", "--k",
                  "--readout-mode", "--eval-every", "--min-label-count"):
@@ -66,7 +66,8 @@ def test_build_gated_pc_args_fit_save_interval_from_config(monkeypatch):
 def test_build_fit_args_routes_gated_pc(monkeypatch):
     mod = _run_exp(monkeypatch)
     args = mod.build_fit_args(_base_eff(), "/out")
-    assert "--disease" in args and "--weight-y" in args   # routed to gated_pc builder
+    assert "--disease" in args and "--gate-attestation" not in args  # gated_pc builder
+    assert "--n-bg" in args
 
 
 def test_gated_pc_store_true_flags(monkeypatch):
@@ -89,30 +90,29 @@ def test_built_args_parse_through_driver(monkeypatch):
     import gated_pc_cloud
     parsed = gated_pc_cloud.parse_args(args)
     assert parsed.disease == "rare6" and parsed.seed == 7
-    assert parsed.head_l2 == 1e-3 and parsed.out_dir == "/out"
+    assert parsed.out_dir == "/out"
 
 
-def test_head_config_round_trips_frontmatter_to_shim_estimator(monkeypatch):
+def test_config_round_trips_frontmatter_to_the_estimator(monkeypatch):
     """Full config chain: frontmatter-style dict -> build_gated_pc_args ->
-    gated_pc_cloud.parse_args -> shim estimator -> the shim builds an engine with
-    the head hypers (head_l2 ridge, newton optimizer) carried through."""
+    gated_pc_cloud.parse_args -> DagGatedLDAEstimator, the fit knobs carried
+    through."""
     mod = _run_exp(monkeypatch)
-    eff = {**_base_eff(), "head_l2": 0.01, "head_optimizer": "newton", "K": 4}
+    eff = {**_base_eff(), "doc_concentration": 0.5, "gate_warm": 2,
+           "gate_seed_mode": "balanced", "gate_seed_leaves": True}
     args = mod.build_gated_pc_args(eff, "/out")
-    assert args[args.index("--head-l2") + 1] == "0.01"
-
     cloud = str(Path(mod.__file__).resolve().parent.parent / "analysis" / "cloud")
     if cloud not in sys.path:
         sys.path.insert(0, cloud)
     import gated_pc_cloud
-    from spark_vi.mllib.topic.pc import _build_model_and_config
     parsed = gated_pc_cloud.parse_args(args)
-    assert parsed.head_l2 == 0.01 and parsed.head_optimizer == "newton"
-    parsed._C = 1
-    est = gated_pc_cloud._build_pc_estimator(parsed, weight_y=50.0, gated=False)
-    assert est.getOrDefault("headL2") == 0.01
-    model, _ = _build_model_and_config(est, vocab_size=8)
-    assert model.head_l2 == 0.01 and model.head_optimizer == "newton"
+    parsed._parent_int = {1: [0], 2: [0]}
+    est = gated_pc_cloud._build_estimator(parsed)
+    assert est.getOrDefault("docConcentration") == [0.5]
+    assert est.getOrDefault("gateWarm") == 2
+    assert est.getOrDefault("gateSeedMode") == "balanced"
+    assert est.getOrDefault("gateSeedLeaves") is True
+    assert est.getOrDefault("maxIter") == 100
 
 
 def test_anchor_select_route(monkeypatch):
@@ -212,25 +212,6 @@ def test_mondo_native_selects_the_native_assembler(monkeypatch):
     assert 4995 in seen["dag"].nodes()          # Mondo term ids, not OMOP cids
 
 
-def test_localize_head_flag_threads(monkeypatch):
-    """localize_head frontmatter -> --localize-head -> driver parses it -> the shim
-    estimator carries localizeHead=True."""
-    mod = _run_exp(monkeypatch)
-    on = mod.build_gated_pc_args({**_base_eff(), "localize_head": True}, "/out")
-    assert "--localize-head" in on
-    off = mod.build_gated_pc_args(_base_eff(), "/out")
-    assert "--localize-head" not in off
-    cloud = str(Path(mod.__file__).resolve().parent.parent / "analysis" / "cloud")
-    if cloud not in sys.path:
-        sys.path.insert(0, cloud)
-    import gated_pc_cloud
-    parsed = gated_pc_cloud.parse_args(on)
-    assert parsed.localize_head is True
-
-
-
-
-
 def test_the_0110_front_matter_asks_for_the_preindex_column():
     """The census (E-census) is a property of 0110's CORPUS and has to be measured
     on the corpus the record run reports — so the flag lives in 0110's own front
@@ -249,7 +230,9 @@ def test_a_removed_option_is_refused_and_its_inert_value_accepted(monkeypatch):
     mod = _run_exp(monkeypatch)
     mod.build_gated_pc_args({**_base_eff(), "init": "random",
                              "anchor_scope": "closure"}, "/out")
-    for key, val in (("init", "spectral"), ("spectral_bg_anchors", 8),
+    mod.build_gated_pc_args({**_base_eff(), "weight_y": 0.0,
+                             "head_l2": 0.01, "localize_head": True}, "/out")
+    for key, val in (("init", "spectral"), ("spectral_bg_anchors", 8), ("weight_y", 50.0),
                      ("anchor_scope", "frontier"), ("alpha_init", "equalized"),
                      ("count_transform", "binary")):
         with pytest.raises(ValueError, match="ADR 0050"):

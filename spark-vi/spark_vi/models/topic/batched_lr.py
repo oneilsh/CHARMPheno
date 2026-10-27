@@ -1,11 +1,11 @@
 """Batched multi-head logistic regression: C independent per-node fits, one solver.
 
-CANONICAL HOME (plan D1, 2026-09-07). This pure-numpy solver is the ONE source of
-truth for both consumers: the co-fit head (``spark_vi.models.topic.pc``, which
-runs it against a MOVING θ during the fit) and the post-hoc readout
-(``analysis.pc`` / ``analysis.cloud.distributed_readout``, FROZEN θ).
-``analysis.pc.batched_lr`` is now a thin re-export of this module — the legal
-``analysis -> spark_vi`` direction — so the two never diverge. Domain-agnostic by
+CANONICAL HOME (plan D1, 2026-09-07). This pure-numpy solver is the post-hoc
+readout's (``analysis.pc`` / ``analysis.cloud.distributed_readout``, FROZEN θ); it
+also served the co-fit head until ADR 0050 removed it (the carried-curvature
+``state`` path below is that head's legacy and stays inert for the readout).
+``analysis.pc.batched_lr`` is a thin re-export of this module — the legal
+``analysis -> spark_vi`` direction. Domain-agnostic by
 construction: pure-Python, flat-layout, no charmpheno/analysis/Spark import (the
 docstrings' ``analysis.pc.evaluate`` mentions are the oracle it reproduces, prose
 not code).
@@ -318,9 +318,7 @@ def make_inmemory_stats_fn(
     for the distributed implementation rather than merely a correct one.
 
     Unobserved cells are zeroed in the residual before aggregation, so a masked
-    cell contributes nothing to any loss or gradient — the invariant
-    :mod:`analysis.pc.tests.test_multitask_masking` pins for the co-fit head, and
-    the reason a node with zero observed rows produces an exactly-zero gradient
+    cell contributes nothing to any loss or gradient — the reason a node with zero observed rows produces an exactly-zero gradient
     and is a no-op for the solver.
     """
     Pi = np.asarray(Pi, dtype=np.float64)

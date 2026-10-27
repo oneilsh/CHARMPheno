@@ -152,10 +152,10 @@ def test_multidomain_bundle_fits_through_the_gated_shim_and_round_trips(spark, t
     """The SP3c<->SP3a seam: a 3-domain bundle fits via the gated estimator with
     featuresCols=[features_0, features_1, features_2], yields a per-domain dict
     lambda over 3 domains, and the saved VIResult round-trips."""
-    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
+    from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
     from spark_vi.io.export import save_result, load_result
     bundle = _three_domain_bundle(spark)
-    est = OnlinePCLDAEstimator(
+    est = DagGatedLDAEstimator(
         featuresCols=["features_0", "features_1", "features_2"], frontierCol="frontier",
         gateNBg=2, gateTpn=1, maxIter=2, seed=0, subsamplingRate=1.0)
     est.setGateParent(bundle.parent_int)
