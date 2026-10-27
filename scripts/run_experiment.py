@@ -666,6 +666,7 @@ _GATED_PC_REMOVED_OPTIONS = {
     "spectral_min_doc_freq": 5, "spectral_bg_anchors": 0,
     "anchor_scope": "closure", "spectral_topo_order": "forward",
     "spectral_marginal_floor": "none",
+    "count_transform": "none", "alpha_init": "uniform", "profile_eta": "",
 }
 
 
@@ -752,10 +753,6 @@ def build_gated_pc_args(
         args.append("--head-intercept")
     if effective.get("head_standardize"):
         args.append("--head-standardize")
-    if str(effective.get("count_transform", "none")) != "none":
-        args.extend(["--count-transform", str(effective["count_transform"])])
-    if str(effective.get("alpha_init", "uniform")) != "uniform":
-        args.extend(["--alpha-init", str(effective["alpha_init"])])
     if effective.get("doc_concentration") is not None:
         args.extend(["--doc-concentration", str(effective["doc_concentration"])])
     if effective.get("dag_source"):

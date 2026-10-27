@@ -663,14 +663,6 @@ def test_readout_main_tees_its_log_into_the_run_dir_before_scoring():
     assert i_tee < i_manifest < i_score
 
 
-def test_parse_args_alpha_init_default_uniform():
-    a = gpc.parse_args(["--cdr", "x", "--billing", "y", "--out-dir", "/tmp/o"])
-    assert a.alpha_init == "uniform"
-    b = gpc.parse_args(["--cdr", "x", "--billing", "y", "--out-dir", "/tmp/o",
-                        "--alpha-init", "equalized"])
-    assert b.alpha_init == "equalized"
-
-
 def test_hard_exit_flushes_the_tee_then_os_exits_with_the_rc(monkeypatch, tmp_path):
     """`hard_exit` must (1) land the tee's pending batch on disk BEFORE `os._exit`
     (which skips atexit), (2) ask the JVM to `System.exit(rc)` through the py4j

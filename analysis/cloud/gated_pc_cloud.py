@@ -1933,20 +1933,6 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
         gateOpenSeed=True,
         localizeHead=bool(getattr(args, "localize_head", False)),
         headSupport=str(getattr(args, "head_support", "siblings")),
-        countTransform=str(getattr(args, "count_transform", "none")),
-        alphaInit=str(getattr(args, "alpha_init", "uniform")),
-        # Profile-eta word-side prior (plan WP-3): the four Params are the
-        # provenance record (path + knobs); the boost itself is built
-        # driver-side (profile_eta.build_profile_eta_boost, from the TSV +
-        # bundle meta) and handed over via setEtaBoost below — the spectral
-        # precedent's split between "what the estimator records" and "what the
-        # driver computes", except the data cannot be derived from the RDD so
-        # it arrives pre-built (plan D4). getattr guards older namespaces.
-        profileEta=str(getattr(args, "profile_eta", "") or ""),
-        profileEtaStrength=float(getattr(args, "profile_eta_strength", 1.0)),
-        profileEtaTopics=int(getattr(args, "profile_eta_topics", 1)),
-        profileEtaMinCoverage=float(
-            getattr(args, "profile_eta_min_coverage", 0.0)),
     )
     # Multi-domain: feed per-domain feature columns (features_0..) so the gated
     # engine carries a per-domain lambda and the topic correction scatters per
@@ -2390,21 +2376,6 @@ def parse_args(argv=None):
                         "siblings, default); 'path_cousins' (also the siblings of every ancestor "
                         "on the root-path); 'path_cousins_kids' (also v's own children's blocks, "
                         "the subtype signal). All bounded; exact Newton kept.")
-    p.add_argument("--alpha-init", choices=["uniform", "equalized"], default="uniform",
-                   help="initial doc-concentration policy for the gated engine: "
-                        "'uniform' (doc_concentration everywhere) or 'equalized' "
-                        "(children-first: equal TOTAL prior pseudo-count per topic "
-                        "block across the corpus, alpha ∝ 1/N_docs_seeing_block, "
-                        "rescaled to the doc_concentration mean; exp 0121). With "
-                        "--optimize-doc-concentration the empirical-Bayes step takes "
-                        "over from it — an init, not a strength knob.")
-    p.add_argument("--count-transform", choices=["none", "binary", "log1p"],
-                   default="none",
-                   help="per-token BOW count transform before seed+fit: 'none' (raw "
-                        "counts), 'binary' (min(count,1) = per-doc presence; de-biases "
-                        "anchors/evidence off utilization volume, insight 0077 extended "
-                        "to all domains), or 'log1p' (softer damping). In-memory; the "
-                        "cached bundle stays raw (no cache-key change).")
     p.add_argument("--dag-source", choices=["mondo_native"], default="mondo_native",
                    help="the label space: exp 0110's NATIVE Mondo terms, powered by "
                         "is-a CLOSURE support, the DAG Mondo's own hierarchy "
@@ -2702,7 +2673,6 @@ def main() -> int:
             "head_history_reset": bool(getattr(args, "head_history_reset", True)),
             "subsampling_rate": args.subsampling_rate, "tau0": args.tau0,
             "kappa": args.kappa, "max_iter": args.max_iter,
-            "alpha_init": str(getattr(args, "alpha_init", "uniform")),
             "dag_source": args.dag_source,
             "extra_domains": list(extra_domains),
             "domain_names": args._domain_names,

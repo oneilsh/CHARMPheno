@@ -136,11 +136,6 @@ def bold_cyan(text: str) -> str:
 # change color; the ELBO/rho/batch middle stays plain and legible.
 _ITER_RE = re.compile(r"(iter \d+/\d+)(:.*, )(\d+\.\d+s)$")
 
-# gated_lda.GatedOnlineLDA._eta_boost_summary's wiring sentinel, e.g.
-# "..., η_boost[topics=3 nnz=120 mass=45.6]". Model-owned text (spark-vi) —
-# never edit that module; this only recolors the string at the print site.
-_ETA_BOOST_RE = re.compile(r"η_boost\[[^\]]*\]")
-
 # Cache/bundle status tokens as driver print()s spell them (word-boundary so
 # "MISSING" or "prebuild" don't light up by accident). MISS is matched
 # case-SENSITIVE (it is a spelled-out sentinel, like HIT — a stray lowercase
@@ -163,14 +158,6 @@ def colorize_iter_line(line: str) -> str:
             + line[m.end():])
 
 
-def colorize_eta_boost(line: str) -> str:
-    """Green-highlight the `η_boost[...]` wiring-sentinel substring, wherever
-    it lands in the line; identity when the substring is absent."""
-    if not enabled() or "η_boost[" not in line:
-        return line
-    return _ETA_BOOST_RE.sub(lambda m: green(m.group(0)), line)
-
-
 def highlight_line(line: str) -> str:
     """The driver print-site rules, applied SPARINGLY and in order:
 
@@ -180,9 +167,8 @@ def highlight_line(line: str) -> str:
                                      codebase actually uses).
       3. a readout headline       -> bold green, whole line ("macro AUC="
                                      or "detection (case vs bg)").
-      4. otherwise, token-level:  HIT green, MISS/rebuild yellow, and an
-                                     eta-boost sentinel green, independently
-                                     — a line can carry more than one.
+      4. otherwise, token-level:  HIT green, MISS/rebuild yellow,
+                                     independently — a line can carry both.
 
     Identity when nothing matches, and identity (via the underlying `c`)
     when color is disabled — never used on markdown report bodies or
@@ -196,5 +182,4 @@ def highlight_line(line: str) -> str:
     out = _HIT_RE.sub(lambda m: green(m.group(0)), line)
     out = _MISS_RE.sub(lambda m: yellow(m.group(0)), out)
     out = _REBUILD_RE.sub(lambda m: yellow(m.group(0)), out)
-    out = colorize_eta_boost(out)
     return out

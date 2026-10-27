@@ -151,37 +151,6 @@ def test_colorize_iter_line_leaves_non_matching_lines_untouched(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# colorize_eta_boost: the eta-boost wiring sentinel from spark_vi model code. #
-# --------------------------------------------------------------------------- #
-
-_ETA_LINE = ("[driver]   α[min=0.01 max=0.5], η_boost[topics=3 nnz=120 "
-             "mass=45.6]")
-
-
-def test_colorize_eta_boost_identity_when_disabled(monkeypatch):
-    import term_colors
-    _tty(monkeypatch, False)
-    assert term_colors.colorize_eta_boost(_ETA_LINE) == _ETA_LINE
-
-
-def test_colorize_eta_boost_highlights_the_token(monkeypatch):
-    import term_colors
-    _tty(monkeypatch, True)
-    out = term_colors.colorize_eta_boost(_ETA_LINE)
-    assert out != _ETA_LINE
-    assert term_colors.green("η_boost[topics=3 nnz=120 mass=45.6]") in out
-    # everything before the token is untouched
-    assert out.startswith("[driver]   α[min=0.01 max=0.5], ")
-
-
-def test_colorize_eta_boost_leaves_non_matching_lines_untouched(monkeypatch):
-    import term_colors
-    _tty(monkeypatch, True)
-    line = "[driver]   iter 3/50: ELBO=-1234.5678, batch=2000, rho=0.1234, 12.3s"
-    assert term_colors.colorize_eta_boost(line) == line
-
-
-# --------------------------------------------------------------------------- #
 # highlight_line: the print-site rules shared by gated_pc_cloud /             #
 # gated_pc_readout / hpoa_stage2_probe / _case_finding_cache.                 #
 # --------------------------------------------------------------------------- #
