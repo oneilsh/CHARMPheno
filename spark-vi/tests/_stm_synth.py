@@ -829,10 +829,10 @@ def dag_placement_corpus_multi(*, parent, leaf_prev, comorbid_rate, V, doc_len, 
 
 
 def fit_gated_svi_local(model, gated_docs, *, n_iter=200, seed=0, data_summary=None):
-    """In-memory batch-VB driver for GatedOnlineLDA (no Spark), mirroring fit_stm.
+    """In-memory batch-VB driver for DagGatedOnlineLDA (no Spark), mirroring fit_stm.
 
     Full-batch lr=1.0 each iteration = variational EM — the cleanest regime for the
-    SVI-vs-Gibbs placement equivalence gate. `model` is a GatedOnlineLDA; `gated_docs` are
+    SVI-vs-Gibbs placement equivalence gate. `model` is a DagGatedOnlineLDA; `gated_docs` are
     GatedBOWDocuments (frontier tags drive the gate).
 
     `data_summary` (default None) is passed straight through to `initialize_global`."""

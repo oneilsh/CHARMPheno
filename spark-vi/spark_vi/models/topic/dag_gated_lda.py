@@ -46,7 +46,24 @@ from spark_vi.models.topic.lda import OnlineLDA, _cavi_doc_inference, _dirichlet
 from spark_vi.models.topic.types import GatedBOWDocument
 
 
-class GatedOnlineLDA(OnlineLDA):
+def expElogbeta_from_lambda(lam) -> np.ndarray:
+    """exp(E[log beta]) as ONE concatenated (K, V) array, from a (K, V) lambda or a
+    per-domain dict {m: (K, V_m)}.
+
+    Each domain is normalized ON ITS OWN full row — exp(psi(lam_m) -
+    psi(lam_m.sum(axis=1))) — then the blocks are concatenated in domain order, so a
+    domain's rows can never be normalized against another domain's mass (the failure
+    mode a single pooled array cannot prevent; MixEHR-style storage, Li, Nair, Lu et
+    al. 2020, Nat. Commun.). The one helper the engine, the MLlib transform and the
+    distributed readout all use to read a fitted lambda."""
+    if isinstance(lam, dict):
+        return np.concatenate(
+            [np.exp(digamma(lam[m]) - digamma(lam[m].sum(axis=1, keepdims=True)))
+             for m in sorted(lam)], axis=1)
+    return np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+
+
+class DagGatedOnlineLDA(OnlineLDA):
     def __init__(self, lay: DagLayout, vocab_size: int, *,
                  optimize_alpha: bool = False,
                  frontier_histogram: dict | None = None,
@@ -252,19 +269,9 @@ class GatedOnlineLDA(OnlineLDA):
         return {m: draw((self.lay.K, v)) for m, v in enumerate(self.domains)}
 
     def _assemble_expElogbeta(self, lam_dict: dict[int, np.ndarray]) -> np.ndarray:
-        """Assemble the concatenated (K, V) expElogbeta the shared gated CAVI consumes
-        from a per-domain lambda dict {m: (K, V_m)} (MixEHR-style storage; Li, Nair, Lu
-        et al. 2020, Nat. Commun.).
-
-        Each domain is normalized ON ITS OWN full row — exp(psi(lam_m) -
-        psi(lam_m.sum(axis=1))) — then the blocks are concatenated in domain order.
-        This is type-safe: a domain's rows can never be normalized against another
-        domain's mass (the failure mode a single pooled array cannot prevent)."""
-        blocks = [
-            np.exp(digamma(lam_dict[m]) - digamma(lam_dict[m].sum(axis=1, keepdims=True)))
-            for m in range(len(self.domains))
-        ]
-        return np.concatenate(blocks, axis=1)
+        """The concatenated (K, V) expElogbeta the shared gated CAVI consumes, from a
+        per-domain lambda dict {m: (K, V_m)} (see `expElogbeta_from_lambda`)."""
+        return expElogbeta_from_lambda({m: lam_dict[m] for m in range(len(self.domains))})
 
     def _split_to_domains(self, concat: np.ndarray) -> dict[int, np.ndarray]:
         """Slice a concatenated (K, V) array into a per-domain dict {m: (K, V_m)} at
@@ -294,12 +301,6 @@ class GatedOnlineLDA(OnlineLDA):
         state["_init_seed"] = None
         return state
 
-    def _expElogbeta(self, lam) -> np.ndarray:
-        """exp(E[log beta]) as one concatenated (K, V) array, from either lambda form."""
-        if self.domains is None:
-            return np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
-        return self._assemble_expElogbeta(lam)
-
     def local_update(
         self,
         rows: Iterable[GatedBOWDocument],
@@ -328,7 +329,7 @@ class GatedOnlineLDA(OnlineLDA):
         # expElogbeta and each doc's concatenated token indices; lambda_stats stays a
         # single concatenated (K, V) array so VIRunner's mini-batch scaling /
         # combine_stats / broadcast are untouched.
-        expElogbeta = self._expElogbeta(lam)
+        expElogbeta = expElogbeta_from_lambda(lam)
         lambda_stats = np.zeros((self.K, self.V), dtype=np.float64)
 
         doc_loglik_sum = 0.0
@@ -421,7 +422,7 @@ class GatedOnlineLDA(OnlineLDA):
         alpha = global_params["alpha"]
         eta = global_params["eta"]
         if self.domains is None:
-            expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+            expElogbeta = expElogbeta_from_lambda(lam)
             target_lam = eta + expElogbeta * target_stats["lambda_stats"]
             new_lam = (1.0 - learning_rate) * lam + learning_rate * target_lam
         else:

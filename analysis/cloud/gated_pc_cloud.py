@@ -1,41 +1,20 @@
-"""Cloud fit+eval driver for Gated-PC rare-disease case-finding (smooshed vocab).
+"""Cloud fit driver for the DAG-gated LDA on the Mondo label DAG (model_class gated_pc).
 
-The forward test named in insight 0066: PC topic-shaping should help in the
-HIDDEN-LOW-MASS regime — a rare phenotype an unsupervised fit spends its K
-topics missing. This driver runs that test on real All-of-Us OMOP data with a
-single smooshed (fused-vocab) BOW, comparing, on the SAME gated hierarchy and
-per-node label:
+Assembles (or reloads from cache) the multi-domain native-Mondo corpus, fits
+`DagGatedLDAEstimator` (ADR 0050: one estimator, named for its DAG gate; the
+supervised head and the DAG spectral init were removed), and saves the fit:
+`<run>/gated_pc_result.npz` (lambda / lambda_0.., alpha) + `manifest.json`. The fit
+ends at that save; every readout and evaluation is `gated_pc_readout.py` against
+it. The file and model-class names keep "gated_pc" for now (renaming them is ADR
+0051's business).
 
-  arm "unsup_gated"  — gated topics, NO supervision (OnlinePCLDA weightY=0). The
-                       controlled incumbent: the same gated E-step + K + init as
-                       the PC arm, only the head is off. (The dag_placement_cloud
-                       node_affinity model is the production incumbent; this is
-                       the pc_topics_lr-comparable twin.)
-  arm "gated_pc"     — gate + FLAT PC head (weightY>0). Inject the hierarchy ONCE
-                       (ADR 0042: gate+flat wins; gate+closure-head collapses).
-  arm "dag_head"     — (optional, --with-dag-head) UNGATED + DAG-closure head, the
-                       label-side-only alternative to the gate.
-
-Headline metric: `pc_topics_lr` — a fresh post-hoc LogisticRegression on each
-arm's FINAL per-doc theta against the per-node label, macro AUC over nodes
-(insight 0066: this isolates representation quality from the co-fit head's own
-convergence, and is directly comparable across arms). The gated_pc arm also
-reports its co-fit head P(node) AUC (secondary; the head's own readout).
-
-That readout is fit either on the DRIVER (collect theta + label/mask, C sklearn
-LRs) or DISTRIBUTED (one batched L-BFGS over all C heads on the executors, then a
-lean float32/uint8 test-split collect) — see `--readout-mode` and
-`resolve_readout_mode`. The metrics stack is the same object either way; only
-where the per-node logistic is fit changes.
-
-The per-node (label, labelMask) is emitted by the Step-A adapter
-(case_finding_assembly.emit_labels): label[c]=1 iff node c is in the is-a
-closure of the doc's frontier; C = len(int2cid). Mirrors dag_placement_cloud's
-assemble->fit->score->save shape (cached CaseFindingBundle, npz + manifest.json).
+The per-node (label, labelMask) the readout scores against is emitted by the
+Step-A adapter (case_finding_assembly.emit_labels): label[c]=1 iff node c is in the
+is-a closure of the doc's frontier; C = len(int2cid).
 
 CANNOT RUN HERE: every fact table is read from the workspace CDR via the
 spark-bigquery connector, so main() only executes inside the All-of-Us Dataproc
-workspace. Unit tests cover parse_args + the pure pc_topics_lr scorer.
+workspace. Unit tests cover parse_args and the pure helpers.
 """
 from __future__ import annotations
 
@@ -286,7 +265,7 @@ def readout_from_proba(proba, y_te, m_te, C, *, recall_targets, fdr_targets,
 #     log P_stack(c | d) = Σ_{a ∈ closure(c)} log σ(z_a(d)),
 #
 # closure = c plus every ancestor including the root, each counted once (the
-# `DagClosureHead` convention, diamond-safe). Two consequences the flat arm does
+# memoized-DFS convention, diamond-safe). Two consequences the flat arm does
 # not have: P(child) ≤ P(parent) by construction, and the root's factor carries
 # the population prior down the tree — PROVIDED the root head saw the
 # background. Under the closure mask it did not (the root is observed only on
@@ -301,14 +280,19 @@ STACKED_NAMING = ("closure-PRODUCT of the per-node readout heads (HSLDA's label-
                   "the heads of nodes ≥ 1 are the prevalent arm's own")
 
 
+def dag_closure_parents(parent_int, C):
+    """Length-C list of parent-LABEL-index lists over the [0, C) engine-id label
+    space (root and any parentless node -> []): `parent_int` (root omitted)
+    densified over range(C)."""
+    return [[int(p) for p in parent_int.get(c, [])] for c in range(C)]
+
+
 def closure_matrix(parent_int, C):
     """(C, C) float64 `M[c, a] = 1` iff `a ∈ closure(c)` — c itself plus every
     ancestor, each ONCE under diamonds, root included.
 
-    Same construction as `DagClosureHead.__init__` (memoized DFS over the
-    direct-parent lists), kept here so the readout's stacked arm and the co-fit
-    closure head agree on what "closure" means without importing the engine.
-    `parent_int` is the bundle's `{child: [parents]}` over engine ids."""
+    A memoized DFS over the direct-parent lists. `parent_int` is the bundle's
+    `{child: [parents]}` over engine ids."""
     C = int(C)
     parents = dag_closure_parents(parent_int, C)
     clo = [None] * C
@@ -706,8 +690,7 @@ def _save_fit(out, gp, C, manifest_fields, *, results=None, domain_mass=None,
     npz_path = out / "gated_pc_result.npz"
     npz_tmp = out / "gated_pc_result.npz.tmp"
     with open(npz_tmp, "wb") as _f:
-        np.savez(_f, **lam_arrays, alpha=gp["alpha"], w_CK=gp["w_CK"],
-                 b_CK=np.asarray(gp.get("b_CK", np.zeros(C)), dtype=np.float64))
+        np.savez(_f, **lam_arrays, alpha=gp["alpha"])
     os.replace(npz_tmp, npz_path)
     manifest = dict(manifest_fields)
     manifest["per_node_domain_mass"] = (
@@ -720,13 +703,6 @@ def _save_fit(out, gp, C, manifest_fields, *, results=None, domain_mass=None,
     return manifest
 
 
-def dag_closure_parents(parent_int, C):
-    """Length-C list of parent-LABEL-index lists for the ungated DAG-closure head.
-
-    closure_parents[c] lists node c's direct parents in the [0, C) engine-id label
-    space (root and any parentless node -> []); this is exactly `parent_int` (root
-    omitted) densified over range(C). Feeds OnlinePCLDAEstimator.setClosureParents."""
-    return [[int(p) for p in parent_int.get(c, [])] for c in range(C)]
 
 
 # --------------------------------------------------------------------------- #
@@ -1709,154 +1685,10 @@ def distributed_score_arm(train_scored, test_scored, C, K, *, recall_targets,
     return readout, proba, y_te, m_te, doc_keys, (V, b_raw), elig
 
 
-def _converge_localized_head(Pi, y, obs, support_cols, C, *, head_l2,
-                             head_newton_ridge, n_iters, head_lr=1.0,
-                             ridge_mode="relative", fixed_ridge=1.0, intercept=False):
-    """Converge a per-node localized ridge-Newton logistic on FROZEN θ — the ENGINE's
-    own head math (support-restricted, w=0 off support, Newton solve), run to
-    convergence (full Newton from w=0) instead of one damped step/iter against a
-    moving θ. Toggles step the engine formulation toward the sklearn oracle so the
-    head-formulation LADDER can isolate WHICH difference costs the co-fit head its AUC:
-
-      ridge_mode='relative' (shipped): ridge = head_l2 + head_newton_ridge·mean(diag
-        H) — the RELATIVE conditioner VANISHES near separation (H→0 as p→0/1), which
-        lets |w| explode (the |w_CK|=273 blowup).
-      ridge_mode='fixed':   ridge = `fixed_ridge` (an ABSOLUTE L2, sklearn-style) —
-        does not vanish, so it bounds |w|.
-      intercept=True: add an UNPENALIZED per-node bias (θ sums to 1, so a rare node's
-        marginal must otherwise be fit through ridge-penalized topic weights — the
-        bias frees them for the within-sibling contrast).
-
-    `obs` = the per-node observed (closure) mask; each node fits on its own observed
-    rows, as in training. Returns (w (C,K), b (C,)); b is 0 when intercept=False.
-    Pure numpy (driver-side)."""
-    K = Pi.shape[1] if Pi.ndim == 2 and Pi.shape[0] else 0
-    w = np.zeros((C, K), dtype=np.float64)
-    b = np.zeros(C, dtype=np.float64)
-    if Pi.shape[0] == 0:
-        return w, b
-    for _ in range(int(n_iters)):
-        for c in range(C):
-            s = support_cols[c]
-            if s.size == 0:
-                continue
-            rows = np.where(obs[:, c] > 0)[0]
-            if rows.size == 0:
-                continue
-            yc = y[rows, c]
-            if np.unique(yc).size < 2:
-                continue
-            X = Pi[np.ix_(rows, s)]
-            d = int(s.size)
-            # design = [support topics | 1] when an intercept is fit; the bias column
-            # is the last coordinate and is left UNPENALIZED in the ridge below.
-            Xa = np.concatenate([X, np.ones((X.shape[0], 1))], axis=1) if intercept else X
-            wc = np.concatenate([w[c, s], [b[c]]]) if intercept else w[c, s].copy()
-            z = np.clip(Xa @ wc, -50.0, 50.0)
-            p = 1.0 / (1.0 + np.exp(-z))
-            g = Xa.T @ (p - yc)
-            H = (Xa * (p * (1.0 - p))[:, None]).T @ Xa
-            if ridge_mode == "fixed":
-                r = float(fixed_ridge)
-            else:
-                r = head_l2 + head_newton_ridge * (float(np.trace(H[:d, :d])) / d) + 1e-10
-            rdiag = np.full(Xa.shape[1], r, dtype=np.float64)
-            if intercept:
-                rdiag[-1] = 0.0                              # unpenalized bias
-            A = H + np.diag(rdiag)
-            rhs = g + rdiag * wc
-            try:
-                delta = np.linalg.solve(A, rhs)
-            except np.linalg.LinAlgError:
-                delta = np.linalg.lstsq(A, rhs, rcond=None)[0]
-            wc = wc - head_lr * delta
-            w[c, s] = wc[:d]
-            if intercept:
-                b[c] = wc[d]
-    return w, b
 
 
-def _localized_head_proba(Pi, w, b=None):
-    """Per-node P(node) = σ(w_c·θ + b_c) for the localized head (w is 0 off-support,
-    so the full dot IS the localized prediction; b is the optional per-node bias).
-    Returns (N, C)."""
-    C = w.shape[0]
-    if Pi.shape[0] == 0:
-        return np.zeros((0, C), dtype=np.float64)
-    z = Pi @ w.T
-    if b is not None:
-        z = z + b[None, :]
-    return 1.0 / (1.0 + np.exp(-np.clip(z, -50.0, 50.0)))
 
 
-def per_node_head_report(w_CK, lay, C, int2cid, count_of, *, dead_eps=1e-6):
-    """FAST head-STARVATION diagnostic (exp 0092 hypothesis): the aggregate |w_CK|max
-    hides the DISTRIBUTION. What decides the whole-Mondo neutral-PC question is: of the
-    C localized heads, how many have `|w_c|≈0` (never trained), and does that track each
-    node's POSITIVE count? A localized head shapes topics only through its own `w_c`
-    (grad_topics ∝ w_CK); a node with too few positives has a degenerate per-node Fisher
-    → `w_c≈0` → no shaping → corr≈0. This is pure driver-side arithmetic on the fitted
-    `w_CK` (C,K) + the per-node support `lay.allowed_with_siblings(c)` + the terminal
-    positive counts `count_of` — near-free, no Spark, no θ collect.
-
-    Returns a formatted multi-line string: a |w_c| bucket histogram, and — split by
-    trained-vs-dead — the median positive count, so 'dead heads are the low-positive
-    ones' is read off directly.
-
-    `count_of` may be EMPTY: the Mondo corpus now comes from the bundle cache, and a
-    HIT skips the DAG build + power-count that produces those counts (the fit needs
-    only `bundle.parent_int`). The |w_c| half of the probe — the part that reads the
-    fitted head — is unaffected, so it still prints, with the +count columns
-    suppressed and said so rather than shown as a wall of zeros."""
-    lines = ["[head-starvation probe] per-node |w_c| on localized support:"]
-    have_counts = bool(count_of)
-    wnorm = np.empty(C, dtype=np.float64)
-    sizes = np.empty(C, dtype=np.int64)
-    pos = np.full(C, -1, dtype=np.int64)          # -1 = class node (no positive count)
-    for c in range(C):
-        sup = np.asarray(sorted(lay.allowed_with_siblings(c)), dtype=int)
-        sizes[c] = sup.size
-        wnorm[c] = float(np.linalg.norm(np.asarray(w_CK)[c, sup])) if sup.size else 0.0
-        cid = int2cid.get(c)
-        if have_counts and cid is not None and cid > 0:
-            pos[c] = int(count_of.get(cid, 0))
-    # |w_c| buckets
-    edges = [(0.0, dead_eps, "dead  (≈0)"), (dead_eps, 1e-2, "tiny  (<1e-2)"),
-             (1e-2, 1.0, "small (<1)"), (1.0, 1e2, "ok    (<100)"),
-             (1e2, np.inf, "big   (≥100)")]
-    for lo, hi, lbl in edges:
-        sel = (wnorm >= lo) & (wnorm < hi)
-        n = int(sel.sum())
-        if n == 0:
-            lines.append(f"    {lbl:14s} {n:5d} nodes")
-            continue
-        pos_sel = pos[sel & (pos >= 0)]
-        if not have_counts:
-            pmed = ""
-        elif pos_sel.size:
-            pmed = f"median +ct={int(np.median(pos_sel))}"
-        else:
-            pmed = "class nodes"
-        lines.append(f"    {lbl:14s} {n:5d} nodes   {pmed}".rstrip())
-    dead = wnorm < dead_eps
-    trained = ~dead
-    lines.append(f"    -> {int(dead.sum())}/{C} heads DEAD (|w_c|<{dead_eps:g}), "
-                 f"{int(trained.sum())} trained")
-    tp = pos[trained & (pos >= 0)]
-    dp = pos[dead & (pos >= 0)]
-    if tp.size and dp.size:
-        lines.append(f"    -> terminal +count: trained median={int(np.median(tp))} "
-                     f"vs DEAD median={int(np.median(dp))}  "
-                     f"(starvation ⇔ dead≪trained)")
-    lines.append(f"    -> |w_c|: min={wnorm.min():.2g} median={np.median(wnorm):.2g} "
-                 f"max={wnorm.max():.2g}   support size: min={sizes.min()} "
-                 f"median={int(np.median(sizes))} max={sizes.max()}")
-    if not have_counts:
-        lines.append("    -> per-terminal +counts UNAVAILABLE (the corpus came from "
-                     "the bundle cache, which skips the Mondo power-count); the "
-                     "dead-vs-trained split by rarity needs a cache MISS or a "
-                     "different --cache-uri.")
-    return "\n".join(lines)
 
 
 def per_node_domain_mass(lam_dict, lay, domain_names):
@@ -1901,63 +1733,44 @@ def format_per_node_domain_mass(mass_by_node, domain_names, int2cid, name_by_id)
 
 
 
-def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
-    """Construct an OnlinePCLDAEstimator for one arm. `gated` injects the gated
-    topic engine (gateParent set post-construction, since the Param is a JSON
-    string); `closure_parents` selects the DAG-closure head. K comes from the gate
-    layout when gated, else --k."""
-    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
+def _build_estimator(args):
+    """Construct the DagGatedLDAEstimator for the fit (ADR 0050). The gate (the
+    run's label DAG, `args._parent_int`) is set post-construction, since the Param
+    is a JSON string; K comes from the layout (n_bg + nodes * tpn)."""
+    from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
 
-    est = OnlinePCLDAEstimator(
-        featuresCol="features", labelCol="label", labelMaskCol="labelMask",
-        numLabels=args._C, weightY=float(weight_y), k=int(getattr(args, "k", 50)),
+    est = DagGatedLDAEstimator(
+        featuresCol="features", frontierCol="frontier",
         maxIter=args.max_iter, seed=args.seed,
         subsamplingRate=args.subsampling_rate,
         learningOffset=args.tau0, learningDecay=args.kappa,
         gammaShape=args.gamma_shape, caviMaxIter=args.cavi_max_iter,
-        caviTol=args.cavi_tol, gradCaviIters=args.grad_cavi_iters,
-        topicTrust=args.topic_trust,
-        headTrustMove=float(getattr(args, "head_trust_move", 0.0)),
-        weightYWarmupIters=args.weight_y_warmup_iters,
-        headOptimizer=args.head_optimizer, headLr=args.head_lr,
-        headInnerIters=int(getattr(args, "head_inner_iters", 3)),
-        headHistoryReset=bool(getattr(args, "head_history_reset", True)),
-        headNewtonRidge=args.head_newton_ridge, headL2=args.head_l2,
-        headIntercept=bool(getattr(args, "head_intercept", False)),
-        headStandardize=bool(getattr(args, "head_standardize", False)),
-        optimizeDocConcentration=args.optimize_doc_concentration,
-        frontierCol="frontier", gateNBg=args.n_bg, gateTpn=args.tpn,
+        caviTol=args.cavi_tol,
+        optimizeDocConcentration=bool(args.optimize_doc_concentration),
+        gateNBg=args.n_bg, gateTpn=args.tpn,
         # Leaves-first gate schedule (report 2026-10-19; exp 0153/0154): 0 = the
-        # single-round gate, byte-identical. Fit-only — no cache key moves.
+        # single-round gate. Fit-only — no cache key moves.
         gateWarm=int(getattr(args, "gate_warm", 0) or 0),
         gateOpenSeed=True,
-        localizeHead=bool(getattr(args, "localize_head", False)),
-        headSupport=str(getattr(args, "head_support", "siblings")),
+        gateSeedMode=str(getattr(args, "gate_seed_mode", "subtree")),
+        gateSeedLeaves=bool(getattr(args, "gate_seed_leaves", False)),
     )
-    # Multi-domain: feed per-domain feature columns (features_0..) so the gated
-    # engine carries a per-domain lambda and the topic correction scatters per
-    # domain. Domain widths are read from the first row (no explicit domainBounds).
+    # Multi-domain: per-domain feature columns (features_0..) so the engine carries
+    # a per-domain lambda. Domain widths are read from the first row.
     dom_cols = getattr(args, "_domain_cols", None)
     if dom_cols:
         est._set(featuresCols=dom_cols)
     dc = getattr(args, "doc_concentration", None)
     if dc is not None and dc > 0:
-        # scalar Dirichlet alpha for the gated doc-topic prior. The default 1/K is razor-
-        # small at whole-Mondo K and collapses theta so the shaping-gradient CAVI Jacobian
-        # underflows (no PC shaping); ~0.5 lifts it out of the collapse regime.
+        # Scalar Dirichlet alpha for the gated doc-topic prior; the default 1/K is
+        # razor-small at whole-Mondo K.
         est._set(docConcentration=[float(dc)])
-    if gated:
-        est.setGateParent(args._parent_int)      # JSON-encodes the DAG map
-        gsp = getattr(args, "_gate_seed_profile", None)
-        if gsp:
-            est.setGateSeedProfile(gsp)
-        if bool(getattr(args, "gate_seed_leaves", False)):
-            est.setParams(gateSeedLeaves=True)
-        if str(getattr(args, "gate_seed_mode", "subtree")) == "balanced":
-            est.setParams(gateSeedMode="balanced")
-            est.setGateSeedOwnCodes(getattr(args, "_gate_seed_own", None) or {})
-    if closure_parents is not None:
-        est.setClosureParents(closure_parents)
+    est.setGateParent(args._parent_int)      # JSON-encodes the DAG map
+    gsp = getattr(args, "_gate_seed_profile", None)
+    if gsp:
+        est.setGateSeedProfile(gsp)
+    if str(getattr(args, "gate_seed_mode", "subtree")) == "balanced":
+        est.setGateSeedOwnCodes(getattr(args, "_gate_seed_own", None) or {})
     return est
 
 
@@ -2365,17 +2178,6 @@ def parse_args(argv=None):
     # gate topic-block layout (topics per node); K is emergent = n_bg + nodes*tpn.
     p.add_argument("--n-bg", type=int, default=2)
     p.add_argument("--tpn", type=int, default=1)
-    p.add_argument("--localize-head", action="store_true",
-                   help="LOCALIZED head: each node's logistic reads only its topic "
-                        "support (gated block + ancestors), not all K — the whole-Mondo "
-                        "scale fix (insight 0071). Only affects newton head.")
-    p.add_argument("--head-support",
-                   choices=["siblings", "path_cousins", "path_cousins_kids"],
-                   default="siblings",
-                   help="localized-head support neighborhood: 'siblings' (closure + immediate "
-                        "siblings, default); 'path_cousins' (also the siblings of every ancestor "
-                        "on the root-path); 'path_cousins_kids' (also v's own children's blocks, "
-                        "the subtype signal). All bounded; exact Newton kept.")
     p.add_argument("--dag-source", choices=["mondo_native"], default="mondo_native",
                    help="the label space: exp 0110's NATIVE Mondo terms, powered by "
                         "is-a CLOSURE support, the DAG Mondo's own hierarchy "
@@ -2427,39 +2229,6 @@ def parse_args(argv=None):
                         "are untouched. Native-Mondo population path only; a distinct "
                         "bundle key.")
     p.add_argument("--optimize-doc-concentration", action="store_true")
-    # PC head + SVI
-    p.add_argument("--weight-y", type=float, default=50.0,
-                   help="PC prediction weight (>0). Hughes ~ tokens/doc; tune on "
-                        "validation. The unsup_gated arm always refits at 0.")
-    p.add_argument("--head-optimizer", choices=["sgd", "newton", "lbfgs"],
-                   default="newton",
-                   help="head optimizer; 'newton' is the settled convergent head "
-                        "(ADR 0039) — the default here. 'lbfgs' is the matrix-free "
-                        "batched-L-BFGS co-fit head (O(C*K) shuffle, no newton "
-                        "O(C*K^2) collect — the whole-Mondo strong head); it needs "
-                        "the distributed re-scoring provider, injected here.")
-    p.add_argument("--head-inner-iters", type=int, default=3,
-                   help="head_optimizer=lbfgs: batched-L-BFGS solver passes per outer "
-                        "SVI iter (amortized against a moving theta). Inert otherwise.")
-    p.add_argument("--head-history-reset", type=lambda s: s.lower() != "false",
-                   default=True,
-                   help="head_optimizer=lbfgs: reset the L-BFGS (s,y) curvature "
-                        "history each outer iter (default true; 'false' carries it). "
-                        "Inert otherwise.")
-    p.add_argument("--head-lr", type=float, default=0.5)
-    p.add_argument("--head-newton-ridge", type=float, default=0.01)
-    p.add_argument("--head-l2", type=float, default=1e-3,
-                   help="ABSOLUTE ridge on w_CK (= Hughes lambda_w; ADR 0041). "
-                        "0.0 BLOWS UP on the separable topics PC creates.")
-    p.add_argument("--grad-cavi-iters", type=int, default=20)
-    p.add_argument("--topic-trust", type=float, default=0.1)
-    p.add_argument("--head-trust-move", type=float, default=0.0,
-                   help="scale-free trust-region radius on the supervised lambda "
-                        "move: cap the EG step when its relative move exceeds this "
-                        "(0.0=off; e.g. 0.03 holds corr_relDlambda in the healthy "
-                        "band regardless of weight_y/K — the K-invariant fix for "
-                        "the over-drive exp 0099/0118/0119 hit at large K).")
-    p.add_argument("--weight-y-warmup-iters", type=int, default=10)
     p.add_argument("--max-iter", type=int, default=100)
     p.add_argument("--subsampling-rate", type=float, default=0.05)
     p.add_argument("--tau0", type=float, default=64.0,
@@ -2486,19 +2255,10 @@ def parse_args(argv=None):
                         "total cluster executor cores to spread the per-doc autograd "
                         "and demand more executors. Pair with "
                         "CHARM_SPARK_CONF='spark.locality.wait=0s'.")
-    p.add_argument("--head-intercept", action="store_true",
-                   help="newton head: fit a per-node UNPENALIZED intercept (base rate).")
-    p.add_argument("--head-standardize", action="store_true",
-                   help="newton head: z-score θ per topic before the logistic (the big "
-                        "conditioning lever; requires --head-intercept). Local realistic "
-                        "validation: co-fit head 0.55->0.84 and readout Δ+0.29 vs unsup.")
     p.add_argument("--doc-concentration", type=float, default=None,
                    help="scalar Dirichlet alpha for the gated doc-topic prior (default "
-                        "1/K). The 1/K default is razor-small at whole-Mondo K (~0.0022) "
-                        "and collapses theta so the supervised-shaping CAVI Jacobian "
-                        "d(theta)/d(eb) UNDERFLOWS (~1e-90) — PC shaping dies upstream of "
-                        "the head. ~0.5 keeps the shaping gradient alive at any "
-                        "grad_cavi_iters.")
+                        "1/K, razor-small at whole-Mondo K ~0.0022; the central "
+                        "configuration sets 0.5).")
     p.add_argument("--cache-uri", default=None)
     p.add_argument("--out-dir", required=True)
     return p.parse_args(argv)
@@ -2546,7 +2306,7 @@ def main() -> int:
 
         def _stash_mondo_inputs(*, count_of, terminal_cids, reduced):
             # Only reached on a cache MISS; the diag-only probe degrades
-            # gracefully without these (per_node_head_report).
+            # gracefully without these.
             args._count_of = count_of
 
         with _phase(f"assemble MONDO_NATIVE corpus (cached, cond + "
@@ -2628,13 +2388,10 @@ def main() -> int:
         _cprint(f"[driver]   corpus: V=({v_desc}) vocab, "
               f"K={lay.K} gated topics ({args.n_bg} bg + {len(lay.nodes)} nodes x "
               f"{args.tpn} tpn), C={C} label heads", flush=True)
-        # PRE-FLIGHT cost profile at the data-build boundary: fan-out / support sizes /
-        # head matrix memory+compute (dense vs localized) so a big fit's cost is visible
-        # BEFORE compute is committed (esp. the whole-Mondo run — high-fan-out parents
-        # inflate the localized support). Logged for every gated fit.
+        # PRE-FLIGHT size profile at the data-build boundary (K, fan-out, lambda
+        # size), so a big fit's shape is visible BEFORE compute is committed.
         _v_total = sum(len(vm) for vm in vocab_maps)
-        _, _prof = lay.cost_report(C, vocab_size=_v_total,
-                                   localized=bool(getattr(args, "localize_head", False)))
+        _, _prof = lay.cost_report(vocab_size=_v_total)
         print("\n".join("[cost] " + ln for ln in _prof.splitlines()), flush=True)
         # Parallelism: the cached bundle parquet has few partitions (~8 part-files),
         # and with dynamic allocation Spark sizes the executor pool to PENDING TASKS
@@ -2664,13 +2421,6 @@ def main() -> int:
             "window_mode": args.window_mode, "lookback_days": args.lookback_days,
             "label_window_days": args.label_window_days,
             "n_bg": args.n_bg, "tpn": args.tpn, "K": lay.K, "C": C,
-            "weight_y": args.weight_y, "head_optimizer": args.head_optimizer,
-            "head_l2": args.head_l2, "head_lr": args.head_lr,
-            "weight_y_warmup_iters": args.weight_y_warmup_iters,
-            "grad_cavi_iters": args.grad_cavi_iters, "topic_trust": args.topic_trust,
-            "head_trust_move": float(getattr(args, "head_trust_move", 0.0)),
-            "head_inner_iters": int(getattr(args, "head_inner_iters", 3)),
-            "head_history_reset": bool(getattr(args, "head_history_reset", True)),
             "subsampling_rate": args.subsampling_rate, "tau0": args.tau0,
             "kappa": args.kappa, "max_iter": args.max_iter,
             "dag_source": args.dag_source,
@@ -2744,12 +2494,9 @@ def main() -> int:
                     "path": args.gate_seed_profile,
                     **getattr(args, "_gate_seed_profile_stats", {})}
 
-        with _phase(f"gated_pc fit (weightY={args.weight_y}, K={lay.K})"):
-            pc_est = _build_pc_estimator(args, weight_y=args.weight_y, gated=True)
-            # Per-iteration hooks, composed: the optional eval logger (eval_every)
-            # and the optional fit checkpoint (fit_save_interval). Both share the
-            # estimator's single on_iteration seam, so build a list and fan out.
-            _on_iters = []
+        with _phase(f"gated_pc fit (DagGatedLDAEstimator, K={lay.K})"):
+            pc_est = _build_estimator(args)
+            # Per-iteration hook: the optional fit checkpoint (fit_save_interval).
             if args.fit_save_interval > 0 and out is not None:
                 def _fit_ckpt(it, gp, _elbo, _out=out, _C=C, _mf=manifest_fields,
                               _every=int(args.fit_save_interval)):
@@ -2760,46 +2507,8 @@ def main() -> int:
                         _save_fit(_out, gp, _C, _mf, partial="fit-only")
                         _cprint(f"[driver]   fit checkpoint @ iter {it} "
                               "(re-scoreable with gated_pc_readout)", flush=True)
-                _on_iters.append(_fit_ckpt)
-            if _on_iters:
-                def _on_iter_fanout(it, gp, elbo, _cbs=tuple(_on_iters)):
-                    for _cb in _cbs:
-                        _cb(it, gp, elbo)
-                pc_est.setOnIteration(_on_iter_fanout)
-            # lbfgs co-fit head: the engine's M-step re-scores the CURRENT θ each
-            # outer iter through a DISTRIBUTED provider (the same treeAggregate seam
-            # the frozen-θ readout uses, re-derived per iter because θ moves). We
-            # build it driver-side and inject via the estimator's factory hook; the
-            # engine (spark-vi) never sees Spark. The holder lets us close() the last
-            # outer iter's persisted scored df after the fit. Inert for sgd/newton.
-            _cofit_provider = {}
-            if args.head_optimizer == "lbfgs":
-                from spark_vi.models.topic.batched_lr import (
-                    fold_standardization, standardized_grad_from_raw)
-
-                def _cofit_factory(ctx, _hold=_cofit_provider):
-                    engine = ctx["engine"]
-                    prov = _dr.make_cofit_head_stats_provider(
-                        ctx["dataset"], ctx["C"], engine.K,
-                        grad_cavi_iters=engine.grad_cavi_iters,
-                        head_standardize=engine.head_standardize,
-                        head_std_floor=engine.head_std_floor,
-                        expElogbeta_fn=engine._expElogbeta_from_lambda,
-                        fold_standardization=fold_standardization,
-                        standardized_grad_from_raw=standardized_grad_from_raw,
-                        features_col=ctx["features_col"],
-                        features_cols=ctx["features_cols"],
-                        domain_sizes=ctx["domain_sizes"],
-                        label_col=ctx["label_col"], mask_col=ctx["label_mask_col"])
-                    _hold["provider"] = prov
-                    return prov
-
-                pc_est.setHeadStatsProviderFactory(_cofit_factory)
-            try:
-                pc_model = pc_est.fit(bundle.train_df)
-            finally:
-                if _cofit_provider.get("provider") is not None:
-                    _cofit_provider["provider"].close()
+                pc_est.setOnIteration(_fit_ckpt)
+            pc_model = pc_est.fit(bundle.train_df)
             # EARLY SAVE, before any readout work touches the cluster: the fit is
             # the hours-long unrepeatable half and the readout is where runs die,
             # so the model reaches durable storage the moment it exists. The final

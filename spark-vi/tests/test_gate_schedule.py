@@ -1,4 +1,4 @@
-"""Leaves-first gate schedule (GatedOnlineLDA.set_gate_schedule; report
+"""Leaves-first gate schedule (DagGatedOnlineLDA.set_gate_schedule; report
 2026-10-19-leaves-first-gate-sim): heights, the capped gate, frozen/opened/seeded
 blocks, multi-domain lambda, the driver-only seed, and the seed-count pass."""
 import pickle
@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from spark_vi.models.topic.dag_placement import DagLayout
-from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
 from spark_vi.models.topic.types import GatedBOWDocument
 
 # diamond: 1 and 2 under root; 3 under both 1 and 2; 4 under 1
@@ -48,7 +48,7 @@ def _fit(m, docs, iters, lr=0.5):
 
 def test_warm_zero_is_the_production_gate():
     lay = DagLayout(PARENT, n_bg=1, tpn=1)
-    m = GatedOnlineLDA(lay, 12, alpha=0.1, eta=0.02, random_seed=0)
+    m = DagGatedOnlineLDA(lay, 12, alpha=0.1, eta=0.02, random_seed=0)
     gp = m.initialize_global(None)
     assert "gate_iter" not in gp
     m.set_gate_schedule(0)
@@ -57,7 +57,7 @@ def test_warm_zero_is_the_production_gate():
 
 def test_schedule_freezes_then_opens_and_seeds():
     lay = DagLayout(PARENT, n_bg=1, tpn=1)
-    m = GatedOnlineLDA(lay, 12, alpha=0.1, eta=0.02, random_seed=0)
+    m = DagGatedOnlineLDA(lay, 12, alpha=0.1, eta=0.02, random_seed=0)
     seed = np.zeros((lay.K, 12))
     seed[lay.block[1][0], :3] = 1.0                    # node 1's seed: words 0..2
     m.set_gate_schedule(2, open_seed=seed)
@@ -76,7 +76,7 @@ def test_schedule_freezes_then_opens_and_seeds():
 
 def test_schedule_multidomain_seeds_each_domain():
     lay = DagLayout(PARENT, n_bg=1, tpn=1)
-    m = GatedOnlineLDA(lay, 12, domains=[8, 4], alpha=0.1, eta=0.02, random_seed=0)
+    m = DagGatedOnlineLDA(lay, 12, domains=[8, 4], alpha=0.1, eta=0.02, random_seed=0)
     seed = np.zeros((lay.K, 12))
     seed[lay.block[2][0], 1] = 5.0                     # domain 0, local word 1
     seed[lay.block[2][0], 9] = 5.0                     # domain 1, local word 1
@@ -90,7 +90,7 @@ def test_schedule_multidomain_seeds_each_domain():
 
 def test_seed_is_driver_only():
     lay = DagLayout(PARENT, n_bg=1, tpn=1)
-    m = GatedOnlineLDA(lay, 12, alpha=0.1, eta=0.02, random_seed=0)
+    m = DagGatedOnlineLDA(lay, 12, alpha=0.1, eta=0.02, random_seed=0)
     m.set_gate_schedule(2, open_seed=np.ones((lay.K, 12)))
     clone = pickle.loads(pickle.dumps(m))
     assert clone._open_seed is None and m._open_seed is not None
@@ -117,12 +117,12 @@ def test_gate_open_seed_counts_sums_admitted_documents(spark):
 
 def test_init_seed_replaces_only_the_domain_it_covers():
     lay = DagLayout(PARENT, n_bg=1, tpn=1)
-    m = GatedOnlineLDA(lay, 12, domains=[8, 4], alpha=0.1, eta=0.02, random_seed=0)
+    m = DagGatedOnlineLDA(lay, 12, domains=[8, 4], alpha=0.1, eta=0.02, random_seed=0)
     init = np.zeros((lay.K, 12))
     k3 = lay.block[3][0]                               # leaf, open at iteration 0
     init[k3, 2] = 1.0                                  # condition domain only
     m.set_gate_schedule(2, init_seed=init)
-    base = GatedOnlineLDA(lay, 12, domains=[8, 4], alpha=0.1, eta=0.02, random_seed=0)
+    base = DagGatedOnlineLDA(lay, 12, domains=[8, 4], alpha=0.1, eta=0.02, random_seed=0)
     base.set_gate_schedule(2)
     np.random.seed(0); gp = m.initialize_global(None)
     np.random.seed(0); gb = base.initialize_global(None)

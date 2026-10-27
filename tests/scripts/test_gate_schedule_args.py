@@ -28,16 +28,19 @@ def test_gate_warm_front_matter_is_emitted_only_when_set(monkeypatch):
 def test_driver_flags_reach_the_estimator():
     import argparse
     import gated_pc_cloud as gpc
-    args = argparse.Namespace(gate_warm=4, gate_no_open_seed=False)
-    for k in ("k", "max_iter", "seed", "subsampling_rate", "tau0", "kappa",
-              "gamma_shape", "cavi_max_iter", "cavi_tol", "grad_cavi_iters",
-              "topic_trust", "weight_y_warmup_iters", "head_optimizer", "head_lr",
-              "head_newton_ridge", "head_l2", "optimize_doc_concentration",
-              "n_bg", "tpn", "_C"):
-        setattr(args, k, {"head_optimizer": "newton", "optimize_doc_concentration": False,
+    args = argparse.Namespace(gate_warm=4, gate_seed_mode="balanced",
+                              gate_seed_leaves=True, _parent_int={1: [0], 2: [1]},
+                              _gate_seed_own={2: [3]})
+    for k in ("max_iter", "seed", "subsampling_rate", "tau0", "kappa",
+              "gamma_shape", "cavi_max_iter", "cavi_tol",
+              "optimize_doc_concentration", "n_bg", "tpn"):
+        setattr(args, k, {"optimize_doc_concentration": False,
                           "subsampling_rate": 0.1, "tau0": 64.0, "kappa": 0.51,
-                          "gamma_shape": 100.0, "cavi_tol": 1e-3, "topic_trust": 0.05,
-                          "head_lr": 1.0, "head_newton_ridge": 0.05,
-                          "head_l2": 0.01}.get(k, 2))
-    est = gpc._build_pc_estimator(args, weight_y=0.0, gated=False)
+                          "gamma_shape": 100.0, "cavi_tol": 1e-3}.get(k, 2))
+    est = gpc._build_estimator(args)
+    assert type(est).__name__ == "DagGatedLDAEstimator"
     assert est.getOrDefault("gateWarm") == 4 and est.getOrDefault("gateOpenSeed") is True
+    assert est.getOrDefault("gateSeedMode") == "balanced"
+    assert est.getOrDefault("gateSeedLeaves") is True
+    assert est.getGateSeedOwnCodes() == {2: [3]}
+    assert est._layout().K == 2 + 2 * 2

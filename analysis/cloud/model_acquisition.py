@@ -12,7 +12,7 @@ THE ENGINE (why each piece has the shape it has)
 ------------------------------------------------
 * θ from a partial record: the deployment fold-in, exactly — UNGATED full-K CAVI over
   the per-domain-normalized concatenated E[log β], with the fitted α
-  (`OnlinePCLDAModel._transform`; `_cavi_doc_inference` itself). The empty record
+  (`DagGatedLDAModel._transform`; `_cavi_doc_inference` itself). The empty record
   folds in to θ = α / sum(α): the model's own "nothing known yet" state.
 * Heads: the record's saved readout heads (`readout_heads_gated_pc_<tag>.npz`):
   p_c = σ(clip(V_c·θ + b_c, ±50)), degenerate nodes at their constant. Only the heads

@@ -52,13 +52,12 @@ def gate_open_seed_counts(rdd, lay, V: int, *, mode: str = "subtree",
     zeros elsewhere (leaves and background open at iteration 0 and need no seed).
 
     Why counts, not a fit: the seed only has to make a block competitive when it
-    opens (`GatedOnlineLDA.set_gate_schedule`); the gated EM then strips what the
+    opens (`DagGatedOnlineLDA.set_gate_schedule`); the gated EM then strips what the
     already-sharp children and background explain. The cost is one pass of the
     E-step's own sparse scatter without CAVI. ADR 0047: the layout rides a broadcast,
     per-partition accumulators are allocated executor-side, the reduction identity is
     a None sentinel, and the broadcast is destroyed after the pass.
-    `rdd` items carry `.indices`, `.counts`, `.frontier` (GatedPCDocument /
-    GatedBOWDocument).
+    `rdd` items carry `.indices`, `.counts`, `.frontier` (GatedBOWDocument).
 
     `mode="balanced"` (exp 0160): a parent with one dominant child would otherwise
     open looking like that child (exp 0154: intrinsic cardiomyopathy took HCM's

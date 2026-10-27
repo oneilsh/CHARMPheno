@@ -147,36 +147,18 @@ def test_parse_args_surface_defaults_and_arms():
     from gated_pc_cloud import parse_args
     a = parse_args([
         "--cdr", "p.d", "--billing", "bp", "--disease", "rare6",
-        "--n-bg", "2", "--tpn", "1", "--weight-y", "80", "--out-dir", "/tmp/g",
+        "--n-bg", "2", "--tpn", "1", "--out-dir", "/tmp/g",
     ])
-    assert a.disease == "rare6" and a.weight_y == 80.0
-    assert a.head_optimizer == "newton"        # settled convergent head default
-    assert a.head_l2 == 1e-3                    # absolute ridge (ADR 0041)
+    assert a.disease == "rare6" and a.n_bg == 2
     assert a.label_mask_mode == "full"         # full-observation default
-    assert a.weight_y_warmup_iters == 10
     assert not hasattr(a, "with_dag_head")     # the fit ends at save (2026-10)
     import pytest
+    for gone in ("--weight-y", "--head-l2", "--init", "--localize-head"):
+        with pytest.raises(SystemExit):        # removed by ADR 0050
+            parse_args(["--cdr", "p.d", "--billing", "bp", "--out-dir", "/t",
+                        gone, "1"])
     with pytest.raises(SystemExit):            # no prefix matching: --k != --kappa
         parse_args(["--cdr", "p.d", "--billing", "bp", "--out-dir", "/t", "--k", "4"])
-
-
-def test_head_l2_ridge_round_trips_through_estimator_and_engine():
-    """--head-l2 flow: parse_args -> _build_pc_estimator (shim Params) ->
-    OnlinePCLDA engine (head_l2 attribute). The ridge is the sole head regularizer
-    (ADR 0043: Firth + Path B removed)."""
-    from gated_pc_cloud import parse_args, _build_pc_estimator
-    from spark_vi.mllib.topic.pc import _build_model_and_config
-    a = parse_args([
-        "--cdr", "p.d", "--billing", "bp", "--out-dir", "/tmp/g",
-        "--head-optimizer", "newton", "--head-l2", "0.01",
-    ])
-    assert a.head_l2 == 0.01 and a.head_optimizer == "newton"
-    a._C = 1
-    est = _build_pc_estimator(a, weight_y=50.0, gated=False)
-    assert est.getOrDefault("headL2") == 0.01
-    model, _ = _build_model_and_config(est, vocab_size=8)
-    assert model.head_l2 == 0.01               # the shim built a ridge-only engine
-    assert model.head_optimizer == "newton"
 
 
 # --------------------------------------------------------------------------- #

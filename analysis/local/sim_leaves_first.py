@@ -12,7 +12,7 @@ current single-round gate, and does the schedule fix it? The fit runs through
 the production `VIRunner` on LOCAL SPARK with the production mini-batch regime
 (subsample 0.1, tau0 64, kappa 0.51; full-batch EM is a different optimizer and
 can land elsewhere — `--full-batch` keeps it only as a comparison arm). The
-model is the production `GatedOnlineLDA` E-step/M-step with the schedule added.
+model is the production `DagGatedOnlineLDA` E-step/M-step with the schedule added.
 
 Schedule mechanics (prototype; nothing in spark-vi changes):
 - the gate state rides `global_params` (the per-iteration broadcast), so the
@@ -48,7 +48,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "spark-vi"))
 
 from spark_vi.models.topic.dag_placement import DagLayout  # noqa: E402
-from spark_vi.models.topic.gated_lda import GatedOnlineLDA  # noqa: E402
+from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA  # noqa: E402
 from spark_vi.models.topic.types import GatedBOWDocument  # noqa: E402
 
 # Planted tree: two branches under root. P(1) has a dominant child (3), a minor
@@ -100,8 +100,8 @@ class StagedLayout(DagLayout):
         return np.array(sorted(al), dtype=int)
 
 
-class StagedGated(GatedOnlineLDA):
-    """GatedOnlineLDA plus a height schedule carried in global_params.
+class StagedGated(DagGatedOnlineLDA):
+    """DagGatedOnlineLDA plus a height schedule carried in global_params.
 
     `schedule[t]` is the max open height at iteration t (None = all open).
     tau0 / kappa are only used by the per-block clock."""

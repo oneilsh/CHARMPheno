@@ -19,9 +19,9 @@ What the artifacts give us (and the one thing they do not)
 `gated_pc_result.npz`:
   lambda / lambda_0,lambda_1,...   per-domain topic-word Dirichlet params, (K, V_m)
   alpha                            (K,) topic concentration
-  w_CK                             (C, K) weightY CO-FIT head (untrained at
+  w_CK, b_CK                       (C, K), (C,) the co-fit head, only on runs
+                                   saved before ADR 0050 (untrained at
                                    weight_y=0 -- NOT the decoder; fallback only)
-  b_CK                             (C,)  co-fit head intercept
 
 `readout_heads_gated_pc.npz` (the REAL decoder -- preferred when present):
   V                                (C, K) raw-theta L-BFGS ridge-logistic coeffs
@@ -580,13 +580,20 @@ def build_report(run_dir, *, top_topics, top_loadings, t_words,
         b_CK = heads["b"]
         degenerate = heads["degenerate"]
         decoder_src = heads["src"]
-    else:
+    elif "w_CK" in npz.files:
+        # Runs saved before ADR 0050 carry the (untrained at weight_y=0) co-fit head.
         w_CK = np.asarray(npz["w_CK"], dtype=np.float64)
         b_CK = (np.asarray(npz["b_CK"], dtype=np.float64)
                 if "b_CK" in npz.files else np.zeros(C))
         degenerate = None
         decoder_src = ("gated_pc_result.npz w_CK (weightY co-fit head, NOT the "
                        "readout decoder — heads sidecar absent)")
+    else:
+        w_CK = np.zeros((C, K), dtype=np.float64)
+        b_CK = np.zeros(C)
+        degenerate = None
+        decoder_src = ("none — no readout heads sidecar (run gated_pc_readout); "
+                       "loadings are blank")
 
     labels, topic2engine = topic_labels(manifest)
     nnames = node_names(manifest)
@@ -1033,7 +1040,7 @@ def build_digest(run_dir, *, exemplars=8, t_words=6, bundle_meta_path=None,
 
     heads = load_readout_heads(run_dir, readout_label)
     decoder_src = (heads["src"] if heads is not None
-                   else "co-fit w_CK (no readout heads sidecar)")
+                   else "none (no readout heads sidecar)")
 
     # bundle meta -> depth + words (same guard-lite path as build_report)
     depths = parent_int = inv_maps = names = None

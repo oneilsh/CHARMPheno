@@ -114,9 +114,9 @@ def _make_arrays(seed=0):
 
 
 def _make_df(spark, Pi, y, mask, offset=0, parts=3, proba=None, preindex=None):
-    """The frame a supervised `OnlinePCLDAModel.transform` produces. `proba` appends
-    the co-fit head's `probability` column; leaving it None is the weightY=0 shape,
-    where that column genuinely does not exist. `preindex` appends E1's sparse
+    """The frame `DagGatedLDAModel.transform` produces (plus the labels). `proba`
+    appends the old co-fit head's `probability` column; leaving it None is the
+    current shape, where that column does not exist. `preindex` appends E1's sparse
     `preindexClosure` (`array<int>` of the engine ids the doc already carried before
     its index), which is what the incident arm's fourth CSR run reads."""
     from pyspark.ml.linalg import VectorUDT, Vectors
@@ -508,8 +508,7 @@ def test_save_fit_writes_the_model_then_overwrites_it_with_the_full_record(tmp_p
     manifest is what it always was and a died-in-readout run is still re-scoreable
     by `gated_pc_readout` off the npz.
     """
-    gp = {"lambda": np.arange(6.0).reshape(2, 3), "alpha": np.ones(2),
-          "w_CK": np.full((4, 2), 0.5)}
+    gp = {"lambda": np.arange(6.0).reshape(2, 3), "alpha": np.ones(2)}
     fields = {"model_class": "gated_pc", "C": 4, "K": 2, "readout_mode": "distributed"}
 
     early = gpc._save_fit(tmp_path, gp, 4, fields, partial="fit-only")
@@ -519,7 +518,7 @@ def test_save_fit_writes_the_model_then_overwrites_it_with_the_full_record(tmp_p
     assert on_disk == early
     with np.load(tmp_path / "gated_pc_result.npz") as z:
         assert np.array_equal(z["lambda"], gp["lambda"])
-        assert np.array_equal(z["b_CK"], np.zeros(4))    # absent b_CK -> zeros
+        assert set(z.files) == {"lambda", "alpha"}       # no co-fit head (ADR 0050)
     # the caller's field dict is a template, not state the writer mutates
     assert "results" not in fields and "partial" not in fields
 
@@ -537,12 +536,11 @@ def test_save_fit_splits_a_multi_domain_lambda_dict(tmp_path):
     `lambda_0, lambda_1, ...` — the shape `reconstruct_model` reads back. Pinned
     because the save block moved into a helper and this is its one branch."""
     gp = {"lambda": {1: np.ones((2, 2)), 0: np.zeros((2, 2))},
-          "alpha": np.ones(2), "w_CK": np.zeros((3, 2)), "b_CK": np.full(3, 0.25)}
+          "alpha": np.ones(2)}
     gpc._save_fit(tmp_path, gp, 3, {"C": 3}, partial="fit-only")
     with np.load(tmp_path / "gated_pc_result.npz") as z:
-        assert set(z.files) == {"lambda_0", "lambda_1", "alpha", "w_CK", "b_CK"}
+        assert set(z.files) == {"lambda_0", "lambda_1", "alpha"}
         assert np.array_equal(z["lambda_1"], np.ones((2, 2)))
-        assert np.array_equal(z["b_CK"], np.full(3, 0.25))
 
 
 def test_re_readout_never_indexes_a_possibly_null_manifest_results():

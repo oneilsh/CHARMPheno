@@ -80,16 +80,32 @@ def test_bundle_key_doc_min_length_override_for_old_manifest():
 
 
 def test_reconstruct_model_from_npz(tmp_path):
+    """A saved fit rebuilds as a DagGatedLDAModel. A pre-ADR-0050 npz still
+    carries the co-fit head (w_CK, b_CK); it is ignored, so old run dirs stay
+    readable."""
     from gated_pc_readout import reconstruct_model
+    from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAModel
     K, V, C = 170, 5000, 27
+    lam = np.abs(np.random.default_rng(0).normal(size=(K, V))) + 1e-3
     np.savez(tmp_path / "gated_pc_result.npz",
-             **{"lambda": np.abs(np.random.default_rng(0).normal(size=(K, V))) + 1e-3,
-                "alpha": np.full(K, 1.0 / K), "w_CK": np.zeros((C, K))})
+             **{"lambda": lam, "alpha": np.full(K, 1.0 / K),
+                "w_CK": np.zeros((C, K)), "b_CK": np.zeros(C)})
     model = reconstruct_model(tmp_path, _manifest())
+    assert isinstance(model, DagGatedLDAModel)
     assert model.vocabSize() == V
-    assert model.headWeights().shape == (C, K)
-    assert float(model.getOrDefault("weightY")) == 50.0   # >0 -> transform emits proba
-    assert int(model.getOrDefault("numLabels")) == C
+    assert set(model.result.global_params) == {"lambda", "alpha"}
+    assert model.getOrDefault("topicDistributionCol") == "topicDistribution"
+
+
+def test_reconstruct_model_multi_domain_reads_the_per_domain_columns(tmp_path):
+    from gated_pc_readout import reconstruct_model
+    K = 6
+    np.savez(tmp_path / "gated_pc_result.npz",
+             lambda_0=np.ones((K, 4)), lambda_1=np.ones((K, 3)),
+             alpha=np.full(K, 0.5))
+    model = reconstruct_model(tmp_path, _manifest())
+    assert model.vocabSize() == 7
+    assert model.getOrDefault("featuresCols") == ["features_0", "features_1"]
 
 
 class TestResolveReadoutMaxIter:

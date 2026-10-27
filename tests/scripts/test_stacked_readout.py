@@ -40,13 +40,6 @@ def test_closure_matrix_counts_each_ancestor_once_and_includes_the_root():
     assert (np.diag(M) == 1).all()
 
 
-def test_closure_matrix_matches_the_dag_closure_head_convention():
-    """One definition of 'closure' for the co-fit head and the readout arm."""
-    from spark_vi.models.topic.pc import DagClosureHead
-    head = DagClosureHead(gpc.dag_closure_parents(PARENT, C))
-    assert np.array_equal(gpc.closure_matrix(PARENT, C), head._closure_matrix)
-
-
 def _proba(seed=0, D=50):
     rng = np.random.default_rng(seed)
     p = rng.uniform(0.05, 0.95, size=(D, C)).astype(np.float32)
@@ -142,3 +135,7 @@ def test_a_constant_root_leaves_depth_one_ranking_tied_with_the_flat_arm():
     d1 = blk["paired_vs_prevalent"]["by_depth"]["1"]
     assert d1["n"] == 3 and d1["ties"] == 3
     assert blk["root_only_detection"]["skipped"]           # a constant column
+
+
+def test_dag_closure_parents_densifies_over_range_C():
+    assert gpc.dag_closure_parents(PARENT, C) == [[], [0], [0], [1], [1, 2], [4], [0]]

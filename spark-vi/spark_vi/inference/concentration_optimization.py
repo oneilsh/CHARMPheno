@@ -182,7 +182,7 @@ def gated_alpha_newton_step(
     group_membership: np.ndarray,
 ) -> np.ndarray:
     """One exact Newton step for a per-node-tied asymmetric Dirichlet α under a
-    DAG gate (GatedOnlineLDA).
+    DAG gate (DagGatedOnlineLDA).
 
     Generalizes the symmetric-simplex Newton of Blei, Ng, Jordan 2003 (A.4.2) to
     (a) a block-tied α (one shared value per DAG node, so the chain rule folds in

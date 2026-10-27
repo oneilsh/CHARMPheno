@@ -502,7 +502,7 @@ def test_dict_param_round_trips_per_key(tmp_path):
     lam = {0: np.arange(6.0).reshape(2, 3), 1: np.arange(4.0).reshape(2, 2)}
     res = VIResult(global_params={"lambda": lam, "alpha": np.array([0.1, 0.2])},
                    elbo_trace=[-1.0], n_iterations=1, converged=False,
-                   metadata={"model_class": "GatedOnlineLDA"})
+                   metadata={"model_class": "DagGatedOnlineLDA"})
     save_result(res, tmp_path / "r")
     assert (tmp_path / "r" / "params" / "lambda_0.npy").exists()
     assert (tmp_path / "r" / "params" / "lambda_1.npy").exists()
