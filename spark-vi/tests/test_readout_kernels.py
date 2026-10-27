@@ -1,15 +1,13 @@
-"""Tests for `analysis/cloud/distributed_readout.py` (Package B of
-`docs/superpowers/plans/2026-08-20-distributed-readout-plan.md`).
+"""Tests for the readout kernels (`spark_vi.readout.kernels`), the Spark passes
+(`spark_vi.readout.spark`) and the Spark-action retry (`spark_vi.core.retry`).
+Moved from `tests/scripts/test_distributed_readout.py` with ADR 0051.
 
-Two layers, matching the repo convention stated in `gated_pc_cloud.py` (Spark
-wiring is cluster-covered; pure numpy partition kernels are unit-tested):
+Two layers:
 
-  * kernel tests — `_moments_kernel` / `_stats_kernel` against direct dense numpy,
+  * kernel tests — `moments_kernel` / `stats_kernel` against direct dense numpy,
     both mask-density code paths, and the gradient against finite differences;
-  * a tiny local-Spark round trip (marked `slow`, per AGENTS.md) asserting the
-    Spark shells reproduce the in-memory kernel results and that
-    `per_node_metric_rows` equals `analysis.pc.evaluate._bundle_masked` — the
-    plan's "What must NOT change" equality, in miniature.
+  * a tiny local-Spark round trip (marked `slow`) asserting the Spark shells
+    reproduce the in-memory kernel results.
 
 The TOP-M SPARSE θ path is tested by the same two layers plus one rule that is
 specific to it: its oracle is the DENSE kernel fed the DENSIFIED truncation. That
@@ -19,40 +17,25 @@ truncated to 1e-10" is the assertion, never "sparse ≈ dense-on-full".
 
 The `node_mask` argument (the solver's "only these heads still need a pass" seam)
 is held to one rule at both layers: masked-in rows equal an unmasked pass's, and
-masked-out rows are exactly zero. It is a COST lever — the whole point is that a
-deep line search stops re-reading every node's cells — so any semantic difference
+masked-out rows are exactly zero. It is a COST lever, so any semantic difference
 would show up as a fit that silently disagrees with the sklearn oracle.
 
 The fold formulas (standardized <-> raw) are written out INLINE here rather than
-imported from `analysis/pc/batched_lr.py` (Package A): the point of the injection
-seam is that this module is testable without the solver, so the tests must not
-create the dependency they exist to rule out.
+imported from `spark_vi.readout.solver`: the stats passes take the fold as an
+injected callable, so they are testable without the solver.
 """
-import os
-import sys
-from pathlib import Path
-
 import numpy as np
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-# PySpark workers are separate processes and inherit PYTHONPATH, not the driver's
-# sys.path — without this the executors cannot import either the module under test
-# or `analysis.pc.evaluate` (which `per_node_metric_rows` ships by reference). Set
-# at import time, i.e. during collection, so it is in place before the session-
-# scoped `spark` fixture builds the context.
-os.environ["PYTHONPATH"] = os.pathsep.join(
-    p for p in (str(REPO_ROOT), os.environ.get("PYTHONPATH", "")) if p)
-
-from analysis.cloud import distributed_readout as dr  # noqa: E402
+from spark_vi.core import retry
+from spark_vi.readout import kernels as kern
+from spark_vi.readout import spark as rspark
 
 C, K, D = 8, 12, 60
 
 
 # --------------------------------------------------------------------------- #
-# Local copies of Package A's fold formulas (see module docstring).            #
+# Local copies of the solver's fold formulas (see module docstring).           #
 # --------------------------------------------------------------------------- #
 def _fold_standardization(W_std, b_std, mu, sd):
     """z = W_std . (theta - mu)/sd + b_std  ==  (W_std/sd) . theta + b_raw."""
@@ -137,7 +120,7 @@ def _densify_topm(Pi, topm):
     `distributed_readout`): the kept entries keep their original values."""
     out = np.zeros_like(Pi)
     for d in range(Pi.shape[0]):
-        idx, val = dr._topm_sparse(Pi[d], topm)
+        idx, val = kern.topm_sparse(Pi[d], topm)
         out[d, idx] = val
     return out
 
@@ -148,7 +131,7 @@ def _packed_sparse(Pi, y, mask, topm):
     rows = []
     for d in range(Pi.shape[0]):
         obs = np.flatnonzero(mask[d]).astype(np.int32)
-        idx, val = dr._topm_sparse(Pi[d], topm)
+        idx, val = kern.topm_sparse(Pi[d], topm)
         rows.append((idx, val, obs, y[d][obs]))
     return rows
 
@@ -158,15 +141,15 @@ def _packed_sparse(Pi, y, mask, topm):
 # --------------------------------------------------------------------------- #
 def test_moments_kernel_matches_dense_reference():
     Pi, y, mask = _make_data()
-    got = dr._moments_kernel(_rows(Pi, y, mask), C, K)
+    got = kern.moments_kernel(_rows(Pi, y, mask), C, K)
     for a, b in zip(got, _ref_moments(Pi, y, mask)):
         assert np.allclose(a, b, atol=1e-10, rtol=0)
 
 
 def test_moments_to_mu_sd_matches_population_std():
     Pi, y, mask = _make_data()
-    sum_theta, sum_sq, n_obs, _ = dr._moments_kernel(_rows(Pi, y, mask), C, K)
-    mu, sd = dr.moments_to_mu_sd(sum_theta, sum_sq, n_obs)
+    sum_theta, sum_sq, n_obs, _ = kern.moments_kernel(_rows(Pi, y, mask), C, K)
+    mu, sd = kern.moments_to_mu_sd(sum_theta, sum_sq, n_obs)
     for c in range(C):
         rows = np.flatnonzero(mask[:, c])
         if rows.size == 0:                              # never-observed node
@@ -185,8 +168,8 @@ def test_moments_to_mu_sd_zero_variance_column_gets_unit_scale():
     Pi = np.tile(np.array([0.5, 0.25, 0.25]), (5, 1))   # every column constant
     mask = np.ones((5, 2))
     y = np.zeros((5, 2))
-    sum_theta, sum_sq, n_obs, _ = dr._moments_kernel(_rows(Pi, y, mask), 2, 3)
-    mu, sd = dr.moments_to_mu_sd(sum_theta, sum_sq, n_obs)
+    sum_theta, sum_sq, n_obs, _ = kern.moments_kernel(_rows(Pi, y, mask), 2, 3)
+    mu, sd = kern.moments_to_mu_sd(sum_theta, sum_sq, n_obs)
     assert np.allclose(mu, Pi[0])
     assert np.allclose(sd, 1.0)
 
@@ -196,7 +179,7 @@ def test_stats_kernel_matches_dense_reference():
     W, b = _params()
     mu, sd = np.zeros((C, K)), np.ones((C, K))          # raw space: fold is identity
     V, b_raw = _fold_standardization(W, b, mu, sd)
-    loss, g_raw, s = dr._stats_kernel(_rows(Pi, y, mask), V, b_raw, C, K)
+    loss, g_raw, s = kern.stats_kernel(_rows(Pi, y, mask), V, b_raw, C, K)
     r_loss, r_g, r_s, _ = _ref_stats(Pi, y, mask, V, b_raw)
     assert np.allclose(loss, r_loss, atol=1e-10, rtol=0)
     assert np.allclose(g_raw, r_g, atol=1e-10, rtol=0)
@@ -207,10 +190,10 @@ def test_stats_kernel_sparse_and_dense_score_paths_agree(monkeypatch):
     """The |obs| >= frac*C fast path must be a pure cost choice, not a semantic one."""
     Pi, y, mask = _make_data(seed=3)
     V, b_raw = _params(seed=4)
-    monkeypatch.setattr(dr, "_DENSE_MASK_FRACTION", 0.0)      # always full matvec
-    dense = dr._stats_kernel(_rows(Pi, y, mask), V, b_raw, C, K)
-    monkeypatch.setattr(dr, "_DENSE_MASK_FRACTION", 2.0)      # always gather V[obs]
-    sparse = dr._stats_kernel(_rows(Pi, y, mask), V, b_raw, C, K)
+    monkeypatch.setattr(kern, "_DENSE_MASK_FRACTION", 0.0)      # always full matvec
+    dense = kern.stats_kernel(_rows(Pi, y, mask), V, b_raw, C, K)
+    monkeypatch.setattr(kern, "_DENSE_MASK_FRACTION", 2.0)      # always gather V[obs]
+    sparse = kern.stats_kernel(_rows(Pi, y, mask), V, b_raw, C, K)
     for a, b in zip(dense, sparse):
         assert np.allclose(a, b, atol=1e-10, rtol=0)
 
@@ -229,18 +212,18 @@ def test_stats_kernel_node_mask_is_exact_and_skips_the_rest():
     """
     Pi, y, mask = _make_data(seed=51)
     V, b_raw = _params(seed=52)
-    full = dr._stats_kernel(_rows(Pi, y, mask), V, b_raw, C, K)
+    full = kern.stats_kernel(_rows(Pi, y, mask), V, b_raw, C, K)
 
     keep = np.zeros(C, dtype=bool)
     keep[[0, 2, C - 1]] = True                   # dense node, ordinary, never-observed
-    got = dr._stats_kernel(_rows(Pi, y, mask), V, b_raw, C, K, node_mask=keep)
+    got = kern.stats_kernel(_rows(Pi, y, mask), V, b_raw, C, K, node_mask=keep)
     for a, b in zip(got, full):
         a, b = np.asarray(a), np.asarray(b)
         assert np.abs(a[keep] - b[keep]).max() < 1e-12
         assert np.abs(a[~keep]).max() == 0.0
 
     # an all-True mask filters nothing, so it is the unmasked pass bit for bit
-    allin = dr._stats_kernel(_rows(Pi, y, mask), V, b_raw, C, K,
+    allin = kern.stats_kernel(_rows(Pi, y, mask), V, b_raw, C, K,
                              node_mask=np.ones(C, dtype=bool))
     for a, b in zip(allin, full):
         assert np.array_equal(a, b)
@@ -257,17 +240,17 @@ def test_sparse_stats_kernel_node_mask_is_exact_and_skips_the_rest():
     Pi, y, mask = _make_data(seed=53)
     V, b_raw = _params(seed=54)
     packed = _packed_sparse(Pi, y, mask, TOPM)
-    full = dr._sparse_stats_kernel(iter(packed), V, b_raw, C, K)
+    full = kern.sparse_stats_kernel(iter(packed), V, b_raw, C, K)
 
     keep = np.zeros(C, dtype=bool)
     keep[[1, 4]] = True
-    got = dr._sparse_stats_kernel(iter(packed), V, b_raw, C, K, node_mask=keep)
+    got = kern.sparse_stats_kernel(iter(packed), V, b_raw, C, K, node_mask=keep)
     for a, b in zip(got, full):
         a, b = np.asarray(a), np.asarray(b)
         assert np.array_equal(a[keep], b[keep])
         assert np.abs(a[~keep]).max() == 0.0
 
-    allin = dr._sparse_stats_kernel(iter(packed), V, b_raw, C, K,
+    allin = kern.sparse_stats_kernel(iter(packed), V, b_raw, C, K,
                                     node_mask=np.ones(C, dtype=bool))
     for a, b in zip(allin, full):
         assert np.array_equal(a, b)
@@ -278,19 +261,19 @@ def test_stats_kernel_gradient_matches_finite_differences():
     """(loss, g_raw, s) folded to standardized space == d/d(W_std, b_std) of the
     summed masked log-loss. This is the contract Package A's solver consumes."""
     Pi, y, mask = _make_data(seed=11)
-    sum_theta, sum_sq, n_obs, _ = dr._moments_kernel(_rows(Pi, y, mask), C, K)
-    mu, sd = dr.moments_to_mu_sd(sum_theta, sum_sq, n_obs)
+    sum_theta, sum_sq, n_obs, _ = kern.moments_kernel(_rows(Pi, y, mask), C, K)
+    mu, sd = kern.moments_to_mu_sd(sum_theta, sum_sq, n_obs)
     # The never-observed node has sd == eps; keep it out of the FD probe (its
     # objective is identically zero, so its gradient is trivially zero anyway).
     W, b = _params(seed=12)
 
     def _total_loss(W_std, b_std):
         V, b_raw = _fold_standardization(W_std, b_std, mu, sd)
-        loss, _, _ = dr._stats_kernel(_rows(Pi, y, mask), V, b_raw, C, K)
+        loss, _, _ = kern.stats_kernel(_rows(Pi, y, mask), V, b_raw, C, K)
         return loss
 
     V, b_raw = _fold_standardization(W, b, mu, sd)
-    loss, g_raw, s = dr._stats_kernel(_rows(Pi, y, mask), V, b_raw, C, K)
+    loss, g_raw, s = kern.stats_kernel(_rows(Pi, y, mask), V, b_raw, C, K)
     gW_std = _standardized_grad_from_raw(g_raw, s, mu, sd)
     assert np.allclose(loss, _total_loss(W, b), atol=1e-12, rtol=0)
 
@@ -317,7 +300,7 @@ def test_dense_triples_roundtrips_packed_rows():
     Pi, y, mask = _make_data(seed=17)
     packed = [(Pi[d], np.flatnonzero(mask[d]).astype(np.int32),
                y[d][np.flatnonzero(mask[d])]) for d in range(D)]
-    got = dr._moments_kernel(dr._dense_triples(packed, C), C, K)
+    got = kern.moments_kernel(kern.dense_triples(packed, C), C, K)
     for a, b in zip(got, _ref_moments(Pi, y, mask)):
         assert np.allclose(a, b, atol=1e-10, rtol=0)
 
@@ -334,9 +317,9 @@ def test_topm_coverage_kernel_matches_direct_numpy():
     D_big = 400
     Pi = rng.dirichlet(np.full(K, 0.3), size=D_big)
     ms = (1, 3, 5, K, K + 4)
-    sums, hist, n = dr._topm_coverage_kernel(iter(Pi), ms)
+    sums, hist, n = kern.topm_coverage_kernel(iter(Pi), ms)
     assert n == D_big
-    got = dr.coverage_from_accum(sums, hist, n, ms)
+    got = kern.coverage_from_accum(sums, hist, n, ms)
     desc = -np.sort(-Pi, axis=1)
     for m in ms:
         cov = desc[:, :min(m, K)].sum(axis=1) / Pi.sum(axis=1)
@@ -355,15 +338,15 @@ def test_topm_coverage_accumulators_combine_by_addition():
     rng = np.random.default_rng(32)
     Pi = rng.dirichlet(np.full(K, 0.5), size=40)
     ms = (2, 4)
-    whole = dr._topm_coverage_kernel(iter(Pi), ms)
-    a = dr._topm_coverage_kernel(iter(Pi[:13]), ms)
-    b = dr._topm_coverage_kernel(iter(Pi[13:]), ms)
+    whole = kern.topm_coverage_kernel(iter(Pi), ms)
+    a = kern.topm_coverage_kernel(iter(Pi[:13]), ms)
+    b = kern.topm_coverage_kernel(iter(Pi[13:]), ms)
     merged = (a[0] + b[0], a[1] + b[1], a[2] + b[2])
     assert np.allclose(merged[0], whole[0], atol=1e-12, rtol=0)
     assert np.array_equal(merged[1], whole[1])
     assert merged[2] == whole[2]
-    got, want = (dr.coverage_from_accum(*merged, ms),
-                 dr.coverage_from_accum(*whole, ms))
+    got, want = (kern.coverage_from_accum(*merged, ms),
+                 kern.coverage_from_accum(*whole, ms))
     for m in ms:
         # the mean re-associates across the split (fp), the binned p10 cannot
         assert got[m][0] == pytest.approx(want[m][0], rel=1e-15)
@@ -375,14 +358,14 @@ def test_topm_sparse_keeps_the_largest_entries_and_does_not_renormalize():
     fold-standardization algebra keeps describing the same feature scale."""
     rng = np.random.default_rng(33)
     theta = rng.dirichlet(np.full(K, 0.2))
-    idx, val = dr._topm_sparse(theta, TOPM)
+    idx, val = kern.topm_sparse(theta, TOPM)
     assert idx.size == TOPM and val.size == TOPM
     assert np.array_equal(idx, np.sort(idx))            # ascending, deterministic
     assert np.allclose(val, theta[idx], atol=0, rtol=0)  # original values, verbatim
     assert val.sum() < 1.0                               # NOT renormalized
     assert set(idx.tolist()) == set(np.argsort(-theta)[:TOPM].tolist())
     # m >= K is the identity truncation (used by the "keeps everything" A/B)
-    idx_all, val_all = dr._topm_sparse(theta, K)
+    idx_all, val_all = kern.topm_sparse(theta, K)
     assert np.array_equal(idx_all, np.arange(K))
     assert np.array_equal(val_all, theta)
 
@@ -403,12 +386,12 @@ def test_sparse_kernels_equal_dense_kernels_on_the_truncated_design(chunk):
     packed = _packed_sparse(Pi, y, mask, TOPM)
     dense_rows = _rows(_densify_topm(Pi, TOPM), y, mask)
 
-    got = dr._sparse_moments_kernel(iter(packed), C, K, chunk_rows=chunk)
-    for a, b in zip(got, dr._moments_kernel(iter(dense_rows), C, K)):
+    got = kern.sparse_moments_kernel(iter(packed), C, K, chunk_rows=chunk)
+    for a, b in zip(got, kern.moments_kernel(iter(dense_rows), C, K)):
         assert np.allclose(a, b, atol=1e-12, rtol=0)
 
-    got = dr._sparse_stats_kernel(iter(packed), V, b_raw, C, K, chunk_rows=chunk)
-    for a, b in zip(got, dr._stats_kernel(iter(dense_rows), V, b_raw, C, K)):
+    got = kern.sparse_stats_kernel(iter(packed), V, b_raw, C, K, chunk_rows=chunk)
+    for a, b in zip(got, kern.stats_kernel(iter(dense_rows), V, b_raw, C, K)):
         assert np.allclose(a, b, atol=1e-10, rtol=0)
 
 
@@ -419,10 +402,10 @@ def test_sparse_lean_eval_kernel_equals_dense_on_the_truncated_design():
     Pi, y, mask = _make_data(seed=43)
     V, b_raw = _params(seed=44)
     Pi_t = _densify_topm(Pi, TOPM)
-    sparse_rows = [(d, dr._topm_sparse(Pi[d], TOPM), y[d], mask[d]) for d in range(D)]
+    sparse_rows = [(d, kern.topm_sparse(Pi[d], TOPM), y[d], mask[d]) for d in range(D)]
     dense_rows = [(d, Pi_t[d], y[d], mask[d]) for d in range(D)]
-    a = dr._lean_eval_kernel(iter(sparse_rows), C, V, b_raw)
-    b = dr._lean_eval_kernel(iter(dense_rows), C, V, b_raw)
+    a = kern.lean_eval_kernel(iter(sparse_rows), C, V, b_raw)
+    b = kern.lean_eval_kernel(iter(dense_rows), C, V, b_raw)
     assert np.array_equal(a[0], b[0])
     assert np.abs(a[1].astype(np.float64) - b[1].astype(np.float64)).max() < 1e-10
     assert np.array_equal(a[2], b[2]) and np.array_equal(a[3], b[3])
@@ -435,11 +418,11 @@ def test_sparse_kernels_at_m_equal_K_reproduce_the_full_dense_result():
     V, b_raw = _params(seed=46)
     packed = _packed_sparse(Pi, y, mask, K)
     rows = _rows(Pi, y, mask)
-    for a, b in zip(dr._sparse_moments_kernel(iter(packed), C, K),
-                    dr._moments_kernel(iter(rows), C, K)):
+    for a, b in zip(kern.sparse_moments_kernel(iter(packed), C, K),
+                    kern.moments_kernel(iter(rows), C, K)):
         assert np.allclose(a, b, atol=1e-12, rtol=0)
-    for a, b in zip(dr._sparse_stats_kernel(iter(packed), V, b_raw, C, K),
-                    dr._stats_kernel(iter(rows), V, b_raw, C, K)):
+    for a, b in zip(kern.sparse_stats_kernel(iter(packed), V, b_raw, C, K),
+                    kern.stats_kernel(iter(rows), V, b_raw, C, K)):
         assert np.allclose(a, b, atol=1e-10, rtol=0)
 
 
@@ -453,9 +436,9 @@ def test_pack_partition_and_row_sparse_agree_on_the_truncated_form():
     # this a pure-kernel test with no SparkSession.
     rows = [{"topicDistribution": Pi[d], "label": y[d], "labelMask": mask[d]}
             for d in range(D)]
-    packed = list(dr._pack_partition(iter(rows), "topicDistribution", "label",
+    packed = list(kern.pack_rows(iter(rows), "topicDistribution", "label",
                                      "labelMask", topm=TOPM))
-    single = list(dr._row_sparse(iter(rows), "topicDistribution", "label",
+    single = list(kern.row_sparse(iter(rows), "topicDistribution", "label",
                                  "labelMask", TOPM))
     assert len(packed) == len(single) == D
     for p, s in zip(packed, single):
@@ -463,7 +446,7 @@ def test_pack_partition_and_row_sparse_agree_on_the_truncated_form():
         for a, b in zip(p, s):
             assert np.array_equal(a, b)
     # topm=0 leaves the dense 3-tuple cache byte-identical
-    dense = list(dr._pack_partition(iter(rows), "topicDistribution", "label",
+    dense = list(kern.pack_rows(iter(rows), "topicDistribution", "label",
                                     "labelMask"))
     assert all(len(t) == 3 for t in dense)
     assert np.array_equal(dense[0][0], Pi[0])
@@ -505,7 +488,7 @@ def no_sleep(monkeypatch):
     return slept
 
 
-def test_retry_spark_action_returns_after_transient_job_aborts(no_sleep, capsys):
+def test_retry_spark_action_returns_after_transient_job_aborts(no_sleep, caplog):
     """The failure this exists for: a preemption wave aborts the job, the cluster
     is healthy again a minute later, and a fresh job gets clean per-taskset
     exclude lists. Two aborts then a success must return the success — and log
@@ -519,18 +502,18 @@ def test_retry_spark_action_returns_after_transient_job_aborts(no_sleep, capsys)
             raise _job_abort()
         return ("aggregate", 42)
 
-    got = dr._retry_spark_action(_fn, attempts=4, base_sleep_s=60, label="stats pass")
+    got = retry.retry_spark_action(_fn, attempts=4, base_sleep_s=60, label="stats pass")
     assert got == ("aggregate", 42)
     assert len(calls) == 3
     assert no_sleep == [60.0, 120.0]             # doubling, one per retry
-    out = capsys.readouterr().out
+    out = caplog.text
     assert out.count("spark action FAILED") == 2
     assert out.count("retrying in") == 2
     assert "excludeOnFailure" in out             # the first line of the error
     assert "stats pass" in out                   # the label names WHICH pass died
 
 
-def test_retry_spark_action_reraises_after_the_last_attempt(no_sleep, capsys):
+def test_retry_spark_action_reraises_after_the_last_attempt(no_sleep, caplog):
     """A cluster that is really gone must still surface the original exception,
     with its traceback, rather than a wrapper — the driver's exit code and log are
     how a run of record reports an unrecoverable failure."""
@@ -542,11 +525,11 @@ def test_retry_spark_action_reraises_after_the_last_attempt(no_sleep, capsys):
         raise err
 
     with pytest.raises(Exception) as excinfo:
-        dr._retry_spark_action(_fn, attempts=3, base_sleep_s=1)
+        retry.retry_spark_action(_fn, attempts=3, base_sleep_s=1)
     assert excinfo.value is err
     assert len(n) == 3                            # attempts, not attempts + 1
     assert no_sleep == [1.0, 2.0]                 # no sleep after the last try
-    assert "giving up" in capsys.readouterr().out
+    assert "giving up" in caplog.text
 
 
 def test_retry_spark_action_does_not_retry_non_spark_exceptions(no_sleep):
@@ -560,12 +543,12 @@ def test_retry_spark_action_does_not_retry_non_spark_exceptions(no_sleep):
         raise ValueError("node_mask shape (3,) != (8,)")
 
     with pytest.raises(ValueError, match="node_mask shape"):
-        dr._retry_spark_action(_fn, attempts=4, base_sleep_s=60)
+        retry.retry_spark_action(_fn, attempts=4, base_sleep_s=60)
     assert len(n) == 1
     assert no_sleep == []
 
 
-def test_retry_spark_action_fails_fast_on_an_analysis_exception(no_sleep, capsys):
+def test_retry_spark_action_fails_fast_on_an_analysis_exception(no_sleep, caplog):
     """A schema error is decided during query ANALYSIS, on the driver, before a
     task is submitted — so it is identical on every attempt and the backoff is
     pure waste. Exp 0110 lost 60+120+240s to
@@ -585,10 +568,10 @@ def test_retry_spark_action_fails_fast_on_an_analysis_exception(no_sleep, capsys
             "with name `probability` cannot be resolved.")
 
     with pytest.raises(AnalysisException, match="probability"):
-        dr._retry_spark_action(_fn, attempts=4, base_sleep_s=60, label="lean eval collect")
+        retry.retry_spark_action(_fn, attempts=4, base_sleep_s=60, label="lean eval collect")
     assert len(n) == 1                            # one attempt, not four
     assert no_sleep == []                         # and not one second of backoff
-    out = capsys.readouterr().out
+    out = caplog.text
     assert "failing fast" in out
     assert "retrying in" not in out
     assert "lean eval collect" in out             # the label still names the pass
@@ -607,7 +590,7 @@ def test_retry_spark_action_still_retries_other_pyspark_exceptions(no_sleep):
             raise PySparkException("Job aborted due to stage failure")
         return "ok"
 
-    assert dr._retry_spark_action(_fn, attempts=4, base_sleep_s=60) == "ok"
+    assert retry.retry_spark_action(_fn, attempts=4, base_sleep_s=60) == "ok"
     assert len(calls) == 3
     assert no_sleep == [60.0, 120.0]
 
@@ -620,8 +603,8 @@ def test_retry_spark_action_first_line_survives_a_dead_gateway():
         def __str__(self):
             raise RuntimeError("gateway is gone")
 
-    assert dr._error_first_line(_Hostile()) == "_Hostile()"      # repr fallback
-    assert dr._error_first_line(_job_abort("line one\nline two")) == "line one"
+    assert retry._error_first_line(_Hostile()) == "_Hostile()"      # repr fallback
+    assert retry._error_first_line(_job_abort("line one\nline two")) == "line one"
 
 
 # The bad-node / node-unhealthy DISK cascade (exp 0110): a full worker local disk
@@ -651,23 +634,23 @@ def test_is_bad_node_failure_predicate():
     preemption. 'lost node' (spot preemption) is deliberately not a needle — a
     false positive there would strip the retry budget from the case this whole
     wrapper exists for."""
-    assert dr._is_bad_node_failure(_job_abort(_BAD_NODE_MSG)) is True
-    assert dr._is_bad_node_failure(_job_abort(_UNHEALTHY_MSG)) is True
-    assert dr._is_bad_node_failure(_job_abort(_PREEMPTION_MSG)) is False
+    assert retry._is_bad_node_failure(_job_abort(_BAD_NODE_MSG)) is True
+    assert retry._is_bad_node_failure(_job_abort(_UNHEALTHY_MSG)) is True
+    assert retry._is_bad_node_failure(_job_abort(_PREEMPTION_MSG)) is False
     # Walks the cause chain, and a hostile __str__ degrades to no-match, never a
     # raise (the gateway may be the thing that died).
     wrapped = RuntimeError("outer")
     wrapped.__cause__ = _job_abort(_BAD_NODE_MSG)
-    assert dr._is_bad_node_failure(wrapped) is True
+    assert retry._is_bad_node_failure(wrapped) is True
 
     class _Hostile(Exception):
         def __str__(self):
             raise RuntimeError("gateway is gone")
 
-    assert dr._is_bad_node_failure(_Hostile()) is False
+    assert retry._is_bad_node_failure(_Hostile()) is False
 
 
-def test_retry_spark_action_fails_fast_on_a_bad_node_cascade(no_sleep, capsys):
+def test_retry_spark_action_fails_fast_on_a_bad_node_cascade(no_sleep, caplog):
     """A bad-node / node-unhealthy failure is a DISK/health cascade that a backoff
     cannot heal and a retry would only feed (exp 0110: ~12 nodes dead over an
     hour). It fails fast on the first raise — no 60+120+240s of backoff — exactly
@@ -680,17 +663,17 @@ def test_retry_spark_action_fails_fast_on_a_bad_node_cascade(no_sleep, capsys):
         raise err
 
     with pytest.raises(Exception) as excinfo:
-        dr._retry_spark_action(_fn, attempts=4, base_sleep_s=60, label="masked moments")
+        retry.retry_spark_action(_fn, attempts=4, base_sleep_s=60, label="masked moments")
     assert excinfo.value is err
     assert len(n) == 1                            # one attempt, not four
     assert no_sleep == []                         # and not one second of backoff
-    out = capsys.readouterr().out
+    out = caplog.text
     assert "BAD NODE" in out
     assert "retrying in" not in out
     assert "masked moments" in out                # the label still names the pass
 
 
-def test_retry_spark_action_still_retries_plain_preemption(no_sleep, capsys):
+def test_retry_spark_action_still_retries_plain_preemption(no_sleep, caplog):
     """The bad-node exclusion must NOT widen onto ordinary spot preemption: a
     transient ExecutorLostFailure without the disk-cascade signature is precisely
     what a fresh job + a short backoff recovers, so it keeps the full budget."""
@@ -702,10 +685,10 @@ def test_retry_spark_action_still_retries_plain_preemption(no_sleep, capsys):
             raise _job_abort(_PREEMPTION_MSG)
         return "ok"
 
-    assert dr._retry_spark_action(_fn, attempts=4, base_sleep_s=60) == "ok"
+    assert retry.retry_spark_action(_fn, attempts=4, base_sleep_s=60) == "ok"
     assert len(calls) == 3
     assert no_sleep == [60.0, 120.0]              # full doubling backoff, as before
-    assert "BAD NODE" not in capsys.readouterr().out
+    assert "BAD NODE" not in caplog.text
 
 
 # --------------------------------------------------------------------------- #
@@ -731,9 +714,9 @@ class TestLocalSparkRoundTrip:
     def test_masked_moments_matches_numpy(self, spark):
         Pi, y, mask = _make_data(seed=21)
         df = _make_df(spark, Pi, y, mask)
-        mu, sd, n_obs, n_pos = dr.masked_moments(df, C, K)
+        mu, sd, n_obs, n_pos = rspark.masked_moments(df, C, K)
         r_sum, r_sq, r_n, r_pos = _ref_moments(Pi, y, mask)
-        r_mu, r_sd = dr.moments_to_mu_sd(r_sum, r_sq, r_n)
+        r_mu, r_sd = kern.moments_to_mu_sd(r_sum, r_sq, r_n)
         assert np.allclose(mu, r_mu, atol=1e-10, rtol=0)
         assert np.allclose(sd, r_sd, atol=1e-10, rtol=0)
         assert np.allclose(n_obs, r_n)
@@ -742,9 +725,9 @@ class TestLocalSparkRoundTrip:
     def test_spark_stats_fn_matches_in_memory_kernel(self, spark):
         Pi, y, mask = _make_data(seed=22)
         df = _make_df(spark, Pi, y, mask)
-        mu, sd, _, _ = dr.masked_moments(df, C, K)
+        mu, sd, _, _ = rspark.masked_moments(df, C, K)
         W, b = _params(seed=23)
-        with dr.make_spark_stats_fn(
+        with rspark.make_spark_stats_fn(
             df, C, K, mu, sd,
             fold_standardization=_fold_standardization,
             standardized_grad_from_raw=_standardized_grad_from_raw,
@@ -752,7 +735,7 @@ class TestLocalSparkRoundTrip:
             loss, gW_std, gb = stats_fn(W, b)
             loss2, _, _ = stats_fn(W, b)        # repeat pass off the cached RDD
         V, b_raw = _fold_standardization(W, b, mu, sd)
-        r_loss, r_g, r_s = dr._stats_kernel(_rows(Pi, y, mask), V, b_raw, C, K)
+        r_loss, r_g, r_s = kern.stats_kernel(_rows(Pi, y, mask), V, b_raw, C, K)
         assert np.allclose(loss, r_loss, atol=1e-10, rtol=0)
         assert np.allclose(loss2, r_loss, atol=1e-10, rtol=0)
         assert np.allclose(gb, r_s, atol=1e-10, rtol=0)
@@ -772,11 +755,11 @@ class TestLocalSparkRoundTrip:
         """
         Pi, y, mask = _make_data(seed=36 + topm)
         df = _make_df(spark, Pi, y, mask)
-        mu, sd, _, _ = dr.masked_moments(df, C, K, topm=topm)
+        mu, sd, _, _ = rspark.masked_moments(df, C, K, topm=topm)
         W, b = _params(seed=37)
         keep = np.zeros(C, dtype=bool)
         keep[[0, 3]] = True
-        with dr.make_spark_stats_fn(
+        with rspark.make_spark_stats_fn(
             df, C, K, mu, sd,
             fold_standardization=_fold_standardization,
             standardized_grad_from_raw=_standardized_grad_from_raw,
@@ -788,11 +771,11 @@ class TestLocalSparkRoundTrip:
             loss_none, _, _ = stats_fn(W, b)
         V, b_raw = _fold_standardization(W, b, mu, sd)
         if topm:
-            r_loss, r_g, r_s = dr._sparse_stats_kernel(
+            r_loss, r_g, r_s = kern.sparse_stats_kernel(
                 iter(_packed_sparse(Pi, y, mask, topm)), V, b_raw, C, K,
                 node_mask=keep)
         else:
-            r_loss, r_g, r_s = dr._stats_kernel(_rows(Pi, y, mask), V, b_raw, C, K,
+            r_loss, r_g, r_s = kern.stats_kernel(_rows(Pi, y, mask), V, b_raw, C, K,
                                                 node_mask=keep)
         assert np.allclose(loss, r_loss, atol=1e-10, rtol=0)
         assert np.allclose(gb, r_s, atol=1e-10, rtol=0)
@@ -812,9 +795,9 @@ class TestLocalSparkRoundTrip:
         into the kernels), which is a wrong FIT, not a crash."""
         Pi, y, mask = _make_data(seed=38)
         df = _make_df(spark, Pi, y, mask)
-        mu, sd, _, _ = dr.masked_moments(df, C, K)
+        mu, sd, _, _ = rspark.masked_moments(df, C, K)
         W, b = _params(seed=39)
-        with dr.make_spark_stats_fn(
+        with rspark.make_spark_stats_fn(
             df, C, K, mu, sd,
             fold_standardization=_fold_standardization,
             standardized_grad_from_raw=_standardized_grad_from_raw,
@@ -830,8 +813,8 @@ class TestLocalSparkRoundTrip:
         Pi, y, mask = _make_data(seed=30)
         df = _make_df(spark, Pi, y, mask)
         ms = (2, 4, 8)
-        got = dr.theta_topm_coverage(df, K, ms=ms)
-        want = dr.coverage_from_accum(*dr._topm_coverage_kernel(iter(Pi), ms), ms)
+        got = rspark.theta_topm_coverage(df, K, ms=ms)
+        want = kern.coverage_from_accum(*kern.topm_coverage_kernel(iter(Pi), ms), ms)
         assert set(got) == set(want)
         for m in ms:
             assert got[m][0] == pytest.approx(want[m][0], abs=1e-12)
@@ -840,10 +823,10 @@ class TestLocalSparkRoundTrip:
     def test_masked_moments_topm_matches_the_sparse_kernel(self, spark):
         Pi, y, mask = _make_data(seed=31)
         df = _make_df(spark, Pi, y, mask)
-        mu, sd, n_obs, n_pos = dr.masked_moments(df, C, K, topm=TOPM)
-        r_sum, r_sq, r_n, r_pos = dr._sparse_moments_kernel(
+        mu, sd, n_obs, n_pos = rspark.masked_moments(df, C, K, topm=TOPM)
+        r_sum, r_sq, r_n, r_pos = kern.sparse_moments_kernel(
             iter(_packed_sparse(Pi, y, mask, TOPM)), C, K)
-        r_mu, r_sd = dr.moments_to_mu_sd(r_sum, r_sq, r_n)
+        r_mu, r_sd = kern.moments_to_mu_sd(r_sum, r_sq, r_n)
         assert np.allclose(mu, r_mu, atol=1e-12, rtol=0)
         assert np.allclose(sd, r_sd, atol=1e-12, rtol=0)
         assert np.allclose(n_obs, r_n) and np.allclose(n_pos, r_pos)
@@ -857,9 +840,9 @@ class TestLocalSparkRoundTrip:
         pure-kernel tests use, now through the real cache/broadcast machinery."""
         Pi, y, mask = _make_data(seed=32)
         df = _make_df(spark, Pi, y, mask)
-        mu, sd, _, _ = dr.masked_moments(df, C, K, topm=TOPM)
+        mu, sd, _, _ = rspark.masked_moments(df, C, K, topm=TOPM)
         W, b = _params(seed=33)
-        with dr.make_spark_stats_fn(
+        with rspark.make_spark_stats_fn(
             df, C, K, mu, sd,
             fold_standardization=_fold_standardization,
             standardized_grad_from_raw=_standardized_grad_from_raw,
@@ -867,10 +850,30 @@ class TestLocalSparkRoundTrip:
         ) as stats_fn:
             loss, gW_std, gb = stats_fn(W, b)
         V, b_raw = _fold_standardization(W, b, mu, sd)
-        r_loss, r_g, r_s = dr._stats_kernel(
+        r_loss, r_g, r_s = kern.stats_kernel(
             _rows(_densify_topm(Pi, TOPM), y, mask), V, b_raw, C, K)
         assert np.allclose(loss, r_loss, atol=1e-10, rtol=0)
         assert np.allclose(gb, r_s, atol=1e-10, rtol=0)
         assert np.allclose(gW_std, _standardized_grad_from_raw(r_g, r_s, mu, sd),
                            atol=1e-10, rtol=0)
 
+
+
+def test_lean_blocks_from_several_partitions_densify_in_order():
+    """Two partitions' blocks concatenate with the right row offsets for p, y and
+    the mask, an all-observed block (`m_idx is None`) included."""
+    C_ = 3
+    y = np.array([[1, 0, 0], [0, 1, 1], [0, 0, 0], [1, 1, 0]], dtype=np.uint8)
+    mask = np.array([[1, 1, 1], [1, 1, 0], [1, 1, 1], [1, 1, 1]], dtype=np.uint8)
+    proba = np.arange(12, dtype=np.float32).reshape(4, 3)
+    rows = [(10 + d, proba[d], y[d].astype(float), mask[d].astype(float))
+            for d in range(4)]
+    b1 = kern.lean_eval_kernel(iter(rows[:2]), C_)
+    b2 = kern.lean_eval_kernel(iter(rows[2:]), C_)
+    assert b2[4] is None                                  # all-observed block
+    p, gy, gm, ids = kern.densify_lean_blocks([b1, b2], C_)
+    assert ids == [10, 11, 12, 13]
+    assert np.array_equal(p, proba)
+    assert np.array_equal(gy, y) and np.array_equal(gm, mask)
+    with pytest.raises(ValueError, match="row-id collision"):
+        kern.densify_lean_blocks([kern.lean_eval_kernel(iter(rows[:1] * 2), C_)], C_)

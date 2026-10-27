@@ -22,8 +22,8 @@ What is pinned here, and why each failure would otherwise be silent:
   3. **The single-doc path is unchanged** (`@slow`): the doc keys are exactly the
      person ids times RADIX, and the collected proba/labels are what the kernel
      always produced — the seam is a rename of the id, not a change of behavior.
-  4. **The corpus-level uniqueness tripwire and `score_cells_df`'s doc-key
-     column** — the two smaller guards the seam ships.
+  4. **The uniqueness tripwire** (`spark_vi.readout.kernels.assert_unique_ids`)
+     the lean collect runs on the keys.
 
 Groups 2-4's Spark cases are `@slow` + the `spark` fixture from conftest; group 1
 and the tripwire are pure.
@@ -46,7 +46,8 @@ os.environ["PYTHONPATH"] = os.pathsep.join(
                 str(REPO_ROOT / "spark-vi"), os.environ.get("PYTHONPATH", ""))
     if p)
 
-import distributed_readout as dr  # noqa: E402
+import doc_key as dr  # noqa: E402
+from spark_vi.readout.kernels import assert_unique_ids  # noqa: E402
 import gated_pc_cloud as g  # noqa: E402
 
 RADIX = dr.DOC_KEY_RADIX
@@ -119,12 +120,12 @@ def test_overflow_guards_raise(person, ep):
 # 4a. The corpus-level uniqueness tripwire (pure).                            #
 # --------------------------------------------------------------------------- #
 def test_uniqueness_tripwire_raises_on_a_collision():
-    with pytest.raises(ValueError, match="doc-key collision"):
-        g._assert_unique_doc_keys([1, 2, 2, 3], where="test")
+    with pytest.raises(ValueError, match="row-id collision"):
+        assert_unique_ids([1, 2, 2, 3], where="test")
 
 
 def test_uniqueness_tripwire_passes_distinct_keys():
-    g._assert_unique_doc_keys([10, 20, 30], where="test")   # no raise
+    assert_unique_ids([10, 20, 30], where="test")   # no raise
 
 
 # --------------------------------------------------------------------------- #
@@ -184,7 +185,7 @@ class TestLeanKernelDocKeyPath:
                 rows.append((person, ep, theta, label, mask))
         df = _scored_df(spark, rows, with_episode=True)
         V, b_raw = _fit_params()
-        proba, y, mask, doc_keys, elig = g._collect_lean_proba(df, C, V, b_raw)
+        proba, y, mask, doc_keys = g._collect_lean_proba(df, C, V, b_raw)
 
         # Four distinct doc keys, each = person*RADIX + episode_no.
         assert len(doc_keys) == 4
@@ -194,7 +195,6 @@ class TestLeanKernelDocKeyPath:
         # person-grain recovery: the two keys per person share a person_of value.
         persons = dr.person_of(np.asarray(doc_keys))
         assert sorted(persons.tolist()) == [100, 100, 250, 250]
-        assert elig is None
 
         # The proba is the real kernel output, aligned back BY DOC KEY — proof the
         # per-document identity is what indexes the eval arrays.
@@ -214,7 +214,7 @@ class TestLeanKernelDocKeyPath:
                 (250, 0, [0.2, 0.2, 0.2, 0.4], [0, 0, 1], [1, 1, 1])]
         df = _scored_df(spark, rows, with_episode=True)
         V, b_raw = _fit_params()
-        _, _, _, doc_keys, _ = g._collect_lean_proba(df, C, V, b_raw)
+        _, _, _, doc_keys = g._collect_lean_proba(df, C, V, b_raw)
 
         covariate = {100: "cohortA", 250: "cohortB"}      # per-person sidecar
         landed = {key: covariate[int(dr.person_of(key))] for key in doc_keys}
@@ -235,7 +235,7 @@ class TestLeanKernelDocKeyPath:
             rows.append((person, None, theta, label, np.ones(C)))
         df = _scored_df(spark, rows, with_episode=False)
         V, b_raw = _fit_params()
-        proba, y, mask, doc_keys, _ = g._collect_lean_proba(df, C, V, b_raw)
+        proba, y, mask, doc_keys = g._collect_lean_proba(df, C, V, b_raw)
 
         assert set(doc_keys) == {5 * RADIX, 3 * RADIX, 9 * RADIX}
         assert np.array_equal(dr.person_of(np.asarray(sorted(doc_keys))),
@@ -245,16 +245,6 @@ class TestLeanKernelDocKeyPath:
             assert np.allclose(proba[i], _expected_proba(by_key[key], V, b_raw),
                                atol=1e-6)
 
-    def test_collect_theta_labels_returns_doc_keys(self, spark):
-        # The DRIVER-path collect (the A/B gate's driver side) must key on the
-        # same doc key, so the two sides align on document identity.
-        rows = [(100, 0, [0.1, 0.2, 0.3, 0.4], [1, 0, 0], [1, 1, 1]),
-                (100, 1, [0.4, 0.3, 0.2, 0.1], [0, 1, 0], [1, 1, 1]),
-                (250, 0, [0.2, 0.2, 0.2, 0.4], [0, 0, 1], [1, 1, 1])]
-        df = _scored_df(spark, rows, with_episode=True)
-        _, _, _, doc_key_order = g._collect_theta_labels(df, C)
-        assert set(doc_key_order) == {100 * RADIX, 100 * RADIX + 1, 250 * RADIX}
-
     def test_collect_raises_on_a_doc_key_collision(self, spark):
         # Two documents that synthesize the SAME key (same person, same episode_no)
         # trip the corpus-level uniqueness assertion rather than silently
@@ -263,7 +253,7 @@ class TestLeanKernelDocKeyPath:
                 (100, 0, [0.4, 0.3, 0.2, 0.1], [0, 1, 0], [1, 1, 1])]
         df = _scored_df(spark, rows, with_episode=True)
         V, b_raw = _fit_params()
-        with pytest.raises(ValueError, match="doc-key collision"):
+        with pytest.raises(ValueError, match="row-id collision"):
             g._collect_lean_proba(df, C, V, b_raw)
 
     def test_overflow_guard_fires_in_the_spark_column(self, spark):

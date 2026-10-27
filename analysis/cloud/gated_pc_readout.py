@@ -30,18 +30,12 @@ sizes against the saved λ's own V dimensions, and the rebuilt engine-id -> conc
 map against the one the manifest recorded. A mismatch aborts with the drift named,
 rather than reporting numbers for a model scored on a corpus it was not fit on.
 
-Both readout paths of ADR 0046 are available here, with the same
-`--readout-mode {driver,distributed,auto}` / `--readout-ab-check` semantics as the
-fit driver: this tool IS the recovery path when a finished fit's readout output was
-lost (exp 0103), and at whole-Mondo C the driver-collect readout is exactly what
-does not fit — so re-reading has to be able to run distributed without re-fitting.
-
-SUBMIT NOTE: the distributed path's mapPartitions kernels pickle by MODULE
-REFERENCE, so `analysis/cloud/distributed_readout.py` must be importable on the
-EXECUTORS as top-level `distributed_readout` — i.e. it must ride in --py-files
-(the `gated-pc-readout` Makefile target does this; a hand-rolled spark-submit must
-add `--py-files ...,<repo>/analysis/cloud/distributed_readout.py` or the
-distributed mode dies unpickling on the executors).
+The heads are fit by `spark_vi.readout` (ADR 0051) on either engine:
+`--readout-engine spark` (default) runs every L-BFGS pass as a treeAggregate over
+the scored frame; `--readout-engine local` collects each split once in compact
+(top-m truncated) form and runs the passes in driver memory with the same kernels.
+The kernels ship in the spark-vi zip, so a hand-rolled spark-submit needs only the
+source zips on --py-files.
 
 Cluster-covered (Spark + live cache); the pure helpers (build_parser,
 bundle_key_from_manifest, reconstruct_model) are unit-tested and the scoring body
@@ -62,9 +56,10 @@ import numpy as np
 from _driver_common import (_phase, configure_logging, hard_exit,
                             install_stdout_tee, make_spark_session)
 from disk_telemetry import start_disk_telemetry
+from spark_vi.readout import read_heads
 from gated_pc_cloud import (
     _MONDO_DAG_SOURCES, _dump_partial_results,
-    _read_readout_heads, distributed_score_arm, format_arm_readout,
+    format_arm_readout, readout_arm,
     format_stacked_readout, multidomain_cache_key, multidomain_load_or_build,
     stacked_readout,
 )
@@ -550,7 +545,7 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
     import differential as dfm
     import model_acquisition as ma
     import voi_tables as vt
-    from gated_pc_cloud import closure_matrix
+    from spark_vi.readout import closure_matrix
     run_dir = Path(run_dir)
     bm, cm = run_dir / "bundle_meta.json", run_dir / "code_map.tsv"
     names_csv = run_dir / "concept_names.csv"
@@ -1090,7 +1085,7 @@ def _whole_history_prior(test_scored, keys, run_dir, *, C, readout_int2cid,
     import prevalence_check as pv
     from pyspark.sql import functions as F
     from conversion_sidecar import try_load_index_horizon, try_load_sidecar
-    import distributed_readout as _dr
+    import doc_key as _dk
     wp = Path(run_dir) / "conversion_sidecar.json"
     if not wp.exists():
         raise SystemExit("[prevalence] --prev-history needs <run>/conversion_sidecar.json "
@@ -1116,7 +1111,7 @@ def _whole_history_prior(test_scored, keys, run_dir, *, C, readout_int2cid,
     got = (pairs.join(F.broadcast(mdf), "node_cid").groupBy("person_id")
            .agg(F.collect_set("rnode").alias("ns")).collect())
     by_person = {int(r["person_id"]): r["ns"] for r in got}
-    prior = pv.prior_from_sets(keys, by_person, int(C), _dr.person_of)
+    prior = pv.prior_from_sets(keys, by_person, int(C), _dk.person_of)
     pairs.unpersist(); hz_t.unpersist()
     return prior, {"n_test_docs": n_docs, "n_with_index": n_idx,
                    "n_sidecar_nodes_prior": len(nodes), "n_mapped_to_readout": len(n2r)}
@@ -1136,8 +1131,8 @@ def run_prevalence_check(test_scored, run_dir, *, C, parent_int,
     WHOLE-HISTORY prior rule beside the lookback one, with a containment check."""
     import prevalence_check as pv
     import voi_tables as vt
-    from gated_pc_cloud import (_collect_lean_proba, _doc_key_column, closure_matrix,
-                                stacked_proba)
+    from gated_pc_cloud import _collect_lean_proba, _doc_key_column
+    from spark_vi.readout import closure_matrix, stacked_proba
     run_dir = Path(run_dir)
     bm, cm = run_dir / "bundle_meta.json", run_dir / "code_map.tsv"
     if not cm.exists():
@@ -1148,7 +1143,7 @@ def run_prevalence_check(test_scored, run_dir, *, C, parent_int,
     z = np.load(hp)
     if int(z["C"]) != int(C):
         raise SystemExit(f"[prevalence] heads {hp.name} are C={int(z['C'])}, frames C={C}")
-    proba, y, _m, keys, _e = _collect_lean_proba(
+    proba, y, _m, keys = _collect_lean_proba(
         test_scored, int(C), z["V"], z["b_raw"], degenerate=z["degenerate"],
         const=z["const"], theta_topm=int(z["theta_topm"]))
     P = stacked_proba(proba, closure_matrix(parent_int, int(C)))
@@ -1234,10 +1229,8 @@ def build_parser() -> argparse.ArgumentParser:
                     "(no re-fit): pc_topics_lr + precision@recall / recall@FDR / "
                     "detection for the gated_pc arm.",
         epilog="Submit via `make gated-pc-readout ID=N` (analysis/cloud/Makefile). A "
-               "hand-rolled spark-submit MUST pass --py-files "
-               "<repo>/analysis/cloud/distributed_readout.py alongside the source "
-               "zips: --readout-mode distributed ships its partition kernels by "
-               "module reference and they must import on the executors.")
+               "hand-rolled spark-submit passes the spark-vi and charmpheno zips on "
+               "--py-files (the readout kernels ship in spark-vi).")
     p.add_argument("--run-dir", required=True,
                    help="Run dir with gated_pc_result.npz + manifest.json.")
     p.add_argument("--cache-uri", default=None,
@@ -1386,9 +1379,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fdr-targets", default="0.1,0.25,0.5")
     p.add_argument("--min-label-count", type=int, default=None,
                    help="Small-cell mask floor; default = the run's own value.")
-    p.add_argument("--readout-mode", choices=["distributed"], default="distributed",
-                   help="accepted for command compatibility; the distributed "
-                        "batched solve is the only readout since the 2026-10 cleanup")
+    p.add_argument("--readout-engine", choices=["spark", "local"], default="spark",
+                   help="Where the heads' L-BFGS passes run (ADR 0051): 'spark' = a "
+                        "treeAggregate over the scored frame per pass; 'local' = "
+                        "collect each split once (top-m truncated, compact) and run "
+                        "every pass in driver memory. Same kernels, same answer up "
+                        "to summation order; local needs the packed train split to "
+                        "fit in the driver.")
     p.add_argument("--readout-theta-mass", type=float, default=None,
                    help="OVERRIDE: resolve the top-m width from a theta-MASS target "
                         "on the train frame (spec 2026-10-07 §D4; smallest m in "
@@ -1811,11 +1808,11 @@ def reconstruct_model(run_dir: Path, manifest: dict):
 def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targets,
                 min_count, out_dir=None, theta_topm=None, readout_max_iter=None,
                 readout_l2=None, mask_tag=None, stacked=False, parent_int=None,
-                theta_mass=None, C=None, warm_start=None):
+                theta_mass=None, C=None, warm_start=None, engine="spark"):
     """Fit and score the pc_topics_lr heads off two already-TRANSFORMED splits.
 
     One path (cleanup 2026-10): the per-node L2 logistic heads are fit by the
-    distributed batched L-BFGS solve (`distributed_score_arm`), the test split's
+    batched L-BFGS solve (`readout_arm`, on the `engine` backend), the test split's
     lean (D, C) proba is collected for the metrics, and `stacked=True` adds the
     closure-product block on that same proba. Taking DataFrames rather than a
     SparkSession + run dir keeps it callable on a local Spark fixture.
@@ -1833,7 +1830,8 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
     `C` overrides the manifest's label width when the frames were widened to the
     readout node space (`readout_dag.widen_labels_to_readout`); `parent_int` is then
     the readout DAG. `warm_start=(V, b_raw)` (`--readout-warm-from`) starts the solve
-    from saved heads of the same problem."""
+    from saved heads of the same problem. `engine` ("spark" | "local") is the
+    readout backend (`gated_pc_cloud.readout_arm`)."""
     C = int(manifest["C"] if C is None else C)
     K = int(manifest.get("K") or 0)
     if not K:
@@ -1870,8 +1868,8 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
         _cprint(f"[readout]   theta top-m by MASS target {_mass:g} (from the "
               "manifest; width not yet resolved there)", flush=True)
     if _mass is not None:
-        import distributed_readout as _drm
-        theta_topm, _cov = _drm.resolve_theta_topm_by_mass(
+        from spark_vi.readout.spark import resolve_theta_topm_by_mass
+        theta_topm, _cov = resolve_theta_topm_by_mass(
             train_scored, K or None, _mass)
         _cprint("[readout]   theta top-m by mass: "
               + " ".join(f"m={m}:{mean:.3f}/{p10:.3f}"
@@ -1890,11 +1888,11 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
     _cprint(f"[readout]   readout l2={readout_l2:g} (from {_l2_src})", flush=True)
     _cprint(f"[readout]   readout max_iter={readout_max_iter} (from {_mi_src})",
           flush=True)
-    dist = distributed_score_arm(
+    dist = readout_arm(
         train_scored, test_scored, C, K, recall_targets=recall_targets,
         fdr_targets=fdr_targets, min_count=min_count, label=arm,
         theta_topm=theta_topm, max_iter=readout_max_iter, l2=readout_l2,
-        warm_start=warm_start,
+        warm_start=warm_start, engine=engine,
         # The solve is the multi-hour part: a death mid-solve costs at most
         # `checkpoint_every` iterations, because the next invocation finds the
         # checkpoint next to the manifest it already reads.
@@ -2320,7 +2318,7 @@ def main(argv=None) -> int:
             _warm = None
             if args.readout_warm_from:
                 _wl = f"gated_pc_{args.readout_warm_from}"
-                _wh = _read_readout_heads(run_dir, _wl, C=_C_ro,
+                _wh = read_heads(run_dir, _wl, C=_C_ro,
                                           K=int(_manifest_ro["K"]))
                 if _wh is None:
                     raise SystemExit(f"[readout] --readout-warm-from: no usable "
@@ -2348,7 +2346,7 @@ def main(argv=None) -> int:
                         mask_tag=_mtag, stacked=bool(args.readout_stacked),
                         parent_int=_parent_ro,
                         theta_mass=args.readout_theta_mass, C=_C_ro,
-                        warm_start=_warm)
+                        warm_start=_warm, engine=args.readout_engine)
             _cprint(f"[readout]   arm results written to {run_dir / _rname}",
                   flush=True)
             if ((args.raw_baseline or args.readout_nodes or args.prev_history)

@@ -4,9 +4,9 @@ What survives of the in-memory PC evaluation harness (ADR 0038, removed by ADR
 0050): the per-label scorer (`_score_label`: heldout ROC AUC, AP and top-k
 screening, with the SKIP_* reasons for a degenerate label), the macro-average
 (`_macro`), the per-label masked logistic baseline (`_lr_proba_per_label[_masked]`,
-the oracle `spark_vi.models.topic.batched_lr` reproduces) and the masked bundle
+the oracle `spark_vi.readout.solver` reproduces) and the masked bundle
 scorer (`_bundle_masked`). The readout drivers (`analysis/cloud/gated_pc_cloud.py`,
-`distributed_readout.py`) import them. This layer is allowed scikit-learn: it is
+`gated_pc_readout.py`) import them. This layer is allowed scikit-learn: it is
 measurement, not a model.
 
 A test-set label column that is constant (all-0 or all-1) makes AUC undefined;

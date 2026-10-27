@@ -51,7 +51,7 @@ os.environ["PYTHONPATH"] = os.pathsep.join(
                 str(REPO_ROOT / "spark-vi"), os.environ.get("PYTHONPATH", ""))
     if p)
 
-import distributed_readout as dr  # noqa: E402
+import doc_key as dr  # noqa: E402
 import gated_pc_cloud as g  # noqa: E402
 
 RADIX = dr.DOC_KEY_RADIX

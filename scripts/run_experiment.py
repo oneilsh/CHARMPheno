@@ -909,15 +909,9 @@ def _apply_max_iter_override(effective: dict, max_iter: int | None) -> dict:
 def _driver_memory_for(model_class: str) -> str:
     """Driver memory for the fit spark-submit, overridable via CHARM_DRIVER_MEMORY.
 
-    The topic-model fits (lda/stm) stream on executors and are
-    fine at 4g. PC is different: its in-memory eval collects a dense ``D x V``
-    matrix to the DRIVER (client mode), so it needs more headroom. gated_pc is
-    lighter (it collects only the ``D x K`` theta + labels, never the dense BOW)
-    but still runs the in-memory per-node pc_topics_lr LR on the driver over
-    train+test across arms, so it gets the same headroom. Lower
-    ``person_mod``/``vocab_size`` if even 8g OOMs on a large cohort — or set
-    ``readout_mode: distributed``, which moves that fit onto the executors and
-    leaves the driver only a float32/uint8 test-split eval bundle.
+    The topic-model fits (lda/stm) stream on executors and are fine at 4g.
+    gated_pc holds the whole-Mondo λ (K x V, hundreds of MB, plus the merged
+    sufficient statistics) on the driver every iteration, so it gets more headroom.
     """
     override = os.environ.get("CHARM_DRIVER_MEMORY")
     if override:
@@ -1037,18 +1031,8 @@ def build_spark_submit_cmd(
     py_files = [
         repo_root / "spark-vi" / "dist" / "spark_vi.zip",
         repo_root / "charmpheno" / "dist" / "charmpheno.zip",
-        # gated_pc's distributed readout (--readout-mode distributed) ships its
-        # partition kernels to the executors inside mapPartitions closures, which
-        # cloudpickle serializes by MODULE REFERENCE — so this module must be
-        # importable ON THE EXECUTORS under the same top-level name the driver used
-        # (`import distributed_readout`, resolved there from the driver script's own
-        # directory). It is a numpy-only leaf, so it rides as a bare .py rather than
-        # in a package zip; the rest of `analysis/` stays driver-side, reached via
-        # PYTHONPATH=REPO_ROOT in client mode.
-        repo_root / "analysis" / "cloud" / "distributed_readout.py",
         # The pre-index closure post-pass (E1) attaches its column via a UDF whose
-        # functions cloudpickle serializes by MODULE REFERENCE, same as the readout
-        # kernels above — the executors must `import preindex_closure` when they
+        # functions cloudpickle serializes by MODULE REFERENCE — the executors must `import preindex_closure` when they
         # unpickle it (exp 0110's first record attempt died of exactly this: the
         # bundle cache write, the first action to touch the column, failed with
         # ModuleNotFoundError on every executor). Numpy-only leaf, rides bare.

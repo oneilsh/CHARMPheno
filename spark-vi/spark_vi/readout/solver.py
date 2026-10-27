@@ -1,14 +1,13 @@
 """Batched multi-head logistic regression: C independent per-node fits, one solver.
 
-CANONICAL HOME (plan D1, 2026-09-07). This pure-numpy solver is the post-hoc
-readout's (``analysis.pc`` / ``analysis.cloud.distributed_readout``, FROZEN θ); it
-also served the co-fit head until ADR 0050 removed it (the carried-curvature
-``state`` path below is that head's legacy and stays inert for the readout).
-``analysis.pc.batched_lr`` is a thin re-export of this module — the legal
-``analysis -> spark_vi`` direction. Domain-agnostic by
-construction: pure-Python, flat-layout, no charmpheno/analysis/Spark import (the
-docstrings' ``analysis.pc.evaluate`` mentions are the oracle it reproduces, prose
-not code).
+The readout's solver (``spark_vi.readout``, ADR 0051; it lived in
+``models/topic/batched_lr.py`` until then), fit on FROZEN θ, or on any other
+frozen feature vector. It also served the co-fit head until ADR 0050 removed it
+(the carried-curvature ``state`` path below is that head's legacy and stays inert
+for the readout). Domain-agnostic by construction: pure numpy, no Spark import;
+the docstrings' ``analysis.pc.evaluate`` mentions name the sklearn oracle it
+reproduces (prose, not code). Both backends feed it: ``readout.spark``'s
+treeAggregate stats function and ``readout.local``'s in-memory one.
 
 This is Package A of the distributed readout
 (`docs/superpowers/plans/2026-08-20-distributed-readout-plan.md`, step 1): the
@@ -526,8 +525,8 @@ def solve_batched_lr(
     long distributed solve — each stats call is a full cluster pass, so iterations
     are minutes, not microseconds, at whole-Mondo scale. The payload also carries
     the CURRENT iterate as ``W_std`` (C,K) and ``b_std`` (C,), which is what lets
-    a driver CHECKPOINT a multi-hour solve (`_fit_readout_heads` in the cloud
-    driver writes them every N iterations and feeds them back as `x0` after a
+    a driver CHECKPOINT a multi-hour solve (`readout.heads.fit_heads` writes them
+    every N iterations and feeds them back as `x0` after a
     crash): the iterate is the entire resumable state, since `x0` is a point and
     the curvature history is rebuilt either way. **They are live views into the
     solver's parameter matrix**, which the loop rebinds and mutates as it
@@ -571,7 +570,7 @@ def solve_batched_lr(
     is a property of the ZERO row, not of the masking: with the data term zeroed
     the objective is the bare ridge `0.5*l2*‖w‖²`, whose gradient `l2*w` vanishes
     only at `w = 0`. A caller that warm-starts must therefore ZERO the `x0` rows
-    of the nodes IT masks (see `_fit_readout_heads` in the cloud driver), or the
+    of the nodes IT masks (see `readout.heads.fit_heads`), or the
     ridge will spend real distributed passes walking them back to zero.
     """
     n = K + 1
