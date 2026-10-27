@@ -561,7 +561,7 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
                        "--emit-eta: mondo_id, concept_id, weight, neg, "
                        "coverage) this fit's etaBoost was built from; empty "
                        "(default) = no profile prior. Requires gateParent (via "
-                       "etaBoost); incompatible with resumeFrom/warmStartFrom.",
+                       "etaBoost); incompatible with resumeFrom.",
                        typeConverter=TypeConverters.toString)
     profileEtaStrength = Param(Params._dummy(), "profileEtaStrength",
                                "D3 scale: each boosted topic's positive boost "
@@ -613,27 +613,6 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         "Fisher; SGD does not converge the head — ADR 0039).",
         typeConverter=TypeConverters.toString,
     )
-    warmStartFrom = Param(
-        Params._dummy(), "warmStartFrom",
-        "path to a previously-written save dir whose global params (topics/lambda) "
-        "SEED this fit as its initial global params, with a FRESH Robbins-Monro "
-        "iteration counter (rho restarts near rho_0). Empty (default) = cold start. "
-        "DISTINCT from resumeFrom, which CONTINUES the counter (decayed rho) — a "
-        "warm start needs the undecayed schedule so the head can move. The "
-        "unsupervised-warm-start protocol (Hughes et al.): fit phase 1 at "
-        "weightY == 0 (learns topics, leaves the head at its zero init), then "
-        "warm-start a supervised phase 2 (weightY > 0) from it. Mutually exclusive "
-        "with resumeFrom.",
-        typeConverter=TypeConverters.toString,
-    )
-
-    def setWarmStartFrom(self, value: str):
-        """Set warmStartFrom (path to a phase-1 checkpoint to warm-init from; empty = cold start)."""
-        return self._set(warmStartFrom=value)
-
-    def getWarmStartFrom(self) -> str:
-        return str(self.getOrDefault(self.warmStartFrom))
-
     def setClosureParents(self, parents) -> "OnlinePCLDAEstimator":
         """Select the DAG-closure head from a length-C sequence of parent-index lists
         (JSON-encoded into the string Param). Empty/None restores the flat head."""
@@ -926,7 +905,7 @@ _ONLINE_PCLDA_DEFAULTS = dict(
     weightYWarmupIters=0, headOptimizer="sgd", headInnerIters=3,
     headHistoryReset=True, headLr=0.05, headNewtonRidge=0.01,
     headL2=1e-3, headIntercept=False, headStandardize=False,
-    closureParents="", warmStartFrom="",
+    closureParents="",
     gateParent="", etaBoost="", gateNBg=2, gateTpn=1, gateWarm=0, gateOpenSeed=True, gateSeedProfile="", gateSeedMode="subtree",
     gateSeedOwnCodes="", gateSeedLeaves=False,
     localizeHead=False,
@@ -1035,7 +1014,6 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         profileEtaMinCoverage: float = 0.0,
         featuresCols: list[str] | None = None,
         domainBounds: list[int] | None = None,
-        warmStartFrom: str = "",
         # _PersistenceParams kwargs — see that mixin's docstring; these MUST
         # appear here explicitly (not just on the mixin) for kwarg-style
         # construction (the cloud driver builds via kwargs).
@@ -1144,25 +1122,6 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         # and > 0 fits go through this one VIRunner.fit code path.
         config, resume_path = apply_persistence_params(self, config)
 
-        # warmStartFrom is a PC-specific, fresh-counter warm-INIT (distinct from
-        # resumeFrom's continue-counter). Resolve + validate it here rather than
-        # in the shared apply_persistence_params so the LDA/HDP resume surface is
-        # untouched. Empty (default) => cold start (warm_start_path stays None).
-        warm_start = self.getOrDefault("warmStartFrom")
-        warm_start_path = None
-        if warm_start:
-            if resume_path is not None:
-                raise ValueError(
-                    "resumeFrom and warmStartFrom are mutually exclusive: "
-                    "resumeFrom continues the Robbins-Monro counter, "
-                    "warmStartFrom resets it. Set at most one."
-                )
-            if not (Path(warm_start) / "manifest.json").exists():
-                raise FileNotFoundError(
-                    f"No manifest.json at warmStartFrom path: {warm_start}"
-                )
-            warm_start_path = Path(warm_start)
-
         # Profile-eta boost guard (plan D5) — the exact twin of the spectral-init
         # guard below: the boost is a FIT-LONG prior re-entering every lambda
         # update, and a checkpoint's lambda was fit without it (or under another
@@ -1172,10 +1131,10 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         # slip past.
         if (str(self.getOrDefault("profileEta"))
                 or str(self.getOrDefault("etaBoost"))):
-            if resume_path is not None or warm_start_path is not None:
+            if resume_path is not None:
                 raise ValueError(
-                    "profileEta/etaBoost is incompatible with resumeFrom/"
-                    "warmStartFrom: the boost is a fit-long word-side prior and "
+                    "profileEta/etaBoost is incompatible with resumeFrom: "
+                    "the boost is a fit-long word-side prior and "
                     "the checkpoint's lambda was fit without it. Set at most one.")
 
         label_col = self.getOrDefault("labelCol") if self.isSet("labelCol") else None
@@ -1253,9 +1212,9 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
                 raise ValueError(
                     f"init={init_mode!r} requires gateParent: spectral init seeds the "
                     "per-node topic blocks, and there are none without the gate.")
-            if resume_path is not None or warm_start_path is not None:
+            if resume_path is not None:
                 raise ValueError(
-                    f"init={init_mode!r} is incompatible with resumeFrom/warmStartFrom: "
+                    f"init={init_mode!r} is incompatible with resumeFrom: "
                     "a checkpoint's lambda overrides the spectral seed. Set at most one.")
             from spark_vi.models.topic.dag_placement import DagLayout
             from spark_vi.mllib.topic.stm import resolve_spectral_method
@@ -1443,7 +1402,6 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
                 pc_rdd,
                 data_summary=data_summary,
                 resume_from=resume_path,
-                warm_start_from=warm_start_path,
                 on_iteration=self._on_iteration,
             )
         finally:

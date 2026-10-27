@@ -71,19 +71,11 @@ def _checkpoint_dir(tmp_path):
     return str(ckpt)
 
 
-def test_profile_eta_incompatible_with_warm_start(spark, tmp_path):
-    df = _two_node_df(spark)
-    est = _pc_est(profileEta="profile_eta.tsv",
-                  warmStartFrom=_checkpoint_dir(tmp_path))
-    with pytest.raises(ValueError, match="incompatible with resumeFrom/warmStartFrom"):
-        est.fit(df)
-
-
 def test_profile_eta_incompatible_with_resume(spark, tmp_path):
     df = _two_node_df(spark)
     est = _pc_est(profileEta="profile_eta.tsv",
                   resumeFrom=_checkpoint_dir(tmp_path))
-    with pytest.raises(ValueError, match="incompatible with resumeFrom/warmStartFrom"):
+    with pytest.raises(ValueError, match="incompatible with resumeFrom"):
         est.fit(df)
 
 
@@ -91,9 +83,9 @@ def test_eta_boost_mechanism_param_also_guarded(spark, tmp_path):
     """The guard keys on the MECHANISM Param too: a boost handed straight to
     setEtaBoost (no profileEta provenance) must not slip past D5 either."""
     df = _two_node_df(spark)
-    est = _pc_est(warmStartFrom=_checkpoint_dir(tmp_path))
+    est = _pc_est(resumeFrom=_checkpoint_dir(tmp_path))
     est.setEtaBoost({2: ([0, 1], [0.5, 0.25])})
-    with pytest.raises(ValueError, match="incompatible with resumeFrom/warmStartFrom"):
+    with pytest.raises(ValueError, match="incompatible with resumeFrom"):
         est.fit(df)
 
 
