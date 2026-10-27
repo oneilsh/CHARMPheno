@@ -29,7 +29,6 @@ import numpy as np
 from spark_vi.core.config import VIConfig
 from spark_vi.core.model import VIModel
 from spark_vi.core.result import VIResult
-from spark_vi.io.export import load_result, save_result
 
 log = logging.getLogger("spark_vi.core.runner")
 
@@ -89,6 +88,13 @@ def run_svi_loop(
     stats are pre-scaled by corpus_size / batch_size so update_global sees an
     unbiased corpus-equivalent target (the MLlib OnlineLDAOptimizer convention).
     """
+    # Lazy import to break a module-load cycle (fix 2cb3c45c, ported with ADR
+    # 0051): spark_vi.io.export imports spark_vi.core.result, which runs
+    # spark_vi.core.__init__ -> runner -> this module, so a module-level import here
+    # fails for any consumer that imports export BEFORE core (e.g. a post-hoc reader
+    # doing `from spark_vi.io.export import load_result` first).
+    from spark_vi.io.export import load_result, save_result
+
     if resume_from is not None:
         loaded = load_result(resume_from)
         global_params = loaded.global_params

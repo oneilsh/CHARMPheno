@@ -561,3 +561,16 @@ def test_unsupported_value_inside_a_dict_param_still_raises(tmp_path):
                    elbo_trace=[], n_iterations=0, converged=False)
     with pytest.raises(UnsupportedGlobalParamError, match=r"lambda\[1\]"):
         save_result(res, tmp_path / "r")
+
+
+def test_export_can_be_imported_before_core():
+    """Regression (fix 2cb3c45c): spark_vi.io.export -> core.result -> core.__init__
+    -> runner -> loop must not import export at module level, or importing export
+    FIRST fails on a partially initialized module. A fresh interpreter, because
+    this process has long since imported both."""
+    import subprocess
+    import sys
+
+    code = ("import spark_vi.io.export as e; import spark_vi.core; "
+            "assert callable(e.load_result)")
+    subprocess.run([sys.executable, "-c", code], check=True)
