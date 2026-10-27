@@ -24,11 +24,22 @@ from spark_vi.core.model import VIModel
 class CountingModel(VIModel):
     """Beta-Bernoulli conjugate VI stand-in."""
 
-    def __init__(self, prior_alpha: float = 1.0, prior_beta: float = 1.0) -> None:
+    def __init__(self, prior_alpha: float = 1.0, prior_beta: float = 1.0, *,
+                 early_stop: bool = True) -> None:
+        """`early_stop=False` disables the ELBO convergence test, for runner tests
+        that need the loop to run its full budget: under full-batch rho = 1 this
+        conjugate model reaches its exact posterior in one step, so with early
+        stopping on it always converges at iteration 2."""
         if prior_alpha <= 0 or prior_beta <= 0:
             raise ValueError("priors must be positive")
         self.prior_alpha = float(prior_alpha)
         self.prior_beta = float(prior_beta)
+        self.early_stop = bool(early_stop)
+
+    def has_converged(self, elbo_trace, convergence_tol) -> bool:
+        if not self.early_stop:
+            return False
+        return super().has_converged(elbo_trace, convergence_tol)
 
     def initialize_global(self, data_summary: Any | None) -> dict[str, np.ndarray]:
         return {

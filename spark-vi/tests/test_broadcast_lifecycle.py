@@ -22,7 +22,10 @@ def _run_with_broadcast_tracking(spark, cfg):
 
     rdd = spark.sparkContext.parallelize([1, 0, 1, 0], numSlices=2).persist()
     rdd.count()  # materialize for VIRunner's strict cache precondition
-    model = CountingModel()
+    # early_stop off: under full-batch rho = 1 the conjugate model converges at
+    # iteration 2, and the max-iterations path needs the loop to run its budget.
+    # The convergence-path test still converges (its tolerance is huge).
+    model = CountingModel(early_stop=cfg.convergence_tol >= 1.0)
     runner = VIRunner(model=model, config=cfg)
 
     # Capture the real broadcast method *before* patching, so the wrapper can

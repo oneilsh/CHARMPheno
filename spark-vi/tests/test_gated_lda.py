@@ -600,7 +600,7 @@ def test_vi_runner_full_batch_matches_local_variational_em(spark):
     SVI-vs-Gibbs gate in this file is written against.
 
     Why this exists. A real defect lived in the production full-batch path for its
-    whole life (insight 0074): VIRunner applied the decaying Robbins-Monro step
+    whole life (fix 3f71de55, ported with ADR 0051): VIRunner applied the decaying Robbins-Monro step
     rho_t = (tau0 + t + 1)^-kappa UNCONDITIONALLY, so full batches were damped toward
     a DETERMINISTIC target -- the parameters froze short of the fixed point and the
     early stop fired on the vanishing step. Every equivalence gate here validated

@@ -60,7 +60,7 @@ def test_checkpoint_and_final_save(tmp_path):
 
     cfg = VIConfig(max_iterations=5, convergence_tol=1e-12, checkpoint_interval=2,
                    checkpoint_dir=tmp_path / "ck")
-    res = LocalRunner(CountingModel(), cfg).fit([1, 0, 1])
+    res = LocalRunner(CountingModel(early_stop=False), cfg).fit([1, 0, 1])
     on_disk = load_result(tmp_path / "ck")
     assert on_disk.n_iterations == res.n_iterations == 5
     np.testing.assert_allclose(on_disk.global_params["alpha"], res.global_params["alpha"])
