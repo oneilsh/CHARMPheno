@@ -35,17 +35,17 @@ def _neg_flags(values) -> np.ndarray:
 
 def build_profile_seed(marks_df, *, eid_by_mondo, vocab_index_by_concept):
     """The leaves-first schedule's PROFILE seed (exp 0157/0158; ADR 0049): {engine
-    node id: {condition-domain vocab idx: weight}} for every node of this run with
+    node id: {primary-domain vocab idx: weight}} for every node of this run with
     an external phenotype profile (HPO) in the vocabulary. The estimator seeds the
-    node's condition-domain start from it (leaves at iteration 0, later blocks when
+    node's primary-domain start from it (leaves at iteration 0, later blocks when
     they open); unprofiled nodes keep the histogram seed.
 
-    Rules: the concept is in the bundle's domain-0 vocabulary; NOT-annotated
+    Rules: the concept is in ``vocab_index_by_concept`` (the primary domain's
+    vocabulary map; the fit driver passes domain 0's); NOT-annotated
     (``neg``) phenotypes never seed, and a concept listed both ways for a node is
     contested and dropped; the weight is an IDF over THIS run's profiled nodes,
     log(N / n_c), so a phenotype every profiled node shares (n_c = N) weighs 0 and
-    drops out — the same knob-free exclusion of profile-generic terms the guided
-    anchors use, computed here because the marks table carries no weight
+    drops out — a knob-free exclusion of profile-generic terms, computed here because the marks table carries no weight
     (``hpo_profile_marks.py`` is bundle-agnostic). Columns used: mondo_id,
     concept_id, neg. Returns ``(seed, stats)``; stats are counts only."""
     mids = marks_df["mondo_id"].astype(str).to_numpy()

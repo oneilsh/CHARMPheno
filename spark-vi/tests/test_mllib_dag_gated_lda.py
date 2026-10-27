@@ -236,3 +236,22 @@ def test_resume_continues_the_iteration_counter(tmp_path, spark):
     assert rb.n_iterations == 6 and len(rb.elbo_trace) == 6
     assert rb.elbo_trace[:3] == ra.elbo_trace
     assert not np.allclose(rb.global_params["lambda"], lam_a)
+
+
+def test_profile_seed_lands_in_the_primary_domain_slice():
+    """gateSeedDomain names the domain the profile / own codes index; its local ids
+    are shifted to that domain's span of the concatenated vocabulary."""
+    from spark_vi.models.topic.dag_placement import DagLayout
+    lay = DagLayout(PARENT, n_bg=2, tpn=1)
+    sizes = [4, 3]
+    for d, (lo, hi) in ((0, (0, 4)), (1, (4, 7))):
+        est = _est(gateWarm=1, gateOpenSeed=False, gateSeedDomain=d)
+        est.setGateSeedProfile({3: {0: 2.0, 2: 1.0}, 1: {1: 1.0}})
+        assert est._primary_slice(7, sizes) == (lo, hi)
+        seed, init, _ = est._gate_seeds(None, lay, 7, sizes)
+        k3, k1 = lay.block[3][0], lay.block[1][0]            # 3 is a leaf, 1 is not
+        np.testing.assert_array_equal(init[k3, lo:lo + 3], [2.0, 0.0, 1.0])
+        assert init[k3].sum() == 3.0                          # nothing outside the slice
+        assert seed[k1, lo + 1] == 1.0 and seed[k1].sum() == 1.0
+    with pytest.raises(ValueError, match="gateSeedDomain"):
+        _est(gateSeedDomain=2)._primary_slice(7, sizes)

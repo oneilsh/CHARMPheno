@@ -175,6 +175,13 @@ class _DagGatedLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         "0 from the word counts of its own documents (exp 0162). Default False.",
         typeConverter=TypeConverters.toBoolean,
     )
+    gateSeedDomain = Param(
+        Params._dummy(), "gateSeedDomain",
+        "the PRIMARY domain: the index (into featuresCols; 0 for a single "
+        "featuresCol) of the domain whose vocabulary gateSeedOwnCodes and "
+        "gateSeedProfile index. Default 0.",
+        typeConverter=TypeConverters.toInt,
+    )
     gateSeedOwnCodes = Param(
         Params._dummy(), "gateSeedOwnCodes",
         "with gateSeedMode='balanced': JSON {engine node id: [primary-domain vocab "
@@ -277,7 +284,7 @@ _DAG_GATED_LDA_DEFAULTS = dict(
     gammaShape=100.0, caviMaxIter=100, caviTol=1e-3,
     gateParent="", gateNBg=2, gateTpn=1, frontierCol="frontier",
     gateWarm=0, gateOpenSeed=True, gateSeedMode="balanced", gateSeedLeaves=False,
-    gateSeedOwnCodes="", gateSeedProfile="",
+    gateSeedDomain=0, gateSeedOwnCodes="", gateSeedProfile="",
     featuresCols=[],   # domainBounds intentionally omitted: it uses isSet (no default)
 )
 
@@ -325,6 +332,7 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator):
         gateOpenSeed: bool = True,
         gateSeedMode: str = "balanced",
         gateSeedLeaves: bool = False,
+        gateSeedDomain: int = 0,
         gateSeedOwnCodes: str = "",
         gateSeedProfile: str = "",
         featuresCols: list[str] | None = None,
@@ -392,23 +400,39 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator):
             raise ValueError("Cannot fit on an empty DataFrame.")
         return features_col, None, int(first[0][0].size)
 
+    def _primary_slice(self, vocab_size, domain_sizes):
+        """(lo, hi): the primary domain's (gateSeedDomain) span in the
+        concatenated vocabulary."""
+        d = int(self.getOrDefault("gateSeedDomain"))
+        sizes = list(domain_sizes) if domain_sizes else [int(vocab_size)]
+        if not 0 <= d < len(sizes):
+            raise ValueError(
+                f"gateSeedDomain={d} is outside the {len(sizes)} domain(s) of this fit")
+        lo = int(sum(sizes[:d]))
+        return lo, lo + int(sizes[d])
+
     def _gate_seeds(self, rdd, lay, vocab_size, domain_sizes):
         """(open_seed, init_seed, summary) for the leaves-first schedule.
 
         The open-time seed is one pass over the cached document RDD
         (`gated_init.gate_open_seed_counts`); with gateSeedLeaves the leaf rows move
-        to the iteration-0 seed. A profile (gateSeedProfile) replaces a profiled
-        node's PRIMARY-domain slice (domain 0, which opens the concatenation); the
-        other domains keep their histogram / init."""
+        to the iteration-0 seed. The own codes (gateSeedOwnCodes) and a profile
+        (gateSeedProfile) index the PRIMARY domain's vocabulary (gateSeedDomain);
+        they are shifted to the concatenated id space here. A profile replaces a
+        profiled node's primary-domain slice; the other domains keep their
+        histogram / init."""
         seed = None
         mode = str(self.getOrDefault("gateSeedMode"))
         leaves = bool(self.getOrDefault("gateSeedLeaves"))
+        lo, hi = self._primary_slice(vocab_size, domain_sizes)
         if bool(self.getOrDefault("gateOpenSeed")):
             from spark_vi.models.topic.gated_init import gate_open_seed_counts
-            seed = gate_open_seed_counts(
-                rdd, lay, vocab_size, mode=mode,
-                own_idx=(self.getGateSeedOwnCodes() if mode == "balanced" else None),
-                leaves=leaves)
+            own = None
+            if mode == "balanced":
+                own = {u: [lo + int(i) for i in idx if 0 <= int(i) < hi - lo]
+                       for u, idx in self.getGateSeedOwnCodes().items()}
+            seed = gate_open_seed_counts(rdd, lay, vocab_size, mode=mode,
+                                         own_idx=own, leaves=leaves)
         init = None
         if seed is not None and leaves:
             # Leaf rows go in at iteration 0; the open-time seed keeps the rest.
@@ -421,26 +445,26 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator):
         prof = self.getGateSeedProfile()
         n_leaf = n_late = 0
         if prof:
-            V0 = int(domain_sizes[0]) if domain_sizes else int(vocab_size)
+            Vp = hi - lo
             if init is None:
                 init = np.zeros((lay.K, vocab_size), dtype=np.float64)
             for u, w in prof.items():
                 if u not in lay.block:
                     continue
-                row = np.zeros(V0)
+                row = np.zeros(Vp)
                 for i, x in w.items():
-                    if 0 <= i < V0:
+                    if 0 <= i < Vp:
                         row[i] = x
                 if not row.any():
                     continue
                 for k in lay.block[u]:
                     if lay.height(u) == 0:
-                        init[k, :V0] = row
+                        init[k, lo:hi] = row
                         n_leaf += 1
                     else:
                         if seed is None:
                             seed = np.zeros((lay.K, vocab_size), dtype=np.float64)
-                        seed[k, :V0] = row
+                        seed[k, lo:hi] = row
                         n_late += 1
             if not n_leaf and not leaves:
                 init = None

@@ -53,27 +53,9 @@ from spark_vi.eval.topic.concentration_recovery import _predictive_loglik, heldo
 from spark_vi.mllib.topic.stm import _gated_mode_theta
 from spark_vi.models.topic._linalg import safe_inverse
 from spark_vi.models.topic.stm import _stm_doc_inference, _stm_doc_newton_polish
+from spark_vi.core.broadcast import destroy_broadcast as _destroy_broadcast
 
 log = logging.getLogger(__name__)
-
-
-def _destroy_broadcast(bcast) -> None:
-    """Fully release a broadcast: executor blocks, the driver block-manager copy,
-    AND the driver-local pickled temp file.
-
-    ``unpersist`` frees only the executor copies, so a per-call broadcast leaks one
-    driver-side pickle every time — the leak class that filled the master's disk and
-    killed a run with ENOSPC (exp 0104; see ``core/runner._destroy_broadcast``).
-    Cleanup must never outrank the work it follows, so failures degrade to unpersist
-    and a log line rather than raising."""
-    try:
-        bcast.destroy()
-    except Exception as exc:
-        try:
-            bcast.unpersist(blocking=False)
-        except Exception:
-            pass
-        log.warning("broadcast destroy fell back to unpersist: %s", exc)
 
 
 def _smoothed_predictive_loglik(
