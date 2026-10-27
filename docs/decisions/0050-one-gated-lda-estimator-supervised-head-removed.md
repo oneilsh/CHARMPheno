@@ -1,7 +1,7 @@
 # ADR 0050 — One DAG-gated LDA estimator; the supervised head and the DAG spectral init are removed
 
 **Date:** 2026-10-27
-**Status:** Proposed (maintainer review)
+**Status:** Accepted (2026-10-28)
 
 ## Context
 
