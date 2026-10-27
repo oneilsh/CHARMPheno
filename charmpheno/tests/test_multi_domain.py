@@ -149,15 +149,16 @@ def test_lookback_feature_frames_splits_all_domains_against_one_index(spark):
 
 
 def test_multidomain_bundle_fits_through_the_gated_shim_and_round_trips(spark, tmp_path):
-    """The SP3c<->SP3a seam: a 3-domain bundle fits via GatedLDAEstimator with
+    """The SP3c<->SP3a seam: a 3-domain bundle fits via the gated estimator with
     featuresCols=[features_0, features_1, features_2], yields a per-domain dict
     lambda over 3 domains, and the saved VIResult round-trips."""
-    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
     from spark_vi.io.export import save_result, load_result
     bundle = _three_domain_bundle(spark)
-    est = GatedLDAEstimator(
-        featuresCols=["features_0", "features_1", "features_2"], labelCol="frontier",
-        parent=bundle.parent_int, nBg=2, tpn=1, maxIter=2, seed=0)
+    est = OnlinePCLDAEstimator(
+        featuresCols=["features_0", "features_1", "features_2"], frontierCol="frontier",
+        gateNBg=2, gateTpn=1, maxIter=2, seed=0, subsamplingRate=1.0)
+    est.setGateParent(bundle.parent_int)
     model = est.fit(bundle.train_df)
     lam = model.result.global_params["lambda"]
     assert isinstance(lam, dict) and set(lam) == {0, 1, 2}

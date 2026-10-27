@@ -1737,7 +1737,7 @@ def score_cofit_theta_df(base_df, expElogbeta, alpha_vec, grad_cavi_iters, *,
     def _infer(*features):
         p = bcast.value
         if p["domain_sizes"] is not None:
-            from spark_vi.mllib.topic.gated_lda import _concat_domain_features
+            from spark_vi.mllib.topic._common import _concat_domain_features
             indices, counts = _concat_domain_features(features, p["domain_sizes"])
         else:
             from spark_vi.mllib.topic._common import _vector_to_bow_document

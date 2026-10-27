@@ -36,6 +36,48 @@ def _vector_to_bow_document(v: Vector) -> BOWDocument:
     return BOWDocument(indices=indices, counts=counts, length=int(counts.sum()))
 
 
+def _concat_domain_features(vectors, sizes):
+    """Concatenate per-domain sparse vectors into the engine's single id space.
+
+    The engine stores one topic-word matrix per domain but consumes ONE
+    concatenated token-id space, with a token's domain recovered by
+    `searchsorted(domain_bounds, w)`. Domain m's local ids therefore shift by
+    `sum(sizes[:m])`. Because each domain's ids are already ascending and the
+    domains are laid out in order, the concatenated ids are GLOBALLY sorted,
+    which is what the E-step's `expElogbeta[:, indices]` gather assumes.
+
+    Raises ValueError naming the domain and both widths if a vector disagrees
+    with the established layout: the layout is derived once per fit, and a row
+    that silently re-lays-out the vocabulary would corrupt the fit with no
+    symptom (SP3a design).
+
+    Equally, `len(vectors)` must equal `len(sizes)`: a bare zip TRUNCATES to the
+    shorter, silently dropping a trailing domain — the same invisible re-layout,
+    reachable wherever the columns and the widths do not arrive together (e.g. a
+    model carrying featuresCols and domainBounds as separate Params).
+    """
+    vectors, sizes = list(vectors), list(sizes)
+    if len(vectors) != len(sizes):
+        raise ValueError(
+            f"_concat_domain_features got {len(vectors)} vector(s) for "
+            f"{len(sizes)} domain size(s); the counts must match or a trailing "
+            f"domain would be silently dropped")
+    idx_parts, cnt_parts, offset = [], [], 0
+    for m, (v, width) in enumerate(zip(vectors, sizes)):
+        if int(v.size) != int(width):
+            raise ValueError(
+                f"featuresCols domain {m} vector size {int(v.size)} != expected "
+                f"{int(width)} (layout derived from the first row); every row must "
+                f"use the same per-domain vocabulary widths")
+        bow = _vector_to_bow_document(v)
+        idx_parts.append(bow.indices.astype(np.int64) + offset)
+        cnt_parts.append(bow.counts)
+        offset += int(width)
+    indices = np.concatenate(idx_parts).astype(np.int32) if idx_parts else np.empty(0, np.int32)
+    counts = np.concatenate(cnt_parts) if cnt_parts else np.empty(0, np.float64)
+    return indices, counts
+
+
 def _vector_to_stm_document(
     row,
     features_col: str = "features",

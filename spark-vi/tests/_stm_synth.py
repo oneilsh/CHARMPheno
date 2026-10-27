@@ -843,16 +843,59 @@ def fit_gated_svi_local(model, gated_docs, *, n_iter=200, seed=0, data_summary=N
     return gp
 
 
+def node_affinity(theta, lay):
+    """Per-node affinity from a full-K theta: the mass on each node's topic block (the
+    SVI analogue of dag_placement.profile's per-node readout). Test oracle only."""
+    return {u: float(theta[lay.block[u]].sum()) for u in lay.nodes}
+
+
+def _midrank_auc(scores, y):
+    """Mann-Whitney AUC with midranks for ties; one-class input -> nan."""
+    from scipy.stats import rankdata
+    y = np.asarray(y, dtype=int)
+    n1 = int(y.sum())
+    n0 = len(y) - n1
+    if n1 == 0 or n0 == 0:
+        return float("nan")
+    ranks = rankdata(scores, method="average")
+    return (ranks[y == 1].sum() - n1 * (n1 + 1) / 2) / (n1 * n0)
+
+
+def placement_metrics(profiles, test_labels, lay):
+    """The placement scores the SVI-vs-Gibbs equivalence tests compare: per-node
+    subtree-membership AUC averaged by depth, MRR and top-2 of the best true frontier
+    node. A patient is positive for node u if any frontier node lies in subtree(u).
+    (The full placement evaluation of the `dag_placement` model class was removed by
+    ADR 0050; this keeps only what the oracle comparison reads.)"""
+    fronts = [set(t) if hasattr(t, "__iter__") else {t} for t in test_labels]
+    P = np.array([[pr[u] for u in lay.nodes] for pr in profiles])
+    node_auc = {u: _midrank_auc(P[:, i], [bool(f & lay.subtree(u)) for f in fronts])
+                for i, u in enumerate(lay.nodes)}
+    ranks = []
+    for i, f in enumerate(fronts):
+        true_idx = [lay.nodes.index(t) for t in f if t in lay.nodes]
+        if true_idx:
+            ranks.append(min(1 + int((P[i] > P[i][j]).sum()) for j in true_idx))
+    by_depth = {}
+    for dep in sorted({lay.depth(u) for u in lay.nodes}):
+        vals = [node_auc[u] for u in lay.nodes if lay.depth(u) == dep]
+        by_depth[dep] = (float(np.nanmean(vals)) if any(not np.isnan(v) for v in vals)
+                         else float("nan"))
+    r = np.array(ranks, dtype=float)
+    return {"node_auc": node_auc, "auc_by_depth": by_depth,
+            "mrr": float(np.mean(1.0 / r)) if ranks else float("nan"),
+            "top2": float(np.mean(r <= 2)) if ranks else float("nan")}
+
+
 def svi_node_profiles(model, gp, docs, lay):
     """Ungated full-K fold-in of each held-out doc -> theta -> node_affinity dict. The SVI
-    analogue of [dag_placement.profile(...) for d in docs]; scored by dag_placement.evaluate.
+    analogue of [dag_placement.profile(...) for d in docs]; scored by `placement_metrics`.
 
     The fold-in is intentionally UNGATED and stochastic (infer_local draws gamma_init from
     the global RNG, not a content-deterministic seed); determinism across the equivalence
     tests comes from the driver's `np.random.seed` call upstream (see fit_gated_svi_local),
     not from anything in this function."""
     from spark_vi.models.topic.types import GatedBOWDocument
-    from spark_vi.models.topic.gated_lda import node_affinity
     out = []
     for d in docs:
         idx, cnt = np.unique(np.asarray(d), return_counts=True)

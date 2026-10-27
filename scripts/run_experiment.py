@@ -280,11 +280,12 @@ def validate_frontmatter(fm: dict) -> None:
             sys.exit(2)
 
     model_class = fm["model_class"]
-    if model_class not in ("lda", "stm", "dag_placement", "gated_pc", "anchor_select"):
+    if model_class not in ("lda", "stm", "gated_pc", "anchor_select"):
         print(f"[run-exp] ERROR: model_class {model_class!r} not supported "
-              f"(currently: lda, stm, dag_placement, gated_pc, anchor_select; the "
-              f"pc / mondo_completeness / mondo_hierarchy drivers were removed in the "
-              f"2026-10 cleanup, last at commit fff7bf4067)", flush=True)
+              f"(currently: lda, stm, gated_pc, anchor_select; the pc / "
+              f"mondo_completeness / mondo_hierarchy drivers were removed in the "
+              f"2026-10 cleanup, last at commit fff7bf4067, and dag_placement by "
+              f"ADR 0050)", flush=True)
         sys.exit(2)
 
     if model_class == "stm":
@@ -315,8 +316,6 @@ def build_fit_driver_path(effective: dict) -> str:
         return f"{base}/lda_bigquery_cloud.py"
     if model_class == "stm":
         return f"{base}/stm_bigquery_cloud.py"
-    if model_class == "dag_placement":
-        return f"{base}/dag_placement_cloud.py"
     if model_class == "gated_pc":
         return f"{base}/gated_pc_cloud.py"
     if model_class == "anchor_select":
@@ -338,8 +337,6 @@ def build_fit_args(
         return build_lda_args(effective, Path(out_dir), resume_from)
     if model_class == "stm":
         return build_stm_args(effective, out_dir, resume_from)
-    if model_class == "dag_placement":
-        return build_dag_placement_args(effective, out_dir, resume_from)
     if model_class == "gated_pc":
         return build_gated_pc_args(effective, out_dir, resume_from)
     if model_class == "anchor_select":
@@ -659,66 +656,6 @@ def build_stm_args(
     ] + hardening + gating + (["--resume-from", str(resume_from)] if resume_from is not None else [])
 
 
-def build_dag_placement_args(
-    effective: dict, out_dir: str, resume_from: Path | None = None,
-) -> list[str]:
-    """Build argv for analysis/cloud/dag_placement_cloud.py (gated-SVI case-finding).
-
-    K is emergent (n_bg + surviving-DAG-nodes * tpn), so there is NO --K. Resume is
-    unsupported (GatedLDAModel is not persistable in v1); resume_from is ignored.
-    """
-    cdr, billing = _require_workspace_env()
-    args = [
-        "--cdr", cdr,
-        "--billing", billing,
-        "--source-table", str(effective["source_table"]),
-        "--person-mod", str(effective["person_mod"]),
-        "--vocab-size", str(effective["vocab_size"]),
-        "--min-df", str(effective["min_df"]),
-        "--min-patient-count", str(effective["min_patient_count"]),
-        "--doc-min-length", str(effective["doc_min_length"]),
-        "--prior-obs-days", str(effective.get("prior_obs_days", 365)),
-        "--window-days", str(effective.get("window_days", 365)),
-        "--window-mode", str(effective.get("window_mode", "forward")),
-        "--lookback-days", str(effective.get("lookback_days", 365)),
-        "--label-window-days", str(effective.get("label_window_days", 365)),
-        "--disease", str(effective.get("disease", "diabetes")),
-        "--min-n", str(effective["min_n"]),
-        "--holdout-frac", str(effective.get("holdout_frac", 0.2)),
-        "--n-bg", str(effective["n_bg"]),
-        "--tpn", str(effective["tpn"]),
-        "--node-alpha-scale", str(effective.get("node_alpha_scale", 1.0)),
-        "--transform-alpha-mode", str(effective.get("transform_alpha_mode", "fitted")),
-        "--transform-alpha", str(effective.get("transform_alpha", 0.0)),
-        "--transform-bg-weight", str(effective.get("transform_bg_weight", 0.5)),
-        "--mini-batch-fraction", str(effective.get("mini_batch_fraction", 0.0)),
-        "--learning-rate-tau0", str(effective.get("learning_rate_tau0", 1.0)),
-        "--learning-rate-kappa", str(effective.get("learning_rate_kappa", 0.7)),
-        "--max-iter", str(effective["max_iter"]),
-        "--cavi-max-iter", str(effective.get("cavi_max_iter", 100)),
-        "--cavi-tol", str(effective.get("cavi_tol", 1e-3)),
-        "--init", str(effective.get("init", "random")),
-        "--spectral-max-vocab", str(effective.get("spectral_max_vocab", 8000)),
-        "--spectral-method", str(effective.get("spectral_method", "auto")),
-        "--anchor-scope", str(effective.get("anchor_scope", "closure")),
-        "--spectral-topo-order", str(effective.get("spectral_topo_order", "forward")),
-        "--strip-mode", str(effective.get("strip_mode", "test_only")),
-        # Per-iter top-terms logging reuses the shared _base.yaml knobs (STM parity).
-        "--print-topics-every", str(effective.get("print_topics_every", 0)),
-        "--top-n-tokens", str(effective.get("top_n_tokens", 8)),
-        "--out-dir", str(out_dir),
-    ]
-    if effective.get("seed") is not None:
-        args.extend(["--seed", str(effective["seed"])])
-    if effective.get("cache_uri"):
-        args.extend(["--cache-uri", str(effective["cache_uri"])])
-    # Store-true flag: learn the asymmetric per-node alpha (optimizeDocConcentration).
-    # node_alpha_scale is the initial alpha; the gated Newton step refines it.
-    if effective.get("optimize_doc_concentration"):
-        args.append("--optimize-doc-concentration")
-    return args
-
-
 # Fit options ADR 0050 removed from the gated_pc fit, with the value that meant
 # "off". A spec that still asks for one (any other value) is refused rather than
 # silently fitting without it; the inert value (e.g. `init: random`) is accepted,
@@ -750,11 +687,8 @@ def build_gated_pc_args(
 ) -> list[str]:
     """Build argv for analysis/cloud/gated_pc_cloud.py (Gated-PC case-finding).
 
-    The supervised sibling of dag_placement: same cached CaseFindingBundle (now
-    with emit_labels), but fits the gate + FLAT PC head and reports pc_topics_lr
-    vs an unsup_gated (weightY=0) twin. K is emergent for the gated arms (n_bg +
-    nodes*tpn); --k applies only to the optional --with-dag-head arm. Resume is
-    unsupported here (v1); resume_from is ignored.
+    The DAG-gated LDA fit on the cached case-finding bundle; K is emergent
+    (n_bg + nodes*tpn). Resume is unsupported here (v1); resume_from is ignored.
     """
     _refuse_removed_gated_pc_options(effective)
     cdr, billing = _require_workspace_env()
@@ -1008,7 +942,7 @@ def _apply_max_iter_override(effective: dict, max_iter: int | None) -> dict:
 def _driver_memory_for(model_class: str) -> str:
     """Driver memory for the fit spark-submit, overridable via CHARM_DRIVER_MEMORY.
 
-    The topic-model fits (lda/stm/dag_placement) stream on executors and are
+    The topic-model fits (lda/stm) stream on executors and are
     fine at 4g. PC is different: its in-memory eval collects a dense ``D x V``
     matrix to the DRIVER (client mode), so it needs more headroom. gated_pc is
     lighter (it collects only the ``D x K`` theta + labels, never the dense BOW)
@@ -1618,9 +1552,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.build_only:
         print("[run-exp] --build-only: skipping eval dispatch", flush=True)
         # Fall through to the build-dispatch block below.
-    elif effective.get("model_class") in ("dag_placement", "gated_pc", "anchor_select"):
-        # These write their own self-contained result (dag_placement: npz +
-        # manifest with placement AUC/MRR; gated_pc: npz + manifest;
+    elif effective.get("model_class") in ("gated_pc", "anchor_select"):
+        # These write their own self-contained result (gated_pc: npz + manifest;
         # anchor_select: candidates_with_counts.tsv + the coverage ladder), not a
         # topic-word bundle the NPMI eval driver can read.
         _mc = effective.get("model_class")
