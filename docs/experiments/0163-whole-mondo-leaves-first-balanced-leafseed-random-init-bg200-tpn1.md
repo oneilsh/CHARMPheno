@@ -187,3 +187,28 @@ comparisons; 0161 vs 0163 stands. Timing: 48 s per pass with 68 nodes per pass o
 cluster, against 22 s with 233 nodes on 0163's original cluster. A pass costs the scan of
 the θ frame, not the nodes still searching, and that cost varies about 2–3× between
 clusters for the same model, which is the likeliest reading of 0161's slow readout.
+
+**2026-10-27 — raw-code comparison on 0163's bundle (readout-only).** Same heads, l2 100,
+readout DAG, ribbon nodes and whole-history new-diagnosis rule as θ; 200 iterations.
+
+| new-diagnosis AUC, 827 nodes | stacked | flat |
+|---|--:|--:|
+| θ (0163) | 0.710 | 0.606 |
+| raw 2,000, by train document frequency (680 cond / 978 meas / 342 drug) | **0.735** | **0.631** |
+| raw 2,000, the model's node-topic top words (1,594 / 44 / 362; 551 shared with frequency) | 0.683 | 0.583 |
+
+- Frequency codes beat θ: median +0.019 stacked (696 of 827 nodes) and flat (609);
+  largest for small nodes (+0.03 at 20-300 new cases), +0.009 above 1,000. The gap was
+  ~0.035-0.04 against 0137/0152 (insight 0101); θ closed part of it, the codes did not move.
+- The model-selected codes lose to both (median −0.024 vs θ, −0.045 vs frequency, on
+  every size stratum). Two reasons sit in the selection itself: (1) a node topic's top
+  words are now its own attesting codes (96% identity), and a patient with a new
+  diagnosis has, by the incident rule, none of the node's codes before the index, so
+  those features cannot fire for the patients being scored; (2) the round-robin draws
+  almost no measurement tokens (44 vs 978), and utilization/measurement presence is
+  where frequency codes carry new-diagnosis signal (insight 0101's length hypothesis).
+  This selector therefore does not test "can the model pick predictors"; a selector that
+  excludes own codes and keeps the domain mix would.
+- Solver: frequency 600/1,060 converged (88 stalled); model-selected 1,017 (418 stalled,
+  998 line-search failures): sparse, rare codes are near-separable for many heads.
+

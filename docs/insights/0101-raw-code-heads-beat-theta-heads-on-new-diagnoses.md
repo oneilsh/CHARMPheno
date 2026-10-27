@@ -40,3 +40,10 @@ Equal on all patients, raw ahead by ~0.04 on new diagnoses in every prior-share 
   gate) leaves new-diagnosis AUC on the shared ribbon nodes where it was (stacked 0.694
   -> 0.700, flat 0.612 -> 0.604); raw codes still lead by ~0.03. Neither gating (0146)
   nor hierarchy closes the gap: it is the θ representation itself.
+- 0163 (2026-10-27, leaves-first + balanced + leaf seed, same bundle for every arm):
+  θ rises to 0.710 stacked / 0.606 flat; frequency codes 0.735 / 0.631 (median +0.019,
+  696 of 827 nodes, largest at 20-300 new cases). The gap narrowed from ~0.035 to ~0.02,
+  all of it on the θ side. A naive model-informed selector (the node topics' top 2,000
+  words) does worse than both (0.683 / 0.583): those words are the nodes' own codes,
+  which by the incident rule are absent before the index for the patients being scored,
+  and it draws almost no measurement tokens.

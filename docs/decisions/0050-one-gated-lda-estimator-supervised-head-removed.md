@@ -50,7 +50,16 @@ Params, the spectral routing, the per-domain λ conversion and the domain-bounds
 5. **Remove other unused options**: the profile-η prior (`etaBoost`, `profileEta*`; the
    profile *seed* stays), `countTransform`, `alphaInit=equalized`, the ω modality
    weight and per-domain η, and the CAVI θ twins that only the head used.
-6. **Housekeeping in the same pass**: one `_destroy_broadcast` in `spark_vi.core`
+6. **Remove the `dag_placement` line** (exps 0052–0069, the first gated model, scored
+   by node placement before `gated_pc` replaced it with readout heads): the
+   `dag_placement` model class and `dag_placement_cloud.py`, `lr_readout.py`, the
+   placement scoring and evaluation in `models/topic/dag_placement.py` (likelihood-ratio
+   and explain-away scores, FDR discovery report, `evaluate`), the estimator's
+   `nodeAffinity` output, and their tests and defaults. `DagLayout` stays (it moves to
+   `spark_vi/dag/` with ADR 0051); the collapsed-Gibbs `fit_gated` / `profile` stay
+   only as a test oracle for the engine. Hashed charmpheno modules import `DagLayout`,
+   so its move is a separate, announced cache-drop commit.
+7. **Housekeeping in the same pass**: one `_destroy_broadcast` in `spark_vi.core`
    (six copies today), one dict-λ → `expElogbeta` helper (three today), `DagLayout`
    built once per fit, and domain-neutral wording: the profile seed and own-code seed
    take the domain index as a parameter instead of assuming domain 0 is "conditions".
