@@ -47,3 +47,11 @@ Equal on all patients, raw ahead by ~0.04 on new diagnoses in every prior-share 
   words) does worse than both (0.683 / 0.583): those words are the nodes' own codes,
   which by the incident rule are absent before the index for the patients being scored,
   and it draws almost no measurement tokens.
+- 0163 `rawr2000` (2026-10-27): a model-informed selector with both flaws fixed (LDAvis
+  relevance λ = 0.6 over node topics, own and descendant codes excluded, frequency's
+  domain mix) reaches 0.717 / 0.623: above θ (median +0.005 stacked, +0.016 flat) but
+  below frequency codes (−0.012 / −0.003), with the deficit on nodes of 20-100 new cases.
+  The model can pick predictors as good as θ, not better than raw frequency; what the
+  frequency set adds is common, utilization-carrying codes, which the lift term drops.
+  Next readout-only arms: λ = 1 (pure p(w|k), own codes still excluded), and θ plus
+  frequency codes.
