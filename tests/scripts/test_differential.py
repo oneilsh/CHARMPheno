@@ -520,7 +520,9 @@ def test_workup_block_on_synthetic_rows():
             if rng.random() < 0.5:
                 toks.append({"d": 0, "t": 502})
             ex = None if i % 10 == 9 else {"__wk": toks, "__wdays": 30 + i % 50}
-            out.append(([m], None, None, None, None, ex))
+            # pre-index record: half the patients already carry the noise code 502
+            # (vocab idx 1 in dom 0), so 502 is new for only the other half
+            out.append(([m], {0: ({1: 1.0} if i % 2 else {})}, None, None, None, ex))
         return out
     tr, te = rows(600), rows(300)
     ytr = [r[0][0] for r in tr]
@@ -531,8 +533,31 @@ def test_workup_block_on_synthetic_rows():
     w = gpr._workup_block(df, ctx, wk, tr, te, ytr, [10, 11], {0: {0}}, halves, truths,
                           {"E6": q, "E3": q}, np.array([0.5, 0.5]))
     assert w["n_test_windows"] == 270 and w["n_candidates"] == 2   # 501 excluded
+    assert w["coverage"]["eligible_median"] in (1.0, 1.5, 2.0)     # 502 new for half
+    wb = gpr._workup_block(df, ctx, wk, tr, te, ytr, [10, 11], {0: {0}}, halves,
+                           truths, {"E6": q}, np.array([0.5, 0.5]),
+                           length_edges=(40,))
+    assert len(wb["train_windows_per_bin"]) == 2 and wb["E6"]["n"] == 270
+    assert wb["E6"]["R2"]["top1"] > wb["E6"]["R2"]["random"]
     assert w["E6"]["n"] == 270 and len(w["E6"]["tau"]) == 2
     assert w["E6"]["R2"]["top1"] > w["E6"]["R2"]["random"]
     assert w["top_facts"][0] == "test T900"
     text = "\n".join(gpr._format_workup(w, "strict"))
     assert "| E6 | 270 |" in text and "test T900" in text
+
+
+def test_known_facts_and_new_only_likelihoods():
+    inv = [{0: 501, 1: 502}, {}, {0: 90003, 1: 90002}]
+    kn = df.known_facts({0: {1: 1.0}, 2: {1: 1.0}}, inv, meas_dom=2)
+    assert kn == {("c", 0, 502), ("m", 900)}
+    cands = [(("c", 0, 502), 2), (("m", 900), df.WK_MAX_A)]
+    assert list(df.eligible_vector(kn, cands)) == [False, False]
+    # two training patients of member 0: one already knew 502 (and has it again),
+    # the other is new to it and does not have it -> P(recorded | m0, new) is low
+    ans = [{("c", 0, 502): 1}, {}]
+    L = df.answer_likelihoods(ans, np.eye(2)[[0, 0]], cands[:1],
+                              known=[{("c", 0, 502)}, set()])
+    assert L[0, 1, 0] == pytest.approx(0.5 / 2.0)        # (0 + .5) / (1 + 1)
+    assert df.workup_candidates(ans * 30, known=[{("c", 0, 502)}, set()] * 30) == []
+    assert df.length_bin(10, (30, 120)) == 0 and df.length_bin(30, (30, 120)) == 1
+    assert df.length_bin(500, (30, 120)) == 2
