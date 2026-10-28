@@ -432,3 +432,107 @@ def test_relevance_selection_support_is_within_member_and_round_robin():
     assert set(h2.codes) == {(0, 1), (0, 3)}
     with pytest.raises(ValueError):
         df.CodeHead(2, select="lift")
+
+
+# --- framing 2 as workup (exp 0167) -------------------------------------------
+
+def test_workup_answers_categories_and_filters():
+    toks = [(0, 7), (0, 8), (2, 5000 * 100 + 2), (2, 5000 * 100 + 3), (2, 6000 * 100),
+            (2, 7000 * 100 + 11), (1, 9)]
+    a = df.workup_answers(toks, meas_dom=2, excl={0: {8}})
+    assert a == {("c", 0, 7): 1, ("m", 5000): df.WK_HIGH, ("m", 6000): df.WK_DONE,
+                 ("m", 7000): df.WK_HIGH, ("c", 1, 9): 1}
+    b = df.workup_answers(toks, meas_dom=2, drop_done=True,
+                          vocab_sets={0: {7}, 1: set(), 2: {500002, 500003, 600000}})
+    assert b == {("c", 0, 7): 1, ("m", 5000): df.WK_HIGH}
+
+
+def _workup_toy(n, seed):
+    """Two members. Test 100 is HIGH for member 1 (70%) vs 10% for member 0; code 5 is
+    recorded for 50% of everyone (uninformative); code 6 for 30% of member 0 only."""
+    rng = np.random.default_rng(seed)
+    ans, y = [], []
+    for _ in range(n):
+        m = int(rng.random() < 0.5)
+        a = {}
+        if rng.random() < (0.7 if m else 0.1):
+            a[("m", 100)] = df.WK_HIGH
+        elif rng.random() < 0.5:
+            a[("m", 100)] = df.WK_NORMAL
+        if rng.random() < 0.5:
+            a[("c", 0, 5)] = 1
+        if m == 0 and rng.random() < 0.3:
+            a[("c", 0, 6)] = 1
+        ans.append(a)
+        y.append(m)
+    return ans, np.array(y)
+
+
+def test_workup_eig_ranks_the_separating_test_and_is_calibrated():
+    tr, ytr = _workup_toy(4000, 0)
+    cands = df.workup_candidates(tr)
+    assert [k for k, _ in cands] == [("c", 0, 5), ("c", 0, 6), ("m", 100)]
+    L = df.answer_likelihoods(tr, np.eye(2)[ytr], cands)
+    np.testing.assert_allclose(L.sum(axis=1), 1.0)
+    q0 = np.array([0.5, 0.5])
+    post, pa = df.workup_posteriors(q0, L)
+    eig = df.workup_eig(q0, post, pa)
+    assert np.argmax(eig) == 2 and eig[0] < 1e-3            # test > code 6 > code 5
+    te, yte = _workup_toy(1500, 1)
+    A = np.stack([df.answer_vector(a, cands) for a in te])
+    q0s = np.tile(q0, (len(te), 1))
+    tau = df.fit_workup_tau(q0s, yte, A, L)
+    assert 0.7 < tau < 1.4                                   # independent answers
+    r = df.evaluate_workup(q0s, yte, A, L, np.array([0.5, 0.5]), tau)
+    assert r["R2"]["top1"] > r["R2"]["random"] > 0           # the test pays most
+    assert r["R2"]["oracle"] >= r["R2"]["top1"]
+    assert 0.7 < r["R3"]["slope"] < 1.3                      # calibrated EIG
+    assert r["R1_spearman_quartiles"][1] > 0
+    cov = df.workup_coverage([10, 20, None, 40], A[:4])
+    assert cov["window_days_quartiles"][1] == 20.0
+
+
+def test_workup_block_on_synthetic_rows():
+    """`gated_pc_readout._workup_block`: windows -> answers -> candidates ->
+    likelihoods -> per-engine R1-R4 over cross-fit halves, coverage, top facts.
+    Measurement token 900*100+3 (test 900 high) marks member 1; condition code 501 is
+    attestation (excluded); 502 is noise; prevalent rows (no window) are skipped."""
+    from types import SimpleNamespace
+    import gated_pc_readout as gpr
+
+    rng = np.random.default_rng(0)
+    inv = [{0: 501, 1: 502}, {}, {0: 90003, 1: 90002, 2: 90000}]
+    ctx = SimpleNamespace(inv_maps=inv,
+                          code_name=lambda d, v: {(0, 1): "noise", (2, 0): "T900 [high]"}
+                          .get((d, v), f"{d}:{v}"))
+    wk = {"tok2idx": [{t: i for i, t in m.items()} for m in inv],
+          "vocab_sets": {d: set(m.values()) for d, m in enumerate(inv)}, "meas_dom": 2}
+
+    def rows(n):
+        out = []
+        for i in range(n):
+            m = int(rng.random() < 0.5)
+            toks = [{"d": 0, "t": 501}]
+            if rng.random() < (0.8 if m else 0.1):
+                toks.append({"d": 2, "t": 90003})
+            elif rng.random() < 0.5:
+                toks.append({"d": 2, "t": 90002})
+            if rng.random() < 0.5:
+                toks.append({"d": 0, "t": 502})
+            ex = None if i % 10 == 9 else {"__wk": toks, "__wdays": 30 + i % 50}
+            out.append(([m], None, None, None, None, ex))
+        return out
+    tr, te = rows(600), rows(300)
+    ytr = [r[0][0] for r in tr]
+    truths = [r[0] for r in te]
+    halves = [(list(range(0, 300, 2)), list(range(1, 300, 2)))]
+    halves.append((halves[0][1], halves[0][0]))
+    q = np.tile([0.5, 0.5], (300, 1))
+    w = gpr._workup_block(df, ctx, wk, tr, te, ytr, [10, 11], {0: {0}}, halves, truths,
+                          {"E6": q, "E3": q}, np.array([0.5, 0.5]))
+    assert w["n_test_windows"] == 270 and w["n_candidates"] == 2   # 501 excluded
+    assert w["E6"]["n"] == 270 and len(w["E6"]["tau"]) == 2
+    assert w["E6"]["R2"]["top1"] > w["E6"]["R2"]["random"]
+    assert w["top_facts"][0] == "test T900"
+    text = "\n".join(gpr._format_workup(w, "strict"))
+    assert "| E6 | 270 |" in text and "test T900" in text

@@ -216,6 +216,56 @@ def paired(run_a, tag_a, run_b, tag_b):
               f"{a[g][2]['E6']:.2f}/{b[g][2]['E6']:.2f} |")
 
 
+def workup_summary(js):
+    """Exp 0167: framing 2 as workup, pooled over the groups that scored it — the
+    coverage, ranking accuracy (R1), value of the top fact against random, the
+    population ranking and hindsight (R2), calibration (R3) and decisions (R4)."""
+    rows = [(g, r["workup"]) for g, r in js.items()
+            if (r.get("workup") or {}).get("coverage")]
+    if not rows:
+        return
+    skipped = sum(1 for r in js.values()
+                  if (r.get("workup") or {}).get("skipped"))
+    cov = [w["coverage"] for _, w in rows]
+    print(f"\n## workup (exp 0167): {len(rows)} groups scored, {skipped} without "
+          f"enough windows")
+    print("window days (median of group medians) "
+          f"{np.median([c['window_days_quartiles'][1] for c in cov]):.0f} · share with "
+          f"any non-default answer, median over groups "
+          f"{np.median([c['share_with_any'] for c in cov]):.2f}")
+    for e in ("E6", "E3"):
+        es = [(g, w[e]) for g, w in rows if w.get(e)]
+        if not es:
+            continue
+        r1 = [x["R1_spearman_quartiles"][1] for _, x in es]
+        d_rand = [x["R2"]["top1"] - x["R2"]["random"] for _, x in es]
+        d_pop = [x["R2"]["top1"] - x["R2"]["population_top1"] for _, x in es]
+        share = [x["R2"]["top1"] / x["R2"]["oracle"] if x["R2"]["oracle"] > 0
+                 else float("nan") for _, x in es]
+        slope = [x["R3"]["slope"] for _, x in es]
+        chg = [x["R4"]["top1_changes_call"] for _, x in es]
+        q = lambda v: " / ".join(f"{z:+.3f}" for z in np.nanpercentile(v, [25, 50, 75]))
+        print(f"- {e} ({len(es)} groups): R1 median Spearman {q(r1)} · top-1 − random "
+              f"{q(d_rand)} (> 0 in {sum(d > 0 for d in d_rand)}) · top-1 − "
+              f"population {q(d_pop)} (> 0 in {sum(d > 0 for d in d_pop)}) · top-1 / "
+              f"oracle {np.nanmedian(share):.2f} · R3 slope median "
+              f"{np.nanmedian(slope):.2f} · top-1 changes the call {np.median(chg):.2f}")
+    print("\n| group | n | window days | any answer | E6 R1 | E6 top-1 / random / "
+          "pop / oracle | slope | E3 R1 |")
+    print("|---|--:|--:|--:|--:|---|--:|--:|")
+    for g, w in rows:
+        e6, e3 = w.get("E6"), w.get("E3")
+        if not e6:
+            continue
+        r2 = e6["R2"]
+        print(f"| {g[:38]} | {e6['n']} | {w['coverage']['window_days_quartiles'][1]:.0f} | "
+              f"{w['coverage']['share_with_any']:.2f} | "
+              f"{e6['R1_spearman_quartiles'][1]:+.2f} | {r2['top1']:+.3f} / "
+              f"{r2['random']:+.3f} / {r2['population_top1']:+.3f} / {r2['oracle']:+.3f}"
+              f" | {e6['R3']['slope']:.2f} | "
+              f"{(e3['R1_spearman_quartiles'][1] if e3 else float('nan')):+.2f} |")
+
+
 def main(argv):
     run = Path(argv[1])
     tag = argv[2] if len(argv) > 2 else "survey"
@@ -282,6 +332,7 @@ def main(argv):
         print(f"| {x['group'][:38]}{f' (+{al})' if al else ''} | {x['M']} | {x['n']} | "
               f"{x['best']} | {x['k_best']:.2f} | {x['gap']:.2f} | {x['dvt']:+.3f} | "
               f"{x['f3t']:.2f}/{x['f3r']:.2f} |")
+    workup_summary(js)
     rs = reasons_by_group(md)
     print("\nE5 reasons, top 10 groups by kappa (codes favouring each member):")
     for x in rows[:10]:
