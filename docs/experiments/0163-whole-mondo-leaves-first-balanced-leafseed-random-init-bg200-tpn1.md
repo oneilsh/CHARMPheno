@@ -225,3 +225,15 @@ readout DAG, ribbon nodes and whole-history new-diagnosis rule as θ; 200 iterat
   iterations at 177 s/iter (8.2 h for the solve; 768 passes, 191 nodes per pass), so
   convergence is not what separates it from frequency (600 converged).
 
+
+**2026-10-28 — framings within 0163, per engine** (`survey_analysis.py "$R163"
+survey_inc_top`, no new compute; the 0161 comparison above only checked that nothing
+moved). 9 deduplicated groups. Best-engine kappa quartiles 0.07 / 0.18 / 0.33; kappa ≥ 0.3
+in 4 groups, ≥ 0.5 in 2 (viral hepatitis 0.55, aortic aneurysm 0.51). The code engines
+carry framing 1: best engine E5 in 4 groups, E6 in 3, E3 in 2 (both at kappa 0.00). E6 −
+E3 kappa quartiles +0.04 / +0.15 / +0.21, so codes add to θ in every quartile. Framing-1
+skill tracks the number of scored patients (Spearman +0.52, n = 9) and framing 2's VOI −
+table (+0.38), not framing 3's AUC (+0.07 θ, +0.02 raw). E5's top reasons repeat the same
+three concepts (cid 4329041, 44824625, 40325768) across unrelated groups (viral
+hepatitis, aortic aneurysm, social phobia, bulimia): document-frequency selection keeps
+codes common to every member. Exp 0166 tests within-group relevance selection instead.

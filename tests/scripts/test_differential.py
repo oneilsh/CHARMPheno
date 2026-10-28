@@ -374,3 +374,61 @@ def test_top_members_rolls_up_subtypes_and_drops_the_group():
     pi = {"1": [5], "2": [1], "3": [1], "4": [5], "5": [0]}
     assert gpr.top_members([1, 2, 3, 4, 5], pi, group=5) == [1, 4]
     assert gpr.top_members([2, 3, 4], pi, group=5) == [2, 3, 4]
+
+
+def _shared_and_marker_bags(n, seed):
+    """Two members. Codes 3..5 are on nearly everyone (frequent, uninformative); code 1
+    marks member 1 on 40% of its patients; codes 6..V are noise."""
+    rng = np.random.default_rng(seed)
+    out = []
+    for _ in range(n):
+        t = int(rng.random() < 0.5)
+        bag = {v: 1.0 for v in (3, 4, 5) if rng.random() < 0.95}
+        noise = rng.choice(np.arange(6, V), 2, replace=False)
+        if t == 1 and rng.random() < 0.4:
+            noise[0] = 1                    # the marker REPLACES a noise code, so the
+        bag.update({int(x): 1.0 for x in noise})    # distinct-count feature can't see it
+        out.append((t, {0: bag}))
+    return out
+
+
+def test_relevance_selection_keeps_the_marker_over_shared_codes():
+    tr = _shared_and_marker_bags(300, 11)
+    bags, y = [b for _, b in tr], [t for t, _ in tr]
+    dfh = df.CodeHead(2, min_df=3, max_codes=3).fit(bags, y)
+    rel = df.CodeHead(2, min_df=3, max_codes=3, select="relevance",
+                      rel_lambda=0.3).fit(bags, y)
+    assert dfh.codes == [(0, 3), (0, 4), (0, 5)]           # frequency: the shared codes
+    assert (0, 1) in rel.codes                              # relevance: the marker
+    # Within a group lift is capped near 1 / P(m) = 2, so the readout's λ = 0.6 is
+    # already frequency-dominated (threshold ~0.45 for this marker), as is λ = 1.
+    for lam in (0.6, 1.0):
+        h = df.CodeHead(2, min_df=3, max_codes=3, select="relevance",
+                        rel_lambda=lam).fit(bags, y)
+        assert (0, 1) not in h.codes
+    te = _shared_and_marker_bags(200, 12)
+    acc = lambda h: np.mean(h.predict([b for _, b in te]).argmax(axis=1)
+                            == np.array([t for t, _ in te]))
+    assert acc(rel) > acc(dfh) + 0.05
+
+
+def test_relevance_selection_support_is_within_member_and_round_robin():
+    # code 1: on 4 of member 1's patients only (group df 4 >= 3, member support 4)
+    # code 2: on 2 of member 0's patients only (member support 2 < min_df 3 -> dropped)
+    bags = [{0: {9: 1.0}} for _ in range(40)]
+    y = [0] * 20 + [1] * 20
+    for i in (20, 21, 22, 23):
+        bags[i][0][1] = 1.0
+    for i in (0, 1):
+        bags[i][0][2] = 1.0
+    for i in range(10):                                     # code 3: member 0's marker
+        bags[i][0][3] = 1.0
+    h = df.CodeHead(2, min_df=3, select="relevance").fit(bags, y)
+    assert (0, 2) not in h.codes
+    assert {(0, 1), (0, 3)} <= set(h.codes)
+    # round robin: with room for two codes each member gets its best one
+    h2 = df.CodeHead(2, min_df=3, max_codes=2, select="relevance", rel_lambda=0.0).fit(
+        bags, y)
+    assert set(h2.codes) == {(0, 1), (0, 3)}
+    with pytest.raises(ValueError):
+        df.CodeHead(2, select="lift")

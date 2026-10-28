@@ -376,9 +376,12 @@ class CodeHead:
     smoothed per-member presence rate mixed by the current differential."""
 
     def __init__(self, n_classes, *, min_df=5, max_codes=3000, theta_topics=None,
-                 lambdas=(1e-2, 1e-1, 1.0, 10.0), seed=0):
+                 lambdas=(1e-2, 1e-1, 1.0, 10.0), seed=0, select="df", rel_lambda=0.6):
+        if select not in ("df", "relevance"):
+            raise ValueError(f"select must be 'df' or 'relevance', not {select!r}")
         self.M = int(n_classes)
         self.min_df, self.max_codes = int(min_df), int(max_codes)
+        self.select, self.rel_lambda = select, float(rel_lambda)
         self.ft = (None if theta_topics is None
                    else np.asarray(theta_topics, dtype=np.int64))
         self.lambdas, self.seed = tuple(lambdas), int(seed)
@@ -414,8 +417,11 @@ class CodeHead:
             for it in set(self._items(b)):
                 df[it] = df.get(it, 0) + 1
                 per.setdefault(it, np.zeros(self.M))[:] += yr
-        keep = sorted((it for it, n in df.items() if n >= self.min_df),
-                      key=lambda it: (-df[it], it))[:self.max_codes]
+        if self.select == "relevance":
+            keep = self._select_relevance(df, per, n_m, len(bags_list))
+        else:
+            keep = sorted((it for it, n in df.items() if n >= self.min_df),
+                          key=lambda it: (-df[it], it))[:self.max_codes]
         self.codes = sorted(keep)
         self.pos = {it: j for j, it in enumerate(self.codes)}
         self.p_codes = len(self.codes)
@@ -427,6 +433,51 @@ class CodeHead:
         self.lam, self.W, self.b = _select_and_fit(X, Y, self.M, self.lambdas,
                                                    self.seed)
         return self
+
+    def _select_relevance(self, df, per, n_m, n):
+        """Exp 0166: codes by WITHIN-GROUP relevance instead of group document frequency.
+
+        Why: the head separates the members, so a code common to all of them (a CBC, an
+        office visit) fills a slot and separates nothing; what separates is a code's lift
+        for one member over the group, P(v | m) / P(v | group). Pure lift favours codes
+        too rare to estimate, so it is mixed with frequency as in the per-node readout
+        (LDAvis relevance, insight 0101):
+
+            rel_m(v) = λ log P(v | m) + (1 − λ) log [ P(v | m) / P(v | group) ]
+
+        with add-half smoothed rates. λ does NOT carry over from the readout: within a
+        group the lift for m is capped at 1 / P(m | group) (~2 for two equal members),
+        where corpus-wide lift reaches 100x, so the log-frequency term dominates sooner.
+        A marker on 40% of m's patients (lift 2) outranks a code on 95% of everyone only
+        for λ < ~0.45; one on 10% only for λ < ~0.24. Hence the λ sweep in exp 0166.
+        Support is counted WITHIN the member (>= `min_df`
+        of its training patients, soft counts for multi-positive targets), so a code's
+        lift for m never rests on one or two of m's patients. Members take their top
+        codes in turn (round robin) up to `max_codes`, so a large member cannot crowd a
+        small one out. Training rows only, as for `df` selection: fold-safe."""
+        lam = self.rel_lambda
+        ranked = []
+        for m in range(self.M):
+            if n_m[m] <= 0:
+                continue
+            sc = []
+            for it, row in per.items():
+                if row[m] < self.min_df:
+                    continue
+                pm = (row[m] + 0.5) / (n_m[m] + 1.0)
+                pg = (df[it] + 0.5) / (n + 1.0)
+                sc.append((-(lam * np.log(pm) + (1.0 - lam) * np.log(pm / pg)), it))
+            sc.sort()
+            ranked.append([it for _, it in sc])
+        keep, seen = [], set()
+        for r in range(max((len(x) for x in ranked), default=0)):
+            for lst in ranked:
+                if r < len(lst) and lst[r] not in seen:
+                    seen.add(lst[r])
+                    keep.append(lst[r])
+                    if len(keep) >= self.max_codes:
+                        return keep
+        return keep
 
     def _softmax(self, Xr):
         Z = self._std(Xr) @ self.W + self.b

@@ -533,7 +533,8 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
                      tag=None, next_question=False, nq_pool=100, nq_hide=0.2,
                      train_ever=False, multi=False, crossfit=False, sidecar_uri=None,
                      fast=False, max_members=None, incident=False,
-                     most_specific=None, groups_like=None, member_rule="auto"):
+                     most_specific=None, groups_like=None, member_rule="auto",
+                     code_select="df", code_lambda=0.6):
     """Framing 1 — DIFFERENTIAL WITH REASONS (spec 2026-10-13 clinician framings,
     R0/R1; `differential.py`). Four engines on the same held-out patients positive on
     exactly one member: E1 presence model with subtype profiles, E2 renormalized
@@ -633,7 +634,9 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
           f"pattern {pattern!r}{' (ad hoc)' if adhoc else ''} · records minus attestation "
           f"codes and {len(measured):,} [measured] tokens · E1 presence subtypes · E2 "
           f"stacked heads ({heads_tag}) · E3 multiclass head (train split) · E4 gated "
-          f"likelihood · tempers fit on one half, all scored on the other", ""]
+          f"likelihood · E5/E6 codes by "
+          f"{'group document frequency' if code_select == 'df' else f'within-group relevance (λ={code_lambda:g})'}"
+          f" · tempers fit on one half, all scored on the other", ""]
     js = {}
     eng = None
     for n, gname, members in sets:
@@ -730,8 +733,11 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
             e3 = dfm.MulticlassHead(feat, len(members), seed=seed).fit(th_tr, ytr)
             # Exp 0148 (insight 0101): the same softmax on the record's CODES (E5) and
             # on codes + log θ (E6) — same filtered records, same patients.
-            e5 = dfm.CodeHead(len(members), seed=seed).fit([r[1] for r in tr], ytr)
-            e6 = dfm.CodeHead(len(members), theta_topics=feat, seed=seed).fit(
+            # Exp 0166: `code_select` picks E5/E6's codes by group frequency (df) or
+            # by within-group relevance (lift mixed with frequency, `code_lambda`).
+            ck = dict(seed=seed, select=code_select, rel_lambda=code_lambda)
+            e5 = dfm.CodeHead(len(members), **ck).fit([r[1] for r in tr], ytr)
+            e6 = dfm.CodeHead(len(members), theta_topics=feat, **ck).fit(
                 [r[1] for r in tr], ytr, th_tr)
         if fast:
             s1 = s4 = lphi4 = None
@@ -785,6 +791,9 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
                "n_eval": len(ev_all), "n_fit": len(fit_i), "n_train": len(tr),
                "n_train_multi": n_tr_multi, "crossfit": bool(crossfit),
                "train_ever": bool(train_ever),
+               "code_select": code_select,
+               "code_lambda": (code_lambda if code_select == "relevance" else None),
+               "e5_n_codes": (e5.p_codes if e5 is not None else None),
                "tau_e1": [t[0] for t in taus], "tau_e4": [t[1] for t in taus],
                "e3_lambda": (e3.lam if e3 is not None else None),
                "e5_lambda": (e5.lam if e5 is not None else None),
@@ -1321,6 +1330,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="(--differential) exp 0149: tempers fit on each half in turn, "
                         "every patient scored once (doubles the scored patients)")
     p.add_argument("--diff-max-train", type=int, default=2000)
+    p.add_argument("--diff-code-select", choices=("df", "relevance"), default="df",
+                   help="(--differential) exp 0166: how the code engines E5/E6 pick "
+                        "their codes: df = top by document frequency in the group; "
+                        "relevance = per member, λ log P(v|m) + (1-λ) log lift over the "
+                        "group, >= 5 of the member's patients, members in turn")
+    p.add_argument("--diff-code-lambda", type=float, default=0.6,
+                   help="(--diff-code-select relevance) the λ above; 1 = within-member "
+                        "frequency, 0 = pure lift")
     p.add_argument("--diff-next-question", action="store_true",
                    help="(--differential) also run framing 2 — the next-question "
                         "evaluation (hide --diff-nq-hide of each record; yield and gain "
@@ -2102,7 +2119,9 @@ def main(argv=None) -> int:
                     sidecar_uri=args.prev_sidecar_uri,
                     fast=bool(args.diff_survey), max_members=(args.diff_survey or None),
                     incident=args.diff_incident, groups_like=args.diff_groups_like,
-                    member_rule=args.diff_members)
+                    member_rule=args.diff_members,
+                    code_select=args.diff_code_select,
+                    code_lambda=args.diff_code_lambda)
             return 0
 
         if args.bundle_only:

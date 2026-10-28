@@ -128,8 +128,21 @@ def reasons_by_group(md_text):
     return out
 
 
+def framing2(r):
+    """(share of the visible→full P(true) gap closed by 5 VOI questions, VOI − table @5)
+    from one group's survey record; NaN without a next-question block."""
+    nq = r.get("next_question") or {}
+    if not nq:
+        return float("nan"), float("nan")
+    v0, vf = nq["visible"]["p_true"], nq["full"]["p_true"]
+    v5 = nq["by"]["VOI (codes)@5"]["p_true"]
+    t5 = nq["by"]["population table@5"]["p_true"]
+    return ((v5 - v0) / (vf - v0) if vf > v0 else float("nan")), v5 - t5
+
+
 def kappa_by_group(run, tag):
-    """{group name: (M, kappa of the best engine)} — for the paired comparison."""
+    """{group name: (M, kappa of the best engine, per-engine kappas, framing-2 pair,
+    E5 code count)} — for the paired comparison."""
     js = json.loads((Path(run) / f"differential_{tag}.json").read_text())
     mem = group_members(run)
     out = {}
@@ -143,7 +156,7 @@ def kappa_by_group(run, tag):
         ks = {e: kappa(mt[k]["bal_top1"], M) for e, k in
               (("E3", "E3 multiclass head"), ("E5", "E5 code head"),
                ("E6", "E6 θ + codes"))}
-        out[g] = (M, max(ks.values()), ks)
+        out[g] = (M, max(ks.values()), ks, framing2(r), r.get("e5_n_codes"))
     return out
 
 
@@ -165,8 +178,9 @@ def paired(run_a, tag_a, run_b, tag_b):
     print("A − B quartiles: " + " / ".join(f"{v:+.3f}" for v in np.percentile(d, [25, 50, 75]))
           + f" · A better in {int((d > 0).sum())} of {len(d)}; "
           f"kappa >= 0.3 A {int((ka >= 0.3).sum())} / B {int((kb >= 0.3).sum())}")
-    # Per engine: E5 reads raw codes only, so it is the same machine in both runs;
-    # E3 (θ only) and E6 (θ + codes) are where the representation enters.
+    # Per engine. Across fits, E5 (raw codes only) is the same machine, so E3 and E6
+    # carry the representation; across code selections (exp 0166) on one fit, E3 is
+    # the same machine and E5 / E6 carry the selection.
     for e, lab in (("E3", "θ only"), ("E5", "codes only"), ("E6", "θ + codes")):
         de = np.array([a[g][2][e] - b[g][2][e] for g in shared])
         print(f"  {e} ({lab}): A − B quartiles "
@@ -174,6 +188,17 @@ def paired(run_a, tag_a, run_b, tag_b):
               + f" · A better in {int((de > 0).sum())} of {len(de)} · median kappa A "
               f"{np.median([a[g][2][e] for g in shared]):.2f} / B "
               f"{np.median([b[g][2][e] for g in shared]):.2f}")
+    for i, lab in ((0, "F2 gap closed by 5 questions"), (1, "F2 VOI − table @5")):
+        da = np.array([a[g][3][i] - b[g][3][i] for g in shared])
+        ok = np.isfinite(da)
+        if ok.any():
+            print(f"  {lab}: A − B quartiles "
+                  + " / ".join(f"{v:+.3f}" for v in np.percentile(da[ok], [25, 50, 75]))
+                  + f" · A better in {int((da[ok] > 0).sum())} of {int(ok.sum())}")
+    nc = [(a[g][4], b[g][4]) for g in shared if a[g][4] is not None and b[g][4] is not None]
+    if nc:
+        print("  E5 codes selected, median A / B: "
+              f"{np.median([x for x, _ in nc]):.0f} / {np.median([y for _, y in nc]):.0f}")
     same = [g for g in shared if a[g][0] == b[g][0]]
     print(f"same member count M in {len(same)} of {len(shared)} groups")
     if len(same) >= 4:
@@ -227,15 +252,7 @@ def main(argv):
                                                 ("E5", "E5 code head"),
                                                 ("E6", "E6 θ + codes"))}
         best = max(bal, key=bal.get)
-        nq = r.get("next_question") or {}
-        if nq:
-            v0, vf = nq["visible"]["p_true"], nq["full"]["p_true"]
-            v5 = nq["by"]["VOI (codes)@5"]["p_true"]
-            t5 = nq["by"]["population table@5"]["p_true"]
-            gap = (v5 - v0) / (vf - v0) if vf > v0 else float("nan")
-            dvt = v5 - t5
-        else:
-            gap = dvt = float("nan")
+        gap, dvt = framing2(r)
         rows.append(dict(group=g, M=M, n=r["n_eval"], best=best,
                          k_best=kappa(bal[best], M), k_e6=kappa(bal["E6"], M),
                          k_e3=kappa(bal["E3"], M), gap=gap, dvt=dvt,
