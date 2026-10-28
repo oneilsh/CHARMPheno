@@ -353,6 +353,15 @@ constant column. `prevalence_check.py` joined the readout's `--py-files` (its pr
 helpers run on the executors). The dense collect (`collect_lean_proba`) remains as a
 small-frame inspection utility, off the production path.
 
+**ADR 0051 step 5 (the DagHeads MLlib shim), 2026-10-28 — done.**
+`spark_vi.mllib.readout`: `DagHeadsEstimator` fits the per-node heads on any vector
+column with `readout.fit_heads` (Spark or local engine, top-m, L2, the readout's own
+tolerance and iteration defaults); `DagHeadsModel.transform` appends the per-node
+probabilities and, given `dagParent`, the closure product; `save`/`load` use the heads
+npz. `Pipeline([DagGatedLDAEstimator, DagHeadsEstimator])` fits and transforms end to
+end (test). The clinical driver still calls `readout_arm` directly (it needs the
+checkpointing, curves and person-grain metrics the stage does not carry).
+
 ## Questions for the maintainer
 
 1. Antidepressant/MDD (Hughes) line, including its `cohorts.py` block and the
