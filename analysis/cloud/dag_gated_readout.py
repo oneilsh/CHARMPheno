@@ -696,6 +696,22 @@ def _workup_block(dfm, ctx, wk_ctx, tr, te, ytr, members, excl, halves, truths,
             [q0[i] for i in ev], [truths[i][0] for i in ev], [A[i] for i in ev],
             [L_of[i] for i in ev], pri, np.asarray(taus),
             eligible=[E[i] for i in ev], L_pop=L)
+    # Run-2 diagnostic (the sign of R1): likelihood transfer, gain by answer type,
+    # R1 by window activity, under the first engine's beliefs.
+    name0 = next((k for k, v in q0_by_engine.items() if v is not None), None)
+    if name0 is not None and out.get(name0):
+        ev0 = [i for i in keep_te]
+        tau_d = float(np.mean(out[name0]["tau"]))
+        tr_ix = list(range(len(keep_tr)))
+        tr_t = [int(np.argmax(Y[j])) for j in tr_ix]
+        out["diagnostics"] = dfm.workup_diagnostics(
+            [q0_by_engine[name0][i] for i in ev0], [truths[i][0] for i in ev0],
+            [A[i] for i in ev0], [L_of[i] for i in ev0], tau_d,
+            eligible=[E[i] for i in ev0],
+            activity=[len(te[i][5]["__wk"] or []) for i in ev0],
+            train=([dfm.answer_vector(tr_a[j], cands) for j in tr_ix], tr_t,
+                   [dfm.eligible_vector(tr_k[j], cands) for j in tr_ix]))
+        out["diagnostics"]["engine"] = name0
     # The group's most valuable facts under the first engine's beliefs: mean EIG over
     # the scored patients for whom each fact is new; every listed fact has >= 20
     # training patients answering it.
@@ -753,6 +769,22 @@ def _format_workup(w, window):
                   f"{r['R4']['top1_moves_toward_truth']:.2f} |")
     if w.get("top_facts"):
         L_ += ["", "most informative facts (mean EIG, E6): " + " · ".join(w["top_facts"])]
+    d = w.get("diagnostics")
+    if d:
+        L_ += ["", f"diagnostic ({d['engine']}): log P(true answer | true member) "
+               f"test {d['ll_test']:.4f} vs train {d.get('ll_train', float('nan')):.4f} · "
+               f"non-default rate predicted {d['pred_nondefault']:.3f} vs observed "
+               f"{d['obs_nondefault']:.3f} · default-answer pairs "
+               f"{d['default_pairs']['n']} (gain {d['default_pairs']['mean_gain']:+.5f}, "
+               f"EIG {d['default_pairs']['mean_eig']:.5f}), non-default "
+               f"{d['nondefault_pairs']['n']} (gain "
+               f"{d['nondefault_pairs']['mean_gain']:+.5f}, EIG "
+               f"{d['nondefault_pairs']['mean_eig']:.5f}) · per patient sum EIG "
+               f"{d['sum_eig_mean']:.4f} vs sum gain {d['sum_gain_mean']:+.4f}"]
+        for b in d.get("by_activity", []):
+            L_.append(f"- activity {b['tercile']} (median {b['activity_median']:.0f} "
+                      f"codes, n {b['n']}): R1 median {b['R1_median']:+.2f} · top-1 gain "
+                      f"{b['top1_gain']:+.4f}")
     return L_ + [""]
 
 

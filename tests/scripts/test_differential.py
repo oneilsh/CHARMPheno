@@ -544,6 +544,8 @@ def test_workup_block_on_synthetic_rows():
     assert w["top_facts"][0] == "test T900"
     text = "\n".join(gpr._format_workup(w, "strict"))
     assert "| E6 | 270 |" in text and "test T900" in text
+    assert w["diagnostics"]["engine"] == "E6" and "diagnostic (E6)" in text
+    assert len(w["diagnostics"]["by_activity"]) == 3
 
 
 def test_known_facts_and_new_only_likelihoods():
@@ -561,3 +563,37 @@ def test_known_facts_and_new_only_likelihoods():
     assert df.workup_candidates(ans * 30, known=[{("c", 0, 502)}, set()] * 30) == []
     assert df.length_bin(10, (30, 120)) == 0 and df.length_bin(30, (30, 120)) == 1
     assert df.length_bin(500, (30, 120)) == 2
+
+
+def test_workup_diagnostics_find_the_activity_confound():
+    """Member 0 gets more care: every one of 20 codes is recorded more often for it,
+    scaled by a per-patient activity level. Absences are then correlated within a
+    patient, so a low-activity member-0 patient's high-EIG facts all point to member
+    1: R1 is lowest in the low-activity tercile. No train/test shift: the log-
+    likelihoods agree."""
+    rng = np.random.default_rng(0)
+
+    def draw(n):
+        ans, ys, act = [], [], []
+        for _ in range(n):
+            m = int(rng.random() < 0.5)
+            lvl = rng.choice([0.2, 1.0, 1.8])
+            base = (0.45 if m == 0 else 0.25) * lvl
+            a = {("c", 0, v): 1 for v in range(20)
+                 if rng.random() < min(base * (1 + v / 20), 0.95)}
+            ans.append(a); ys.append(m); act.append(len(a))
+        return ans, np.array(ys), act
+    tr, ytr, _ = draw(3000)
+    cands = df.workup_candidates(tr)
+    L = df.answer_likelihoods(tr, np.eye(2)[ytr], cands)
+    te, yte, act = draw(900)
+    A = [df.answer_vector(a, cands) for a in te]
+    q0 = [np.array([0.5, 0.5])] * len(te)
+    d = df.workup_diagnostics(q0, yte, A, L, 1.0, activity=act,
+                              train=([df.answer_vector(a, cands) for a in tr], ytr,
+                                     [np.ones(len(cands), bool)] * len(tr)))
+    assert abs(d["ll_test"] - d["ll_train"]) < 0.02
+    assert abs(d["pred_nondefault"] - d["obs_nondefault"]) < 0.02
+    terc = {b["tercile"]: b for b in d["by_activity"]}
+    assert terc["low"]["R1_median"] < terc["high"]["R1_median"]
+    assert d["default_pairs"]["n"] + d["nondefault_pairs"]["n"] == len(te) * len(cands)
