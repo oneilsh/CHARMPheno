@@ -1,7 +1,7 @@
 ---
 id: 166
 slug: framings-relevance-codes-on-0163
-status: planned
+status: done
 model_class: gated_pc
 # NOT A FIT. Framings 1 and 2 on 0163's fit with the code engines' codes chosen by
 # WITHIN-GROUP RELEVANCE instead of group document frequency (`--diff-code-select
@@ -98,4 +98,44 @@ tail -f "$L"
 
 ## Run log
 
-(planned)
+**2026-10-28 — done.** First attempt failed on the sidecar MISS (above); the rerun
+rebuilt it and ran all four surveys, about 8 min each. 9 groups, 59-259 scored patients
+each; pooled figures only.
+
+- **Control:** `survey_0166_df` reproduces 0163's `survey_inc_top` exactly (every
+  engine, both framings, A − B 0.000 in 9 of 9), so the pairs below differ only in the
+  code selection. It also confirms the post-refactor (ADR 0051 step 3) bundle scores
+  the same patients the same way.
+- **Framing 1, best-engine kappa vs the df control (paired, 9 groups):**
+
+  | arm | median kappa (control 0.18) | paired A − B quartiles | better / worse | kappa ≥ 0.3 |
+  |---|--:|---|---|--:|
+  | relevance λ = 0.6 | 0.33 | +0.000 / +0.000 / +0.042 | 4 / 2 | 5 (control 4) |
+  | relevance λ = 0.3 | 0.33 | −0.005 / +0.000 / +0.042 | 3 / 3 | 5 |
+  | relevance λ = 0 (pure lift) | 0.32 | −0.016 / +0.000 / +0.042 | 3 / 3 | 5 |
+
+  The median moves because two groups sitting at the control median gain:
+  autoimmune disorder of exocrine system (Sjögren vs its sibling; +0.26 / +0.31 /
+  +0.26) and phobic disorder (+0.15 / +0.15 / +0.14), plus eating disorder +0.04. The
+  paired median is 0. Losses grow as λ falls: aortic aneurysm +0.01 / −0.03 / −0.13;
+  GI autoimmune −0.02 at every λ; viral hepatitis −0.00 to −0.02. λ = 0.6 is the only
+  arm with no loss beyond 0.02. E3 is unchanged by construction; E5 and E6 move
+  together.
+- **Framing 2:** no gain, slightly worse. Gap closed by 5 questions, A − B median
+  −0.017 (λ 0.6) / −0.038 (0.3) / −0.038 (0); VOI − table @5 median −0.000. The
+  hypothesis that relevance would let VOI value discriminating questions is not
+  supported: VOI picks from the same EIG pool, and its yield and P(true) barely move.
+- **Codes selected:** 3,000 in every group at every λ: the per-member floor of 5
+  never bound.
+- **Correction to the motivation.** Three concepts (cid 4329041, 44824625, 40325768)
+  that recur among E5's top reasons across unrelated groups were read in the Why as
+  codes common to every member. They survive pure-lift selection (λ = 0) as top
+  reasons for hepatitis A, social phobia and bulimia, so within each group they DO
+  separate the members; they are broad codes whose rate differs by member (plausibly a
+  demographic proxy such as age), not shared noise. Resolving their names would say
+  which.
+- **Read:** within-group relevance at λ = 0.6 is a modest, uneven gain for framing 1
+  (a large gain on 2 of 9 groups, nothing worse than −0.02) and none for framing 2.
+  Nine groups cannot separate that from group-level noise; the broad survey (every
+  Mondo group with 2-25 members, exp 0150's protocol, no `--diff-groups-like`) pairs
+  far more groups at the same cost per group.
