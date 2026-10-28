@@ -141,3 +141,31 @@ surveys about 9 min. 9 groups, 59-259 scored patients each; pooled figures only.
   conditioning as an option, run beside it; names resolved first. No exclusion of
   calendar-time proxies: anything that ranks high for a reason it should not is looked
   at by name, deliberately.
+
+**2026-10-28 — run 2 (new facts only; length bins beside it; names resolved).**
+- **New-fact coverage is thin.** Excluding facts already in the pre-index record leaves
+  2-12 candidates in four groups (neuropathy 2, eating 6, phobic 7, septal defect 12)
+  and 69-188 in the rest; 10-71% of patients have any non-default answer (median over
+  groups 53%), median 0-3 per patient. Most of what a workup window records repeats the
+  record.
+- **The ranking still fails.** E6: R1 median over groups +0.08 (quartiles −0.38 /
+  +0.08 / +0.56), strongly negative in heart septal defect (−0.85), phobic disorder
+  (−0.66) and aortic aneurysm (−0.38); top-1 beats random in 6 of 9 groups by about
+  0.001 nats; the best fact in hindsight is worth 0.001-0.10 nats. Groups that cannot
+  test the idea: thyroid / neuropathy / septal defect (q0 96-98% on one member) and
+  the 2-7-candidate groups; of the four with power, exocrine (Sjögren) is positive
+  (R1 +0.56), aortic aneurysm negative, GI autoimmune and viral hepatitis near zero.
+- **Length bins: worse** (top-1 below the population ranking in every group; dropped).
+- **Names.** Clinically sensible facts appear (viral hepatitis: HCV antibody test;
+  Sjögren: tear film insufficiency; GI autoimmune: type 2 diabetes), but much of the
+  list is inpatient / procedural care (IV sodium and potassium chloride, lidocaine,
+  fentanyl, phenylephrine), and aortic aneurysm's tops ("Disease", "Nasal discharge")
+  are noise.
+- **Open question:** R1 strongly negative, identical under E6 and E3 (so the
+  likelihoods, not q0), is not what a merely weak model produces. Hypothesis:
+  absences are correlated through a patient's care activity, which naive Bayes counts
+  as independent evidence. A planted toy with exact per-fact likelihoods reproduces
+  the signature (R1 median +0.01, top-1 = random, slope 0.83, R1 lowest outside the
+  high-activity tercile). Run 3 adds the diagnostic (likelihood transfer train vs
+  test, gain by answer type, R1 by window-activity tercile).
+

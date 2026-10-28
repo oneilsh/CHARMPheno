@@ -1152,3 +1152,82 @@ def workup_coverage(window_days, answers):
                                       if wd.size else []),
             "share_with_any": float((nd > 0).mean()) if nd.size else float("nan"),
             "median_non_default": float(np.median(nd)) if nd.size else float("nan")}
+
+
+def workup_diagnostics(q0s, truths, answers, L, tau, *, eligible=None, activity=None,
+                       train=None):
+    """Exp 0167 run-2 diagnostic: WHY can the per-patient ranking anti-correlate with
+    realized gain? Four reads over the eligible (patient, fact) pairs:
+
+    1. likelihood transfer — mean log P(true answer | true member) on the test pairs,
+       and on the training pairs (`train` = (answers, member index, eligible lists)),
+       plus predicted vs observed non-default rate under the true member: a gap is a
+       train/test shift;
+    2. gain by answer type — mean realized gain and mean EIG over pairs whose answer
+       was the default ("not recorded" / "not done") vs a non-default one;
+    3. R1 and top-1 gain by window-activity tercile (`activity`: distinct codes in the
+       patient's window): absences are correlated through how much care a patient
+       got, which naive Bayes treats as independent evidence, so a low-activity
+       patient's high-EIG facts can all point the wrong way;
+    4. per patient, total EIG vs total realized gain.
+    Pooled numbers only."""
+    n = len(truths)
+    Ls = _per_patient(L, n)
+    els = _per_patient(eligible, n)
+    taus = np.broadcast_to(np.asarray(tau, dtype=np.float64), (n,))
+    ll_te, pred_nd, obs_nd = [], [], []
+    gd, ed, gn, en = [], [], [], []
+    rows_r1, top1, sum_e, sum_g = [], [], [], []
+    for q0, t, a, Li, el, tau_i in zip(q0s, truths, answers, Ls, els, taus):
+        n_c = Li.shape[0]
+        el = np.ones(n_c, bool) if el is None else np.asarray(el, bool)
+        ix = np.flatnonzero(el)
+        if ix.size == 0:
+            rows_r1.append(float("nan")); top1.append(float("nan"))
+            sum_e.append(0.0); sum_g.append(0.0)
+            continue
+        post, pa = workup_posteriors(q0, Li, tau_i)
+        eig = workup_eig(q0, post, pa)
+        g = (np.log(np.clip(post[np.arange(n_c), a, t], 1e-300, None))
+             - np.log(max(q0[t], 1e-300)))
+        lt = Li[ix, a[ix], t]
+        ll_te.extend(np.log(np.clip(lt, 1e-300, None)).tolist())
+        pred_nd.extend((1.0 - Li[ix, 0, t]).tolist())
+        obs_nd.extend((a[ix] > 0).astype(float).tolist())
+        d = a[ix] == 0
+        gd.extend(g[ix][d].tolist()); ed.extend(eig[ix][d].tolist())
+        gn.extend(g[ix][~d].tolist()); en.extend(eig[ix][~d].tolist())
+        rows_r1.append(_spearman(eig[ix], g[ix]))
+        top1.append(float(g[ix[np.argmax(eig[ix])]]))
+        sum_e.append(float(eig[ix].sum())); sum_g.append(float(g[ix].sum()))
+    mean = lambda x: float(np.nanmean(x)) if len(x) else float("nan")
+    out = {"ll_test": mean(ll_te), "pred_nondefault": mean(pred_nd),
+           "obs_nondefault": mean(obs_nd),
+           "default_pairs": {"n": len(gd), "mean_gain": mean(gd), "mean_eig": mean(ed)},
+           "nondefault_pairs": {"n": len(gn), "mean_gain": mean(gn),
+                                "mean_eig": mean(en)},
+           "sum_eig_mean": mean(sum_e), "sum_gain_mean": mean(sum_g)}
+    if train is not None:
+        tr_a, tr_t, tr_el = train
+        ll_tr = []
+        for a, t, el in zip(tr_a, tr_t, tr_el):
+            ix = np.flatnonzero(np.asarray(el, bool))
+            Ltr = L if not isinstance(L, (list, tuple)) else Ls[0]
+            ll_tr.extend(np.log(np.clip(Ltr[ix, a[ix], t], 1e-300, None)).tolist())
+        out["ll_train"] = mean(ll_tr)
+    if activity is not None and n >= 3:
+        act = np.asarray(activity, dtype=np.float64)
+        cuts = np.nanpercentile(act, [100 / 3, 200 / 3])
+        terc = np.searchsorted(cuts, act, side="right")
+        out["by_activity"] = []
+        for k, lab in enumerate(("low", "mid", "high")):
+            m = terc == k
+            if not m.any():
+                continue
+            r = np.asarray(rows_r1)[m]
+            out["by_activity"].append({
+                "tercile": lab, "n": int(m.sum()),
+                "activity_median": float(np.median(act[m])),
+                "R1_median": float(np.nanmedian(r)) if np.isfinite(r).any() else float("nan"),
+                "top1_gain": mean(np.asarray(top1)[m])})
+    return out
