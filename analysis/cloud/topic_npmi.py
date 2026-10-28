@@ -24,7 +24,7 @@ EGRESS: the per-topic table (with reference document counts) is written to the r
 dir and is WORKSPACE-INTERNAL; a topic with fewer than 20 reference documents is
 not scored. The markdown summary carries pooled figures only.
 
-    gated_pc_readout.py ... --npmi [--npmi-top 10] [--npmi-split train] [--npmi-domains 0]
+    dag_gated_readout.py ... --npmi [--npmi-top 10] [--npmi-split train] [--npmi-domains 0]
     python3 topic_npmi.py compare <run A> <run B> [tag]
 """
 from __future__ import annotations
@@ -397,7 +397,7 @@ if __name__ == "__main__":
     elif len(sys.argv) >= 3 and sys.argv[1] == "key":
         # The run's bundle on HDFS: <cache_uri>/<key>, recomputed from the manifest
         # exactly as the readout does (no Spark session).
-        from gated_pc_readout import bundle_key_from_manifest
+        from dag_gated_readout import bundle_key_from_manifest
         _m = json.loads((Path(sys.argv[2]) / "manifest.json").read_text())
         _cu = ((_m.get("corpus_manifest") or {}).get("cache_uri")
                or "hdfs:///user/dataproc/charm/case_finding_cache")

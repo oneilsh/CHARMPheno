@@ -44,7 +44,7 @@ docstring — moves every key and orphans every cached bundle in every bucket,
 including exp 0104's record run (~20 min of BigQuery) and the four tripwire
 hashes pinned in `tests/scripts/test_case_finding_cache_mondo.py`. So this module
 follows `mondo_collapse.py`'s route exactly: a NEW driver-level module, applied
-in `gated_pc_cloud` between the corpus build and the cache write, folded into the
+in `dag_gated_fit` between the corpus build and the cache write, folded into the
 key ONLY when the flag is on. Flag off ⇒ byte-identical keys.
 
 THE DESIGN POINT THAT MAKES THAT POSSIBLE: THE INDEX IS DETERMINISTIC
@@ -206,7 +206,7 @@ def require_preindex_closure(bundle, *, key=None, cache_uri=None) -> str:
             f"was built without --preindex-closure, so column "
             f"{PREINDEX_CLOSURE_COL!r} is absent and every incident-eligibility "
             f"number derived from it would be undefined. Re-run the fit (or "
-            f"gated_pc_readout) for this corpus with the flag on — that is a "
+            f"dag_gated_readout) for this corpus with the flag on — that is a "
             f"different bundle cache key, so nothing already cached is "
             f"invalidated.")
     col = str(witness.get("col_name") or PREINDEX_CLOSURE_COL)
@@ -329,7 +329,7 @@ def attach_preindex_closure_to_bundle(spark, bundle, *, before_dag,
                                       _cond=None, _feature_events=None):
     """Build `R_d` and attach it to a freshly-assembled bundle, in place.
 
-    The driver-owned post-pass (R1.1): called in `gated_pc_cloud`'s assemble seam
+    The driver-owned post-pass (R1.1): called in `dag_gated_fit`'s assemble seam
     AFTER the assembler returns and BEFORE the cache write, so the sparse column
     and its witness are part of what gets cached — exactly where the
     `dag_collapse` reduction sits relative to `mondo_src`, and for the same

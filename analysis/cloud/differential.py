@@ -34,7 +34,7 @@ presence minus the other members' mean; E4 — per code, c_n · (log φ-normaliz
 the member's gate − the mean over the other gates). Pooled per member over correctly
 called patients, names only, suppressed under the egress floor.
 
-Pure numpy over saved parameters; the driver (`gated_pc_readout --differential`) only
+Pure numpy over saved parameters; the driver (`dag_gated_readout --differential`) only
 collects the patients."""
 from __future__ import annotations
 

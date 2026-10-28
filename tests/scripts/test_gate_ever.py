@@ -1,5 +1,5 @@
 """Label redesign R2 (spec 2026-10-13): the all-ever topic gate
-(`gated_pc_cloud._attach_gate_ever`, `--gate-attestation ever`)."""
+(`dag_gated_fit._attach_gate_ever`, `--gate-attestation ever`)."""
 import os
 import sys
 import types
@@ -18,7 +18,7 @@ os.environ["PYTHONPATH"] = os.pathsep.join(
                 str(REPO_ROOT / "spark-vi"), os.environ.get("PYTHONPATH", ""))
     if p)
 
-import gated_pc_cloud as gpc  # noqa: E402
+import dag_gated_fit as gpc  # noqa: E402
 from charmpheno.omop.case_finding_assembly import (  # noqa: E402
     doc_frontier_engine_ids, frontier_to_label)
 from charmpheno.omop.condition_dag import ConditionDag  # noqa: E402
@@ -121,7 +121,7 @@ def test_ever_gate_rolls_up_all_history_and_leaves_label_and_test(spark):
 
 
 def test_re_readout_recovers_the_ever_gate_from_the_manifest():
-    import gated_pc_readout as gpr
+    import dag_gated_readout as gpr
     spec = gpc.multidomain_corpus_spec(_args(gate_attestation="ever"), extra_domains=())
     rec = gpr.corpus_spec_from_manifest({"corpus_manifest": dict(spec)})
     assert gpc.multidomain_cache_key(rec) == gpc.multidomain_cache_key(spec)

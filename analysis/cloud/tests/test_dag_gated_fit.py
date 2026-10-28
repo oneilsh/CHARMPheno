@@ -19,7 +19,7 @@ def test_dag_children_and_depth():
 
 
 def test_ece_perfectly_calibrated_is_zero_and_miscalibrated_is_positive():
-    from gated_pc_cloud import _ece
+    from dag_gated_fit import _ece
     import numpy as np
     rng = np.random.default_rng(0)
     # p == empirical frequency in each bin -> ECE ~ 0.
@@ -51,7 +51,7 @@ def test_precision_at_recall_and_recall_at_fdr():
 
 def test_score_arm_separable_and_detection_shape():
     import numpy as np
-    from gated_pc_cloud import score_arm
+    from dag_gated_fit import score_arm
     Pi_tr = np.array([[1., 0], [.9, .1], [.1, .9], [0, 1.], [.8, .2], [.2, .8]])
     y_tr = np.array([[1, 0], [1, 0], [0, 1], [0, 1], [1, 0], [0, 1]], float)
     Pi_te = np.array([[.95, .05], [.05, .95], [.85, .15], [.15, .85]])
@@ -76,7 +76,7 @@ def test_detection_excludes_constant_node_columns():
     the max constant too. It carries no per-document information by construction,
     so excluding it cannot lose signal — it can only stop one being masked."""
     import numpy as np
-    from gated_pc_cloud import detection_readout
+    from dag_gated_fit import detection_readout
     # node 0 = root (the foreground label); node 1 = informative; node 2 = constant
     # HIGH (0.9), which is exactly what dominates the max.
     y = np.array([[0., 0, 0], [0., 0, 0], [1., 1, 0], [1., 1, 0]])
@@ -97,7 +97,7 @@ def test_detection_excludes_constant_node_columns():
 def test_detection_unchanged_when_no_column_is_constant():
     """The fix is a no-op on a healthy readout — same score, same numbers."""
     import numpy as np
-    from gated_pc_cloud import detection_readout
+    from dag_gated_fit import detection_readout
     y = np.array([[0., 0, 0], [0., 0, 0], [1., 1, 0], [1., 0, 1]])
     proba = np.array([[0.1, 0.2, 0.15], [0.3, 0.1, 0.25],
                       [0.7, 0.9, 0.35], [0.8, 0.4, 0.95]])
@@ -110,7 +110,7 @@ def test_detection_unchanged_when_no_column_is_constant():
 def test_detection_skips_when_every_disease_column_is_constant():
     """Nothing to rank: say so rather than reporting a meaningless 0.5."""
     import numpy as np
-    from gated_pc_cloud import detection_readout
+    from dag_gated_fit import detection_readout
     y = np.array([[0., 0, 0], [1., 1, 0]])
     proba = np.array([[0.5, 0.4, 0.6], [0.5, 0.4, 0.6]])
     det = detection_readout(proba, y, [0.5])
@@ -121,7 +121,7 @@ def test_detection_skips_when_every_disease_column_is_constant():
 def test_format_arm_readout_names_the_excluded_columns():
     """Printed rather than silently applied: at whole-Mondo the count IS the
     degenerate-node count, so the line doubles as a structural read."""
-    from gated_pc_cloud import format_arm_readout
+    from dag_gated_fit import format_arm_readout
     arm = {"ranking": {"auc": 0.7, "ap": 0.5, "n_labels_scored": 3},
            "pr": {"par": {0.5: 0.4}, "raf": {0.1: 0.2}},
            "detection": {"skipped": None, "auc": 0.81, "ap": 0.6,
@@ -133,7 +133,7 @@ def test_format_arm_readout_names_the_excluded_columns():
 
 
 def test_parse_args_surface_defaults_and_arms():
-    from gated_pc_cloud import parse_args
+    from dag_gated_fit import parse_args
     a = parse_args([
         "--cdr", "p.d", "--billing", "bp", "--disease", "rare6",
         "--n-bg", "2", "--tpn", "1", "--out-dir", "/tmp/g",

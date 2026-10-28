@@ -23,7 +23,7 @@ for _p in (str(REPO_ROOT / "analysis" / "cloud"), str(REPO_ROOT / "charmpheno"),
 
 from spark_vi.readout import kernels as kern  # noqa: E402
 from spark_vi.readout import spark as dr  # noqa: E402
-import gated_pc_readout as gpr  # noqa: E402
+import dag_gated_readout as gpr  # noqa: E402
 
 
 def test_mass_grid_is_powers_of_two_then_K():

@@ -1,5 +1,5 @@
 """Exp 0147 raw-code baseline: token selection and the binary presence column
-(gated_pc_readout.select_raw_codes / attach_raw_presence)."""
+(dag_gated_readout.select_raw_codes / attach_raw_presence)."""
 import os
 import sys
 from pathlib import Path
@@ -14,7 +14,7 @@ os.environ["PYTHONPATH"] = os.pathsep.join(
                 str(REPO_ROOT / "charmpheno"), str(REPO_ROOT / "spark-vi"),
                 os.environ.get("PYTHONPATH", "")) if p)
 
-import gated_pc_readout as gpr  # noqa: E402
+import dag_gated_readout as gpr  # noqa: E402
 
 
 def test_presence_kernel_marks_selected_tokens_per_domain():
@@ -102,7 +102,7 @@ def test_masked_heads_drop_out_of_the_distributed_solve(spark, tmp_path, capsys)
 
 def test_model_codes_round_robin_over_node_topics_skipping_background():
     import numpy as np
-    from gated_pc_readout import select_model_codes
+    from dag_gated_readout import select_model_codes
     # K = 3: topic 0 background (would pick word 0), topics 1, 2 node blocks.
     lam = {0: np.array([[9.0, 0, 0, 0], [0, 5, 4, 0], [0, 0, 1, 0]]),
            1: np.array([[0.0, 0], [0, 1], [3, 0]])}
@@ -116,7 +116,7 @@ def test_model_codes_round_robin_over_node_topics_skipping_background():
 
 def test_relevance_codes_exclude_own_codes_and_keep_the_domain_quota():
     import numpy as np
-    from gated_pc_readout import select_relevance_codes
+    from dag_gated_readout import select_relevance_codes
     # K = 3: topic 0 background, topics 1, 2 node blocks. Domain 0 has 4 words,
     # domain 1 has 2. Word 0 is common everywhere; word 1 is topic 1's own code.
     lam = {0: np.array([[50.0, 1, 1, 1], [30, 40, 5, 1], [30, 1, 1, 9]]),

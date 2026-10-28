@@ -205,7 +205,7 @@ def write_heads(run_dir, label, V, b_raw, const, degenerate, C, K,
 
     Additive: it changes no existing number. Written only when the arm has a
     durable run dir (the driver's `checkpoint_dir`), which is exactly
-    the fit driver's readout path and `gated_pc_readout`'s recovery path — never
+    the fit driver's readout path and `dag_gated_readout`'s recovery path — never
     the row-SAMPLED A/B fit or the calibration sub-fit, which have no business
     owning this file. Atomic (tmp + replace) for the same gcsfuse torn-file reason
     as `write_ckpt`; failures are swallowed and reported, because the
@@ -214,7 +214,7 @@ def write_heads(run_dir, label, V, b_raw, const, degenerate, C, K,
     True on success.
 
     NOTE: pre-existing fits (e.g. 0110's) predate this file and lack it until a
-    readout is re-run under this code — `make gated-pc-readout ID=<n>` once.
+    readout is re-run under this code — `make dag-gated-readout ID=<n>` once.
 
     `W_std` (optional, (C,K)): the solve's STANDARDIZED weights, stored beside V
     so the off-cluster loadings read (`inspect_topics`) has an honest importance

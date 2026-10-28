@@ -20,24 +20,27 @@ def _base_eff():
             "n_bg": 2, "tpn": 1, "max_iter": 100}
 
 
-def test_validate_frontmatter_accepts_gated_pc(monkeypatch):
+def test_validate_frontmatter_accepts_dag_gated(monkeypatch):
+    """`dag_gated` (ADR 0051 step 6) and the old `gated_pc` both validate, and both
+    become the on-disk value `gated_pc` (manifests keep it)."""
     mod = _run_exp(monkeypatch)
-    mod.validate_frontmatter({
-        "id": 90, "slug": "x", "cohort": "population_rare6",
-        "model_class": "gated_pc"})
+    for name in ("dag_gated", "gated_pc"):
+        fm = {"id": 90, "slug": "x", "cohort": "population_rare6", "model_class": name}
+        mod.validate_frontmatter(fm)
+        assert fm["model_class"] == "gated_pc"
 
 
-def test_driver_path_for_gated_pc(monkeypatch):
+def test_driver_path_for_dag_gated(monkeypatch):
     mod = _run_exp(monkeypatch)
     assert mod.build_fit_driver_path({"model_class": "gated_pc"}) \
-        == "analysis/cloud/gated_pc_cloud.py"
+        == "analysis/cloud/dag_gated_fit.py"
 
 
-def test_build_gated_pc_args_shape(monkeypatch):
+def test_build_dag_gated_args_shape(monkeypatch):
     mod = _run_exp(monkeypatch)
     eff = {**_base_eff(), "seed": 42, "cache_uri": "hdfs:///c",
            "num_partitions": 96}
-    args = mod.build_gated_pc_args(eff, "/out")
+    args = mod.build_dag_gated_args(eff, "/out")
     assert args[args.index("--disease") + 1] == "rare6"
     assert args[args.index("--num-partitions") + 1] == "96"
     assert args[args.index("--out-dir") + 1] == "/out"
@@ -51,30 +54,30 @@ def test_build_gated_pc_args_shape(monkeypatch):
         assert gone not in args                    # fit ends at save (2026-10)
 
 
-def test_build_gated_pc_args_fit_save_interval_default_off(monkeypatch):
+def test_build_dag_gated_args_fit_save_interval_default_off(monkeypatch):
     mod = _run_exp(monkeypatch)
-    args = mod.build_gated_pc_args(_base_eff(), "/out")
+    args = mod.build_dag_gated_args(_base_eff(), "/out")
     assert args[args.index("--fit-save-interval") + 1] == "0"
 
 
-def test_build_gated_pc_args_fit_save_interval_from_config(monkeypatch):
+def test_build_dag_gated_args_fit_save_interval_from_config(monkeypatch):
     mod = _run_exp(monkeypatch)
-    args = mod.build_gated_pc_args({**_base_eff(), "fit_save_interval": 5}, "/out")
+    args = mod.build_dag_gated_args({**_base_eff(), "fit_save_interval": 5}, "/out")
     assert args[args.index("--fit-save-interval") + 1] == "5"
 
 
-def test_build_fit_args_routes_gated_pc(monkeypatch):
+def test_build_fit_args_routes_dag_gated(monkeypatch):
     mod = _run_exp(monkeypatch)
     args = mod.build_fit_args(_base_eff(), "/out")
     assert "--disease" in args and "--gate-attestation" not in args  # gated_pc builder
     assert "--n-bg" in args
 
 
-def test_gated_pc_store_true_flags(monkeypatch):
+def test_dag_gated_store_true_flags(monkeypatch):
     mod = _run_exp(monkeypatch)
     base = _base_eff()
-    assert "--optimize-doc-concentration" not in mod.build_gated_pc_args(base, "/out")
-    a = mod.build_gated_pc_args({**base, "optimize_doc_concentration": True}, "/out")
+    assert "--optimize-doc-concentration" not in mod.build_dag_gated_args(base, "/out")
+    a = mod.build_dag_gated_args({**base, "optimize_doc_concentration": True}, "/out")
     assert "--optimize-doc-concentration" in a
 
 
@@ -82,32 +85,32 @@ def test_built_args_parse_through_driver(monkeypatch):
     """The argv run_experiment builds must parse cleanly through the driver's own
     parse_args — the contract between the config layer and the driver CLI."""
     mod = _run_exp(monkeypatch)
-    args = mod.build_gated_pc_args({**_base_eff(), "seed": 7},
+    args = mod.build_dag_gated_args({**_base_eff(), "seed": 7},
                                    "/out")
     cloud = str(Path(mod.__file__).resolve().parent.parent / "analysis" / "cloud")
     if cloud not in sys.path:
         sys.path.insert(0, cloud)
-    import gated_pc_cloud
-    parsed = gated_pc_cloud.parse_args(args)
+    import dag_gated_fit
+    parsed = dag_gated_fit.parse_args(args)
     assert parsed.disease == "rare6" and parsed.seed == 7
     assert parsed.out_dir == "/out"
 
 
 def test_config_round_trips_frontmatter_to_the_estimator(monkeypatch):
-    """Full config chain: frontmatter-style dict -> build_gated_pc_args ->
-    gated_pc_cloud.parse_args -> DagGatedLDAEstimator, the fit knobs carried
+    """Full config chain: frontmatter-style dict -> build_dag_gated_args ->
+    dag_gated_fit.parse_args -> DagGatedLDAEstimator, the fit knobs carried
     through."""
     mod = _run_exp(monkeypatch)
     eff = {**_base_eff(), "doc_concentration": 0.5, "gate_warm": 2,
            "gate_seed_mode": "balanced", "gate_seed_leaves": True}
-    args = mod.build_gated_pc_args(eff, "/out")
+    args = mod.build_dag_gated_args(eff, "/out")
     cloud = str(Path(mod.__file__).resolve().parent.parent / "analysis" / "cloud")
     if cloud not in sys.path:
         sys.path.insert(0, cloud)
-    import gated_pc_cloud
-    parsed = gated_pc_cloud.parse_args(args)
+    import dag_gated_fit
+    parsed = dag_gated_fit.parse_args(args)
     parsed._parent_int = {1: [0], 2: [0]}
-    est = gated_pc_cloud._build_estimator(parsed)
+    est = dag_gated_fit._build_estimator(parsed)
     assert est.getOrDefault("docConcentration") == [0.5]
     assert est.getOrDefault("gateWarm") == 2
     assert est.getOrDefault("gateSeedMode") == "balanced"
@@ -125,23 +128,23 @@ def test_mondo_native_dag_source_threads_end_to_end(monkeypatch):
     eff = {**_base_eff(), "dag_source": "mondo_native", "min_positives": 100,
            "mondo_version": "2026-06-02", "window_mode": "lookback",
            "label_mask_mode": "closure", "localize_head": True}
-    args = mod.build_gated_pc_args(eff, "/out")
+    args = mod.build_dag_gated_args(eff, "/out")
     assert args[args.index("--dag-source") + 1] == "mondo_native"
 
     cloud = str(Path(mod.__file__).resolve().parent.parent / "analysis" / "cloud")
     if cloud not in sys.path:
         sys.path.insert(0, cloud)
-    import gated_pc_cloud
-    parsed = gated_pc_cloud.parse_args(args)
+    import dag_gated_fit
+    parsed = dag_gated_fit.parse_args(args)
     assert parsed.dag_source == "mondo_native"
-    spec = gated_pc_cloud.multidomain_corpus_spec(parsed, ("drug",))
+    spec = dag_gated_fit.multidomain_corpus_spec(parsed, ("drug",))
     assert spec["dag_source"] == "mondo_native"
     assert spec["index_mode"] == "population" and spec["min_n"] == 0
     assert spec["min_positives"] == 100 and spec["mondo_version"] == "2026-06-02"
     assert spec["dag_collapse"] is False
 
     with pytest.raises(SystemExit):            # the flag is gone (2026-10 cleanup)
-        gated_pc_cloud.parse_args(args + ["--dag-collapse"])
+        dag_gated_fit.parse_args(args + ["--dag-collapse"])
 
 
 def test_mondo_native_selects_the_native_assembler(monkeypatch):
@@ -152,7 +155,7 @@ def test_mondo_native_selects_the_native_assembler(monkeypatch):
     cloud = str(Path(mod.__file__).resolve().parent.parent / "analysis" / "cloud")
     if cloud not in sys.path:
         sys.path.insert(0, cloud)
-    import gated_pc_cloud
+    import dag_gated_fit
 
     seen = {}
 
@@ -181,7 +184,7 @@ def test_mondo_native_selects_the_native_assembler(monkeypatch):
     spec = {"dag_source": "mondo_native", "cdr": "p.d", "billing": "bp",
             "mondo_version": "2026-06-02", "mondo_cache_dir": "data/mondo",
             "min_positives": 100, "mondo_branch": ""}
-    fn = gated_pc_cloud.mondo_assemble_fn(
+    fn = dag_gated_fit.mondo_assemble_fn(
         spec, _build_inputs=_fake_native_build, _assemble=_fake_assemble)
     assert fn(None) == "bundle"
     assert seen["native_kw"]["min_positives"] == 100
@@ -205,12 +208,12 @@ def test_a_removed_option_is_refused_and_its_inert_value_accepted(monkeypatch):
     # ADR 0050: a spec still asking for a removed fit option fails loudly; the
     # value that meant "off" (e.g. an old spec's `init: random`) passes.
     mod = _run_exp(monkeypatch)
-    mod.build_gated_pc_args({**_base_eff(), "init": "random",
+    mod.build_dag_gated_args({**_base_eff(), "init": "random",
                              "anchor_scope": "closure"}, "/out")
-    mod.build_gated_pc_args({**_base_eff(), "weight_y": 0.0,
+    mod.build_dag_gated_args({**_base_eff(), "weight_y": 0.0,
                              "head_l2": 0.01, "localize_head": True}, "/out")
     for key, val in (("init", "spectral"), ("spectral_bg_anchors", 8), ("weight_y", 50.0),
                      ("anchor_scope", "frontier"), ("alpha_init", "equalized"),
                      ("count_transform", "binary")):
         with pytest.raises(ValueError, match="ADR 0050"):
-            mod.build_gated_pc_args({**_base_eff(), key: val}, "/out")
+            mod.build_dag_gated_args({**_base_eff(), key: val}, "/out")

@@ -1,6 +1,6 @@
 """Stacked (closure-product) readout arm — spec 2026-10-06 Part A, off-Spark.
 
-`gated_pc_cloud.closure_matrix` / `stacked_proba` / `stacked_readout`: the
+`dag_gated_fit.closure_matrix` / `stacked_proba` / `stacked_readout`: the
 product P_stack(c) = Π_{a ∈ closure(c)} σ(z_a) on a frozen (D, C) proba, its
 DagClosureHead agreement, the monotone P(child) ≤ P(parent), and the block's
 bookkeeping (root-only detection, paired per-node delta, marginal ECE by depth).
@@ -22,7 +22,7 @@ for _p in (str(REPO_ROOT), str(CLOUD)):
 os.environ["PYTHONPATH"] = os.pathsep.join(
     p for p in (str(REPO_ROOT), str(CLOUD), os.environ.get("PYTHONPATH", "")) if p)
 
-import gated_pc_cloud as gpc  # noqa: E402
+import dag_gated_fit as gpc  # noqa: E402
 from spark_vi.dag.ops import parents_over_range  # noqa: E402
 from spark_vi.readout import stacked as stk  # noqa: E402
 

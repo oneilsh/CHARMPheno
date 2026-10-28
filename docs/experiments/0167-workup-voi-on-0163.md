@@ -94,7 +94,7 @@ BASE="--differential . --diff-survey 25 --diff-members top --diff-incident --dif
 for arm in new: newlen:--diff-workup-length-bins=30,120; do
   tag=${arm%%:*}; extra=${arm#*:}
   echo "### survey 0167 run 2 $tag"
-  make -C analysis/cloud gated-pc-readout ID=163 GPR_SPARK_CONF=spark.eventLog.enabled=false GPR_ARGS="$BASE $extra --acq-tag survey_0167_$tag" || { echo "FAILED: survey $tag"; exit 1; }
+  make -C analysis/cloud dag-gated-readout ID=163 DGR_SPARK_CONF=spark.eventLog.enabled=false DGR_ARGS="$BASE $extra --acq-tag survey_0167_$tag" || { echo "FAILED: survey $tag"; exit 1; }
   python3 analysis/cloud/survey_analysis.py "$R163" survey_0167_$tag | sed -n "/## workup/,/^E5 reasons/p" | cut -c1-260
   grep -E "^## |most informative facts" "$R163"/differential_survey_0167_$tag.md | cut -c1-260
 done

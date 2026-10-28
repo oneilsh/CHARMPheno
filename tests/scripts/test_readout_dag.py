@@ -149,7 +149,7 @@ def test_widening_is_closure_max_labels_and_parent_activation_masks(spark, rdag)
 # plumbing: flags, front matter, the code-map (WP-C') round trips              #
 # --------------------------------------------------------------------------- #
 def test_readout_tool_parses_the_hierarchy_flag():
-    import gated_pc_readout as gpr
+    import dag_gated_readout as gpr
     a = gpr.build_parser().parse_args(["--run-dir", "/tmp/run"])
     assert a.readout_hierarchy == "auto"
     a = gpr.build_parser().parse_args(["--run-dir", "/tmp/run", "--readout-hierarchy", "flat"])
@@ -158,7 +158,7 @@ def test_readout_tool_parses_the_hierarchy_flag():
 
 def test_code_map_rides_the_cache_meta_and_the_run_dir(tmp_path):
     import _case_finding_cache as cfc
-    import gated_pc_cloud as gpc
+    import dag_gated_fit as gpc
 
     class B:
         parent_int = {0: [], 1: [0]}; int2cid = {0: -1, 1: 5021}; cid2int = {-1: 0, 5021: 1}
@@ -174,8 +174,8 @@ def test_code_map_rides_the_cache_meta_and_the_run_dir(tmp_path):
 
 def test_bundle_meta_lands_in_the_run_dir_and_the_readout_has_bundle_only(tmp_path):
     import _case_finding_cache as cfc
-    import gated_pc_cloud as gpc
-    import gated_pc_readout as gpr
+    import dag_gated_fit as gpc
+    import dag_gated_readout as gpr
 
     class B:
         parent_int = {0: [], 1: [0]}; int2cid = {0: -1, 1: 5021}; cid2int = {-1: 0, 5021: 1}

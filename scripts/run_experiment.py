@@ -186,7 +186,7 @@ NOISE_PATTERNS: list[re.Pattern] = [
 # (readability) is documentary.
 DROP_PATTERNS: list[re.Pattern] = PATIENT_PATTERNS + NOISE_PATTERNS
 
-# gated_pc_cloud's driver may run with CHARM_COLOR=1 forced (see the fit
+# dag_gated_fit's driver may run with CHARM_COLOR=1 forced (see the fit
 # dispatch below), so a relayed line can carry ANSI SGR escapes. Strip them
 # before `parse_iter_marker` (its regex is anchored on a literal "[driver]"
 # prefix and would silently stop matching with an escape spliced in) and
@@ -280,9 +280,15 @@ def validate_frontmatter(fm: dict) -> None:
             sys.exit(2)
 
     model_class = fm["model_class"]
+    if model_class == "dag_gated":
+        # ADR 0051 step 6: the DAG-gated model's name. The fit still writes
+        # model_class "gated_pc" into its manifest (on-disk names are kept, so every
+        # existing run dir reads unchanged), so the front matter is canonicalized to
+        # it here and everything downstream sees one value.
+        fm["model_class"] = model_class = "gated_pc"
     if model_class not in ("lda", "stm", "gated_pc"):
         print(f"[run-exp] ERROR: model_class {model_class!r} not supported "
-              f"(currently: lda, stm, gated_pc; the pc / mondo_completeness / "
+              f"(currently: lda, stm, dag_gated (alias gated_pc); the pc / mondo_completeness / "
               f"mondo_hierarchy drivers were removed in the 2026-10 cleanup, last at "
               f"commit fff7bf4067, dag_placement by ADR 0050 and anchor_select with "
               f"ADR 0051)", flush=True)
@@ -317,7 +323,7 @@ def build_fit_driver_path(effective: dict) -> str:
     if model_class == "stm":
         return f"{base}/stm_bigquery_cloud.py"
     if model_class == "gated_pc":
-        return f"{base}/gated_pc_cloud.py"
+        return f"{base}/dag_gated_fit.py"
     raise ValueError(f"no fit driver for model_class={model_class!r}")
 
 
@@ -336,7 +342,7 @@ def build_fit_args(
     if model_class == "stm":
         return build_stm_args(effective, out_dir, resume_from)
     if model_class == "gated_pc":
-        return build_gated_pc_args(effective, out_dir, resume_from)
+        return build_dag_gated_args(effective, out_dir, resume_from)
     raise ValueError(f"unknown model_class: {model_class!r}")
 
 
@@ -649,7 +655,7 @@ _GATED_PC_REMOVED_OPTIONS = {
 }
 
 
-def _refuse_removed_gated_pc_options(effective: dict) -> None:
+def _refuse_removed_dag_gated_options(effective: dict) -> None:
     """Refuse a gated_pc spec that asks for an option ADR 0050 removed."""
     for key, inert in _GATED_PC_REMOVED_OPTIONS.items():
         if key not in effective or effective[key] is None:
@@ -662,15 +668,15 @@ def _refuse_removed_gated_pc_options(effective: dict) -> None:
             f"recoverable from git, commit fff7bf4067); drop it from the spec")
 
 
-def build_gated_pc_args(
+def build_dag_gated_args(
     effective: dict, out_dir: str, resume_from: Path | None = None,
 ) -> list[str]:
-    """Build argv for analysis/cloud/gated_pc_cloud.py (Gated-PC case-finding).
+    """Build argv for analysis/cloud/dag_gated_fit.py (Gated-PC case-finding).
 
     The DAG-gated LDA fit on the cached case-finding bundle; K is emergent
     (n_bg + nodes*tpn). Resume is unsupported here (v1); resume_from is ignored.
     """
-    _refuse_removed_gated_pc_options(effective)
+    _refuse_removed_dag_gated_options(effective)
     cdr, billing = _require_workspace_env()
     args = [
         "--cdr", cdr,
@@ -1238,7 +1244,7 @@ def main(argv: list[str] | None = None) -> int:
                              "space-separated k=v pairs on stdout and exit (empty "
                              "if the doc has none). Requires --id N. Launches "
                              "nothing: it exists so other launchers (the Makefile's "
-                             "gated-pc-readout target) can reuse the doc's recorded "
+                             "dag-gated-readout target) can reuse the doc's recorded "
                              "Spark tuning instead of duplicating it.")
     parser.add_argument("--max-iter", type=int, default=None, metavar="N",
                         help="Override the doc's max_iter with N (a positive int). "
@@ -1443,7 +1449,7 @@ def main(argv: list[str] | None = None) -> int:
                 "PYTHONPATH": f"{REPO_ROOT}:{os.environ.get('PYTHONPATH', '')}",
             }
         if model_class == "gated_pc" and sys.stdout.isatty():
-            # gated_pc_cloud.py's term_colors decides color by `isatty()` on
+            # dag_gated_fit.py's term_colors decides color by `isatty()` on
             # ITS OWN stdout, which is always a pipe here (run_subprocess_
             # tee_sanitize streams it) -- so color would auto-disable even
             # when a human is watching THIS process's terminal live. Force it

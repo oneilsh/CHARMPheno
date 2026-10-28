@@ -362,6 +362,22 @@ npz. `Pipeline([DagGatedLDAEstimator, DagHeadsEstimator])` fits and transforms e
 end (test). The clinical driver still calls `readout_arm` directly (it needs the
 checkpointing, curves and person-grain metrics the stage does not carry).
 
+**ADR 0051 step 6 (the renames), 2026-10-28 — done.** Maintainer's choice (a): rename
+the code and the commands, keep every name written into a run dir.
+`analysis/cloud/gated_pc_cloud.py` → `dag_gated_fit.py`, `gated_pc_readout.py` →
+`dag_gated_readout.py` (and their tests, `test_run_experiment_dag_gated.py`); `make
+gated-pc-readout` → `make dag-gated-readout`; the `GPR_*` make variables → `DGR_*`;
+front matter `model_class: dag_gated` (the old `gated_pc` still accepted;
+`validate_frontmatter` canonicalizes both to the on-disk `gated_pc`). Kept, because
+existing run dirs and their readers use them: `gated_pc_result.npz`,
+`readout_heads_gated_pc*.npz`, `readout_ckpt_gated_pc*`, the `gated_pc` /
+`gated_pc_stacked` results keys and the manifest's `model_class: "gated_pc"`.
+Historical docs (finished experiments, ADRs, reports, older specs) keep the names they
+were written with. Two docstring mentions in the source-hashed
+`charmpheno/mondo/native_dag.py` were left for the next deliberate hashed edit (no
+cache drop for a comment). The conversion and workup sidecars' keys move (their
+modules import from the renamed readout), so each rebuilds once.
+
 ## Questions for the maintainer
 
 1. Antidepressant/MDD (Hughes) line, including its `cohorts.py` block and the

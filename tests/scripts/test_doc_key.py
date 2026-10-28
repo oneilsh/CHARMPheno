@@ -48,7 +48,7 @@ os.environ["PYTHONPATH"] = os.pathsep.join(
 
 import doc_key as dr  # noqa: E402
 from spark_vi.readout.kernels import assert_unique_ids  # noqa: E402
-import gated_pc_cloud as g  # noqa: E402
+import dag_gated_fit as g  # noqa: E402
 
 RADIX = dr.DOC_KEY_RADIX
 

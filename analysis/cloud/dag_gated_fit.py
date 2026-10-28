@@ -4,9 +4,12 @@ Assembles (or reloads from cache) the multi-domain native-Mondo corpus, fits
 `DagGatedLDAEstimator` (ADR 0050: one estimator, named for its DAG gate; the
 supervised head and the DAG spectral init were removed), and saves the fit:
 `<run>/gated_pc_result.npz` (lambda / lambda_0.., alpha) + `manifest.json`. The fit
-ends at that save; every readout and evaluation is `gated_pc_readout.py` against
-it. The file and model-class names keep "gated_pc" for now (renaming them is ADR
-0051's business).
+ends at that save; every readout and evaluation is `dag_gated_readout.py` against
+it. Renamed from `gated_pc_cloud.py` by ADR 0051 step 6; the names it WRITES into a
+run dir (`gated_pc_result.npz`, `model_class: "gated_pc"` in the manifest, the
+`readout_heads_gated_pc*` files and `gated_pc` results keys) are kept, so every
+existing run reads unchanged. Experiment front matter says `model_class: dag_gated`
+(or the old `gated_pc`).
 
 The per-node (label, labelMask) the readout scores against is emitted by the
 Step-A adapter (case_finding_assembly.emit_labels): label[c]=1 iff node c is in the
@@ -47,7 +50,7 @@ def _cprint(msg, **kw) -> None:
     happen to light up.
 
     LOCAL import, not module-level: this module is reachable transitively
-    from `gated_pc_readout.py`'s top-level import (itself imported at module
+    from `dag_gated_readout.py`'s top-level import (itself imported at module
     level by `hpoa_stage2_probe.py`, which rides Spark's `--py-files` for its
     own mapPartitions kernel) -- term_colors must never become a top-level
     dependency an executor could be asked to resolve. See term_colors.py's
@@ -129,7 +132,7 @@ def readout_from_proba(proba, y_te, m_te, C, *, recall_targets, fdr_targets,
 # the population prior down the tree — PROVIDED the root head saw the
 # background. Under the closure mask it did not (the root is observed only on
 # foreground rows, all positive, so its head is the degenerate constant 1.0);
-# `gated_pc_readout.observe_root_everywhere` is what makes the root head a real
+# `dag_gated_readout.observe_root_everywhere` is what makes the root head a real
 # case-vs-background logistic for this arm, and `root_only_detection` below is
 # that single head read on its own, so the stacked detection can be told apart
 # from "a detection head would have done it".
@@ -327,7 +330,7 @@ def format_stacked_readout(block) -> str:
 def score_arm(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, C, *, recall_targets,
               fdr_targets, min_count=0, doc_keys=None):
     """Full readout for one arm's theta via the pc_topics_lr proba (a fresh per-node
-    LR on the shaped theta). Pure; used inline by the driver and by gated_pc_readout
+    LR on the shaped theta). Pure; used inline by the driver and by dag_gated_readout
     on a finished fit. `doc_keys` (R5.7) is the TEST split's collect order (the
     caller's own collect order) — forwarded to
     `readout_from_proba` so the detection pool dedups to persons; `None` keeps the
@@ -409,7 +412,7 @@ def _dump_partial_results(out, results, name="results_partial.json"):
     once, at the very end, and is lost with everything after it otherwise.
     Write-to-temp + rename so a mid-write death never leaves a torn file.
 
-    `name` exists so the standalone re-readout (gated_pc_readout, which writes
+    `name` exists so the standalone re-readout (dag_gated_readout, which writes
     into a FINISHED run's dir) lands in its own `results_readout.json` instead of
     clobbering the record the fit itself left behind."""
     tmp = out / (name + ".tmp")
@@ -426,7 +429,7 @@ def _save_fit(out, gp, C, manifest_fields, *, results=None, domain_mass=None,
     where the driver collects, the second batched solve and the ECE diagnostic
     live, and where the 0104 smokes died repeatedly. Writing the model only at the
     very end meant every readout death also threw away the fit, so recovery meant
-    re-running the fit instead of re-running `gated_pc_readout` against it. So the
+    re-running the fit instead of re-running `dag_gated_readout` against it. So the
     first call lands the npz plus a manifest carrying everything the fit itself
     determines (`results=None`, `partial="fit-only"`) the moment the fit
     completes, and the final call OVERWRITES both at the same paths with the full
@@ -712,10 +715,10 @@ def _build_estimator(args):
 
 
 # --------------------------------------------------------------------------- #
-# Multi-domain / Mondo corpus seam (shared by the fit and gated_pc_readout).   #
+# Multi-domain / Mondo corpus seam (shared by the fit and dag_gated_readout).   #
 # --------------------------------------------------------------------------- #
 # The `dag_source` values a manifest may carry. Only `mondo_native` is built since
-# the 2026-10 cleanup (`_refuse_removed_spec_options`); `gated_pc_readout` imports
+# the 2026-10 cleanup (`_refuse_removed_spec_options`); `dag_gated_readout` imports
 # this to recognize a Mondo run's manifest.
 _MONDO_DAG_SOURCES = ("mondo", "mondo_native")
 
@@ -1082,7 +1085,7 @@ def parse_args(argv=None):
     # surviving one (`--k 4` would otherwise parse as `--kappa 4`).
     p = argparse.ArgumentParser(
         description="Gated-LDA fit on the Mondo label DAG; ends at the saved fit "
-                    "(every readout is gated_pc_readout.py).", allow_abbrev=False)
+                    "(every readout is dag_gated_readout.py).", allow_abbrev=False)
     p.add_argument("--cdr", required=True)
     p.add_argument("--billing", required=True)
     p.add_argument("--source-table", default="condition_era")
@@ -1181,7 +1184,7 @@ def parse_args(argv=None):
                         "manifest.json, partial='fit-only') every N SVI iters (0 = "
                         "off, only the end-of-fit save). Crash insurance for long "
                         "co-fit runs: a death at iter M leaves iter-M lambda on disk, "
-                        "re-scoreable with gated_pc_readout — no resume needed (and "
+                        "re-scoreable with dag_gated_readout — no resume needed (and "
                         "profile-eta fits cannot resume anyway, D5). Writes are "
                         "atomic; the cost is one npz+manifest dump per interval, so "
                         "keep it modest (e.g. 5).")
@@ -1217,7 +1220,7 @@ def main() -> int:
     install_stdout_tee(out / "driver_log.md")
     extra_domains = tuple(d for d in args.extra_domains.split(",") if d)
     corpus_spec = None
-    with make_spark_session(app_name="gated-pc-fit") as spark:
+    with make_spark_session(app_name="dag-gated-fit") as spark:
         # Driver-disk telemetry, IN-BAND (see disk_telemetry's docstring): the
         # fit phase is the other half of the ~100 GB that ADR 0047's destroy
         # fixes do not account for, and a watcher writing to the master's local
@@ -1367,7 +1370,7 @@ def main() -> int:
             "domain_vocab_sizes": [len(vm) for vm in vocab_maps],
             "ledger": bundle.ledger,
             # Corpus params — ALL of the bundle cache-key inputs, so a post-hoc
-            # gated_pc_readout can recompute the exact key + reload the bundle
+            # dag_gated_readout can recompute the exact key + reload the bundle
             # (doc_min_length + emit_labels are required by the key; recording
             # them here removes the lr_readout-style fragility). On the
             # multi-domain / Mondo paths this block is the corpus SPEC verbatim —
@@ -1444,21 +1447,21 @@ def main() -> int:
                     if it % _every == 0:
                         _save_fit(_out, gp, _C, _mf, partial="fit-only")
                         _cprint(f"[driver]   fit checkpoint @ iter {it} "
-                              "(re-scoreable with gated_pc_readout)", flush=True)
+                              "(re-scoreable with dag_gated_readout)", flush=True)
                 pc_est.setOnIteration(_fit_ckpt)
             pc_model = pc_est.fit(bundle.train_df)
             # EARLY SAVE, before any readout work touches the cluster: the fit is
             # the hours-long unrepeatable half and the readout is where runs die,
             # so the model reaches durable storage the moment it exists. The final
             # save overwrites these same two paths with the full record; until it
-            # does, `partial="fit-only"` says so and `gated_pc_readout` can score
+            # does, `partial="fit-only"` says so and `dag_gated_readout` can score
             # this run from the npz alone.
             _save_fit(out, pc_model.result.global_params, C, manifest_fields,
                       partial="fit-only")
             _cprint(f"[driver]   saved FIT-ONLY result to {out} (readout pending; "
-                  "re-scoreable with gated_pc_readout)", flush=True)
+                  "re-scoreable with dag_gated_readout)", flush=True)
             # The fit ends here (cleanup 2026-10): every readout and evaluation is
-            # `gated_pc_readout.py` against this saved fit. Per-node per-domain λ
+            # `dag_gated_readout.py` against this saved fit. Per-node per-domain λ
             # mass needs no readout, so it is still reported with the fit.
             gp = pc_model.result.global_params
             if extra_domains and isinstance(gp["lambda"], dict):
