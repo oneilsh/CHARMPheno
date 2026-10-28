@@ -45,7 +45,7 @@ def _module_source_hash(module) -> str:
 # `case_finding_assembly.assemble_case_finding_corpus:640` and
 # `multi_domain.assemble_multidomain_case_finding_corpus:408` construct
 # `PatientCohortDocSpec(min_doc_length=doc_min_length)`, and the Mondo providers
-# are handed a `PatientCohortDocSpec()` driver-side (gated_pc_cloud). The token is
+# are handed a `PatientCohortDocSpec()` driver-side (dag_gated_fit). The token is
 # the spec's `name` field — its class identity; the only other identity-bearing
 # parameter, `min_doc_length`, is ALREADY folded as `doc_min_length`.
 #
@@ -391,7 +391,7 @@ def load_or_build_case_finding_bundle(spark, *, cache_uri=None, _assemble_fn=Non
     seam — a testing hook, and on the multi-domain paths the real dispatch: the
     Mondo driver binds a closure that builds the Mondo DAG + code-ladder provider
     and THEN assembles, so a cache HIT never pays for a hierarchy the cached bundle
-    already encodes (see gated_pc_cloud.mondo_assemble_fn).
+    already encodes (see dag_gated_fit.mondo_assemble_fn).
 
     `_key_extra` are cache-key inputs that are NOT assembler kwargs — the
     multi-domain/Mondo identity markers (`multidomain`, `mondo`, `mondo_version`,

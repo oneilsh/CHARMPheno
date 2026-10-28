@@ -438,7 +438,7 @@ def main(argv=None) -> int:
     import json as _json
 
     from _driver_common import _phase, configure_logging, make_spark_session
-    from gated_pc_readout import resolve_run_dir
+    from dag_gated_readout import resolve_run_dir
 
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--run-dir", required=True)

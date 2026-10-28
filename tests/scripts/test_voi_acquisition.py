@@ -1,5 +1,5 @@
 """WP-D part 3: simulated acquisition on held-out patients (voi_acquisition.py) and
-the driver's patient collect (gated_pc_readout.collect_set_patients)."""
+the driver's patient collect (dag_gated_readout.collect_set_patients)."""
 import os
 import sys
 from pathlib import Path
@@ -88,7 +88,7 @@ def test_format_suppresses_under_the_egress_floor():
 def test_collect_set_patients_filters_members_and_reads_sparse_bags(spark):
     from pyspark.ml.linalg import Vectors
     from pyspark.sql import Row
-    from gated_pc_readout import collect_set_patients
+    from dag_gated_readout import collect_set_patients
     rows = [Row(label=[1.0, 1.0, 0.0, 0.0], features_0=Vectors.sparse(5, [0, 3], [2.0, 1.0]),
                 features_1=Vectors.sparse(4, [1], [5.0])),
             Row(label=[1.0, 0.0, 0.0, 1.0], features_0=Vectors.sparse(5, [4], [1.0]),

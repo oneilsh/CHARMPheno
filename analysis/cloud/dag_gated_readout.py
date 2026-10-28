@@ -57,7 +57,7 @@ from _driver_common import (_phase, configure_logging, hard_exit,
                             install_stdout_tee, make_spark_session)
 from disk_telemetry import start_disk_telemetry
 from spark_vi.readout import read_heads
-from gated_pc_cloud import (
+from dag_gated_fit import (
     _MONDO_DAG_SOURCES, _dump_partial_results,
     format_arm_readout, readout_arm,
     format_stacked_readout, multidomain_cache_key, multidomain_load_or_build,
@@ -1407,7 +1407,7 @@ def run_prevalence_check(test_scored, run_dir, *, C, parent_int,
     WHOLE-HISTORY prior rule beside the lookback one, with a containment check."""
     import prevalence_check as pv
     import voi_tables as vt
-    from gated_pc_cloud import _doc_key_column
+    from dag_gated_fit import _doc_key_column
     from spark_vi.eval.metrics import local as ml
     from spark_vi.readout import closure_matrix
     from spark_vi.readout import evaluate as ev
@@ -1544,7 +1544,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Post-hoc case-finding readout on a finished gated_pc run "
                     "(no re-fit): pc_topics_lr + precision@recall / recall@FDR / "
                     "detection for the gated_pc arm.",
-        epilog="Submit via `make gated-pc-readout ID=N` (analysis/cloud/Makefile). A "
+        epilog="Submit via `make dag-gated-readout ID=N` (analysis/cloud/Makefile). A "
                "hand-rolled spark-submit passes the spark-vi and charmpheno zips on "
                "--py-files (the readout kernels ship in spark-vi).")
     p.add_argument("--run-dir", required=True,
@@ -1820,10 +1820,10 @@ def resolve_run_dir(pattern):
         raise SystemExit(
             f"[readout] no run dir with gated_pc_result.npz matches {pattern!r} "
             f"(matched: {[m.name for m in matches]}). Has the fit finished + saved? "
-            f"Pass an exact --run-dir / GPR_RUN_DIR.")
+            f"Pass an exact --run-dir / DGR_RUN_DIR.")
     raise SystemExit(
         f"[readout] {len(hits)} gated_pc run dirs match {pattern!r}: "
-        f"{[m.name for m in hits]}. Pass an exact --run-dir / GPR_RUN_DIR.")
+        f"{[m.name for m in hits]}. Pass an exact --run-dir / DGR_RUN_DIR.")
 
 
 # The single-domain assembler's kwargs that are also cache-key inputs (billing is
@@ -1831,7 +1831,7 @@ def resolve_run_dir(pattern):
 # and "what a rebuild needs" cannot drift apart.
 #
 # `doc_spec` is NOT here for the same reason it is not in
-# `gated_pc_cloud._SPEC_ASSEMBLY_KEYS`: these names are forwarded to the
+# `dag_gated_fit._SPEC_ASSEMBLY_KEYS`: these names are forwarded to the
 # assembler (`rebuild_bundle` below), which takes no doc-spec kwarg. It is
 # key-only, and is passed explicitly at each of the two sites that need it.
 _SNOMED_KEY_KEYS = (
@@ -1922,7 +1922,7 @@ def corpus_spec_from_manifest(manifest: dict, *, doc_min_length=None, billing=No
         # the flag existed means — so an old run still recomputes its own key.
         # On the exp-0110 native path the splice is intrinsic to the build, so the
         # flag is pinned False there and cannot double-apply (this mirrors
-        # `gated_pc_cloud.multidomain_corpus_spec`, which is what wrote the field).
+        # `dag_gated_fit.multidomain_corpus_spec`, which is what wrote the field).
         "dag_collapse": (False if dag_source == "mondo_native" else
                          bool(dag_collapse if dag_collapse is not None
                               else _pick("dag_collapse", False))),
@@ -2051,7 +2051,7 @@ def rebuild_bundle(spark, spec, *, cache_uri=None):
     params = {k: spec[k] for k in _SNOMED_KEY_KEYS}
     return load_or_build_case_finding_bundle(
         spark, cache_uri=cache_uri, billing=spec["billing"],
-        # key-only, exactly as the fit passes it (gated_pc_cloud's single-domain
+        # key-only, exactly as the fit passes it (dag_gated_fit's single-domain
         # call site), so a rebuild lands under the key the fit stored under.
         _key_extra={"doc_spec": spec["doc_spec"]}, **params)
 
@@ -2178,7 +2178,7 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
     readout node space (`readout_dag.widen_labels_to_readout`); `parent_int` is then
     the readout DAG. `warm_start=(V, b_raw)` (`--readout-warm-from`) starts the solve
     from saved heads of the same problem. `engine` ("spark" | "local") is the
-    readout backend (`gated_pc_cloud.readout_arm`). `curve_sample` > 0 writes the
+    readout backend (`dag_gated_fit.readout_arm`). `curve_sample` > 0 writes the
     thinned ROC/PR curves of that many nodes (a seeded sample of 1..C-1; both arms
     when stacked) to `readout_curves[_<tag>].json` in `out_dir`."""
     C = int(manifest["C"] if C is None else C)
@@ -2315,7 +2315,7 @@ def main(argv=None) -> int:
     cm = manifest.get("corpus_manifest") or {}
     cache_uri = args.cache_uri or cm.get("cache_uri")
 
-    with make_spark_session(app_name="gated-pc-readout") as spark:
+    with make_spark_session(app_name="dag-gated-readout") as spark:
         # Driver-disk telemetry, IN-BAND (see disk_telemetry's docstring): this
         # is the solve that keeps dying of ENOSPC from `sc.broadcast` with every
         # ADR 0047 destroy fix active, and the two local `diskwatch` loops that
@@ -2424,7 +2424,7 @@ def main(argv=None) -> int:
             else:
                 _cprint(f"[readout]   bundle loaded ({cache_uri}/{key}); C={C}",
                       flush=True)
-            from gated_pc_cloud import write_bundle_meta
+            from dag_gated_fit import write_bundle_meta
             _bmp = write_bundle_meta(run_dir, bundle)
             _cprint(f"[readout]   wrote bundle meta -> {_bmp}", flush=True)
             _ncm = getattr(bundle, "native_code_map", None)
@@ -2432,7 +2432,7 @@ def main(argv=None) -> int:
                 # WP-C': a fit from before the code map rode the bundle gets it
                 # on its first re-readout, so `--profile-census --own-codes`
                 # works on 0135 without a refit.
-                from gated_pc_cloud import write_code_map
+                from dag_gated_fit import write_code_map
                 _cmp = write_code_map(run_dir, _ncm)
                 _cprint(f"[readout]   wrote native code map ({len(_ncm)} pairs) -> "
                       f"{_cmp}", flush=True)
@@ -2748,7 +2748,7 @@ def main(argv=None) -> int:
 
             # Echo the other arms' stored summary (only gated_pc can be re-scored).
             # `results` is legitimately absent-or-null on a FIT-ONLY manifest:
-            # `gated_pc_cloud` writes the npz + manifest as soon as the fit lands
+            # `dag_gated_fit` writes the npz + manifest as soon as the fit lands
             # (`partial="fit-only"`) so a readout death cannot cost the fit, which
             # is precisely the run this tool exists to rescue — so say what is
             # missing rather than echoing nothing, and never index into it.

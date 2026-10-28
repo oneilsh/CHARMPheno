@@ -4,7 +4,7 @@
 `spark-vi/tests/test_readout_*.py` cover the readout's kernels, backends and heads
 in isolation and `analysis/pc/tests/test_batched_lr.py` covers the solver against
 the sklearn oracle. What is left — and what this file pins — is the JOIN:
-`gated_pc_cloud.readout_arm`, on BOTH engines (spark, local), must produce the same
+`dag_gated_fit.readout_arm`, on BOTH engines (spark, local), must produce the same
 readout as `score_arm` (the sklearn path) when both are handed the SAME frozen θ, including the degenerate-node
 fallback, which is the plan's open question ("must yield the same constant-
 prediction fallback as `_lr_proba_per_label_masked`, so macro means stay
@@ -12,7 +12,7 @@ comparable"). The cluster A/B at C=444 is the full-scale version of exactly this
 comparison; this is its miniature, so a formulation regression is caught in 20s
 instead of a Dataproc run.
 
-The same JOIN is pinned for the STANDALONE re-readout tool (`gated_pc_readout`,
+The same JOIN is pinned for the STANDALONE re-readout tool (`dag_gated_readout`,
 the recovery path when a finished fit's readout output is lost): its `run_readout`
 must route both arms through either path and agree with the driver readout on the
 same frozen θ, and it must SKIP the co-fit head arm on the unsupervised mainline
@@ -56,12 +56,12 @@ for _p in (str(REPO_ROOT), str(CLOUD)):
 os.environ["PYTHONPATH"] = os.pathsep.join(
     p for p in (str(REPO_ROOT), str(CLOUD), os.environ.get("PYTHONPATH", "")) if p)
 
-import gated_pc_cloud as gpc  # noqa: E402
+import dag_gated_fit as gpc  # noqa: E402
 from spark_vi.readout import SparkReadoutData, fit_heads  # noqa: E402
 from spark_vi.readout import heads as readout_heads  # noqa: E402
 from spark_vi.readout import kernels as readout_kernels  # noqa: E402
 from spark_vi.readout import spark as readout_spark  # noqa: E402
-import gated_pc_readout as gpr  # noqa: E402
+import dag_gated_readout as gpr  # noqa: E402
 import run_experiment as rex  # noqa: E402
 
 C, K, D_TR, D_TE = 6, 10, 200, 120
@@ -451,7 +451,7 @@ def test_lean_head_proba_collect_matches_driver_collect(spark):
 
 @pytest.mark.slow
 class TestReReadout:
-    """`gated_pc_readout.run_readout` — the re-readout of a FINISHED fit — against
+    """`dag_gated_readout.run_readout` — the re-readout of a FINISHED fit — against
     the driver `score_arm` (sklearn) oracle on the same frozen θ."""
 
     @pytest.fixture(scope="class")
@@ -524,7 +524,7 @@ def test_save_fit_writes_the_model_then_overwrites_it_with_the_full_record(tmp_p
     so (`partial="fit-only"`, `results=None`). The final call writes the SAME two
     paths with the arms filled in and the marker cleared, so a finished run's
     manifest is what it always was and a died-in-readout run is still re-scoreable
-    by `gated_pc_readout` off the npz.
+    by `dag_gated_readout` off the npz.
     """
     gp = {"lambda": np.arange(6.0).reshape(2, 3), "alpha": np.ones(2)}
     fields = {"model_class": "gated_pc", "C": 4, "K": 2, "readout_mode": "distributed"}

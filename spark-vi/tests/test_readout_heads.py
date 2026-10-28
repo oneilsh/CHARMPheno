@@ -4,7 +4,7 @@
 hook, the fold) over a fake data backend whose stats come from the solver's
 in-memory reference (`solver.make_inmemory_stats_fn`) and which can be told to die
 mid-solve, which is what a preemption-wave job abort looks like from `fit_heads`.
-Moved from `analysis/cloud/tests/test_gated_pc_cloud.py` with ADR 0051.
+Moved from `analysis/cloud/tests/test_dag_gated_fit.py` with ADR 0051.
 """
 import logging
 from contextlib import nullcontext

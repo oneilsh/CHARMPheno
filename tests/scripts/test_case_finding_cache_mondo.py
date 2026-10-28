@@ -44,8 +44,8 @@ os.environ["PYTHONPATH"] = os.pathsep.join(
     if p)
 
 import _case_finding_cache as ccache  # noqa: E402
-import gated_pc_cloud as gpc  # noqa: E402
-import gated_pc_readout as gpr  # noqa: E402
+import dag_gated_fit as gpc  # noqa: E402
+import dag_gated_readout as gpr  # noqa: E402
 from charmpheno.mondo.native_dag import MONDO_NATIVE_VERSION  # noqa: E402
 
 

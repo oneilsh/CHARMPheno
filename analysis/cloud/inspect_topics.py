@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """inspect_topics.py -- off-cluster inspector for a saved gated-PC fit.
 
-Reads the two artifacts `_save_fit` (gated_pc_cloud.py) writes at the end of a
+Reads the two artifacts `_save_fit` (dag_gated_fit.py) writes at the end of a
 run -- `<run-dir>/gated_pc_result.npz` and `<run-dir>/manifest.json` -- and
 renders a human-readable *topics view* of the model: per-node topic sharpness,
 the readout loadings (w_CK: which topics decode each node), and, when a vocab
@@ -95,7 +95,7 @@ import numpy as np
 def resolve_run_dir(pattern):
     """Resolve a run dir from an exact path or a glob (e.g. `.../0111-*`).
 
-    Mirrors gated_pc_readout's resolution: an exact dir holding
+    Mirrors dag_gated_readout's resolution: an exact dir holding
     gated_pc_result.npz is used as-is; otherwise the pattern is globbed and
     filtered to matched dirs that contain the npz, so a shared runs/ dir with a
     same-numbered run from another experiment does not collide.
@@ -197,7 +197,7 @@ def load_readout_heads(run_dir, label="gated_pc"):
 def domain_lambdas(npz):
     """The per-domain lambda arrays in domain order, as a list of (K, V_m).
 
-    Mirrors `_reconstruct` in gated_pc_readout.py: a single-domain run stores
+    Mirrors `_reconstruct` in dag_gated_readout.py: a single-domain run stores
     `lambda`; the multi-domain (Mondo) path stores `lambda_0, lambda_1, ...`.
     """
     files = set(npz.files)
@@ -592,7 +592,7 @@ def build_report(run_dir, *, top_topics, top_loadings, t_words,
         w_CK = np.zeros((C, K), dtype=np.float64)
         b_CK = np.zeros(C)
         degenerate = None
-        decoder_src = ("none — no readout heads sidecar (run gated_pc_readout); "
+        decoder_src = ("none — no readout heads sidecar (run dag_gated_readout); "
                        "loadings are blank")
 
     labels, topic2engine = topic_labels(manifest)
@@ -1637,7 +1637,7 @@ def _results_per_node(res, arm, where):
         if not isinstance(node, dict) or part not in node:
             have = sorted(node) if isinstance(node, dict) else type(node).__name__
             raise SystemExit(f"[inspect_topics] no {part!r} on the path {arm!r} in "
-                             f"{where} (has: {have}); run gated-pc-readout first")
+                             f"{where} (has: {have}); run dag-gated-readout first")
         node = node[part]
     return node
 
@@ -2042,7 +2042,7 @@ def main():
                          "(default 8).")
     ap.add_argument("--readout-auc", action="store_true",
                     help="Emit a compact PER-NODE READOUT-AUC slice from the run's "
-                         "results_readout.json (run gated-pc-readout first): AUC "
+                         "results_readout.json (run dag-gated-readout first): AUC "
                          "quantiles, by-depth medians (needs --bundle-meta), and "
                          "--grep'd nodes' AUCs vs the rest. AUC/AP only — no "
                          "patient counts. Suppresses the other reports.")

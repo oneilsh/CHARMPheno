@@ -151,8 +151,8 @@ def test_colorize_iter_line_leaves_non_matching_lines_untouched(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# highlight_line: the print-site rules shared by gated_pc_cloud /             #
-# gated_pc_readout / hpoa_stage2_probe / _case_finding_cache.                 #
+# highlight_line: the print-site rules shared by dag_gated_fit /             #
+# dag_gated_readout / hpoa_stage2_probe / _case_finding_cache.                 #
 # --------------------------------------------------------------------------- #
 
 def test_highlight_line_identity_when_disabled(monkeypatch):

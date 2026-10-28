@@ -79,8 +79,8 @@ discipline that matters is correctness: re-pin the tripwires in the same commit,
 and after a refactor-only hashed edit check that a `--bundle-only` rebuild
 reproduces the corpus counts in the previous run's `bundle_meta.json`.
 
-- **Driver-owned files are free to edit:** `analysis/cloud/{gated_pc_cloud,
-  gated_pc_readout,doc_key,readout_dag,prevalence_check,topic_npmi,inspect_topics}.py`,
+- **Driver-owned files are free to edit:** `analysis/cloud/{dag_gated_fit,
+  dag_gated_readout,doc_key,readout_dag,prevalence_check,topic_npmi,inspect_topics}.py`,
   `scripts/run_experiment.py`, the `Makefile`, tests. Prefer solving at a driver
   **seam** (the `attested_provider` / injection-parameter pattern) over editing
   a hashed module.
@@ -142,7 +142,7 @@ Cluster runs happen on the user's Dataproc cluster, checked out at
    sidecar caches default to `hdfs://…`, which dies with the cluster — a fresh
    cluster has empty HDFS and must rebuild. Expensive artifacts (the sidecar,
    the bundle) therefore rebuild per cluster unless pointed at a **persistent,
-   in-boundary GCS bucket** (`GPR_SIDECAR_URI` / `GPR_CACHE_URI`).
+   in-boundary GCS bucket** (`DGR_SIDECAR_URI` / `DGR_CACHE_URI`).
    Do not guess bucket names — the Makefile defaults may be stale; ask the user
    for the current in-boundary staging bucket before writing to GCS.
    Right-size the master for the driver-collect wall of record runs, not just

@@ -17,7 +17,7 @@ for _p in (str(REPO_ROOT), str(CLOUD)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import gated_pc_cloud as gpc  # noqa: E402
+import dag_gated_fit as gpc  # noqa: E402
 
 
 def _gp(C=6, K=4, V=10):

@@ -126,7 +126,7 @@ def test_run_differential_end_to_end_on_a_tiny_run(tmp_path, monkeypatch):
     sys.path.insert(0, str(REPO_ROOT / "tests" / "scripts"))
     sys.path.insert(0, str(REPO_ROOT / "charmpheno"))
     from test_inspect_topics import _make_census_run
-    import gated_pc_readout as gpr
+    import dag_gated_readout as gpr
     _make_census_run(tmp_path)                       # node1 sig idx 0; node2 sigs idx 2, 3
     K, C = 10, 4
     (tmp_path / "readout_dag.json").write_text(json.dumps({
@@ -362,14 +362,14 @@ def test_next_question_codes_only():
 
 
 def test_most_specific_members_drops_ancestors():
-    import gated_pc_readout as gpr
+    import dag_gated_readout as gpr
     pi = {"1": [0], "2": [1], "3": [1], "4": [0]}
     assert gpr.most_specific_members([1, 2, 3, 4], pi) == [2, 3, 4]
     assert gpr.most_specific_members([2, 4], pi) == [2, 4]
 
 
 def test_top_members_rolls_up_subtypes_and_drops_the_group():
-    import gated_pc_readout as gpr
+    import dag_gated_readout as gpr
     # group 5 -> {1 (hep C), 4 (hep A)}; 1 -> {2 (chronic), 3 (acute)}
     pi = {"1": [5], "2": [1], "3": [1], "4": [5], "5": [0]}
     assert gpr.top_members([1, 2, 3, 4, 5], pi, group=5) == [1, 4]
@@ -493,12 +493,12 @@ def test_workup_eig_ranks_the_separating_test_and_is_calibrated():
 
 
 def test_workup_block_on_synthetic_rows():
-    """`gated_pc_readout._workup_block`: windows -> answers -> candidates ->
+    """`dag_gated_readout._workup_block`: windows -> answers -> candidates ->
     likelihoods -> per-engine R1-R4 over cross-fit halves, coverage, top facts.
     Measurement token 900*100+3 (test 900 high) marks member 1; condition code 501 is
     attestation (excluded); 502 is noise; prevalent rows (no window) are skipped."""
     from types import SimpleNamespace
-    import gated_pc_readout as gpr
+    import dag_gated_readout as gpr
 
     rng = np.random.default_rng(0)
     inv = [{0: 501, 1: 502}, {}, {0: 90003, 1: 90002, 2: 90000}]

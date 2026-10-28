@@ -16,7 +16,7 @@ The gap ALL − INCIDENT per node is the part of the AUC that rewards recognizin
 diagnosis. Prior evidence is read from the 5-year lookback only (what the features
 hold), so diagnoses older than that count as incident — the gap is a lower bound.
 
-Pure numpy; the driver (`gated_pc_readout --prevalence-check`) scores the test split and
+Pure numpy; the driver (`dag_gated_readout --prevalence-check`) scores the test split and
 collects one sparse code list per patient."""
 from __future__ import annotations
 

@@ -125,7 +125,7 @@ def bold_cyan(text: str) -> str:
 
 # --------------------------------------------------------------------------- #
 # Line-level rules, shared by the logging Formatter (_driver_common) and the  #
-# plain print() sites in gated_pc_cloud / gated_pc_readout / hpoa_stage2_probe. #
+# plain print() sites in dag_gated_fit / dag_gated_readout / hpoa_stage2_probe. #
 # Every function here is identity on a non-matching line, and identity        #
 # (via `c`) when color is disabled — the substring-absent / disabled cases    #
 # are the same code path, not a separate branch, so they can't drift.         #

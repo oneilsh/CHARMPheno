@@ -131,7 +131,7 @@ full-history frames still exist, in driver-owned code, as a separate artifact.
   smaller than the events. The build logs the row and person counts and the coverage
   numbers above.
 - **Location:** HDFS by default like the others (rebuilt per cluster; the conversion
-  sidecar must exist on the cluster first), or `GPR_SIDECAR_URI` for a persistent
+  sidecar must exist on the cluster first), or `DGR_SIDECAR_URI` for a persistent
   in-boundary bucket.
 
 ## Code
@@ -141,7 +141,7 @@ full-history frames still exist, in driver-owned code, as a separate artifact.
   rates), `eig_categorical`, `nb_update`, `evaluate_workup` (R1-R4 and coverage).
   Pure numpy; unit-tested against a planted toy where one test separates the members
   and EIG must rank it first and be calibrated.
-- `gated_pc_readout.py --diff-workup [--diff-workup-window strict|inclusive]
+- `dag_gated_readout.py --diff-workup [--diff-workup-window strict|inclusive]
   [--diff-workup-no-measured]`: framing 2 on the workup sidecar in place of the hidden-
   record protocol, inside the existing survey (`--diff-survey`), so the same groups and
   patients as framing 1 are scored.

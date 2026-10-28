@@ -4,7 +4,7 @@ The flat disease label set of spec
 `docs/superpowers/specs/2026-10-07-dismech-ribbon-label-space-design.md`: one row
 per DisMech disorder (`kb/disorders/*.yaml`) that carries a MONDO `disease_term`.
 Loaded by `analysis/cloud/dismech_ribbon.py` and handed to the native-Mondo build
-as the `label_set` the powered set is intersected with (`gated_pc_cloud --label-set`,
+as the `label_set` the powered set is intersected with (`dag_gated_fit --label-set`,
 `label_set:` in an experiment's front matter). Subtypes are not rows; the hierarchy
 lives only in the stacked readout.
 

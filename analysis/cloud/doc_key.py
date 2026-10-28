@@ -6,7 +6,7 @@ carry several documents, so the readout keys rows by one synthesized int64 that 
 unique per document, recovers the person by arithmetic, and leaves single-document
 corpora on their existing ids (scaled order-preservingly). The generic readout
 (`spark_vi.readout`) only needs an int64 row id; this module is the clinical
-definition of it, used driver-side (`gated_pc_cloud._doc_key_column` builds the
+definition of it, used driver-side (`dag_gated_fit._doc_key_column` builds the
 same map as a Spark Column).
 
 Until ADR 0051 this file was `distributed_readout.py` and also held the readout's

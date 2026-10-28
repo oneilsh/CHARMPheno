@@ -19,15 +19,15 @@ BASE = {"source_table": "t", "person_mod": 1, "vocab_size": 5000, "min_df": 20,
 def test_gate_warm_front_matter_is_emitted_only_when_set(monkeypatch):
     monkeypatch.setenv("WORKSPACE_CDR", "cdr")
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
-    plain = rex.build_gated_pc_args(dict(BASE), "/tmp/out")
+    plain = rex.build_dag_gated_args(dict(BASE), "/tmp/out")
     assert "--gate-warm" not in plain and "--gate-no-open-seed" not in plain
-    on = rex.build_gated_pc_args(dict(BASE, gate_warm=5), "/tmp/out")
+    on = rex.build_dag_gated_args(dict(BASE, gate_warm=5), "/tmp/out")
     assert on[on.index("--gate-warm") + 1] == "5" and "--gate-no-open-seed" not in on
 
 
 def test_driver_flags_reach_the_estimator():
     import argparse
-    import gated_pc_cloud as gpc
+    import dag_gated_fit as gpc
     args = argparse.Namespace(gate_warm=4, gate_seed_mode="balanced",
                               gate_seed_leaves=True, _parent_int={1: [0], 2: [1]},
                               _gate_seed_own={2: [3]})

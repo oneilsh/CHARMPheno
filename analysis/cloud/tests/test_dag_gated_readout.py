@@ -22,7 +22,7 @@ def _manifest(**over):
 
 
 def test_resolve_run_dir_disambiguates_collision(tmp_path):
-    from gated_pc_readout import resolve_run_dir
+    from dag_gated_readout import resolve_run_dir
     runs = tmp_path / "runs"
     ours = runs / "0076-gated-pc-rare6-smooshed"
     other = runs / "0076-multidomain-rare-priority-cond-drug-obs"
@@ -37,7 +37,7 @@ def test_resolve_run_dir_disambiguates_collision(tmp_path):
 
 def test_resolve_run_dir_errors_when_none_finished(tmp_path):
     import pytest
-    from gated_pc_readout import resolve_run_dir
+    from dag_gated_readout import resolve_run_dir
     runs = tmp_path / "runs"
     (runs / "0076-gated-pc-rare6-smooshed").mkdir(parents=True)   # no npz yet
     with pytest.raises(SystemExit, match="no run dir with gated_pc_result.npz"):
@@ -45,7 +45,7 @@ def test_resolve_run_dir_errors_when_none_finished(tmp_path):
 
 
 def test_build_parser_surface():
-    from gated_pc_readout import build_parser
+    from dag_gated_readout import build_parser
     a = build_parser().parse_args(["--run-dir", "/runs/0076-x", "--cache-uri",
                                    "hdfs:///c", "--doc-min-length", "10"])
     assert a.run_dir == "/runs/0076-x" and a.cache_uri == "hdfs:///c"
@@ -54,7 +54,7 @@ def test_build_parser_surface():
 
 
 def test_bundle_key_from_manifest_matches_direct_key():
-    from gated_pc_readout import bundle_key_from_manifest
+    from dag_gated_readout import bundle_key_from_manifest
     from _case_finding_cache import compute_bundle_cache_key
     m = _manifest()
     key = bundle_key_from_manifest(m)
@@ -69,7 +69,7 @@ def test_bundle_key_from_manifest_matches_direct_key():
 
 
 def test_bundle_key_doc_min_length_override_for_old_manifest():
-    from gated_pc_readout import bundle_key_from_manifest
+    from dag_gated_readout import bundle_key_from_manifest
     m = _manifest()
     del m["corpus_manifest"]["doc_min_length"]        # older manifest omits it
     with pytest.raises(KeyError, match="doc_min_length"):
@@ -83,7 +83,7 @@ def test_reconstruct_model_from_npz(tmp_path):
     """A saved fit rebuilds as a DagGatedLDAModel. A pre-ADR-0050 npz still
     carries the co-fit head (w_CK, b_CK); it is ignored, so old run dirs stay
     readable."""
-    from gated_pc_readout import reconstruct_model
+    from dag_gated_readout import reconstruct_model
     from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAModel
     K, V, C = 170, 5000, 27
     lam = np.abs(np.random.default_rng(0).normal(size=(K, V))) + 1e-3
@@ -98,7 +98,7 @@ def test_reconstruct_model_from_npz(tmp_path):
 
 
 def test_reconstruct_model_multi_domain_reads_the_per_domain_columns(tmp_path):
-    from gated_pc_readout import reconstruct_model
+    from dag_gated_readout import reconstruct_model
     K = 6
     np.savez(tmp_path / "gated_pc_result.npz",
              lambda_0=np.ones((K, 4)), lambda_1=np.ones((K, 3)),
@@ -119,17 +119,17 @@ class TestResolveReadoutMaxIter:
     readout would actually have used), and this is the precedence that consumes it."""
 
     def test_cli_wins_over_manifest(self):
-        from gated_pc_readout import resolve_readout_max_iter
+        from dag_gated_readout import resolve_readout_max_iter
         assert resolve_readout_max_iter(30, _manifest(readout_max_iter=60)) == \
             (30, "CLI")
 
     def test_manifest_wins_when_no_cli_value(self):
-        from gated_pc_readout import resolve_readout_max_iter
+        from dag_gated_readout import resolve_readout_max_iter
         assert resolve_readout_max_iter(None, _manifest(readout_max_iter=60)) == \
             (60, "manifest")
 
     def test_legacy_default_when_manifest_predates_the_field(self):
-        from gated_pc_readout import (_LEGACY_READOUT_MAX_ITER,
+        from dag_gated_readout import (_LEGACY_READOUT_MAX_ITER,
                                       resolve_readout_max_iter)
         # `_manifest()` has no readout_max_iter — exactly the exp 0104 fit whose
         # recovery still needs an explicit --readout-max-iter 60.
@@ -138,11 +138,11 @@ class TestResolveReadoutMaxIter:
         assert _LEGACY_READOUT_MAX_ITER == 200
 
     def test_cli_wins_even_against_a_legacy_manifest(self):
-        from gated_pc_readout import resolve_readout_max_iter
+        from dag_gated_readout import resolve_readout_max_iter
         assert resolve_readout_max_iter(60, _manifest()) == (60, "CLI")
 
     def test_zero_or_null_recorded_value_falls_back(self):
-        from gated_pc_readout import resolve_readout_max_iter
+        from dag_gated_readout import resolve_readout_max_iter
         # A 0/None cap is not a budget; treat it as "not recorded" rather than
         # letting the solver take zero passes on a rescue run.
         assert resolve_readout_max_iter(None, _manifest(readout_max_iter=0))[1] == \
@@ -152,7 +152,7 @@ class TestResolveReadoutMaxIter:
             "legacy default"
 
     def test_parser_default_is_none_so_the_manifest_can_speak(self):
-        from gated_pc_readout import build_parser
+        from dag_gated_readout import build_parser
         a = build_parser().parse_args(["--run-dir", "/runs/0104-x"])
         assert a.readout_max_iter is None
         b = build_parser().parse_args(["--run-dir", "/runs/0104-x",
@@ -167,23 +167,23 @@ class TestMondoSpecMismatch:
     corpus — exp 0104's fresh-cluster recovery. The guard fires before the key."""
 
     def test_mondo_ids_with_snomed_spec_is_a_mismatch(self):
-        from gated_pc_readout import mondo_spec_mismatch
+        from dag_gated_readout import mondo_spec_mismatch
         m = _manifest(int2cid=["MONDO:0005267", "MONDO:0002869"])
         assert mondo_spec_mismatch({"dag_source": "snomed"}, m)
 
     def test_mondo_ids_with_mondo_spec_is_fine(self):
-        from gated_pc_readout import mondo_spec_mismatch
+        from dag_gated_readout import mondo_spec_mismatch
         m = _manifest(int2cid=["MONDO:0005267"])
         assert not mondo_spec_mismatch({"dag_source": "mondo"}, m)
 
     def test_snomed_ids_never_mismatch(self):
-        from gated_pc_readout import mondo_spec_mismatch
+        from dag_gated_readout import mondo_spec_mismatch
         # A genuine SNOMED run: numeric concept ids, snomed default is correct.
         m = _manifest(int2cid=["44054006", "73211009"])
         assert not mondo_spec_mismatch({"dag_source": "snomed"}, m)
 
     def test_dict_shaped_int2cid_and_missing_field(self):
-        from gated_pc_readout import mondo_spec_mismatch
+        from dag_gated_readout import mondo_spec_mismatch
         # int2cid serialized as {engine-int: cid} instead of a list, and a
         # manifest with no int2cid at all (nothing to witness -> no mismatch).
         m = _manifest(int2cid={"0": "MONDO:0005267"})

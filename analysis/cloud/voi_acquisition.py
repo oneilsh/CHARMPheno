@@ -43,7 +43,7 @@ THE SIMULATION (why each piece has the shape it has)
   count), entropy in bits, and hits (how many asked codes were present). Calibration:
   ECE of the max posterior (10 bins) at the last step and for `full`.
 
-Pure numpy; the driver (`gated_pc_readout --acquisition`) only collects the test
+Pure numpy; the driver (`dag_gated_readout --acquisition`) only collects the test
 patients' code sets. Pooled numbers only — a set with fewer than 20 patients is
 suppressed (egress floor)."""
 from __future__ import annotations

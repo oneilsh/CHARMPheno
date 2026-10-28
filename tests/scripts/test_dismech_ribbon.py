@@ -2,7 +2,7 @@
 
 Two claims (the third, the fit-time `label_set` key fold, went with the option in
 the 2026-10 cleanup and ADR 0051; the ribbon is now read post hoc, e.g.
-`gated_pc_readout --readout-nodes`):
+`dag_gated_readout --readout-nodes`):
 
   1. **The reader is faithful and the artifact is pinned.** `kb/disorders/*.yaml`
      -> rows -> TSV -> rows round-trips; a disorder without a MONDO disease_term is

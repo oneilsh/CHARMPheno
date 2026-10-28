@@ -345,12 +345,12 @@ next-exp: zip cluster-overlay $(WORKSPACE_ENV)
 # --max-iter): for a run whose NUMBERS DON'T MATTER and you just need it to COMPLETE,
 # e.g. bootstrapping a cache-HIT bundle + manifest.json for the --emit-eta probe on a
 # fresh cluster without paying a full fit. NEVER for a run of record.
-# GPR_SPARK_CONF (space-separated k=v) reaches the fit as CHARM_SPARK_CONF, the
-# same knob gated-pc-readout takes, so one command line serves both.
+# DGR_SPARK_CONF (space-separated k=v) reaches the fit as CHARM_SPARK_CONF, the
+# same knob dag-gated-readout takes, so one command line serves both.
 exp: zip cluster-overlay $(WORKSPACE_ENV)
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	. ./$(WORKSPACE_ENV) && \
-	CHARM_SPARK_CONF="$(strip $$CHARM_SPARK_CONF $(GPR_SPARK_CONF))" \
+	CHARM_SPARK_CONF="$(strip $$CHARM_SPARK_CONF $(DGR_SPARK_CONF))" \
 	python $(REPO_ROOT)/scripts/run_experiment.py --id $(ID) --runs-dir $(RUNS_DIR) $(if $(NO_EVAL),--no-eval) $(if $(MAX_ITER),--max-iter $(MAX_ITER))
 
 # Post-hoc case-finding readout on a FINISHED gated_pc run (no re-fit):
@@ -367,12 +367,12 @@ exp: zip cluster-overlay $(WORKSPACE_ENV)
 #
 # The bundle cache-uri and (for OLDER runs whose manifest omits it) doc-min-length
 # are overridable; a run whose manifest already records doc_min_length + emit_labels
-# (current driver) needs neither. If the key still misses, pass GPR_ARGS="--bundle-path
+# (current driver) needs neither. If the key still misses, pass DGR_ARGS="--bundle-path
 # <cache_uri>/<key>".
 #
 # The readout kernels ship in the spark-vi zip (spark_vi.readout, ADR 0051).
-# GPR_ARGS="--readout-engine local" runs the heads' passes in driver memory
-# (each split collected once, top-m truncated): size GPR_DRIVER_MEMORY for the
+# DGR_ARGS="--readout-engine local" runs the heads' passes in driver memory
+# (each split collected once, top-m truncated): size DGR_DRIVER_MEMORY for the
 # packed train split.
 #
 # The EXPERIMENT DOC's `spark_conf:` front matter is injected too (resolved by
@@ -381,39 +381,39 @@ exp: zip cluster-overlay $(WORKSPACE_ENV)
 # the same spot VMs as the fit it is rescuing, so it needs the same survival
 # settings — and the whole point of moving them into the doc was to stop retyping
 # them per launch. Layering matches the fit path exactly: fixed confs above, then
-# the doc's, then GPR_SPARK_CONF (spark-submit takes the last value of a repeated
+# the doc's, then DGR_SPARK_CONF (spark-submit takes the last value of a repeated
 # key), so the env-style hook remains the one-off override.
 # Example (re-read with the heads' passes in driver memory):
-#   make gated-pc-readout ID=163 GPR_ARGS="--readout-engine local"
+#   make dag-gated-readout ID=163 DGR_ARGS="--readout-engine local"
 # Example (recover exp 0104's readout; its doc's spark_conf rides automatically,
 # and --readout-max-iter is only needed for a fit whose manifest predates the
 # recorded readout_max_iter):
-#   make gated-pc-readout ID=104 GPR_ARGS="--readout-max-iter 60"
-GPR_SPARK_CONF     ?=
+#   make dag-gated-readout ID=104 DGR_ARGS="--readout-max-iter 60"
+DGR_SPARK_CONF     ?=
 # Driver JVM heap for the readout submit. 8g is comfortable on a 32GB master; on
 # a 16GB master the 8g JVM + the Mondo TSV download/parse (a rebuild's driver-side
 # pandas work) + JupyterLab together trip the HOST OOM killer (exp 0109, 08-31:
 # `Killed` / exit 137 mid-download). The readout's big arrays are PYTHON-side
 # (L-BFGS history, lean eval), not JVM heap, so 4g is safe there:
-#   make gated-pc-readout ID=109 GPR_DRIVER_MEMORY=4g
-GPR_DRIVER_MEMORY  ?= 8g
-GPR_CACHE_URI      ?= hdfs:///user/dataproc/charm/case_finding_cache
-GPR_DOC_MIN_LENGTH ?=
+#   make dag-gated-readout ID=109 DGR_DRIVER_MEMORY=4g
+DGR_DRIVER_MEMORY  ?= 8g
+DGR_CACHE_URI      ?= hdfs:///user/dataproc/charm/case_finding_cache
+DGR_DOC_MIN_LENGTH ?=
 # The run-dir is passed as a QUOTED glob so the shell does NOT pre-expand it (the
 # shared runs/ dir can hold a same-numbered run from another experiment, e.g. a
-# stale 0076-multidomain-...); gated_pc_readout.resolve_run_dir globs it and keeps
-# only the dir with gated_pc_result.npz. Override with an exact dir via GPR_RUN_DIR.
-GPR_RUN_DIR        ?= $(RUNS_DIR)/$(shell printf '%04d' $(ID))-*
+# stale 0076-multidomain-...); dag_gated_readout.resolve_run_dir globs it and keeps
+# only the dir with gated_pc_result.npz. Override with an exact dir via DGR_RUN_DIR.
+DGR_RUN_DIR        ?= $(RUNS_DIR)/$(shell printf '%04d' $(ID))-*
 # `spark.dataproc.listeners=` (empty) drops Dataproc's DataprocMetricsListener,
 # registered cluster-wide in spark-defaults. Its publisher pushes a usage payload
 # to the master's metrics collector on a NON-DAEMON pool thread that sat in
 # socketWrite0 for hours at app end inside the enclave (jstack 2026-09-12), which
 # kept the client-mode SparkSubmit JVM — the process `make` waits on — alive after
-# the Python driver had exited, wedging every chained sweep. gated_pc_readout's
+# the Python driver had exited, wedging every chained sweep. dag_gated_readout's
 # `hard_exit` already takes the JVM down regardless; this removes the cause. Not
 # yet on the fit's submit (run_experiment.py): verify a readout starts clean with
 # it first, then port — the fit's JVM clears on its own after ~13 min.
-gated-pc-readout: zip cluster-overlay $(WORKSPACE_ENV)
+dag-gated-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	EXP_SPARK_CONF="$$(python3 $(REPO_ROOT)/scripts/run_experiment.py \
 	    --print-spark-conf --id $(ID))" || \
@@ -426,7 +426,7 @@ gated-pc-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	PYTHONPATH=$(REPO_ROOT):$$PYTHONPATH spark-submit \
 	    --master yarn \
 	    --deploy-mode client \
-	    --driver-memory $(GPR_DRIVER_MEMORY) \
+	    --driver-memory $(DGR_DRIVER_MEMORY) \
 	    --conf spark.executor.cores=4 \
 	    --conf spark.executor.memory=6g \
 	    --conf spark.executor.memoryOverhead=2g \
@@ -435,13 +435,13 @@ gated-pc-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	    --conf spark.excludeOnFailure.enabled=true \
 	    --conf spark.dataproc.listeners= \
 	    $$EXP_CONF_FLAGS \
-	    $(foreach kv,$(GPR_SPARK_CONF),--conf $(kv)) \
+	    $(foreach kv,$(DGR_SPARK_CONF),--conf $(kv)) \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/preindex_closure.py,$(REPO_ROOT)/analysis/cloud/topic_npmi.py,$(REPO_ROOT)/analysis/cloud/prevalence_check.py \
-	    $(REPO_ROOT)/analysis/cloud/gated_pc_readout.py \
-	    --run-dir "$(GPR_RUN_DIR)" \
-	    --cache-uri $(GPR_CACHE_URI) \
-	    $(if $(GPR_DOC_MIN_LENGTH),--doc-min-length $(GPR_DOC_MIN_LENGTH),) \
-	    $(GPR_ARGS)
+	    $(REPO_ROOT)/analysis/cloud/dag_gated_readout.py \
+	    --run-dir "$(DGR_RUN_DIR)" \
+	    --cache-uri $(DGR_CACHE_URI) \
+	    $(if $(DGR_DOC_MIN_LENGTH),--doc-min-length $(DGR_DOC_MIN_LENGTH),) \
+	    $(DGR_ARGS)
 
 # ---------------------------------------------------------------------------
 # inspect-topics: OFF-CLUSTER topics/readout inspector (pure numpy, NO Spark, NO
@@ -464,7 +464,7 @@ gated-pc-readout: zip cluster-overlay $(WORKSPACE_ENV)
 #   make inspect-topics ID=116 INSPECT_ARGS="--readout-auc" COMPARE=113 CREDITED=1
 #   make inspect-topics ID=111 INSPECT_KEY=<hash> INSPECT_ARGS="--sort depth"
 #   make inspect-topics ID=111 INSPECT_META=/tmp/meta.json INSPECT_ARGS="--top-topics 200"
-INSPECT_CACHE_URI  ?= $(GPR_CACHE_URI)
+INSPECT_CACHE_URI  ?= $(DGR_CACHE_URI)
 INSPECT_META       ?=
 INSPECT_KEY        ?=
 NO_META            ?=
@@ -479,7 +479,7 @@ INSPECT_NAMES      ?=
 # INSPECT_KEY or INSPECT_META). cdr + billing come from the run's manifest.
 RESOLVE_NAMES      ?=
 INSPECT_ARGS       ?=
-# QUOTED glob, like GPR_RUN_DIR: inspect_topics.resolve_run_dir keeps the one dir
+# QUOTED glob, like DGR_RUN_DIR: inspect_topics.resolve_run_dir keeps the one dir
 # with gated_pc_result.npz. Override with an exact dir via INSPECT_RUN_DIR.
 INSPECT_RUN_DIR    ?= $(RUNS_DIR)/$(shell printf '%04d' $(ID))-*
 inspect-topics: $(WORKSPACE_ENV)
@@ -495,7 +495,7 @@ inspect-topics: $(WORKSPACE_ENV)
 	  if [ -n "$$KEY" ]; then \
 	    echo "[inspect-topics] auto-selected bundle key $$KEY (newest in $(INSPECT_CACHE_URI); wrong-bundle shape mismatches are flagged in the report — override with INSPECT_KEY=<hash> or NO_META=1)"; \
 	  else \
-	    echo "[inspect-topics] no bundle dir found in $(INSPECT_CACHE_URI); continuing without meta (no depth/words). Fresh cluster? Run: make gated-pc-readout ID=$(ID) GPR_ARGS=\"--bundle-only\" (writes <run>/bundle_meta.json)"; \
+	    echo "[inspect-topics] no bundle dir found in $(INSPECT_CACHE_URI); continuing without meta (no depth/words). Fresh cluster? Run: make dag-gated-readout ID=$(ID) DGR_ARGS=\"--bundle-only\" (writes <run>/bundle_meta.json)"; \
 	  fi; \
 	fi; \
 	if [ -z "$$META" ] && [ -n "$$KEY" ]; then \
@@ -572,8 +572,8 @@ build-conversion-sidecar: zip cluster-overlay $(WORKSPACE_ENV)
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/preindex_closure.py,$(REPO_ROOT)/analysis/cloud/conversion_sidecar.py \
 	    $(REPO_ROOT)/analysis/cloud/conversion_sidecar.py \
 	    --run-dir "$(RUNS_DIR)/$(shell printf '%04d' $(ID))-*" \
-	    $(if $(GPR_SIDECAR_URI),--sidecar-uri $(GPR_SIDECAR_URI),) \
-	    $(GPR_ARGS)
+	    $(if $(DGR_SIDECAR_URI),--sidecar-uri $(DGR_SIDECAR_URI),) \
+	    $(DGR_ARGS)
 
 # Workup sidecar (exp 0167, spec 2026-10-28 workup-voi-design): every code first
 # recorded in the year after each person's index, all corpus domains, keyed on its own
@@ -596,8 +596,8 @@ build-workup-sidecar: zip cluster-overlay $(WORKSPACE_ENV)
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/workup_sidecar.py \
 	    $(REPO_ROOT)/analysis/cloud/workup_sidecar.py \
 	    --run-dir "$(RUNS_DIR)/$(shell printf '%04d' $(ID))-*" \
-	    $(if $(GPR_WORKUP_URI),--sidecar-uri $(GPR_WORKUP_URI),) \
-	    $(GPR_ARGS)
+	    $(if $(DGR_WORKUP_URI),--sidecar-uri $(DGR_WORKUP_URI),) \
+	    $(DGR_ARGS)
 
 # Print summary.md for an experiment (copy/paste back to chat)
 summary:
