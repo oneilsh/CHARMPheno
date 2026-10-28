@@ -235,5 +235,7 @@ E3 kappa quartiles +0.04 / +0.15 / +0.21, so codes add to θ in every quartile. 
 skill tracks the number of scored patients (Spearman +0.52, n = 9) and framing 2's VOI −
 table (+0.38), not framing 3's AUC (+0.07 θ, +0.02 raw). E5's top reasons repeat the same
 three concepts (cid 4329041, 44824625, 40325768) across unrelated groups (viral
-hepatitis, aortic aneurysm, social phobia, bulimia): document-frequency selection keeps
-codes common to every member. Exp 0166 tests within-group relevance selection instead.
+hepatitis, aortic aneurysm, social phobia, bulimia). Read at first as codes common to
+every member; exp 0166 shows they survive pure-lift selection, so within each group
+they do separate the members (broad codes whose rate differs by member). Exp 0166
+tests within-group relevance selection.
