@@ -653,8 +653,8 @@ underexercised after the HDP and OU. Candidates:
 
 ## Project Structure
 
-The layout as of ADR 0051 step 4 (steps 5-6 add the `DagHeads` shim and the
-renames; see the ADR).
+The layout as of ADR 0051 step 5 (step 6 renames the drivers and model class; see the
+ADR).
 
 ```
 spark_vi/
@@ -686,6 +686,8 @@ spark_vi/
 │   ├── spark.py, local.py  #   per-key metrics: merged in the shuffle / in memory
 │   └── report.py           #   skip rules and macros
 ├── mllib/topic/            # Estimator/Model shims: LDA, HDP, STM, DagGatedLDA
+├── mllib/readout.py        # DagHeadsEstimator/Model: the per-node heads as a stage, so
+│                           #   Pipeline([DagGatedLDA, DagHeads]) is the case-finding model
 ├── inference/              # concentration (α/η) optimization
 ├── io/export.py            # save_result / load_result
 └── diagnostics/persist.py  # the cached-input precondition
