@@ -88,8 +88,9 @@ def test_stacked_readout_block_has_the_three_detection_reads_and_paired_bookkeep
     p = _proba(seed=5, D=120)
     y, m = _labels(p)
     prev = gpc.readout_from_proba(p, y, m, C, recall_targets=RT, fdr_targets=FT)
-    blk = gpc.stacked_readout(p, y, m, PARENT, C, recall_targets=RT, fdr_targets=FT,
-                              min_count=0, prevalent=prev, arm_label="arm")
+    blk = gpc.stacked_readout(gpc._array_blocks(p, y, m), PARENT, C, recall_targets=RT,
+                              fdr_targets=FT, min_count=0, prevalent=prev,
+                              arm_label="arm", person_pool=False)
     assert blk["naming"] == gpc.STACKED_NAMING
     assert blk["closure_terms"]["max"] == 5
     # Root-only detection IS detection_readout on the root column alone.
@@ -132,8 +133,8 @@ def test_a_constant_root_leaves_depth_one_ranking_tied_with_the_flat_arm():
     p[:, 0] = 1.0
     y, m = _labels(p)
     prev = gpc.readout_from_proba(p, y, m, C, recall_targets=RT, fdr_targets=FT)
-    blk = gpc.stacked_readout(p, y, m, PARENT, C, recall_targets=RT, fdr_targets=FT,
-                              prevalent=prev)
+    blk = gpc.stacked_readout(gpc._array_blocks(p, y, m), PARENT, C, recall_targets=RT,
+                              fdr_targets=FT, prevalent=prev, person_pool=False)
     d1 = blk["paired_vs_prevalent"]["by_depth"]["1"]
     assert d1["n"] == 3 and d1["ties"] == 3
     assert blk["root_only_detection"]["skipped"]           # a constant column

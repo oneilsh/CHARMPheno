@@ -436,7 +436,7 @@ gated-pc-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	    --conf spark.dataproc.listeners= \
 	    $$EXP_CONF_FLAGS \
 	    $(foreach kv,$(GPR_SPARK_CONF),--conf $(kv)) \
-	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/preindex_closure.py,$(REPO_ROOT)/analysis/cloud/topic_npmi.py \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/preindex_closure.py,$(REPO_ROOT)/analysis/cloud/topic_npmi.py,$(REPO_ROOT)/analysis/cloud/prevalence_check.py \
 	    $(REPO_ROOT)/analysis/cloud/gated_pc_readout.py \
 	    --run-dir "$(GPR_RUN_DIR)" \
 	    --cache-uri $(GPR_CACHE_URI) \

@@ -1084,17 +1084,19 @@ def _split_gidx(eng, g):
 
 
 
-def _whole_history_prior(test_scored, keys, run_dir, *, C, readout_int2cid,
-                         parent_adj, sidecar_uri=None):
-    """Exp 0145 (spec 2026-10-13 label redesign R1): prior[d, X] from the E4 sidecar —
-    a first attestation of X's Mondo term or a descendant dated BEFORE the person's
-    index (the sidecar's own index_horizon, re-derived by the assembler's index
-    builder at sidecar build). Whole history, not the 5-year lookback. Returns
-    (prior, receipt)."""
+def _whole_history_prior(test_scored, run_dir, *, readout_int2cid, parent_adj,
+                         sidecar_uri=None):
+    """Exp 0145 (spec 2026-10-13 label redesign R1): the WHOLE-HISTORY prior from the
+    E4 sidecar — a first attestation of X's Mondo term or a descendant dated BEFORE
+    the person's index (the sidecar's own index_horizon, re-derived by the
+    assembler's index builder at sidecar build). Not the 5-year lookback.
+
+    Returns `(test_scored + an "_prior_hist" array<int> column of readout nodes, None
+    where the person has none; receipt)`: a join, so nothing per person reaches the
+    driver (ADR 0051 step 4)."""
     import prevalence_check as pv
     from pyspark.sql import functions as F
     from conversion_sidecar import try_load_index_horizon, try_load_sidecar
-    import doc_key as _dk
     wp = Path(run_dir) / "conversion_sidecar.json"
     if not wp.exists():
         raise SystemExit("[prevalence] --prev-history needs <run>/conversion_sidecar.json "
@@ -1109,7 +1111,7 @@ def _whole_history_prior(test_scored, keys, run_dir, *, C, readout_int2cid,
                          "on this cluster (make build-conversion-sidecar ID=N)")
     persons = test_scored.select("person_id").distinct()
     hz_t = hz.join(persons, "person_id").select("person_id", "index_date").cache()
-    n_docs, n_idx = len(keys), hz_t.count()
+    n_idx = hz_t.count()
     pairs = (first.join(hz_t, "person_id")
              .where(F.col("first_attested_date") < F.col("index_date"))
              .select("person_id", "node_cid").distinct().cache())
@@ -1117,13 +1119,11 @@ def _whole_history_prior(test_scored, keys, run_dir, *, C, readout_int2cid,
     n2r = pv.sidecar_nodes_to_readout(nodes, readout_int2cid, parent_adj)
     mrows = [(int(n), int(r)) for n, rs in n2r.items() for r in rs]
     mdf = spark.createDataFrame(mrows, "node_cid long, rnode int")
-    got = (pairs.join(F.broadcast(mdf), "node_cid").groupBy("person_id")
-           .agg(F.collect_set("rnode").alias("ns")).collect())
-    by_person = {int(r["person_id"]): r["ns"] for r in got}
-    prior = pv.prior_from_sets(keys, by_person, int(C), _dk.person_of)
-    pairs.unpersist(); hz_t.unpersist()
-    return prior, {"n_test_docs": n_docs, "n_with_index": n_idx,
-                   "n_sidecar_nodes_prior": len(nodes), "n_mapped_to_readout": len(n2r)}
+    hist = (pairs.join(F.broadcast(mdf), "node_cid").groupBy("person_id")
+            .agg(F.collect_set("rnode").alias("_prior_hist")))
+    out = test_scored.join(hist, "person_id", "left")
+    return out, {"n_with_index": n_idx, "n_sidecar_nodes_prior": len(nodes),
+                 "n_mapped_to_readout": len(n2r)}, (pairs, hz_t)
 
 
 def run_prevalence_check(test_scored, run_dir, *, C, parent_int,
@@ -1136,12 +1136,19 @@ def run_prevalence_check(test_scored, run_dir, *, C, parent_int,
     patients vs with those patients set aside — flat heads and the stacked product.
     Writes `prevalence_check[_<tag>].md/.json`.
 
+    The scores, the prior flags and the closure product stay on the executors as score
+    blocks, and the per-node AUCs come from merged tallies (ADR 0051 step 4): the
+    driver never holds a (patients, nodes) matrix.
+
     `history` (exp 0145): a dict of `_whole_history_prior` kwargs; adds the
     WHOLE-HISTORY prior rule beside the lookback one, with a containment check."""
     import prevalence_check as pv
     import voi_tables as vt
-    from gated_pc_cloud import _collect_lean_proba, _doc_key_column
-    from spark_vi.readout import closure_matrix, stacked_proba
+    from gated_pc_cloud import _doc_key_column
+    from spark_vi.eval.metrics import local as ml
+    from spark_vi.readout import closure_matrix
+    from spark_vi.readout import evaluate as ev
+    from spark_vi.readout.spark import score_blocks
     run_dir = Path(run_dir)
     bm, cm = run_dir / "bundle_meta.json", run_dir / "code_map.tsv"
     if not cm.exists():
@@ -1152,52 +1159,89 @@ def run_prevalence_check(test_scored, run_dir, *, C, parent_int,
     z = np.load(hp)
     if int(z["C"]) != int(C):
         raise SystemExit(f"[prevalence] heads {hp.name} are C={int(z['C'])}, frames C={C}")
-    proba, y, _m, keys = _collect_lean_proba(
-        test_scored, int(C), z["V"], z["b_raw"], degenerate=z["degenerate"],
-        const=z["const"], theta_topm=int(z["theta_topm"]))
-    P = stacked_proba(proba, closure_matrix(parent_int, int(C)))
+    C = int(C)
     col = "features_0" if "features_0" in test_scored.columns else "features"
+    df = test_scored.withColumn("doc_key", _doc_key_column(test_scored, "person_id"))
+    res = {}
+    rec, cached = None, ()
+    extra = [col]
+    if history:
+        df, rec, cached = _whole_history_prior(df, run_dir, **history)
+        extra.append("_prior_hist")
+    rdd, bheads = score_blocks(df, C, z["V"], z["b_raw"], degenerate=z["degenerate"],
+                               const=z["const"], theta_topm=int(z["theta_topm"]),
+                               extra_cols=extra)
+    blocks = ev.Blocks(rdd, bcasts=[bheads])
+    bv2n = blocks.broadcast(pv.vocab_to_nodes(ctx.own_idx, ctx.rdag["pos_sources"]))
 
-    def _codes(row):
-        v = row[col]
-        idx = getattr(v, "indices", None)
-        if idx is None:
-            arr = np.asarray(v.toArray() if hasattr(v, "toArray") else v)
-            idx = np.flatnonzero(arr)
-        return int(row["doc_key"]), [int(i) for i in idx]
-    rows = (test_scored.withColumn("doc_key", _doc_key_column(test_scored, "person_id"))
-            .select("doc_key", col).rdd.map(_codes).collect())
-    codes = dict(rows)
-    v2n = pv.vocab_to_nodes(ctx.own_idx, ctx.rdag["pos_sources"])
-    prior = pv.prior_matrix([int(k) for k in keys], codes, v2n, int(C))
-    nodes = list(range(1, int(C)))
+    def _priors(b, _bv=bv2n, _col=col, _C=C, _hist=bool(history)):
+        def _idx(v):
+            i = getattr(v, "indices", None)
+            if i is None:
+                a = np.asarray(v.toArray() if hasattr(v, "toArray") else v)
+                i = np.flatnonzero(a)
+            return [int(x) for x in i]
+        out = {k: b[k] for k in ("ids", "proba", "y", "mask")}
+        out["prior"] = pv.prior_rows([_idx(v) for v in b[_col]], ev._val(_bv), _C)
+        if _hist:
+            out["prior_hist"] = pv.rows_from_node_lists(b["_prior_hist"], _C)
+        return out
+    blocks = blocks.map(_priors)
+    blocks._bcasts.append(bv2n)
+    blocks = ev.with_stacked(blocks, closure_matrix(parent_int, C)).persist()
+    nodes = list(range(1, C))
     if node_subset is not None:
         # Exp 0152: only the solved heads — masked heads are constants (AUC 0.5).
         nodes = [n for n in nodes if node_subset[n]]
-    res = {}
+    rules = [("", "prior")] + ([("history_", "prior_hist")] if history else [])
+    arms = (("stacked", "stacked"), ("flat", "proba"))
+
+    def _pieces(b, _nodes=tuple(nodes), _rules=tuple(r for _, r in rules)):
+        for arm, sc in arms:
+            yield from ml.column_pieces(b[sc], b["y"], columns=_nodes,
+                                        key=lambda c, _a=arm: (_a, "all", c))
+            for rule in _rules:
+                yield from ml.column_pieces(b[sc], b["y"], ~b[rule], columns=_nodes,
+                                            key=lambda c, _a=arm, _r=rule: (_a, _r, c))
+    try:
+        per_key = blocks.metrics(_pieces)
+
+        def _counts(b, _h=bool(history)):
+            a = b["prior"]
+            hh = b["prior_hist"] if _h else a
+            return np.array([a.shape[0], a.sum(), hh.sum(), (a & hh).sum()],
+                            dtype=np.int64)
+        n_docs, n_lb, n_h, n_both = (int(x) for x in blocks.reduce(
+            _counts, lambda u, v: u + v))
+    finally:
+        blocks.unpersist()
+        for d in cached:
+            d.unpersist()
     L_ = [f"# {run_dir.name} — prevalence check: AUC with prior-diagnosis patients set "
-          f"aside", f"heads {hp.name} · {len(keys):,} test patients · LOOKBACK prior = a "
+          f"aside", f"heads {hp.name} · {n_docs:,} test patients · LOOKBACK prior = a "
           f"mapped attestation code of the node (or a label descendant) in the 5-year "
           f"pre-index condition features (a lower bound: older diagnoses count as "
           f"incident)", ""]
-    rules = [("", prior)]
     if history:
-        prior_h, rec = _whole_history_prior(test_scored, keys, run_dir, C=int(C),
-                                            **history)
+        rec = {"n_test_docs": n_docs, **rec}
         res["history_receipt"] = rec
-        res["containment_lookback_in_history"] = pv.containment(prior, prior_h)
+        res["containment_lookback_in_history"] = (n_both / n_lb if n_lb
+                                                  else float("nan"))
         L_ += [f"WHOLE-HISTORY prior (exp 0145) = a sidecar first attestation of the "
                f"node's Mondo term or a descendant before the index · test docs "
                f"{rec['n_test_docs']:,}, with a sidecar index {rec['n_with_index']:,} · "
-               f"prior cells: lookback {int(prior.sum()):,}, whole history "
-               f"{int(prior_h.sum()):,} · lookback cells inside whole-history "
+               f"prior cells: lookback {n_lb:,}, whole history {n_h:,} · lookback "
+               f"cells inside whole-history "
                f"{res['containment_lookback_in_history']:.3f} (expect ~1; low = index "
                f"or node-id mismatch)", ""]
-        rules.append(("history_", prior_h))
-    for pre, pri in rules:
-        for arm0, score in (("stacked", P), ("flat", proba)):
+    for pre, rule in rules:
+        for arm0, _sc in arms:
             arm = pre + arm0
-            per = pv.node_aucs(score, y, pri, nodes)
+            m_all = {c: per_key[(arm0, "all", c)] for c in nodes
+                     if (arm0, "all", c) in per_key}
+            m_inc = {c: per_key[(arm0, rule, c)] for c in nodes
+                     if (arm0, rule, c) in per_key}
+            per = pv.node_aucs_from_metrics(m_all, m_inc, nodes)
             sm = pv.summarize(per)
             res[arm] = {"summary": sm, "per_node": per}
             if not sm.get("n_nodes"):
@@ -1403,6 +1447,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "every pass in driver memory. Same kernels, same answer up "
                         "to summation order; local needs the packed train split to "
                         "fit in the driver.")
+    p.add_argument("--readout-curves", type=int, default=50, metavar="N",
+                   help="ROC/PR curves (thinned to ~300 points) of N sampled nodes, "
+                        "flat and stacked arms, to readout_curves[_<tag>].json in the "
+                        "run dir (workspace-internal: per-node). 0 = none.")
     p.add_argument("--readout-theta-mass", type=float, default=None,
                    help="OVERRIDE: resolve the top-m width from a theta-MASS target "
                         "on the train frame (spec 2026-10-07 §D4; smallest m in "
@@ -1825,13 +1873,14 @@ def reconstruct_model(run_dir: Path, manifest: dict):
 def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targets,
                 min_count, out_dir=None, theta_topm=None, readout_max_iter=None,
                 readout_l2=None, mask_tag=None, stacked=False, parent_int=None,
-                theta_mass=None, C=None, warm_start=None, engine="spark"):
+                theta_mass=None, C=None, warm_start=None, engine="spark",
+                curve_sample=0):
     """Fit and score the pc_topics_lr heads off two already-TRANSFORMED splits.
 
     One path (cleanup 2026-10): the per-node L2 logistic heads are fit by the
     batched L-BFGS solve (`readout_arm`, on the `engine` backend), the test split's
-    lean (D, C) proba is collected for the metrics, and `stacked=True` adds the
-    closure-product block on that same proba. Taking DataFrames rather than a
+    split is scored into score blocks the metrics read where they live (ADR 0051
+    step 4), and `stacked=True` adds the closure-product block on those blocks. Taking DataFrames rather than a
     SparkSession + run dir keeps it callable on a local Spark fixture.
 
     `theta_topm` / `theta_mass` / `readout_max_iter` / `readout_l2` are None-means-
@@ -1848,7 +1897,9 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
     readout node space (`readout_dag.widen_labels_to_readout`); `parent_int` is then
     the readout DAG. `warm_start=(V, b_raw)` (`--readout-warm-from`) starts the solve
     from saved heads of the same problem. `engine` ("spark" | "local") is the
-    readout backend (`gated_pc_cloud.readout_arm`)."""
+    readout backend (`gated_pc_cloud.readout_arm`). `curve_sample` > 0 writes the
+    thinned ROC/PR curves of that many nodes (a seeded sample of 1..C-1; both arms
+    when stacked) to `readout_curves[_<tag>].json` in `out_dir`."""
     C = int(manifest["C"] if C is None else C)
     K = int(manifest.get("K") or 0)
     if not K:
@@ -1905,30 +1956,51 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
     _cprint(f"[readout]   readout l2={readout_l2:g} (from {_l2_src})", flush=True)
     _cprint(f"[readout]   readout max_iter={readout_max_iter} (from {_mi_src})",
           flush=True)
+    curve_nodes = ()
+    if int(curve_sample) > 0 and C > 1:
+        curve_nodes = tuple(sorted(int(c) for c in np.random.default_rng(0).choice(
+            np.arange(1, C), size=min(int(curve_sample), C - 1), replace=False)))
     dist = readout_arm(
         train_scored, test_scored, C, K, recall_targets=recall_targets,
         fdr_targets=fdr_targets, min_count=min_count, label=arm,
+        curve_columns=curve_nodes,
         theta_topm=theta_topm, max_iter=readout_max_iter, l2=readout_l2,
         warm_start=warm_start, engine=engine,
         # The solve is the multi-hour part: a death mid-solve costs at most
         # `checkpoint_every` iterations, because the next invocation finds the
         # checkpoint next to the manifest it already reads.
         checkpoint_dir=out_dir)
-    results["gated_pc"] = dist[0]
+    results["gated_pc"], blocks, _heads = dist
+    curves = {}
+    if curve_nodes:
+        curves["gated_pc"] = results["gated_pc"].pop("curves")
     _dump(results)
     print(format_arm_readout(f"{arm} (pc_topics_lr)", results["gated_pc"]),
           flush=True)
-    if stacked:
-        # Same collected proba the arm was scored on — one closure product, no
-        # second collect, no second solve.
-        _stk = stacked_readout(
-            dist[1], dist[2], dist[3], parent_int, C, recall_targets=recall_targets,
-            fdr_targets=fdr_targets, min_count=min_count,
-            prevalent=results["gated_pc"], doc_keys=dist[4], arm_label=arm)
-        results["gated_pc_stacked"] = _stk
-        _dump(results)
-        print(format_stacked_readout(_stk).replace("[driver]", "[readout]"),
-              flush=True)
+    try:
+        if stacked:
+            # The same score blocks the arm was scored on: the closure product is
+            # formed where they live, no second scoring pass, no second solve.
+            _stk = stacked_readout(
+                blocks, parent_int, C, recall_targets=recall_targets,
+                fdr_targets=fdr_targets, min_count=min_count,
+                prevalent=results["gated_pc"], arm_label=arm,
+                curve_columns=curve_nodes)
+            if curve_nodes:
+                curves["gated_pc_stacked"] = _stk["readout"].pop("curves")
+            results["gated_pc_stacked"] = _stk
+            _dump(results)
+            print(format_stacked_readout(_stk).replace("[driver]", "[readout]"),
+                  flush=True)
+    finally:
+        blocks.unpersist()
+    if curves and out_dir is not None:
+        cname = ("readout_curves.json" if not mask_tag
+                 else f"readout_curves_{mask_tag}.json")
+        (Path(out_dir) / cname).write_text(json.dumps(
+            {"nodes": list(curve_nodes), "arms": curves}, default=str))
+        _cprint(f"[readout]   ROC/PR curves of {len(curve_nodes)} sampled nodes -> "
+                f"{cname}", flush=True)
     return results
 
 
@@ -2365,7 +2437,8 @@ def main(argv=None) -> int:
                         mask_tag=_mtag, stacked=bool(args.readout_stacked),
                         parent_int=_parent_ro,
                         theta_mass=args.readout_theta_mass, C=_C_ro,
-                        warm_start=_warm, engine=args.readout_engine)
+                        warm_start=_warm, engine=args.readout_engine,
+                        curve_sample=args.readout_curves)
             _cprint(f"[readout]   arm results written to {run_dir / _rname}",
                   flush=True)
             if ((args.raw_baseline or args.readout_nodes or args.prev_history)

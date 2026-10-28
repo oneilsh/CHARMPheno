@@ -410,8 +410,22 @@ collected from a DataFrame with the executors packing and top-m truncating each
 row) and loops over it. The two agree up to summation order
 (`tests/test_readout_local.py`). The readout imports nothing from `models`: its
 inputs are a vector column, `label`/`labelMask` arrays and, for the closure
-product (`stacked.py`), a `{child: [parents]}` DAG. Metrics over the scored
-probabilities stay in the analysis layer until `eval/metrics` (ADR 0051 step 4).
+product (`stacked.py`), a `{child: [parents]}` DAG.
+
+**Evaluation without a collect** (ADR 0051 step 4). The scored test split stays
+where it lives as score blocks (`score_blocks`: one block per partition of float32
+probabilities with uint8 labels and masks, plus any per-row arrays a caller attaches,
+such as the closure product or a prior-evidence matrix). `readout/evaluate.py` turns
+blocks into the readout's results: ranking, per-node precision@recall /
+recall@FDR, pooled detection (rows pooled onto units such as persons by max),
+the marginal (unmasked) ranking, calibration by node group, and ROC/PR curves for a
+node sample. The metrics are exact and come from `spark_vi.eval.metrics`: a column's
+tally (distinct scores with positive and negative counts) determines AUC (ties at
+half credit), AP, precision@recall, recall@FDR, top-k screening and the curves,
+and tallies merge, so each partition tallies its column pieces, the shuffle merges
+them by node, and each node's metrics are computed where its tally lands. The driver
+receives one small record per node. The same functions run on an in-memory list of
+blocks (the local backend), and scikit-learn is the tests' oracle, not a dependency.
 
 **Output modes:**
 
@@ -639,8 +653,8 @@ underexercised after the HDP and OU. Candidates:
 
 ## Project Structure
 
-The layout as of ADR 0051 step 3 (steps 4-6 add `eval/metrics/` and the `DagHeads`
-shim; see the ADR).
+The layout as of ADR 0051 step 4 (steps 5-6 add the `DagHeads` shim and the
+renames; see the ADR).
 
 ```
 spark_vi/
@@ -664,8 +678,13 @@ spark_vi/
 │   ├── heads.py            # fit_heads: the backend-agnostic fit, checkpoints, heads npz
 │   ├── spark.py            # SparkReadoutData: a pass = one treeAggregate
 │   ├── local.py            # LocalReadoutData: a pass = numpy over rows held once
-│   └── stacked.py          # closure product over a label DAG
+│   ├── stacked.py          # closure product over a label DAG
+│   └── evaluate.py         # the readout's metrics from score blocks (no collect)
 ├── eval/topic/             # coherence (incl. gated NPMI), concentration
+├── eval/metrics/           # exact AUC / AP / P@R / R@FDR / top-k / curves / ECE
+│   ├── core.py             #   from mergeable score tallies (pure numpy)
+│   ├── spark.py, local.py  #   per-key metrics: merged in the shuffle / in memory
+│   └── report.py           #   skip rules and macros
 ├── mllib/topic/            # Estimator/Model shims: LDA, HDP, STM, DagGatedLDA
 ├── inference/              # concentration (α/η) optimization
 ├── io/export.py            # save_result / load_result

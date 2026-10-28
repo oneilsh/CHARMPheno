@@ -411,6 +411,9 @@ def collect_lean_proba(scored_df, C, V=None, b_raw=None, *, degenerate=None,
                        mask_col="labelMask", id_col="doc_key", theta_topm=0):
     """LEAN readout collect: `(proba (D,C) f32, y u8, mask u8, id_order)`.
 
+    Not on the readout's production path since ADR 0051 step 4 (the metrics read
+    `score_blocks` where they live); kept for inspecting and aligning small frames.
+
     The test split's per-node probabilities and labels at ~6 bytes per (row, node)
     cell (`lean_eval_kernel` / `densify_lean_blocks`): no features and no float64
     (D,C) arrays reach the driver. With `(V, b_raw)` the executors score the raw
@@ -495,9 +498,61 @@ class SparkReadoutData:
                             standardized_grad_from_raw=standardized_grad_from_raw,
                             depth=self.depth, topm=self.topm, **self.cols)
 
+    def score_blocks(self, V, b_raw, *, degenerate=None, const=None, extra_cols=()):
+        """The split scored by the heads as persisted `readout.evaluate.Blocks`, left
+        on the executors; `unpersist()` releases them and the heads broadcast."""
+        from spark_vi.readout.evaluate import Blocks
+
+        rdd, bcast = score_blocks(
+            self.df, self.C, V, b_raw, degenerate=degenerate, const=const,
+            score_col=self.cols["topic_col"], label_col=self.cols["label_col"],
+            mask_col=self.cols["mask_col"], id_col=self.id_col, theta_topm=self.topm,
+            extra_cols=extra_cols)
+        return Blocks(rdd, bcasts=[bcast]).persist()
+
     def lean_proba(self, V, b_raw, *, degenerate=None, const=None):
         return collect_lean_proba(
             self.df, self.C, V, b_raw, degenerate=degenerate, const=const,
             score_col=self.cols["topic_col"], label_col=self.cols["label_col"],
             mask_col=self.cols["mask_col"], id_col=self.id_col,
             theta_topm=self.topm)
+
+
+def score_blocks(scored_df, C, V, b_raw, *, degenerate=None, const=None,
+                 score_col="topicDistribution", label_col="label",
+                 mask_col="labelMask", id_col="doc_key", theta_topm=0, extra_cols=()):
+    """The test split scored by the heads as an RDD of SCORE BLOCKS, one per
+    partition, kept on the executors (`readout.evaluate`; ADR 0051 step 4):
+    `{"ids", "proba" (n,C) f32, "y" (n,C) u8, "mask" (n,C) u8}` plus one list per
+    `extra_cols` name (that column's per-row values). The same kernel as
+    `collect_lean_proba` (and the same fallback for degenerate heads), without the
+    collect. The broadcast of the heads is returned for the caller to destroy once
+    the blocks are no longer read: `(rdd, bcast)`."""
+    C = int(C)
+    deg = (np.zeros(C, dtype=bool) if degenerate is None
+           else np.asarray(degenerate, dtype=bool))
+    cst = np.zeros(C, dtype=np.float32) if const is None else np.asarray(
+        const, dtype=np.float32)
+    sc = scored_df.sparkSession.sparkContext
+    bcast = sc.broadcast((np.ascontiguousarray(V, dtype=np.float64),
+                          np.ascontiguousarray(b_raw, dtype=np.float64), deg, cst))
+    cols = (id_col, score_col, label_col, mask_col)
+    extra = tuple(extra_cols)
+
+    def _block(rows, _b=bcast, _C=C, _cols=cols, _m=int(theta_topm), _ex=extra):
+        rows = list(rows)
+        if not rows:
+            return []
+        V_, b_, d_, c_ = _b.value
+        blk = lean_eval_kernel(row_quads(rows, *_cols, topm=_m), _C, V_, b_)
+        proba, y, mask, ids = densify_lean_blocks([blk], _C)
+        if d_.any():
+            proba[:, d_] = c_[d_]
+        out = {"ids": np.asarray(ids, dtype=np.int64), "proba": proba, "y": y,
+               "mask": mask}
+        for name in _ex:
+            out[name] = [r[name] for r in rows]
+        return [out]
+
+    rdd = scored_df.select(*(cols + extra)).rdd.mapPartitions(_block)
+    return rdd, bcast

@@ -1,13 +1,12 @@
 """Per-label metric primitives for the post-hoc readout (id-agnostic, numpy in).
 
 What survives of the in-memory PC evaluation harness (ADR 0038, removed by ADR
-0050): the per-label scorer (`_score_label`: heldout ROC AUC, AP and top-k
-screening, with the SKIP_* reasons for a degenerate label), the macro-average
-(`_macro`), the per-label masked logistic baseline (`_lr_proba_per_label[_masked]`,
-the oracle `spark_vi.readout.solver` reproduces) and the masked bundle
-scorer (`_bundle_masked`). The readout drivers (`analysis/cloud/gated_pc_cloud.py`,
-`gated_pc_readout.py`) import them. This layer is allowed scikit-learn: it is
-measurement, not a model.
+0050): the per-label scorer (`_score_label`), the macro (`_macro`) and the masked
+bundle scorer (`_bundle_masked`), now thin wrappers over `spark_vi.eval.metrics`
+(ADR 0051 step 4: one exact definition shared with the Spark readout), and the
+per-label masked logistic baseline (`_lr_proba_per_label[_masked]`, the oracle
+`spark_vi.readout.solver` reproduces). This layer is allowed scikit-learn for the
+baselines: it is measurement, not a model.
 
 A test-set label column that is constant (all-0 or all-1) makes AUC undefined;
 such labels are skipped with a recorded reason and left out of the macro-average
@@ -19,63 +18,17 @@ from typing import Any
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import average_precision_score, roc_auc_score
 from sklearn.preprocessing import StandardScaler
 
+from spark_vi.eval.metrics import core as _mcore
+from spark_vi.eval.metrics import report as _mreport
 
-
-# The three — and only three — reasons a label column is dropped from the macro.
-# They are COUNTED SEPARATELY and never summed (incident-eval spec §8, standing
-# rule 5): "how many nodes had no negatives", "how many were too small to
-# disclose" and "how many carry a constant prediction column" are three different
-# facts about a run, and a single `n_labels_skipped` hides all three.
-SKIP_DEGENERATE = "degenerate_test_column"
-SKIP_SMALL = "small_test_column"
-SKIP_CONSTANT = "constant_prediction_column"
-SKIP_CODES = (SKIP_DEGENERATE, SKIP_SMALL, SKIP_CONSTANT)
-
-
-def _topk_screening_metrics(
-    y_true: np.ndarray, proba: np.ndarray, n_pos: int, n_neg: int,
-    topk_frac: float,
-) -> dict[str, Any]:
-    """Top-fraction screening metrics — the rare-disease-honest complement to AUC.
-
-    Rank the scored rows by predicted score and take the top ``topk_frac`` (e.g.
-    0.01 = top 1%). Then:
-
-      * ``prec_at_k``  — of that top slice, the fraction who are true positives;
-      * ``recall_at_k``— of ALL positives, the fraction captured in the slice;
-      * ``lift_at_k``  — ``prec_at_k`` / prevalence, i.e. how many times better
-        than the do-nothing baseline of flagging a random ``topk_frac`` (which,
-        like predicting the majority class, catches positives only at the base
-        rate). lift 1.0 == no better than chance; lift >> 1 == real enrichment.
-
-    AUC integrates over all thresholds and can look respectable while the actionable
-    top slice is barely above prevalence — for a screening / value-of-information
-    use only the top slice is ever acted on, so this is the operating point that
-    matters. ``k = ceil(topk_frac * n)`` (>=1), ties broken by a stable argsort.
-    Returns None fields where undefined (no rows, no positives). Never raises — a
-    computation failure degrades to None so the AUC path is never at risk.
-    """
-    out = {"topk_frac": float(topk_frac),
-           "prec_at_k": None, "recall_at_k": None, "lift_at_k": None}
-    try:
-        n = int(n_pos) + int(n_neg)
-        if n == 0 or n_pos == 0:
-            return out
-        k = min(n, max(1, int(np.ceil(float(topk_frac) * n))))
-        order = np.argsort(-proba, kind="stable")[:k]
-        tp = float((y_true[order] == 1).sum())
-        prevalence = float(n_pos) / float(n)
-        prec = tp / float(k)
-        out["prec_at_k"] = prec
-        out["recall_at_k"] = tp / float(n_pos)
-        out["lift_at_k"] = (prec / prevalence) if prevalence > 0 else None
-    except Exception:
-        return {"topk_frac": float(topk_frac),
-                "prec_at_k": None, "recall_at_k": None, "lift_at_k": None}
-    return out
+# The three — and only three — reasons a label column is dropped from the macro
+# (`spark_vi.eval.metrics.report`); counted separately, never summed.
+SKIP_DEGENERATE = _mreport.SKIP_DEGENERATE
+SKIP_SMALL = _mreport.SKIP_SMALL
+SKIP_CONSTANT = _mreport.SKIP_CONSTANT
+SKIP_CODES = _mreport.SKIP_CODES
 
 
 def _score_label(
@@ -86,128 +39,20 @@ def _score_label(
     skip_constant: bool = False,
     topk_frac: float = 0.01,
 ) -> dict[str, Any]:
-    """ROC AUC + AP for one label column, or a skip record if it is unscoreable.
-
-    AUC (and a meaningful AP) require both classes present in ``y_true``. A
-    constant heldout column (all-0 => no positives, all-1 => no negatives) is
-    reported as ``{"skipped": <reason>, "auc": None, "ap": None}`` so the caller
-    can drop it from the macro-average instead of raising.
-
-    ``min_count`` (default 0 = off) additionally masks *small* heldout columns:
-    when either class has fewer than ``min_count`` test cells, the AUC is too
-    noisy to trust (and, on All-of-Us, a count < 20 is not disclosable), so the
-    column is reported skipped and dropped from the macro — exactly as a
-    degenerate column is. The ``n_pos``/``n_neg`` are still recorded in the
-    result (callers suppress them at display time via ``format_results_table``'s
-    ``min_label_count`` handling); scoring simply refuses to compute an AUC.
-
-    ``skip_constant`` (incident-eval spec R2.1) adds the THIRD skip reason: a
-    column whose predictions are CONSTANT over the scored rows
-    (``np.ptp(proba) == 0``) carries no per-document information by construction,
-    and ``roc_auc_score`` returns exactly 0.5 for it — a number that looks like a
-    measurement and is not one. This is the ranking-axis twin of the guard
-    ``detection_readout`` has applied to its pooled max since exp 0104, and the
-    incident cohort is where it becomes load-bearing: a node whose TRAIN cell was
-    degenerate gets a constant fallback column, is all-positive under the
-    prevalent mask (hence already skipped as degenerate), but ACQUIRES negatives
-    under the incident mask when the prior carriers that made it all-positive
-    leave both classes. Without this guard those columns enter the macro at 0.5.
-
-    It defaults OFF because turning it on unconditionally would move every
-    recorded prevalent macro in the repo (exps 0104/0109/0110 are compared on
-    them); the incident arm passes ``skip_constant=True`` and reports the count
-    separately. Every skip record also carries a machine-readable ``skip_code``
-    from :data:`SKIP_CODES` beside the human sentence, which is what lets a caller
-    report three counts instead of one.
-    """
-    y_true = np.asarray(y_true, dtype=np.float64).ravel()
-    proba = np.asarray(proba, dtype=np.float64).ravel()
-    n_pos = int((y_true == 1).sum())
-    n_neg = int((y_true == 0).sum())
-    if n_pos == 0 or n_neg == 0:
-        which = "all-positive" if n_neg == 0 else "all-negative"
-        return {
-            "auc": None,
-            "ap": None,
-            "n_pos": n_pos,
-            "n_neg": n_neg,
-            "skipped": f"degenerate test column ({which}); AUC undefined",
-            "skip_code": SKIP_DEGENERATE,
-        }
-    if min_count > 0 and (n_pos < min_count or n_neg < min_count):
-        return {
-            "auc": None,
-            "ap": None,
-            "n_pos": n_pos,
-            "n_neg": n_neg,
-            "skipped": (
-                f"small test column (min class < {min_count}); "
-                "AUC unreliable / count not disclosable — masked"
-            ),
-            "skip_code": SKIP_SMALL,
-        }
-    # Checked AFTER the two count-based skips so the reasons stay disjoint and a
-    # single column is attributed to exactly one of them.
-    if skip_constant and proba.size and float(np.ptp(proba)) == 0.0:
-        return {
-            "auc": None,
-            "ap": None,
-            "n_pos": n_pos,
-            "n_neg": n_neg,
-            "skipped": (
-                "constant prediction column (no per-document information; "
-                "roc_auc_score would return exactly 0.5)"
-            ),
-            "skip_code": SKIP_CONSTANT,
-        }
-    return {
-        "auc": float(roc_auc_score(y_true, proba)),
-        "ap": float(average_precision_score(y_true, proba)),
-        "n_pos": n_pos,
-        "n_neg": n_neg,
-        "skipped": None,
-        "skip_code": None,
-        # Top-fraction screening metrics (additive; a scored column always carries
-        # them). Skip records omit them and readers use .get(...) -> None.
-        **_topk_screening_metrics(y_true, proba, n_pos, n_neg, topk_frac),
-    }
+    """ROC AUC, AP and top-k screening for one label column, or a skip record
+    (`spark_vi.eval.metrics.report.score_record`): degenerate (one class), small
+    (either class under ``min_count``; not disclosable on All of Us under 20) or,
+    with ``skip_constant``, a constant prediction (AUC exactly 0.5 by
+    construction). Top-k: k = ceil(topk_frac n), lift = precision@k / prevalence,
+    a tie at the cut counted at its mean positive rate."""
+    m = _mcore.node_metrics(_mcore.tally(proba, y_true), topk_frac=topk_frac)
+    return _mreport.score_record(m, min_count=min_count, skip_constant=skip_constant)
 
 
 def _macro(per_label: dict[int, dict[str, Any]]) -> dict[str, Any]:
-    """Macro-average AUC/AP over the labels that were scored (not skipped).
-
-    ``skipped_by_reason`` breaks the skip total down by :data:`SKIP_CODES`. It is
-    additive (the existing keys are untouched, so every recorded number and every
-    reader of them is unaffected) and it exists because a lumped
-    ``n_labels_skipped`` cannot answer the question R2.1 raises: how many columns
-    did the constant guard catch?"""
-    scored = [d for d in per_label.values() if d.get("skipped") is None]
-    aucs = [d["auc"] for d in scored]
-    aps = [d["ap"] for d in scored]
-    by_reason = {code: 0 for code in SKIP_CODES}
-    for d in per_label.values():
-        code = d.get("skip_code")
-        if code in by_reason:
-            by_reason[code] += 1
-    # Macro-average the top-fraction screening metrics over the same scored labels
-    # (a label with lift_at_k None — e.g. zero prevalence — drops out, like the
-    # AUC skips). topk_frac is uniform across labels; read it off any scorer.
-    lifts = [d["lift_at_k"] for d in scored if d.get("lift_at_k") is not None]
-    precs = [d["prec_at_k"] for d in scored if d.get("prec_at_k") is not None]
-    recs = [d["recall_at_k"] for d in scored if d.get("recall_at_k") is not None]
-    topk_frac = next((d.get("topk_frac") for d in scored
-                      if d.get("topk_frac") is not None), None)
-    return {
-        "auc": float(np.mean(aucs)) if aucs else None,
-        "ap": float(np.mean(aps)) if aps else None,
-        "n_labels_scored": len(aucs),
-        "n_labels_skipped": len(per_label) - len(aucs),
-        "skipped_by_reason": by_reason,
-        "topk_frac": topk_frac,
-        "lift_at_k": float(np.mean(lifts)) if lifts else None,
-        "prec_at_k": float(np.mean(precs)) if precs else None,
-        "recall_at_k": float(np.mean(recs)) if recs else None,
-    }
+    """Macro AUC / AP / top-k over the scored labels, with the skip counts by reason
+    (`spark_vi.eval.metrics.report.macro`)."""
+    return _mreport.macro(per_label)
 
 
 def _lr_proba_per_label(
