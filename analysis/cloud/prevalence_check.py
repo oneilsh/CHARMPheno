@@ -24,7 +24,8 @@ import numpy as np
 
 
 __all__ = ["auc", "framing3_sources", "vocab_to_nodes", "prior_matrix", "sidecar_nodes_to_readout",
-           "prior_from_sets", "containment", "node_aucs", "summarize", "EGRESS_FLOOR"]
+           "prior_from_sets", "containment", "node_aucs", "summarize", "EGRESS_FLOOR",
+           "prior_rows", "rows_from_node_lists", "node_aucs_from_metrics"]
 
 EGRESS_FLOOR = 20
 
@@ -156,25 +157,58 @@ def containment(a, b):
     return float((a & b).sum() / n) if n else float("nan")
 
 
-def node_aucs(score, y, prior, nodes, *, floor=EGRESS_FLOOR):
-    """Per node: AUC over all patients and with prior-evidence patients set aside, the
-    number of positives in each, and the prior share of positives / negatives. Nodes
-    with fewer than `floor` positives in either setting are skipped."""
+def prior_rows(code_lists, v2n, C):
+    """(n, C) bool for one block of rows: row i has prior evidence for node c when one
+    of its condition vocab indices `code_lists[i]` maps to c (`vocab_to_nodes`)."""
+    M = np.zeros((len(code_lists), int(C)), dtype=bool)
+    for i, codes in enumerate(code_lists):
+        for v in codes:
+            ns = v2n.get(int(v))
+            if ns:
+                M[i, ns] = True
+    return M
+
+
+def rows_from_node_lists(node_lists, C):
+    """(n, C) bool from per-row lists of readout nodes (None = no prior)."""
+    M = np.zeros((len(node_lists), int(C)), dtype=bool)
+    for i, ns in enumerate(node_lists):
+        if ns:
+            M[i, sorted(int(n) for n in ns)] = True
+    return M
+
+
+def node_aucs_from_metrics(m_all, m_inc, nodes, *, floor=EGRESS_FLOOR):
+    """Per node, from its column metrics over all patients (`m_all[c]`) and with the
+    prior-evidence patients set aside (`m_inc[c]`; `spark_vi.eval.metrics`): both
+    AUCs, the positives in each, and the prior share of positives / negatives (the
+    rows the second set drops). Nodes under `floor` positives in either setting, or
+    under `floor` incident negatives, are skipped."""
     out = {}
     for c in nodes:
-        yc = y[:, c].astype(bool)
-        pc = prior[:, c]
-        keep = ~pc
-        n_all, n_inc = int(yc.sum()), int((yc & keep).sum())
-        if n_all < floor or n_inc < floor or int((~yc & keep).sum()) < floor:
+        a, b = m_all.get(c), m_inc.get(c)
+        if a is None or b is None:
             continue
+        n_all, n_inc = int(a["n_pos"]), int(b["n_pos"])
+        if n_all < floor or n_inc < floor or int(b["n_neg"]) < floor:
+            continue
+        nn = int(a["n_neg"])
         out[int(c)] = {
-            "auc_all": auc(score[:, c], yc),
-            "auc_incident": auc(score[keep, c], yc[keep]),
+            "auc_all": a["auc"], "auc_incident": b["auc"],
             "n_pos_all": n_all, "n_pos_incident": n_inc,
-            "prior_share_pos": float(pc[yc].mean()),
-            "prior_share_neg": float(pc[~yc].mean())}
+            "prior_share_pos": (n_all - n_inc) / n_all,
+            "prior_share_neg": (nn - int(b["n_neg"])) / nn if nn else float("nan")}
     return out
+
+
+def node_aucs(score, y, prior, nodes, *, floor=EGRESS_FLOOR):
+    """`node_aucs_from_metrics` on dense (D, C) arrays (the in-memory backend)."""
+    from spark_vi.eval.metrics import local as ml
+    cols = [int(c) for c in nodes]
+    m_all = ml.per_key_metrics(ml.column_pieces(score, y, columns=cols))
+    m_inc = ml.per_key_metrics(ml.column_pieces(score, y, ~np.asarray(prior, bool),
+                                                columns=cols))
+    return node_aucs_from_metrics(m_all, m_inc, cols, floor=floor)
 
 
 def summarize(per_node):

@@ -333,6 +333,26 @@ full-batch fit made on this branch under-converged. Four runner tests that leane
 the damped step to keep a conjugate model from converging now use
 `CountingModel(early_stop=False)`.
 
+**ADR 0051 step 4 (eval/metrics; the collect-free readout), 2026-10-28 — done.**
+`spark_vi.eval.metrics`: every readout metric (AUC with ties at half credit, AP,
+precision@recall, recall@FDR, top-k screening, ROC/PR curves, binned ECE) is computed
+exactly from a column's TALLY (distinct scores with positive / negative counts), and
+tallies merge; the Spark backend tallies partition pieces, merges by node in the
+shuffle and evaluates each node where it lands. `spark_vi.readout.evaluate` builds the
+readout's results (ranking, PR, person-grain detection, the stacked block's marginal
+ranking and ECE by depth) from score blocks left on the executors
+(`readout.spark.score_blocks`); `readout_arm`, `stacked_readout` and the prevalence
+check (whose prior flags are now computed per block, the whole-history prior by a
+join) no longer collect a (D, C) matrix. `--readout-curves N` (default 50) writes the
+thinned ROC/PR curves of a seeded node sample to `readout_curves[_<tag>].json`.
+scikit-learn left the metric path (kept for the logistic baselines and as the tests'
+oracle; matches to 1e-12 on tied and untied columns). One definition changed: a
+top-k cut inside a tie now counts the tie at its mean positive rate (the old scorer
+broke ties by row order), so lift@k moves only where the cut splits a tie, such as a
+constant column. `prevalence_check.py` joined the readout's `--py-files` (its prior
+helpers run on the executors). The dense collect (`collect_lean_proba`) remains as a
+small-frame inspection utility, off the production path.
+
 ## Questions for the maintainer
 
 1. Antidepressant/MDD (Hughes) line, including its `cohorts.py` block and the

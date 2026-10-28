@@ -34,8 +34,8 @@ from disk_telemetry import start_disk_telemetry
 import doc_key as _dk
 from spark_vi.dag import children_and_depth
 from spark_vi.readout import (LocalReadoutData, SparkReadoutData, closure_matrix,
-                              collect_lean_proba, fit_heads, stacked_proba,
-                              write_heads)
+                              collect_lean_proba, fit_heads, write_heads)
+from spark_vi.readout import evaluate as _ev
 from spark_vi.readout.heads import READOUT_GTOL, READOUT_MAX_ITER
 
 
@@ -56,188 +56,60 @@ def _cprint(msg, **kw) -> None:
     print(highlight_line(msg), **kw)
 
 
-def precision_at_recall(y, p, targets):
-    """Max precision achievable at recall >= each target (the case-finding operating
-    point: 'if we must catch t% of true cases, how clean is the surfaced list?').
-    NaN for a degenerate (single-class) column. Pure numpy + sklearn."""
-    from sklearn.metrics import precision_recall_curve
-    y = np.asarray(y, float); p = np.asarray(p, float)
-    if len(np.unique(y)) < 2:
-        return {t: float("nan") for t in targets}
-    prec, rec, _ = precision_recall_curve(y, p)
-    out = {}
-    for t in targets:
-        m = rec >= t
-        out[float(t)] = float(np.max(prec[m])) if np.any(m) else float("nan")
-    return out
-
-
-def recall_at_fdr(y, p, targets):
-    """Max recall achievable while holding the false-discovery rate <= each q
-    (FDR = 1 - precision): 'at a q% junk tolerance, what fraction of true cases do
-    we recover?'. The FDR-controlled discovery view (insight 0064: ranking AUC !=
-    FDR-controlled discovery — report both). 0.0 if no threshold meets the bound."""
-    from sklearn.metrics import precision_recall_curve
-    y = np.asarray(y, float); p = np.asarray(p, float)
-    if len(np.unique(y)) < 2:
-        return {q: float("nan") for q in targets}
-    prec, rec, _ = precision_recall_curve(y, p)
-    out = {}
-    for q in targets:
-        m = prec >= (1.0 - q)
-        out[float(q)] = float(np.max(rec[m])) if np.any(m) else 0.0
-    return out
-
-
-def pr_readout(proba_DC, y_DC, mask_DC, C, recall_targets, fdr_targets, min_count=0):
-    """Per-node precision@recall + recall@FDR over observed test cells, macro'd over
-    the non-degenerate nodes. The case-finding complement to the ranking AUC/AP: it
-    answers 'at a usable operating point, how clean / how complete is each disease
-    node's surfaced cohort?'. Pure; feeds off the same per-node proba as pc_topics_lr."""
-    per = {}
-    for c in range(C):
-        rows = np.where(mask_DC[:, c].astype(bool))[0]
-        yc, pc = y_DC[rows, c], proba_DC[rows, c]
-        n_pos, n_neg = int(yc.sum()), int(len(yc) - yc.sum())
-        if n_pos < max(min_count, 1) or n_neg < max(min_count, 1):
-            per[c] = {"skipped": True, "n_pos": n_pos, "n_neg": n_neg}
-            continue
-        per[c] = {"skipped": False, "n_pos": n_pos, "n_neg": n_neg,
-                  "par": precision_at_recall(yc, pc, recall_targets),
-                  "raf": recall_at_fdr(yc, pc, fdr_targets)}
-    scored = [d for d in per.values() if not d["skipped"]]
-
-    def _mean(vals):
-        vals = [v for v in vals if v == v]                 # drop NaN
-        return float(np.mean(vals)) if vals else None
-
-    macro = {
-        "n_scored": len(scored),
-        "par": {float(t): _mean([d["par"][float(t)] for d in scored])
-                for t in recall_targets},
-        "raf": {float(q): _mean([d["raf"][float(q)] for d in scored])
-                for q in fdr_targets},
-    }
-    return {"per_node": per, "macro": macro}
+def _array_blocks(proba, y, mask=None, doc_keys=None):
+    """Dense test-split arrays as one in-memory score block (`readout.evaluate`):
+    the local backend of every readout metric, for tests and the sklearn oracle arm.
+    `doc_keys=None` numbers the rows."""
+    proba = np.asarray(proba, dtype=np.float32)
+    y = np.asarray(y).astype(np.uint8)
+    mask = np.ones_like(y) if mask is None else np.asarray(mask).astype(np.uint8)
+    ids = (np.arange(proba.shape[0], dtype=np.int64) if doc_keys is None
+           else np.asarray(doc_keys, dtype=np.int64))
+    return _ev.Blocks([{"ids": ids, "proba": proba, "y": y, "mask": mask}])
 
 
 def detection_readout(proba_DC, y_DC, recall_targets, *, doc_keys=None):
-    """Case-vs-background detection: pool a per-UNIT case SCORE = max over disease-node
-    probabilities and the foreground indicator = the root node's label (label[:,0]=1
-    iff the unit has any attested disease node). Reports AUC/AP + precision@recall on
-    that pooled signal — 'can we tell a rare-disease patient from a background one,
-    and how precise is the surfaced case list?'. Empty/degenerate -> skipped.
+    """Case-vs-background detection on dense arrays (`readout.evaluate.detection`):
+    the per-unit max over the informative disease nodes against the root's label.
 
-    `doc_keys` (R5.7, spec R5.7): pass the collect's int64 DOC KEY order
-    (`_doc_key_column` / `_collect_lean_proba`'s fourth
-    return) and the pool is DEDUPED TO PERSONS before scoring — `None` (the default)
-    keeps the exact pre-multi-doc per-document pool, byte-identical, which is what
-    every existing single-doc-per-person fixture and recorded run (0104/0109/0110)
-    is compared on. The semantic being preserved is the MAX-pooling rule this
-    function already applies across disease nodes for one document: extend it one
-    grain further and take the max over EVERY (document, node) cell a person owns,
-    with the foreground indicator OR'd (max) the same way — a person who attested
-    the disease in any one of their <=3 docs is a case. Anything else (e.g. a
-    doc-count-weighted average) would let a chronic 3-doc person cast 3 votes in a
-    detection rate that is supposed to answer one question per PERSON. On a
-    single-doc corpus `person_of(doc_key)` is a bijection onto the existing rows, so
-    passing `doc_keys` there is a no-op — proved by
-    `tests/scripts/test_multidoc_seams.py::test_detection_readout_single_doc_noop`.
+    `doc_keys` pools documents onto PERSONS (max over every (document, node) cell a
+    person owns, the foreground indicator OR'd the same way), so a person with three
+    documents is one case, not three votes (spec R5.7). `None` keeps the
+    per-document pool. Constant columns are excluded before the pooling: a constant
+    column in the max can pin it and the AUC at exactly 0.5 (exp 0104)."""
+    return _ev.detection(
+        _array_blocks(proba_DC, y_DC, doc_keys=doc_keys), recall_targets,
+        unit_divisor=None if doc_keys is None else _dk.DOC_KEY_RADIX)
 
-    CONSTANT COLUMNS ARE EXCLUDED FROM THE POOL — an EVAL bug fix, always on.
-    A node whose observed train cell is single-class gets a CONSTANT fallback
-    column from the readout head (763 of them at whole-Mondo, exp 0104). A
-    constant column contributes the same value to every document's max, so as soon
-    as one of them sits above the informative columns the per-doc max is constant
-    too and the AUC pins at exactly 0.5000 — which is what every 0104 readout
-    printed. The column carries no per-document information by construction, so
-    dropping it cannot lose signal; it can only stop one from being masked. Note
-    this touches the DETECTION pool only: the ranking and per-node metrics score
-    each column against its own labels and are deliberately left untouched (a
-    degenerate node is already reported there as skipped/degenerate). The
-    constant-column filter runs BEFORE the person dedup — "is this node constant
-    over the test split" is a corpus/fit question, unaffected by how many
-    documents any one person contributes."""
-    from sklearn.metrics import average_precision_score, roc_auc_score
-    if proba_DC.shape[0] == 0 or proba_DC.shape[1] < 2:
-        return {"skipped": "empty or single-node"}
-    y = np.asarray(y_DC[:, 0], float)                       # root = any-disease
-    disease = proba_DC[:, 1:]                               # node 0 is the root
-    informative = np.ptp(disease, axis=0) > 0                # non-constant columns
-    n_const = int(disease.shape[1] - informative.sum())
-    if not informative.any():
-        return {"skipped": "all disease-node scores are constant",
-                "n_constant_nodes": n_const}
-    score = disease[:, informative].max(axis=1)             # strongest disease node
-    n_units = int(len(score))
-    if doc_keys is not None:
-        persons = _dk.person_of(np.asarray(doc_keys))
-        # max-pool BOTH arrays onto the person grain in one pass (np.maximum.at
-        # is the unbuffered scatter-max sklearn/numpy ship for exactly this —
-        # ordinary fancy-index assignment would silently keep only the LAST
-        # document written per person instead of the max over all of them).
-        uniq_p, inv = np.unique(persons, return_inverse=True)
-        p_score = np.full(uniq_p.shape[0], -np.inf)
-        p_y = np.zeros(uniq_p.shape[0])
-        np.maximum.at(p_score, inv, score)
-        np.maximum.at(p_y, inv, y)
-        score, y = p_score, p_y
-        n_units = int(uniq_p.shape[0])
-    if len(np.unique(y)) < 2:
-        return {"skipped": "degenerate foreground indicator",
-                "n_constant_nodes": n_const}
-    return {"skipped": None, "prevalence": float(y.mean()),
-            "auc": float(roc_auc_score(y, score)),
-            "ap": float(average_precision_score(y, score)),
-            "n_constant_nodes": n_const,
-            "grain": "person" if doc_keys is not None else "document",
-            "n_units": n_units,
-            "par": precision_at_recall(y, score, recall_targets)}
+
+def readout_from_blocks(blocks, C, *, recall_targets, fdr_targets, min_count=0,
+                        skip_constant=False, person_pool=True, score="proba",
+                        curve_columns=()):
+    """The readout block from score blocks (Spark or local; `readout.evaluate`):
+    ranking (AUC/AP + top-k screening over each node's masked rows), per-node
+    precision@recall / recall@FDR, case-vs-background detection (person grain by
+    default: the blocks' ids are doc keys) and the per-node (auc, n_pos) the
+    headline splits by rarity.
+
+    `skip_constant` (R2.1) drops a node whose scores are constant over its scored
+    rows from the ranking macro (its AUC is exactly 0.5 by construction). Off for
+    the prevalent arms, on for the incident arm. `curve_columns` adds `curves`, the
+    thinned ROC/PR points of those nodes (ADR 0051: curves for a node sample)."""
+    return _ev.readout_metrics(
+        blocks, C, recall_targets=recall_targets, fdr_targets=fdr_targets,
+        min_count=min_count, skip_constant=skip_constant, score=score,
+        unit_divisor=_dk.DOC_KEY_RADIX if person_pool else None,
+        curve_columns=curve_columns)
 
 
 def readout_from_proba(proba, y_te, m_te, C, *, recall_targets, fdr_targets,
                        min_count=0, skip_constant=False, doc_keys=None):
-    """Full readout from an already-computed (N_te, C) per-node probability:
-    ranking (AUC/AP) + per-node precision@recall / recall@FDR + case-vs-background
-    detection. Shared by the pc_topics_lr arm (proba = post-hoc LR on theta) and the
-    co-fit head arm (proba = sigmoid(w_CK·theta)).
-
-    `skip_constant` (R2.1) forwards the RANKING axis's constant-column guard to
-    `_score_label`. It defaults OFF so every prevalent arm reproduces its recorded
-    numbers byte for byte (0104/0109/0110 are compared on them), and the INCIDENT
-    arm turns it on — that is the arm where a train-degenerate node's constant
-    column stops being all-positive and starts scoring an exact 0.5.
-
-    `doc_keys` (R5.7) forwards ONLY to `detection_readout`. The ranking and
-    per-node PR axes are per-NODE metrics (spec R5.7 is silent on them; only the
-    detection pool's collapse of ALL nodes into one max-over-everything score
-    turns a multi-doc person's several rows into several votes toward the SAME
-    pooled AUC point). `None` (the default) is the pre-multi-doc per-document
-    pool, byte-identical to every recorded run."""
-    from analysis.pc.evaluate import _bundle_masked
-    ranking = _bundle_masked(proba, y_te, m_te, C, min_count,
-                             skip_constant=skip_constant)
-    pr = pr_readout(proba, y_te, m_te, C, recall_targets, fdr_targets, min_count)
-    det = detection_readout(proba, y_te, recall_targets, doc_keys=doc_keys)
-    # Per-node (auc, n_pos) kept alongside the macro so the HEADLINE can split the
-    # gated_pc-vs-unsup delta by node RARITY (insight 0066: PC's promised edge is the
-    # hidden low-mass tail; a flat macro can hide it). auc from the ranking per_label
-    # (skipped=None == scored), n_pos (test positives) from the PR per_node.
-    per_node = {}
-    for c in range(C):
-        rl = ranking["per_label"].get(c, {})
-        if rl.get("skipped") is None and rl.get("auc") is not None:
-            per_node[c] = {"auc": float(rl["auc"]),
-                           "ap": (None if rl.get("ap") is None else float(rl["ap"])),
-                           "n_pos": int(pr["per_node"].get(c, {}).get("n_pos", 0)),
-                           # top-fraction screening metrics (evaluate._score_label),
-                           # so the headline can rank nodes by lift, not just AUC.
-                           "prec_at_k": rl.get("prec_at_k"),
-                           "recall_at_k": rl.get("recall_at_k"),
-                           "lift_at_k": rl.get("lift_at_k"),
-                           "topk_frac": rl.get("topk_frac")}
-    return {"ranking": ranking["macro"], "pr": pr["macro"], "detection": det,
-            "per_node": per_node}
+    """`readout_from_blocks` on dense arrays. `doc_keys` pools detection onto
+    persons; `None` keeps the per-document pool."""
+    return readout_from_blocks(
+        _array_blocks(proba, y_te, m_te, doc_keys), C, recall_targets=recall_targets,
+        fdr_targets=fdr_targets, min_count=min_count, skip_constant=skip_constant,
+        person_pool=doc_keys is not None)
 
 
 # --------------------------------------------------------------------------- #
@@ -293,96 +165,94 @@ def _paired_per_node(base_per_node, new_per_node, depth):
             "by_depth": {str(k): _summ(v) for k, v in sorted(by_depth.items())}}
 
 
-def _marginal_ece_by_depth(proba, stacked, y, scored_nodes, depth, n_bins=10):
+def _marginal_ece_by_depth(blocks, scored_nodes, depth, n_bins=10):
     """Pooled MARGINAL calibration (ECE over ALL test docs, not the parent cohort)
     per depth, for both arms. The flat head's σ(z_c) is a P(c | parent) and is
     expected to be badly calibrated as a marginal (it never saw the background);
     the product is the arm that claims to be a marginal P(c | d). Depth 0 is the
-    root head itself — the detection head's own calibration."""
+    root head itself — the detection head's own calibration. `blocks` carry the
+    flat "proba" and the "stacked" product."""
     groups = {}
     for c in scored_nodes:
         groups.setdefault(int(depth.get(c) if depth.get(c) is not None else -1),
                           []).append(int(c))
-    out = {}
-    for d, cs in sorted(groups.items()):
-        yy = np.asarray(y[:, cs], dtype=np.float64).ravel()
-        out[str(d)] = {"n_nodes": len(cs),
-                       "flat": _ece(yy, np.asarray(proba[:, cs], dtype=np.float64)
-                                    .ravel(), n_bins),
-                       "stacked": _ece(yy, np.asarray(stacked[:, cs],
-                                                      dtype=np.float64).ravel(),
-                                       n_bins)}
-    return out
+    ece = _ev.calibration_by_group(blocks, groups, scores=("proba", "stacked"),
+                                   n_bins=n_bins)
+    return {str(d): {"n_nodes": len(cs), "flat": ece.get(("proba", d)),
+                     "stacked": ece.get(("stacked", d))}
+            for d, cs in sorted(groups.items())}
 
 
-def stacked_readout(proba, y_te, m_te, parent_int, C, *, recall_targets,
-                    fdr_targets, min_count=0, prevalent=None, doc_keys=None,
-                    arm_label="gated_pc"):
-    """The `gated_pc_stacked` results block: `readout_from_proba` on the closure
-    product of the SAME per-doc probabilities the prevalent arm scored, plus the
-    reads that make the product interpretable next to it:
+def stacked_readout(blocks, parent_int, C, *, recall_targets, fdr_targets,
+                    min_count=0, prevalent=None, arm_label="gated_pc",
+                    person_pool=True, curve_columns=()):
+    """The `gated_pc_stacked` results block: the readout of the closure product of
+    the SAME per-doc probabilities the prevalent arm scored, plus the reads that
+    make the product interpretable next to it:
 
       * `readout` — ranking / PR / detection / per_node on `P_stack`, the same
         mask and the same person-grain detection pool as the prevalent arm;
-      * `root_only_detection` — `detection_readout` on the root head alone
-        (column 0, which under the stacked arm is a case-vs-background logistic):
-        if the stacked detection does not beat this, the product adds nothing a
-        single detection head would not;
+      * `root_only_detection` — detection on the root head alone (column 0, which
+        under the stacked arm is a case-vs-background logistic): if the stacked
+        detection does not beat this, the product adds nothing a single detection
+        head would not;
+      * `marginal_ranking` — HSLDA's own read, per-node AUC over ALL test docs;
       * `paired_vs_prevalent` — per-node AUC delta (stacked − flat) over the
         shared scored nodes, pooled and by depth (counts of nodes only);
       * `marginal_ece_by_depth` — pooled marginal ECE of both arms by depth.
 
-    Pure numpy + sklearn, off-Spark testable. `proba` is the lean collect's
-    (D, C) float32; `parent_int` the bundle's engine-id parent map."""
+    `blocks` are the flat arm's score blocks (Spark or local); the product is
+    formed where each block lives, so nothing (D, C)-shaped reaches the driver.
+    `parent_int` is the bundle's engine-id parent map."""
     C = int(C)
     M = closure_matrix(parent_int, C)
-    P = stacked_proba(proba, M)
-    readout = readout_from_proba(
-        P, y_te, m_te, C, recall_targets=recall_targets, fdr_targets=fdr_targets,
-        min_count=min_count, doc_keys=doc_keys)
-    root_col = np.asarray(proba[:, 0], dtype=np.float32)
-    root_det = detection_readout(np.stack([root_col, root_col], axis=1), y_te,
-                                 recall_targets, doc_keys=doc_keys)
-    _, depth = children_and_depth(parent_int, C)
-    n_terms = M.sum(axis=1)
-    # HSLDA's own read — per-node AUC over ALL test docs (y_c vs everyone, no
-    # cohort): the de-novo case-finding question the within-cohort ranking never
-    # asks. The flat head is a P(c | parent) and is expected to collapse here (it
-    # never saw the background); the product is the arm that claims a marginal.
-    # Same scorer, all-ones mask, both arms, paired. Read next to the pooled
-    # detection, which on a branch with ONE degenerate depth-1 node is exactly
-    # the root head (P_stack(depth-1) = sigma(z_0) * 1) and says nothing per node.
-    from analysis.pc.evaluate import _bundle_masked
-    ones = np.ones_like(np.asarray(y_te), dtype=np.uint8)
-    marg_flat = _bundle_masked(proba, y_te, ones, C, min_count)
-    marg_stk = _bundle_masked(P, y_te, ones, C, min_count)
+    sb = _ev.with_stacked(blocks, M).persist()
+    unit = _dk.DOC_KEY_RADIX if person_pool else None
+    try:
+        readout = _ev.readout_metrics(
+            sb, C, recall_targets=recall_targets, fdr_targets=fdr_targets,
+            min_count=min_count, score="stacked", unit_divisor=unit,
+            curve_columns=curve_columns)
+        root_det = _ev.detection(sb, recall_targets, columns="root",
+                                 unit_divisor=unit)
+        _, depth = children_and_depth(parent_int, C)
+        n_terms = M.sum(axis=1)
+        # HSLDA's own read — per-node AUC over ALL test docs (y_c vs everyone, no
+        # cohort): the de-novo case-finding question the within-cohort ranking never
+        # asks. The flat head is a P(c | parent) and is expected to collapse here (it
+        # never saw the background); the product is the arm that claims a marginal.
+        # Same scorer and min_count, no mask, both arms, paired.
 
-    def _scored(bm):
-        return {c: r for c, r in bm["per_label"].items()
-                if r.get("skipped") is None and r.get("auc") is not None}
-
-    marginal = {
-        "definition": "per-node AUC of P(c|d) over ALL test docs (all-ones mask: "
-                      "y_c vs everyone), the de-novo read; same scorer and "
-                      "min_count as the within-cohort ranking",
-        "flat": {"macro": marg_flat["macro"], "per_node": _scored(marg_flat)},
-        "stacked": {"macro": marg_stk["macro"], "per_node": _scored(marg_stk)},
-    }
-    marginal["paired"] = _paired_per_node(marginal["flat"]["per_node"],
-                                          marginal["stacked"]["per_node"], depth)
-    block = {
-        "naming": STACKED_NAMING,
-        "definition": "log P_stack(c|d) = sum_{a in closure(c)} log sigma(z_a(d)); "
-                      "closure = c + all ancestors incl. root, each once",
-        "arm_label": arm_label,
-        "min_count": int(min_count),
-        "closure_terms": {"mean": float(n_terms.mean()), "max": int(n_terms.max())},
-        "readout": readout,
-        "marginal_ranking": marginal,
-        "root_only_detection": root_det,
-        "marginal_ece_by_depth": _marginal_ece_by_depth(
-            proba, P, y_te, sorted(set(readout["per_node"]) | {0}), depth),
-    }
+        def _marg(score):
+            per = _ev.column_metrics(sb, score=score, mask=None)
+            rk, _pr = _ev.ranking_and_pr(per, C, recall_targets=(), fdr_targets=(),
+                                         min_count=min_count)
+            return {"macro": rk["macro"],
+                    "per_node": {c: r for c, r in rk["per_label"].items()
+                                 if r.get("skipped") is None
+                                 and r.get("auc") is not None}}
+        marginal = {
+            "definition": "per-node AUC of P(c|d) over ALL test docs (no mask: "
+                          "y_c vs everyone), the de-novo read; same scorer and "
+                          "min_count as the within-cohort ranking",
+            "flat": _marg("proba"), "stacked": _marg("stacked")}
+        marginal["paired"] = _paired_per_node(marginal["flat"]["per_node"],
+                                              marginal["stacked"]["per_node"], depth)
+        block = {
+            "naming": STACKED_NAMING,
+            "definition": "log P_stack(c|d) = sum_{a in closure(c)} log sigma(z_a(d)); "
+                          "closure = c + all ancestors incl. root, each once",
+            "arm_label": arm_label,
+            "min_count": int(min_count),
+            "closure_terms": {"mean": float(n_terms.mean()), "max": int(n_terms.max())},
+            "readout": readout,
+            "marginal_ranking": marginal,
+            "root_only_detection": root_det,
+            "marginal_ece_by_depth": _marginal_ece_by_depth(
+                sb, sorted(set(readout["per_node"]) | {0}), depth),
+        }
+    finally:
+        sb.unpersist()
     if prevalent is not None:
         block["paired_vs_prevalent"] = _paired_per_node(
             prevalent["per_node"], readout["per_node"], depth)
@@ -707,10 +577,11 @@ def readout_arm(train_scored, test_scored, C, K, *, recall_targets, fdr_targets,
                 checkpoint_dir=None, checkpoint_every=10,
                 topic_col="topicDistribution", label_col="label",
                 mask_col="labelMask", id_col="person_id", feature_mask=None,
-                engine="spark"):
+                engine="spark", curve_columns=()):
     """Fit the per-node heads on the train split, score the test split, macro the
-    metrics: `(readout, proba_te (D_te,C) f32, y_te u8, m_te u8, doc_key_order,
-    (V, b_raw))`.
+    metrics: `(readout, test score blocks, (V, b_raw))`. The blocks
+    (`readout.evaluate.Blocks`, persisted on Spark) feed further readouts of the same
+    scores, such as the stacked arm; the caller `unpersist()`s them.
 
     `engine` picks the readout backend (ADR 0051 §2): "spark" runs every L-BFGS pass
     as a treeAggregate over the scored frame (`SparkReadoutData`); "local" collects
@@ -751,12 +622,13 @@ def readout_arm(train_scored, test_scored, C, K, *, recall_targets, fdr_targets,
     if checkpoint_dir is not None:
         write_heads(checkpoint_dir, label, V, b_raw, const, degenerate, C, K,
                     theta_topm, W_std=info.get("W_std"))
-    proba, y_te, m_te, doc_keys = data_te.lean_proba(V, b_raw, degenerate=degenerate,
-                                                     const=const)
-    readout = readout_from_proba(proba, y_te, m_te, C, recall_targets=recall_targets,
-                                 fdr_targets=fdr_targets, min_count=min_count,
-                                 doc_keys=doc_keys)
-    return readout, proba, y_te, m_te, doc_keys, (V, b_raw)
+    # ADR 0051 step 4: the test split is scored where it lives (score blocks) and
+    # the metrics merge per-node tallies; no (D, C) matrix reaches the driver.
+    blocks = data_te.score_blocks(V, b_raw, degenerate=degenerate, const=const)
+    readout = readout_from_blocks(blocks, C, recall_targets=recall_targets,
+                                  fdr_targets=fdr_targets, min_count=min_count,
+                                  curve_columns=curve_columns)
+    return readout, blocks, (V, b_raw)
 
 
 def per_node_domain_mass(lam_dict, lay, domain_names):

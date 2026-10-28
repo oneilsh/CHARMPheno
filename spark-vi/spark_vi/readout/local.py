@@ -161,6 +161,15 @@ class LocalReadoutData:
         return LocalStatsFn(self, mu, sd, fold_standardization=fold_standardization,
                             standardized_grad_from_raw=standardized_grad_from_raw)
 
+    def score_blocks(self, V, b_raw, *, degenerate=None, const=None):
+        """The held rows scored, as one in-memory `readout.evaluate.Blocks` block."""
+        from spark_vi.readout.evaluate import Blocks
+
+        proba, y, mask, ids = self.lean_proba(V, b_raw, degenerate=degenerate,
+                                              const=const)
+        return Blocks([{"ids": np.asarray(ids, dtype=np.int64), "proba": proba,
+                        "y": y, "mask": mask}])
+
     def lean_proba(self, V, b_raw, *, degenerate=None, const=None):
         """Score the held rows: `(proba (D,C) f32, y u8, mask u8, ids)`, the same
         arrays `readout.spark.collect_lean_proba` returns."""

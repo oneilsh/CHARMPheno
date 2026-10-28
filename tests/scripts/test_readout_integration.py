@@ -143,6 +143,17 @@ def _make_df(spark, Pi, y, mask, offset=0, parts=3, proba=None, preindex=None):
     return spark.createDataFrame(rows, StructType(fields)).repartition(parts)
 
 
+def _dense(blocks):
+    """The test split's score blocks as dense arrays in doc-key order (small frames
+    only: the readout itself never does this)."""
+    bl = blocks.blocks.collect() if blocks.is_rdd else blocks.blocks
+    ids = np.concatenate([b["ids"] for b in bl])
+    o = np.argsort(ids, kind="stable")
+    return (np.concatenate([b["proba"] for b in bl])[o],
+            np.concatenate([b["y"] for b in bl])[o],
+            np.concatenate([b["mask"] for b in bl])[o], ids[o])
+
+
 @pytest.mark.slow
 class TestDistributedArmMatchesDriverArm:
     """`readout_arm` (both engines) vs `score_arm` on identical frozen θ."""
@@ -165,8 +176,8 @@ class TestDistributedArmMatchesDriverArm:
         """The lean collect is the memory claim: float32 proba + uint8 y/mask, and
         it must reproduce the label/mask arrays the driver collect returns."""
         (_, y_tr, _, _, y_te, m_te), dist, _ = both
-        _, proba, y_got, m_got, persons = dist[:5]
-        V, b_raw = dist[5]                        # the fit params, for warm starts
+        proba, y_got, m_got, persons = _dense(dist[1])
+        V, b_raw = dist[2]                        # the fit params, for warm starts
         assert V.shape == (C, K) and b_raw.shape == (C,)
         assert proba.dtype == np.float32
         assert y_got.dtype == np.uint8 and m_got.dtype == np.uint8
@@ -181,7 +192,7 @@ class TestDistributedArmMatchesDriverArm:
         rows are exactly the case `_lr_proba_per_label_masked` refuses to fit; both
         paths must emit the lone class value, bit for bit."""
         _, dist, _ = both
-        _, proba, _, _, _ = dist[:5]
+        proba = _dense(dist[1])[0]
         assert np.all(proba[:, 0] == np.float32(1.0))
         assert np.all(proba[:, 1] == np.float32(0.0))
 
@@ -319,9 +330,10 @@ def test_theta_topm_equal_to_K_is_the_identity_truncation(spark):
     full = gpc.readout_arm(train_df, test_df, C, K, label="full", **kw)
     trunc = gpc.readout_arm(train_df, test_df, C, K, label="topm=K",
                                       theta_topm=K, **kw)
-    assert np.array_equal(trunc[1], full[1]), "identical proba, bit for bit"
-    assert np.allclose(trunc[5][0], full[5][0], atol=1e-12, rtol=0)
-    assert np.allclose(trunc[5][1], full[5][1], atol=1e-12, rtol=0)
+    assert np.array_equal(_dense(trunc[1])[0], _dense(full[1])[0]), \
+        "identical proba, bit for bit"
+    assert np.allclose(trunc[2][0], full[2][0], atol=1e-12, rtol=0)
+    assert np.allclose(trunc[2][1], full[2][1], atol=1e-12, rtol=0)
     for c in full[0]["per_node"]:
         assert trunc[0]["per_node"][c]["auc"] == full[0]["per_node"][c]["auc"], c
     assert trunc[0]["ranking"]["auc"] == full[0]["ranking"]["auc"]
@@ -757,8 +769,15 @@ def test_re_readout_stacked_arm_adds_the_block_and_leaves_the_other_heads_alone(
                            fdr_targets=FDR_TARGETS, min_count=0, out_dir=tmp_path)
     stk = gpr.run_readout(train_df, test_df, manifest, recall_targets=RECALL_TARGETS,
                           fdr_targets=FDR_TARGETS, min_count=0, out_dir=tmp_path,
-                          mask_tag="stacked", stacked=True, parent_int=PARENT_INT)
+                          mask_tag="stacked", stacked=True, parent_int=PARENT_INT,
+                          curve_sample=3)
     assert set(base) == {"gated_pc"}
+    # ADR 0051: curves for a node sample, both arms, in their own file.
+    cv = json.loads((tmp_path / "readout_curves_stacked.json").read_text())
+    assert len(cv["nodes"]) == 3 and set(cv["arms"]) == {"gated_pc", "gated_pc_stacked"}
+    some = [v for v in cv["arms"]["gated_pc_stacked"].values() if v]
+    assert some and all(v["tpr"][-1] == 1.0 for v in some)
+    assert "curves" not in stk["gated_pc"]
     assert set(stk) == {"gated_pc", "gated_pc_stacked"}
     blk = stk["gated_pc_stacked"]
     assert blk["naming"] == gpc.STACKED_NAMING

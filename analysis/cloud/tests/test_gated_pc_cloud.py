@@ -32,19 +32,21 @@ def test_ece_perfectly_calibrated_is_zero_and_miscalibrated_is_positive():
 
 
 def test_precision_at_recall_and_recall_at_fdr():
-    from gated_pc_cloud import precision_at_recall, recall_at_fdr
+    """The per-node PR block the readout reports (`spark_vi.eval.metrics`, whose own
+    tests hold scikit-learn as the oracle)."""
+    import math
+    from spark_vi.eval.metrics import core
+
+    def _m(y, p, rt=(), fq=()):
+        return core.node_metrics(core.tally(p, y), recall_targets=rt, fdr_targets=fq)
     # perfectly separable: at any recall, precision 1.0; at any FDR, recall 1.0.
     y = [0, 0, 1, 1]
-    p = [0.1, 0.2, 0.8, 0.9]
-    assert precision_at_recall(y, p, [0.5, 1.0]) == {0.5: 1.0, 1.0: 1.0}
-    assert recall_at_fdr(y, p, [0.0, 0.5]) == {0.0: 1.0, 0.5: 1.0}
+    m = _m(y, [0.1, 0.2, 0.8, 0.9], (0.5, 1.0), (0.0, 0.5))
+    assert m["par"] == {0.5: 1.0, 1.0: 1.0} and m["raf"] == {0.0: 1.0, 0.5: 1.0}
     # one hard positive ranked below a negative: recall 1.0 now costs some precision.
-    p2 = [0.1, 0.85, 0.8, 0.9]        # neg[1]=0.85 outranks pos[2]=0.8
-    par = precision_at_recall(y, p2, [1.0])
-    assert par[1.0] < 1.0             # to catch both positives we admit the negative
+    assert _m(y, [0.1, 0.85, 0.8, 0.9], (1.0,))["par"][1.0] < 1.0
     # degenerate single-class column -> NaN, not an exception.
-    import math
-    assert math.isnan(precision_at_recall([1, 1, 1], [0.2, 0.5, 0.9], [0.5])[0.5])
+    assert math.isnan(_m([1, 1, 1], [0.2, 0.5, 0.9], (0.5,))["par"][0.5])
 
 
 def test_score_arm_separable_and_detection_shape():
