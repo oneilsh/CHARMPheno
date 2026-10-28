@@ -611,12 +611,20 @@ def _workup_setup(spark, run_dir, ctx, sidecar_uri=None):
 
 
 def _workup_block(dfm, ctx, wk_ctx, tr, te, ytr, members, excl, halves, truths,
-                  q0_by_engine, pri, *, drop_done=False):
+                  q0_by_engine, pri, *, drop_done=False, new_only=True,
+                  length_edges=()):
     """Exp 0167 for one group: answers, candidates, likelihoods, then per engine the
     temper on each cross-fit fitting half and R1-R4 on its evaluation half (all
     patients once), plus coverage and the group's top facts. None when too few
-    windows exist to score."""
+    windows exist to score.
+
+    `new_only` (run 2, default): a fact already in the patient's pre-index record is
+    not a candidate for that patient, and the likelihoods count only the training
+    patients for whom it was new. `length_edges` (days, e.g. (30, 120)): likelihoods
+    per window-length bin, shrunk to the pooled one, each patient read with its own
+    window's bin."""
     tok2idx = wk_ctx["tok2idx"]
+    md = wk_ctx["meas_dom"]
     excl_tok = {d: {ctx.inv_maps[d][int(i)] for i in ex if int(i) in ctx.inv_maps[d]}
                 for d, ex in excl.items()}
 
@@ -624,28 +632,50 @@ def _workup_block(dfm, ctx, wk_ctx, tr, te, ytr, members, excl, halves, truths,
         if extra is None or extra.get("__wdays") is None:
             return None
         return dfm.workup_answers([(r["d"], r["t"]) for r in (extra["__wk"] or [])],
-                                  meas_dom=wk_ctx["meas_dom"],
-                                  vocab_sets=wk_ctx["vocab_sets"], excl=excl_tok,
-                                  drop_done=drop_done)
+                                  meas_dom=md, vocab_sets=wk_ctx["vocab_sets"],
+                                  excl=excl_tok, drop_done=drop_done)
+
+    def _known(row):
+        return (dfm.known_facts(row[1], ctx.inv_maps, meas_dom=md) if new_only
+                else set())
     tr_ans = [_ans(r[5]) for r in tr]
     keep_tr = [i for i, a in enumerate(tr_ans) if a is not None]
     te_ans = [_ans(r[5]) for r in te]
     keep_te = [i for i, a in enumerate(te_ans) if a is not None]
-    out = {"n_train_windows": len(keep_tr), "n_test_windows": len(keep_te)}
+    out = {"n_train_windows": len(keep_tr), "n_test_windows": len(keep_te),
+           "new_only": bool(new_only), "length_edges": list(length_edges)}
     if len(keep_te) < dfm.EGRESS_FLOOR or len(keep_tr) < dfm.EGRESS_FLOOR:
-        out["skipped"] = "fewer than 20 train or test patients with a workup window"
+        out["skipped"] = "fewer than 20 train or test patients with a window"
         return out
+    tr_a = [tr_ans[i] for i in keep_tr]
+    tr_k = [_known(tr[i]) for i in keep_tr]
     Y = dfm.label_matrix([ytr[i] for i in keep_tr], len(members))
-    cands = dfm.workup_candidates([tr_ans[i] for i in keep_tr])
+    cands = dfm.workup_candidates(tr_a, known=tr_k)
     out["n_candidates"] = len(cands)
     if not cands:
-        out["skipped"] = "no fact recorded for 20 training patients"
+        out["skipped"] = "no fact recorded (new) for 20 training patients"
         return out
-    L = dfm.answer_likelihoods([tr_ans[i] for i in keep_tr], Y, cands)
-    A = {i: dfm.answer_vector(te_ans[i], cands) for i in keep_te}
+    L = dfm.answer_likelihoods(tr_a, Y, cands, known=tr_k)
     days = {i: te[i][5]["__wdays"] for i in keep_te}
+    if length_edges:
+        tr_bin = np.array([dfm.length_bin(tr[i][5]["__wdays"], length_edges)
+                           for i in keep_tr])
+        Lb = []
+        for b in range(len(length_edges) + 1):
+            sel = np.flatnonzero(tr_bin == b)
+            Lb.append(dfm.answer_likelihoods([tr_a[j] for j in sel], Y[sel], cands,
+                                             known=[tr_k[j] for j in sel], prior=L)
+                      if sel.size else L)
+        L_of = {i: Lb[dfm.length_bin(days[i], length_edges)] for i in keep_te}
+        out["train_windows_per_bin"] = [int((tr_bin == b).sum())
+                                        for b in range(len(length_edges) + 1)]
+    else:
+        L_of = {i: L for i in keep_te}
+    A = {i: dfm.answer_vector(te_ans[i], cands) for i in keep_te}
+    E = {i: dfm.eligible_vector(_known(te[i]), cands) for i in keep_te}
     out["coverage"] = dfm.workup_coverage([days[i] for i in keep_te],
-                                          [A[i] for i in keep_te])
+                                          [A[i] * E[i] for i in keep_te])
+    out["coverage"]["eligible_median"] = float(np.median([E[i].sum() for i in keep_te]))
     kt = set(keep_te)
     for name, q0 in q0_by_engine.items():
         if q0 is None:
@@ -653,32 +683,37 @@ def _workup_block(dfm, ctx, wk_ctx, tr, te, ytr, members, excl, halves, truths,
         ev, taus = [], []
         for fi, ei in halves:
             f = [i for i in fi if i in kt]
-            tau = dfm.fit_workup_tau([q0[i] for i in f], [truths[i][0] for i in f],
-                                     [A[i] for i in f], L) if f else 1.0
+            tau = (dfm.fit_workup_tau([q0[i] for i in f], [truths[i][0] for i in f],
+                                      [A[i] for i in f], [L_of[i] for i in f],
+                                      eligible=[E[i] for i in f]) if f else 1.0)
             for i in ei:
                 if i in kt:
                     ev.append(i)
                     taus.append(tau)
         if len(ev) < dfm.EGRESS_FLOOR:
             continue
-        out[name] = dfm.evaluate_workup([q0[i] for i in ev], [truths[i][0] for i in ev],
-                                        [A[i] for i in ev], L, pri, np.asarray(taus))
+        out[name] = dfm.evaluate_workup(
+            [q0[i] for i in ev], [truths[i][0] for i in ev], [A[i] for i in ev],
+            [L_of[i] for i in ev], pri, np.asarray(taus),
+            eligible=[E[i] for i in ev], L_pop=L)
     # The group's most valuable facts under the first engine's beliefs: mean EIG over
-    # the scored patients; every listed fact has >= 20 training patients answering.
+    # the scored patients for whom each fact is new; every listed fact has >= 20
+    # training patients answering it.
     name0 = next((k for k, v in q0_by_engine.items() if v is not None), None)
     if name0 is not None:
         tau0 = float(np.mean(out.get(name0, {}).get("tau") or [1.0]))
-        tot = np.zeros(len(cands))
+        tot, cnt = np.zeros(len(cands)), np.zeros(len(cands))
         for i in keep_te:
-            post, pa = dfm.workup_posteriors(q0_by_engine[name0][i], L, tau0)
-            tot += dfm.workup_eig(q0_by_engine[name0][i], post, pa)
+            post, pa = dfm.workup_posteriors(q0_by_engine[name0][i], L_of[i], tau0)
+            tot += dfm.workup_eig(q0_by_engine[name0][i], post, pa) * E[i]
+            cnt += E[i]
+        mean_eig = np.divide(tot, cnt, out=np.zeros_like(tot), where=cnt > 0)
         names = []
-        for j in np.argsort(-tot)[:5]:
+        for j in np.argsort(-mean_eig)[:5]:
             k = cands[int(j)][0]
             if k[0] == "c":
                 names.append(ctx.code_name(k[1], tok2idx[k[1]].get(k[2], -1)))
             else:
-                md = wk_ctx["meas_dom"]
                 t = next((t for t in tok2idx[md] if t // 100 == k[1]), None)
                 nm = ctx.code_name(md, tok2idx[md][t]) if t is not None else str(k[1])
                 names.append(f"test {nm.split(' [')[0]}")
@@ -689,7 +724,9 @@ def _workup_block(dfm, ctx, wk_ctx, tr, te, ytr, members, excl, halves, truths,
 def _format_workup(w, window):
     """The group's workup block (exp 0167) as markdown lines."""
     L_ = [f"### Workup (framing 2, exp 0167; window [index, first diagnosis"
-          f"{']' if window == 'inclusive' else ')'})"]
+          f"{']' if window == 'inclusive' else ')'}"
+          f"{'; new facts only' if w.get('new_only') else ''}"
+          f"{'; length bins ' + ','.join(str(x) for x in w['length_edges']) + ' days' if w.get('length_edges') else ''})"]
     if w.get("skipped"):
         return L_ + [f"({w['skipped']}: train {w['n_train_windows']}, test "
                      f"{w['n_test_windows']})", ""]
@@ -698,7 +735,8 @@ def _format_workup(w, window):
     L_ += [f"{w['n_test_windows']} test / {w['n_train_windows']} train patients with a "
            f"window · {w['n_candidates']} candidate facts · window days {dq} · "
            f"{100 * c['share_with_any']:.0f}% with any non-default answer (median "
-           f"{c['median_non_default']:.0f})", "",
+           f"{c['median_non_default']:.0f}; {c.get('eligible_median', float('nan')):.0f} "
+           f"candidates new to the median patient)", "",
            "| q0 | n | tau | R1 Spearman (q1/med/q3) | gain top-1 | top-3 | random | "
            "population | oracle | R3 slope | top-1 changes call | toward truth |",
            "|---|--:|---|---|--:|--:|--:|--:|--:|--:|--:|--:|"]
@@ -727,7 +765,8 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
                      fast=False, max_members=None, incident=False,
                      most_specific=None, groups_like=None, member_rule="auto",
                      code_select="df", code_lambda=0.6, workup=False,
-                     workup_window="strict", workup_drop_done=False):
+                     workup_window="strict", workup_drop_done=False,
+                     workup_new_only=True, workup_length_edges=()):
     """Framing 1 — DIFFERENTIAL WITH REASONS (spec 2026-10-13 clinician framings,
     R0/R1; `differential.py`). Four engines on the same held-out patients positive on
     exactly one member: E1 presence model with subtype profiles, E2 renormalized
@@ -1090,7 +1129,8 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
             wres = _workup_block(
                 dfm, ctx, wk_ctx, tr, te, ytr, members, excl, halves, truths,
                 {"E6": e6.predict([r[1] for r in te], th_te), "E3": e3.predict(th_te)},
-                pri, drop_done=workup_drop_done)
+                pri, drop_done=workup_drop_done, new_only=workup_new_only,
+                length_edges=tuple(workup_length_edges))
             res["workup"] = wres
             L_ += _format_workup(wres, workup_window)
         if next_question and e3 is not None and fast:
@@ -1608,6 +1648,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="(--diff-workup) [index, t_dx) or [index, t_dx]")
     p.add_argument("--diff-workup-drop-done", action="store_true",
                    help="(--diff-workup) drop the order-only 'done, no result' answer")
+    p.add_argument("--diff-workup-all-facts", action="store_true",
+                   help="(--diff-workup) also ask about facts the patient's pre-index "
+                        "record already carries (exp 0167 run 1; default: new facts "
+                        "only)")
+    p.add_argument("--diff-workup-length-bins", default="", metavar="DAYS,DAYS",
+                   help="(--diff-workup) likelihoods per window-length bin with these "
+                        "edges in days (e.g. 30,120), shrunk to the pooled one")
     p.add_argument("--diff-code-select", choices=("df", "relevance"), default="df",
                    help="(--differential) exp 0166: how the code engines E5/E6 pick "
                         "their codes: df = top by document frequency in the group; "
@@ -2429,7 +2476,10 @@ def main(argv=None) -> int:
                     code_select=args.diff_code_select,
                     code_lambda=args.diff_code_lambda, workup=args.diff_workup,
                     workup_window=args.diff_workup_window,
-                    workup_drop_done=args.diff_workup_drop_done)
+                    workup_drop_done=args.diff_workup_drop_done,
+                    workup_new_only=not args.diff_workup_all_facts,
+                    workup_length_edges=tuple(
+                        int(x) for x in args.diff_workup_length_bins.split(",") if x))
             return 0
 
         if args.bundle_only:

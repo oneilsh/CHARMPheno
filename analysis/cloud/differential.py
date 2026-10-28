@@ -918,43 +918,88 @@ def workup_answers(tokens, *, meas_dom=None, vocab_sets=None, excl=None,
     return out
 
 
-def workup_candidates(train_answers, *, floor=EGRESS_FLOOR):
-    """Facts whose non-default answer occurs for at least `floor` training patients:
-    `[(key, n_answers)]`, sorted for determinism."""
+def known_facts(bags, inv_maps, *, meas_dom=None, token_base=100):
+    """The facts a patient's PRE-index record already carries, as workup fact keys:
+    `("c", dom, token)` for a condition / drug code, `("m", concept)` for a test of
+    any result. Exp 0167 run 2: only NEW facts are asked about, because an answer the
+    record already holds was used to form q0 and is not independent evidence."""
+    out = set()
+    for d, b in bags.items():
+        inv = inv_maps[d] if inv_maps and d < len(inv_maps) else {}
+        for v in b:
+            tok = inv.get(int(v))
+            if tok is None:
+                continue
+            if meas_dom is not None and int(d) == int(meas_dom):
+                out.add(("m", int(tok) // int(token_base)))
+            else:
+                out.add(("c", int(d), int(tok)))
+    return out
+
+
+def workup_candidates(train_answers, *, floor=EGRESS_FLOOR, known=None):
+    """Facts whose non-default answer occurs for at least `floor` training patients
+    for whom the fact was new (`known[i]`, the patient's pre-index facts; None = all
+    new): `[(key, n_answers)]`, sorted for determinism."""
     cnt = {}
-    for ans in train_answers:
+    for i, ans in enumerate(train_answers):
+        kn = known[i] if known is not None else ()
         for k in ans:
-            cnt[k] = cnt.get(k, 0) + 1
+            if k not in kn:
+                cnt[k] = cnt.get(k, 0) + 1
     return [(k, WK_MAX_A if k[0] == "m" else 2)
             for k in sorted(cnt, key=repr) if cnt[k] >= int(floor)]
 
 
-def answer_likelihoods(train_answers, Y, cands, *, smooth=0.5):
-    """(n_cand, WK_MAX_A, M) `P(answer | member)`, add-`smooth` over each fact's own
-    answer categories, zero on the categories a fact does not have. `Y` (n, M) is the
-    training patients' (possibly soft) member matrix."""
+def answer_likelihoods(train_answers, Y, cands, *, smooth=0.5, known=None,
+                       prior=None, prior_strength=5.0):
+    """(n_cand, WK_MAX_A, M) `P(answer | member)` over the training patients for whom
+    each fact was NEW (`known`), zero on the categories a fact does not have. `Y`
+    (n, M) is the training patients' (possibly soft) member matrix.
+
+    Smoothing: add-`smooth` per category, or, given `prior` (an L of the same shape),
+    a Dirichlet centred on it with `prior_strength` pseudo-patients (the window-length
+    bins shrink to the pooled likelihood)."""
     Y = np.asarray(Y, dtype=np.float64)
     M = Y.shape[1]
     idx = {k: i for i, (k, _) in enumerate(cands)}
     counts = np.zeros((len(cands), WK_MAX_A, M))
-    nm = Y.sum(axis=0)
-    for ans, y in zip(train_answers, Y):
+    n_el = np.tile(Y.sum(axis=0), (len(cands), 1))          # eligible patients
+    for r, (ans, y) in enumerate(zip(train_answers, Y)):
+        if known is not None:
+            for k in known[r]:
+                i = idx.get(k)
+                if i is not None:
+                    n_el[i] -= y
+        kn = known[r] if known is not None else ()
         for k, a in ans.items():
             i = idx.get(k)
-            if i is not None:
+            if i is not None and k not in kn:
                 counts[i, a] += y
     for i, (_, A) in enumerate(cands):
-        counts[i, 0] = nm - counts[i, 1:A].sum(axis=0)        # the default answer
+        counts[i, 0] = n_el[i] - counts[i, 1:A].sum(axis=0)  # the default answer
     L = np.zeros_like(counts)
     for i, (_, A) in enumerate(cands):
-        c = counts[i, :A] + smooth
+        c = counts[i, :A] + (smooth if prior is None
+                             else prior_strength * prior[i, :A])
         L[i, :A] = c / c.sum(axis=0, keepdims=True)
     return L
+
+
+def length_bin(days, edges):
+    """Index of the window-length bin `days` falls in (`edges` ascending)."""
+    return int(np.searchsorted(np.asarray(edges, dtype=np.float64), float(days),
+                               side="right"))
 
 
 def answer_vector(ans, cands):
     """(n_cand,) int: each candidate's answer for one patient (0 = default)."""
     return np.array([ans.get(k, 0) for k, _ in cands], dtype=np.int64)
+
+
+def eligible_vector(known, cands):
+    """(n_cand,) bool: the candidates that are new for one patient."""
+    return np.array([k not in known for k, _ in cands], dtype=bool)
 
 
 def _entropy_nats(P, axis=-1):
@@ -982,27 +1027,39 @@ def workup_eig(q0, post, pa):
     return h - (pa * _entropy_nats(post)).sum(axis=1)
 
 
-def fit_workup_tau(q0s, truths, answers, L, *, lo=0.05, hi=3.0):
+def _per_patient(x, n):
+    """`x` given once for all patients, or once per patient: a length-n list."""
+    if isinstance(x, (list, tuple)) and len(x) == n:
+        return list(x)
+    return [x] * n
+
+
+def fit_workup_tau(q0s, truths, answers, L, *, eligible=None, lo=0.05, hi=3.0):
     """The temper maximizing the mean log posterior of the truth after one fact,
-    over every (patient, candidate) pair of the fitting half: it absorbs the naive-
-    Bayes independence assumption (answers are not independent of the record that
-    made q0)."""
+    over every eligible (patient, candidate) pair of the fitting half: it absorbs the
+    naive-Bayes independence assumption (answers are not independent of the record
+    that made q0). `L` one likelihood array or one per patient (length bins)."""
     from scipy.optimize import minimize_scalar
-    rows = np.arange(L.shape[0])
+    n = len(truths)
+    Ls = _per_patient(L, n)
+    els = _per_patient(eligible, n)
 
     def nll(tau):
-        tot, n = 0.0, 0
-        for q0, t, a in zip(q0s, truths, answers):
-            post, _ = workup_posteriors(q0, L, tau)
-            tot -= np.log(np.clip(post[rows, a, t], 1e-300, None)).sum()
-            n += rows.size
-        return tot / max(n, 1)
+        tot, m = 0.0, 0
+        for q0, t, a, Li, el in zip(q0s, truths, answers, Ls, els):
+            post, _ = workup_posteriors(q0, Li, tau)
+            lp = np.log(np.clip(post[np.arange(Li.shape[0]), a, t], 1e-300, None))
+            if el is not None:
+                lp = lp[el]
+            tot -= lp.sum()
+            m += lp.size
+        return tot / max(m, 1)
     return float(minimize_scalar(nll, bounds=(lo, hi), method="bounded").x)
 
 
 def _spearman(x, y):
     from scipy.stats import spearmanr
-    if np.ptp(x) == 0 or np.ptp(y) == 0:
+    if len(x) < 2 or np.ptp(x) == 0 or np.ptp(y) == 0:
         return float("nan")
     return float(spearmanr(x, y).correlation)
 
@@ -1010,51 +1067,66 @@ def _spearman(x, y):
 WK_EIG_BINS = (0.0, 1e-3, 3e-3, 1e-2, 3e-2, 0.1, 0.3, np.inf)
 
 
-def evaluate_workup(q0s, truths, answers, L, pri, tau, *, ks=(1, 3)):
-    """R1-R4 of the spec over every (patient, candidate) pair. `q0s` (n, M) beliefs,
-    `truths` (n,) member index, `answers` (n, n_cand) true answers, `L` the
-    likelihoods, `pri` the training prior (the population ranking's belief), `tau`
-    one temper or one per patient (each cross-fit half fits its own).
+def evaluate_workup(q0s, truths, answers, L, pri, tau, *, ks=(1, 3), eligible=None,
+                    L_pop=None):
+    """R1-R4 of the spec over every eligible (patient, candidate) pair. `q0s` (n, M)
+    beliefs, `truths` (n,) member index, `answers` (n, n_cand) true answers, `L` the
+    likelihoods (one array, or one per patient: window-length bins), `pri` the
+    training prior (the population ranking's belief, scored with `L_pop`, default the
+    first L), `tau` one temper or one per patient (each cross-fit half fits its own),
+    `eligible` per-patient (n_cand,) bool of the facts new to that patient.
 
     Realized gain of a fact, `g = log q(true | a_true) − log q0(true)`, is a proper
     score whose expectation under a calibrated model is the fact's EIG."""
-    n_c = L.shape[0]
+    n = len(truths)
+    Ls = _per_patient(L, n)
+    els = _per_patient(eligible, n)
+    taus = np.broadcast_to(np.asarray(tau, dtype=np.float64), (n,))
+    Lp = Ls[0] if L_pop is None else L_pop
+    n_c = Lp.shape[0]
     rows = np.arange(n_c)
-    taus = np.broadcast_to(np.asarray(tau, dtype=np.float64), (len(truths),))
-    post_p, pa_p = workup_posteriors(pri, L, float(np.mean(taus)) if len(taus) else 1.0)
-    pop_order = np.argsort(-workup_eig(pri, post_p, pa_p), kind="stable")
-    r1, top, rnd, popg, orc, chg, toward, right = [], {k: [] for k in ks}, [], [], [], [], [], []
+    post_p, pa_p = workup_posteriors(pri, Lp, float(np.mean(taus)) if n else 1.0)
+    pop_score = workup_eig(pri, post_p, pa_p)
+    r1, top, rnd, popg, orc = [], {k: [] for k in ks}, [], [], []
+    chg, toward, right, n_el = [], [], [], []
     bins = np.zeros((len(WK_EIG_BINS) - 1, 3))           # n, sum eig, sum g
     sxx = sxy = 0.0
-    for q0, t, a, tau_i in zip(q0s, truths, answers, taus):
-        post, pa = workup_posteriors(q0, L, tau_i)
+    for q0, t, a, Li, el, tau_i in zip(q0s, truths, answers, Ls, els, taus):
+        el = np.ones(n_c, bool) if el is None else np.asarray(el, bool)
+        if not el.any():
+            continue
+        post, pa = workup_posteriors(q0, Li, tau_i)
         eig = workup_eig(q0, post, pa)
         q_after = post[rows, a]                            # (n_c, M)
         g = np.log(np.clip(q_after[:, t], 1e-300, None)) - np.log(max(q0[t], 1e-300))
-        r1.append(_spearman(eig, g))
-        order = np.argsort(-eig, kind="stable")
+        ix = np.flatnonzero(el)
+        e_, g_ = eig[ix], g[ix]
+        n_el.append(ix.size)
+        r1.append(_spearman(e_, g_))
+        order = ix[np.argsort(-e_, kind="stable")]
         for k in ks:
             top[k].append(float(g[order[:k]].mean()))
-        rnd.append(float(g.mean()))
-        popg.append(float(g[pop_order[0]]))
-        orc.append(float(g.max()))
+        rnd.append(float(g_.mean()))
+        popg.append(float(g[ix[np.argmax(pop_score[ix])]]))
+        orc.append(float(g_.max()))
         b = order[0]
         new = int(np.argmax(q_after[b]))
         chg.append(new != int(np.argmax(q0)))
         toward.append(bool(q_after[b, t] > q0[t]))
         right.append(new == int(t))
-        j = np.clip(np.searchsorted(WK_EIG_BINS, eig, side="right") - 1, 0,
+        j = np.clip(np.searchsorted(WK_EIG_BINS, e_, side="right") - 1, 0,
                     len(WK_EIG_BINS) - 2)
         np.add.at(bins, (j, 0), 1.0)
-        np.add.at(bins, (j, 1), eig)
-        np.add.at(bins, (j, 2), g)
-        sxx += float(eig @ eig)
-        sxy += float(eig @ g)
+        np.add.at(bins, (j, 1), e_)
+        np.add.at(bins, (j, 2), g_)
+        sxx += float(e_ @ e_)
+        sxy += float(e_ @ g_)
     mean = lambda x: float(np.nanmean(x)) if len(x) else float("nan")
     q = lambda x: [float(v) for v in np.nanpercentile(x, [25, 50, 75])] if len(x) else []
     chg = np.asarray(chg, bool)
     return {
-        "n": len(truths), "n_candidates": int(n_c),
+        "n": len(r1), "n_candidates": int(n_c),
+        "eligible_per_patient_median": float(np.median(n_el)) if n_el else 0.0,
         "tau": sorted({round(float(x), 4) for x in taus}),
         "R1_spearman_quartiles": q(r1),
         "R2": {**{f"top{k}": mean(v) for k, v in top.items()}, "random": mean(rnd),
