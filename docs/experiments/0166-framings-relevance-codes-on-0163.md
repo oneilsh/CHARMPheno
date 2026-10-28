@@ -61,7 +61,9 @@ VOI value the discriminating questions.
 
 The bundle rebuilds on a fresh cluster; the readout's drift gate checks it against the
 fit (also the post-refactor corpus-equivalence check, ADR 0051 step 3). If it reports
-DRIFTED, stop and report. The df control re-runs `survey_inc_top` on the current code,
+DRIFTED, stop and report. The incident rule reads the conversion sidecar, also on HDFS,
+so the job rebuilds it first (the first attempt, 2026-10-28, failed on the sidecar MISS
+after the bundle rebuilt in 18 min; the bundle is a HIT now). The df control re-runs `survey_inc_top` on the current code,
 so the pairs differ only in the code selection.
 
 ```bash
@@ -72,6 +74,8 @@ L=$R163/job_log_0166.md
 nohup bash -c '
 set -o pipefail
 R152='$R152'; R163='$R163'
+echo "### sidecar 163 (HDFS, per cluster; its key also moved with ADR 0051 step 3)"
+make -C analysis/cloud build-conversion-sidecar ID=163 || { echo "FAILED: sidecar 163"; exit 1; }
 BASE="--differential . --diff-survey 25 --diff-members top --diff-incident --diff-groups-like $R152/groups_4b.json --acq-heads stacked_nodes_mass99 --diff-max-patients 1500 --diff-crossfit --diff-next-question --diff-nq-hide 0.8"
 for arm in df:df rel06:relevance:0.6 rel03:relevance:0.3 rel00:relevance:0; do
   IFS=: read tag sel lam <<< "$arm"
