@@ -575,6 +575,30 @@ build-conversion-sidecar: zip cluster-overlay $(WORKSPACE_ENV)
 	    $(if $(GPR_SIDECAR_URI),--sidecar-uri $(GPR_SIDECAR_URI),) \
 	    $(GPR_ARGS)
 
+# Workup sidecar (exp 0167, spec 2026-10-28 workup-voi-design): every code first
+# recorded in the year after each person's index, all corpus domains, keyed on its own
+# (cdr, persons, index via the conversion sidecar, domains, window, source). Needs the
+# run's conversion sidecar on this cluster (build-conversion-sidecar first). A HIT does
+# nothing; --force rebuilds. Cluster-only (BigQuery).
+#   make build-workup-sidecar ID=163
+build-workup-sidecar: zip cluster-overlay $(WORKSPACE_ENV)
+	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
+	. ./$(WORKSPACE_ENV) && \
+	PYTHONPATH=$(REPO_ROOT):$$PYTHONPATH spark-submit \
+	    --master yarn \
+	    --deploy-mode client \
+	    --driver-memory 8g \
+	    --conf spark.executor.cores=4 \
+	    --conf spark.executor.memory=6g \
+	    --conf spark.executor.memoryOverhead=2g \
+	    --conf spark.task.maxFailures=8 \
+	    --conf spark.excludeOnFailure.enabled=true \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/workup_sidecar.py \
+	    $(REPO_ROOT)/analysis/cloud/workup_sidecar.py \
+	    --run-dir "$(RUNS_DIR)/$(shell printf '%04d' $(ID))-*" \
+	    $(if $(GPR_WORKUP_URI),--sidecar-uri $(GPR_WORKUP_URI),) \
+	    $(GPR_ARGS)
+
 # Print summary.md for an experiment (copy/paste back to chat)
 summary:
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi

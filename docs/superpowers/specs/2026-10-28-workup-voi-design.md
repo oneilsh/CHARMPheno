@@ -1,7 +1,7 @@
 # Framing 2 as workup: which fact would most move this patient's differential?
 
 **Date:** 2026-10-28
-**Status:** draft for review
+**Status:** accepted 2026-10-28 (open questions answered; see exp 0167)
 **Supersedes:** framing 2's evaluation in the clinician-framings spec (2026-10-13, R2):
 "hide 80% of the pre-index record at random, ask YES-only questions, score P(true)@k".
 That protocol stays in the record (exps 0148-0151, 0166); it is not the deliverable.
@@ -147,7 +147,15 @@ full-history frames still exist, in driver-owned code, as a separate artifact.
   patients as framing 1 are scored.
 - `survey_analysis.py`: the coverage and R1-R4 columns, single-run and paired.
 
-## Open questions for review
+## Decisions (maintainer, 2026-10-28)
+
+1. Window `[index, t_dx)`; the inclusive window only as a cheap sensitivity run (it is:
+   the sidecar holds first dates over the whole year, so it is a re-filter).
+2. "Done, no result" kept as an answer category (`--diff-workup-drop-done` exists).
+3. Starting belief E6, with E3 in the same pass.
+4. Shortened pre-index records: deferred.
+
+## Open questions as posed
 
 1. **Window end.** Strict `[index, t_dx)` by default with an inclusive sensitivity
    run, or the reverse?

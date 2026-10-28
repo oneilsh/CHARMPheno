@@ -399,7 +399,8 @@ def attach_raw_presence(df, selected, feat_cols, *, out_col="topicDistribution")
 
 
 def collect_set_patients(test_df, members, n_domains, *, max_patients=5000, seed=0,
-                         label_col="label", length="distinct", ever_df=None):
+                         label_col="label", length="distinct", ever_df=None,
+                         extra_cols=()):
     """Test-split persons positive on any of `members` (fit-width label indices):
     `[(truth positions into members, {d: {vocab idx: count}}, {d: length})]`.
 
@@ -411,7 +412,10 @@ def collect_set_patients(test_df, members, n_domains, *, max_patients=5000, seed
 
     `ever_df` (exp 0149; `(person_id, __ever: array<int>)` positions into `members`
     from the E4 sidecar): a person ever coded with a member is collected too, and the
-    truth is the union of label-year and ever-coded members."""
+    truth is the union of label-year and ever-coded members.
+
+    `extra_cols`: columns of `test_df` carried through per row as a 4th element, a
+    `{name: value}` dict (exp 0167: the workup window's codes and length)."""
     import json as _json
     from pyspark.sql import functions as F
     lit = F.from_json(F.lit(_json.dumps([int(m) for m in members])), "array<int>")
@@ -429,7 +433,7 @@ def collect_set_patients(test_df, members, n_domains, *, max_patients=5000, seed
     df = (base.where(keep)
               .select(F.transform(lit, lambda i: lab[i]).alias("__y"),
                       F.coalesce(F.col("__ever"), F.array().cast("array<int>"))
-                       .alias("__ever"), *fcols))
+                       .alias("__ever"), *fcols, *extra_cols))
     n = df.count()
     if n > int(max_patients):
         df = df.sample(False, min(1.0, 1.2 * int(max_patients) / n), seed=int(seed))
@@ -452,7 +456,10 @@ def collect_set_patients(test_df, members, n_domains, *, max_patients=5000, seed
             bags[d] = {int(i): float(c) for i, c in zip(idx, vals)}
             lens[d] = (float(np.sum(vals)) if length == "tokens"
                        else float(len(idx)))
-        out.append((truth, bags, lens))
+        if extra_cols:
+            out.append((truth, bags, lens, {c: row[c] for c in extra_cols}))
+        else:
+            out.append((truth, bags, lens))
     return out, n
 
 
@@ -481,6 +488,44 @@ def ever_member_frame(spark, run_dir, members, member_cids, parent_adj, *,
     mdf = spark.createDataFrame(rows, "node_cid long, __pos int")
     return (first.join(F.broadcast(mdf), "node_cid").groupBy("person_id")
             .agg(F.collect_set("__pos").alias("__ever")))
+
+
+def workup_frame(first, horizon, workup, node_cids, target_cids, parent_adj, *,
+                 label_window_days=365, inclusive=False):
+    """Exp 0167: `(person_id, __wk: array<struct<d,t>>, __wdays)` for every person whose
+    FIRST diagnosis of a group member (any of `target_cids` or a Mondo term under
+    one, from the conversion sidecar) falls in the label year `[index, index + W)`:
+    the `(dom, token)` pairs the workup sidecar has first recorded in
+    `[index, t_dx)` (`inclusive`: `[index, t_dx]`), and the window's length in days.
+    Persons diagnosed before the index (prevalent) or never get no row: they have no
+    workup window."""
+    import prevalence_check as pv
+    from pyspark.sql import functions as F
+    tgt = {i + 1: int(c) for i, c in enumerate(target_cids)}
+    hit = pv.sidecar_nodes_to_readout(node_cids, tgt, parent_adj, root_cid=-10**9)
+    spark = first.sparkSession
+    if not hit:
+        return spark.createDataFrame(
+            [], "person_id long, __wk array<struct<d:int,t:long>>, __wdays int")
+    ndf = spark.createDataFrame([(int(x),) for x in hit], "node_cid long")
+    hz = horizon.select("person_id", "index_date")
+    dx = (first.join(F.broadcast(ndf), "node_cid").join(hz, "person_id")
+          .where(F.col("first_attested_date") >= F.col("index_date"))
+          .where(F.col("first_attested_date")
+                 < F.date_add(F.col("index_date"), int(label_window_days)))
+          .groupBy("person_id", "index_date")
+          .agg(F.min("first_attested_date").alias("t_dx")))
+    before = (F.col("first_date") <= F.col("t_dx")) if inclusive else (
+        F.col("first_date") < F.col("t_dx"))
+    wk = (workup.join(dx.select("person_id", "t_dx"), "person_id").where(before)
+          .groupBy("person_id")
+          .agg(F.collect_list(F.struct(F.col("dom").cast("int").alias("d"),
+                                       F.col("token").alias("t"))).alias("__wk")))
+    return (dx.withColumn("__wdays", F.datediff("t_dx", "index_date"))
+            .join(wk, "person_id", "left")
+            .select("person_id",
+                    F.coalesce("__wk", F.array().cast("array<struct<d:int,t:long>>"))
+                    .alias("__wk"), "__wdays"))
 
 
 def _test_prior_pairs(test_df, run_dir, sidecar_uri=None):
@@ -526,6 +571,153 @@ def _incident_test_frame(test_df, prior_pairs, prior_nodes, target_cids, parent_
 
 
 
+def _workup_setup(spark, run_dir, ctx, sidecar_uri=None):
+    """Exp 0167: the frames and maps the workup framing reads once per survey — the
+    conversion sidecar (first attestations, index horizon), the workup sidecar, the
+    corpus vocabularies (so answers stay in the space the engines read) and the
+    measurement domain's index."""
+    from conversion_sidecar import try_load_index_horizon, try_load_sidecar
+    from workup_sidecar import try_load_workup
+    run_dir = Path(run_dir)
+    for f, how in (("conversion_sidecar.json", "build-conversion-sidecar"),
+                   ("workup_sidecar.json", "build-workup-sidecar")):
+        if not (run_dir / f).exists():
+            raise SystemExit(f"[differential] --diff-workup needs <run>/{f} "
+                             f"(make {how} ID=N)")
+    cw = json.loads((run_dir / "conversion_sidecar.json").read_text())
+    ww = json.loads((run_dir / "workup_sidecar.json").read_text())
+    uri = sidecar_uri or cw.get("sidecar_uri")
+    first = try_load_sidecar(spark, uri, cw["key"])
+    hz = try_load_index_horizon(spark, uri, cw["key"])
+    wk = try_load_workup(spark, ww["sidecar_uri"], ww["key"])
+    if first is None or hz is None or wk is None:
+        raise SystemExit("[differential] a sidecar is MISSING on this cluster — rebuild "
+                         "(make build-conversion-sidecar ID=N, then "
+                         "build-workup-sidecar ID=N)")
+    if ww.get("conversion_key") != cw["key"]:
+        raise SystemExit("[differential] the workup sidecar was built against a "
+                         "different conversion sidecar — rebuild it (--force)")
+    first = first.cache()
+    nodes = [int(r[0]) for r in first.select("node_cid").distinct().collect()]
+    if not ctx.inv_maps:
+        raise SystemExit("[differential] --diff-workup needs the bundle's vocab maps")
+    tok2idx = [{int(t): int(i) for i, t in m.items()} for m in ctx.inv_maps]
+    meas = (ctx.dom_names.index("measurement") if "measurement" in ctx.dom_names
+            else None)
+    return {"first": first, "hz": hz, "workup": wk, "nodes": nodes,
+            "n_nodes": len(nodes), "window": int(ww.get("label_window_days") or 365),
+            "tok2idx": tok2idx, "vocab_sets": {d: set(m) for d, m in enumerate(tok2idx)},
+            "meas_dom": meas}
+
+
+def _workup_block(dfm, ctx, wk_ctx, tr, te, ytr, members, excl, halves, truths,
+                  q0_by_engine, pri, *, drop_done=False):
+    """Exp 0167 for one group: answers, candidates, likelihoods, then per engine the
+    temper on each cross-fit fitting half and R1-R4 on its evaluation half (all
+    patients once), plus coverage and the group's top facts. None when too few
+    windows exist to score."""
+    tok2idx = wk_ctx["tok2idx"]
+    excl_tok = {d: {ctx.inv_maps[d][int(i)] for i in ex if int(i) in ctx.inv_maps[d]}
+                for d, ex in excl.items()}
+
+    def _ans(extra):
+        if extra is None or extra.get("__wdays") is None:
+            return None
+        return dfm.workup_answers([(r["d"], r["t"]) for r in (extra["__wk"] or [])],
+                                  meas_dom=wk_ctx["meas_dom"],
+                                  vocab_sets=wk_ctx["vocab_sets"], excl=excl_tok,
+                                  drop_done=drop_done)
+    tr_ans = [_ans(r[5]) for r in tr]
+    keep_tr = [i for i, a in enumerate(tr_ans) if a is not None]
+    te_ans = [_ans(r[5]) for r in te]
+    keep_te = [i for i, a in enumerate(te_ans) if a is not None]
+    out = {"n_train_windows": len(keep_tr), "n_test_windows": len(keep_te)}
+    if len(keep_te) < dfm.EGRESS_FLOOR or len(keep_tr) < dfm.EGRESS_FLOOR:
+        out["skipped"] = "fewer than 20 train or test patients with a workup window"
+        return out
+    Y = dfm.label_matrix([ytr[i] for i in keep_tr], len(members))
+    cands = dfm.workup_candidates([tr_ans[i] for i in keep_tr])
+    out["n_candidates"] = len(cands)
+    if not cands:
+        out["skipped"] = "no fact recorded for 20 training patients"
+        return out
+    L = dfm.answer_likelihoods([tr_ans[i] for i in keep_tr], Y, cands)
+    A = {i: dfm.answer_vector(te_ans[i], cands) for i in keep_te}
+    days = {i: te[i][5]["__wdays"] for i in keep_te}
+    out["coverage"] = dfm.workup_coverage([days[i] for i in keep_te],
+                                          [A[i] for i in keep_te])
+    kt = set(keep_te)
+    for name, q0 in q0_by_engine.items():
+        if q0 is None:
+            continue
+        ev, taus = [], []
+        for fi, ei in halves:
+            f = [i for i in fi if i in kt]
+            tau = dfm.fit_workup_tau([q0[i] for i in f], [truths[i][0] for i in f],
+                                     [A[i] for i in f], L) if f else 1.0
+            for i in ei:
+                if i in kt:
+                    ev.append(i)
+                    taus.append(tau)
+        if len(ev) < dfm.EGRESS_FLOOR:
+            continue
+        out[name] = dfm.evaluate_workup([q0[i] for i in ev], [truths[i][0] for i in ev],
+                                        [A[i] for i in ev], L, pri, np.asarray(taus))
+    # The group's most valuable facts under the first engine's beliefs: mean EIG over
+    # the scored patients; every listed fact has >= 20 training patients answering.
+    name0 = next((k for k, v in q0_by_engine.items() if v is not None), None)
+    if name0 is not None:
+        tau0 = float(np.mean(out.get(name0, {}).get("tau") or [1.0]))
+        tot = np.zeros(len(cands))
+        for i in keep_te:
+            post, pa = dfm.workup_posteriors(q0_by_engine[name0][i], L, tau0)
+            tot += dfm.workup_eig(q0_by_engine[name0][i], post, pa)
+        names = []
+        for j in np.argsort(-tot)[:5]:
+            k = cands[int(j)][0]
+            if k[0] == "c":
+                names.append(ctx.code_name(k[1], tok2idx[k[1]].get(k[2], -1)))
+            else:
+                md = wk_ctx["meas_dom"]
+                t = next((t for t in tok2idx[md] if t // 100 == k[1]), None)
+                nm = ctx.code_name(md, tok2idx[md][t]) if t is not None else str(k[1])
+                names.append(f"test {nm.split(' [')[0]}")
+        out["top_facts"] = names
+    return out
+
+
+def _format_workup(w, window):
+    """The group's workup block (exp 0167) as markdown lines."""
+    L_ = [f"### Workup (framing 2, exp 0167; window [index, first diagnosis"
+          f"{']' if window == 'inclusive' else ')'})"]
+    if w.get("skipped"):
+        return L_ + [f"({w['skipped']}: train {w['n_train_windows']}, test "
+                     f"{w['n_test_windows']})", ""]
+    c = w["coverage"]
+    dq = " / ".join(f"{x:.0f}" for x in c["window_days_quartiles"])
+    L_ += [f"{w['n_test_windows']} test / {w['n_train_windows']} train patients with a "
+           f"window · {w['n_candidates']} candidate facts · window days {dq} · "
+           f"{100 * c['share_with_any']:.0f}% with any non-default answer (median "
+           f"{c['median_non_default']:.0f})", "",
+           "| q0 | n | tau | R1 Spearman (q1/med/q3) | gain top-1 | top-3 | random | "
+           "population | oracle | R3 slope | top-1 changes call | toward truth |",
+           "|---|--:|---|---|--:|--:|--:|--:|--:|--:|--:|--:|"]
+    for e in ("E6", "E3"):
+        r = w.get(e)
+        if not r:
+            continue
+        r1 = " / ".join(f"{x:+.2f}" for x in r["R1_spearman_quartiles"])
+        g = r["R2"]
+        L_.append(f"| {e} | {r['n']} | {', '.join(f'{t:.2f}' for t in r['tau'])} | {r1} | "
+                  f"{g['top1']:+.4f} | {g['top3']:+.4f} | {g['random']:+.4f} | "
+                  f"{g['population_top1']:+.4f} | {g['oracle']:+.4f} | "
+                  f"{r['R3']['slope']:.2f} | {r['R4']['top1_changes_call']:.2f} | "
+                  f"{r['R4']['top1_moves_toward_truth']:.2f} |")
+    if w.get("top_facts"):
+        L_ += ["", "most informative facts (mean EIG, E6): " + " · ".join(w["top_facts"])]
+    return L_ + [""]
+
+
 def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
                      results_name="results_readout_stacked_mass99.json",
                      heads_tag="stacked_mass99", max_patients=600, max_train=2000,
@@ -534,7 +726,8 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
                      train_ever=False, multi=False, crossfit=False, sidecar_uri=None,
                      fast=False, max_members=None, incident=False,
                      most_specific=None, groups_like=None, member_rule="auto",
-                     code_select="df", code_lambda=0.6):
+                     code_select="df", code_lambda=0.6, workup=False,
+                     workup_window="strict", workup_drop_done=False):
     """Framing 1 — DIFFERENTIAL WITH REASONS (spec 2026-10-13 clinician framings,
     R0/R1; `differential.py`). Four engines on the same held-out patients positive on
     exactly one member: E1 presence model with subtype profiles, E2 renormalized
@@ -572,7 +765,7 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
     ev = np.asarray(ctx.sh["evidence"], dtype=np.float64)
     member_cid, parent_adj = {}, None
     prior_pairs, prior_nodes = None, []
-    if train_ever or incident:
+    if train_ever or incident or workup:
         # Exp 0149: members' Mondo ids (bundle int2cid) and the Mondo is-a, so the
         # sidecar's finer terms roll up onto the members.
         from readout_dag import load_mondo_parent_adj
@@ -596,6 +789,13 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
         _cprint(f"[differential]   incident rule: {_np:,} (test person, node) pairs "
                 f"attested before the index over {len(prior_nodes):,} Mondo nodes",
                 flush=True)
+    wk_ctx = None
+    if workup:
+        wk_ctx = _workup_setup(train_df.sparkSession, run_dir, ctx, sidecar_uri)
+        _cprint(f"[differential]   workup (exp 0167): window [index, t_dx"
+                f"{']' if workup_window == 'inclusive' else ')'}"
+                f"{', order-only answers dropped' if workup_drop_done else ''} · "
+                f"{wk_ctx['n_nodes']:,} sidecar nodes", flush=True)
     sets = vt.select_sets(ctx, pattern, adhoc=adhoc)
     # Member rule. A flat label set scores every label member ("all"). On a nested
     # label space (no label set: exp 0152) "top" scores the group's top-level label
@@ -677,13 +877,14 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
 
         def prep(rows, keep_multi):
             out = []
-            for truth, bags, _ in rows:
+            for row in rows:
+                truth, bags = row[0], row[1]
                 if not truth or (len(truth) != 1 and not keep_multi):
                     continue
                 fb, lens = dfm.filter_record(bags, excl)
                 gi = [eng.gidx(d, v) for d, b in fb.items() for v in b]
                 gc = [c for d, b in fb.items() for c in b.values()]
-                out.append((truth, fb, lens, gi, gc))
+                out.append((truth, fb, lens, gi, gc, row[3] if len(row) > 3 else None))
             return out
         ever = None
         if train_ever:
@@ -699,12 +900,27 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
                                           + ([member_cid[int(n)]] if int(n) > 0
                                              and int(n) in member_cid else []),
                                           parent_adj)
+        tr_src, wk_cols = train_df, ()
+        if wk_ctx is not None:
+            # Exp 0167: each person's workup window for THIS group (index to the first
+            # diagnosis of any member), joined on before the collect.
+            from pyspark.sql import functions as F
+            wkf = workup_frame(wk_ctx["first"], wk_ctx["hz"], wk_ctx["workup"],
+                               wk_ctx["nodes"], [member_cid[int(m)] for m in members],
+                               parent_adj, label_window_days=wk_ctx["window"],
+                               inclusive=(workup_window == "inclusive")).cache()
+            te_src = te_src.join(F.broadcast(wkf), "person_id", "left")
+            tr_src = train_df.join(F.broadcast(wkf), "person_id", "left")
+            wk_cols = ("__wk", "__wdays")
         te_raw, n_te = collect_set_patients(te_src, members, len(ctx.lams),
-                                            max_patients=max_patients, seed=seed)
-        tr_raw, n_tr = collect_set_patients(train_df, members, len(ctx.lams),
+                                            max_patients=max_patients, seed=seed,
+                                            extra_cols=wk_cols)
+        tr_raw, n_tr = collect_set_patients(tr_src, members, len(ctx.lams),
                                             max_patients=max_train, seed=seed,
-                                            ever_df=ever)
-        n_multi = sum(len(t) > 1 for t, _, _ in te_raw)
+                                            ever_df=ever, extra_cols=wk_cols)
+        if wk_ctx is not None:
+            wkf.unpersist()
+        n_multi = sum(len(r[0]) > 1 for r in te_raw)
         te_all = prep(te_raw, True)
         te = [r for r in te_all if len(r[0]) == 1]
         te_multi = [r for r in te_all if len(r[0]) > 1] if multi else []
@@ -870,6 +1086,13 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
                     L_.append(f"- {named[m][:40]}: " + " · ".join(
                         ctx.code_name(d, v) for d, v in codes))
         L_.append("")
+        if wk_ctx is not None and e3 is not None:
+            wres = _workup_block(
+                dfm, ctx, wk_ctx, tr, te, ytr, members, excl, halves, truths,
+                {"E6": e6.predict([r[1] for r in te], th_te), "E3": e3.predict(th_te)},
+                pri, drop_done=workup_drop_done)
+            res["workup"] = wres
+            L_ += _format_workup(wres, workup_window)
         if next_question and e3 is not None and fast:
             nq = _next_question_block(ctx, eng, None, members, te, ev_i, truths, pri,
                                       excl, named, nq_pool, seed, frac=nq_hide,
@@ -1374,6 +1597,17 @@ def build_parser() -> argparse.ArgumentParser:
                    help="(--differential) exp 0149: tempers fit on each half in turn, "
                         "every patient scored once (doubles the scored patients)")
     p.add_argument("--diff-max-train", type=int, default=2000)
+    p.add_argument("--diff-workup", action="store_true",
+                   help="(--differential) exp 0167: framing 2 as WORKUP — rank every "
+                        "fact recorded between the index and the first diagnosis by "
+                        "its EIG under each patient's belief (E6, E3) and score R1-R4 "
+                        "on the true answers. Needs <run>/workup_sidecar.json "
+                        "(make build-workup-sidecar ID=N)")
+    p.add_argument("--diff-workup-window", choices=("strict", "inclusive"),
+                   default="strict",
+                   help="(--diff-workup) [index, t_dx) or [index, t_dx]")
+    p.add_argument("--diff-workup-drop-done", action="store_true",
+                   help="(--diff-workup) drop the order-only 'done, no result' answer")
     p.add_argument("--diff-code-select", choices=("df", "relevance"), default="df",
                    help="(--differential) exp 0166: how the code engines E5/E6 pick "
                         "their codes: df = top by document frequency in the group; "
@@ -2193,7 +2427,9 @@ def main(argv=None) -> int:
                     incident=args.diff_incident, groups_like=args.diff_groups_like,
                     member_rule=args.diff_members,
                     code_select=args.diff_code_select,
-                    code_lambda=args.diff_code_lambda)
+                    code_lambda=args.diff_code_lambda, workup=args.diff_workup,
+                    workup_window=args.diff_workup_window,
+                    workup_drop_done=args.diff_workup_drop_done)
             return 0
 
         if args.bundle_only:

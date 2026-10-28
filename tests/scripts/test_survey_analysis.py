@@ -129,3 +129,16 @@ def test_framing3_sources_finds_the_record_check_and_skips_resolves_and_raw(tmp_
     assert framing3_sources(tmp_path)[0] == {"v": "theta"}
     (tmp_path / "prevalence_check_history.json").write_text('{"v": "history"}')
     assert framing3_sources(tmp_path)[0] == {"v": "history"}
+
+
+def test_workup_summary_prints_the_pooled_block(capsys):
+    w = {"coverage": {"window_days_quartiles": [20, 60, 120], "share_with_any": 0.8,
+                      "median_non_default": 4},
+         "E6": {"n": 50, "R1_spearman_quartiles": [0.0, 0.2, 0.4],
+                "R2": {"top1": 0.05, "top3": 0.03, "random": 0.01,
+                       "population_top1": 0.02, "oracle": 0.4},
+                "R3": {"slope": 0.9}, "R4": {"top1_changes_call": 0.1}}}
+    sa.workup_summary({"g1": {"workup": w}, "g2": {"workup": {"skipped": "x"}}})
+    out = capsys.readouterr().out
+    assert "1 groups scored, 1 without enough windows" in out
+    assert "| g1 | 50 | 60 | 0.80 | +0.20 |" in out

@@ -865,3 +865,218 @@ def evaluate_next_question(eng, head, patients, pool_items, flagged, rng, *,
                    for (s_, k), a in acc.items()},
             "flag_share_top3": (n_flag / n_top) if n_top else float("nan"),
             "recommended": rec, "recommended_codes": rec_c}
+
+
+# --------------------------------------------------------------------------- #
+# Framing 2 as WORKUP (spec 2026-10-28 workup-voi-design; exp 0167).          #
+# --------------------------------------------------------------------------- #
+# A candidate FACT is a condition / drug code (answer: recorded in the workup
+# window or not) or a measurement concept (answer: not done, done without a result
+# state, normal / negative, low, high / positive / abnormal). Every answer — the
+# default ones included — is evidence through P(answer | member): "not recorded" is
+# a recording outcome, informative exactly as far as recording rates differ between
+# members. The belief update is naive Bayes over the answers given, tempered by tau.
+
+WK_MAX_A = 5                          # the widest answer space (a measurement)
+WK_DONE, WK_NORMAL, WK_LOW, WK_HIGH = 1, 2, 3, 4
+# measurement_tokens state codes -> answer category (unlisted states count as done)
+_WK_STATE = {0: WK_DONE, 2: WK_NORMAL, 10: WK_NORMAL, 12: WK_NORMAL,
+             1: WK_LOW, 14: WK_LOW, 3: WK_HIGH, 11: WK_HIGH, 13: WK_HIGH,
+             15: WK_HIGH}
+# when a window holds several states of one test, the most abnormal wins
+_WK_RANK = {WK_DONE: 0, WK_NORMAL: 1, WK_LOW: 2, WK_HIGH: 3}
+
+
+def workup_answers(tokens, *, meas_dom=None, vocab_sets=None, excl=None,
+                   token_base=100, drop_done=False):
+    """`{fact key: answer category}` for one window's `(dom, token)` pairs; facts not
+    present keep their default answer (0) implicitly.
+
+    Keys: `("c", dom, token)` for a condition / drug code (category 1 = recorded),
+    `("m", concept)` for a measurement concept (the `_WK_STATE` categories, most
+    abnormal winning). `vocab_sets[dom]` restricts each domain to the corpus
+    vocabulary (a measurement token's concept is kept when the token is in it);
+    `excl[dom]` drops attestation codes. `drop_done` maps "done, no result" to the
+    default (the spec's sensitivity run without order-only answers)."""
+    out = {}
+    for d, tok in tokens:
+        d, tok = int(d), int(tok)
+        if vocab_sets is not None and tok not in vocab_sets.get(d, ()):
+            continue
+        if excl is not None and tok in excl.get(d, ()):
+            continue
+        if meas_dom is not None and d == int(meas_dom):
+            concept, state = divmod(tok, int(token_base))
+            a = _WK_STATE.get(state, WK_DONE)
+            if drop_done and a == WK_DONE:
+                continue
+            k = ("m", concept)
+            if k not in out or _WK_RANK[a] > _WK_RANK[out[k]]:
+                out[k] = a
+        else:
+            out[("c", d, tok)] = 1
+    return out
+
+
+def workup_candidates(train_answers, *, floor=EGRESS_FLOOR):
+    """Facts whose non-default answer occurs for at least `floor` training patients:
+    `[(key, n_answers)]`, sorted for determinism."""
+    cnt = {}
+    for ans in train_answers:
+        for k in ans:
+            cnt[k] = cnt.get(k, 0) + 1
+    return [(k, WK_MAX_A if k[0] == "m" else 2)
+            for k in sorted(cnt, key=repr) if cnt[k] >= int(floor)]
+
+
+def answer_likelihoods(train_answers, Y, cands, *, smooth=0.5):
+    """(n_cand, WK_MAX_A, M) `P(answer | member)`, add-`smooth` over each fact's own
+    answer categories, zero on the categories a fact does not have. `Y` (n, M) is the
+    training patients' (possibly soft) member matrix."""
+    Y = np.asarray(Y, dtype=np.float64)
+    M = Y.shape[1]
+    idx = {k: i for i, (k, _) in enumerate(cands)}
+    counts = np.zeros((len(cands), WK_MAX_A, M))
+    nm = Y.sum(axis=0)
+    for ans, y in zip(train_answers, Y):
+        for k, a in ans.items():
+            i = idx.get(k)
+            if i is not None:
+                counts[i, a] += y
+    for i, (_, A) in enumerate(cands):
+        counts[i, 0] = nm - counts[i, 1:A].sum(axis=0)        # the default answer
+    L = np.zeros_like(counts)
+    for i, (_, A) in enumerate(cands):
+        c = counts[i, :A] + smooth
+        L[i, :A] = c / c.sum(axis=0, keepdims=True)
+    return L
+
+
+def answer_vector(ans, cands):
+    """(n_cand,) int: each candidate's answer for one patient (0 = default)."""
+    return np.array([ans.get(k, 0) for k, _ in cands], dtype=np.int64)
+
+
+def _entropy_nats(P, axis=-1):
+    P = np.clip(P, 1e-300, 1.0)
+    return -(P * np.log(P)).sum(axis=axis)
+
+
+def workup_posteriors(q0, L, tau=1.0):
+    """(n_cand, WK_MAX_A, M) posteriors after each answer of each fact,
+    `q(m | a) ∝ q0(m) P(a | m)^tau`, and (n_cand, WK_MAX_A) predictive `P(a)` under
+    q0 (untempered). Categories a fact does not have get P(a) = 0."""
+    q0 = np.asarray(q0, dtype=np.float64)
+    Lt = np.where(L > 0, np.power(np.clip(L, 1e-300, None), float(tau)), 0.0)
+    post = q0[None, None, :] * Lt
+    z = post.sum(axis=-1, keepdims=True)
+    post = np.divide(post, z, out=np.zeros_like(post), where=z > 0)
+    return post, L @ q0
+
+
+def workup_eig(q0, post, pa):
+    """(n_cand,) expected information gain, nats: H(q0) − sum_a P(a) H(q(·|a)) — the
+    expected KL from q0 to the belief after the answer, i.e. how far the answer is
+    expected to move the differential in any direction."""
+    h = _entropy_nats(np.asarray(q0, dtype=np.float64))
+    return h - (pa * _entropy_nats(post)).sum(axis=1)
+
+
+def fit_workup_tau(q0s, truths, answers, L, *, lo=0.05, hi=3.0):
+    """The temper maximizing the mean log posterior of the truth after one fact,
+    over every (patient, candidate) pair of the fitting half: it absorbs the naive-
+    Bayes independence assumption (answers are not independent of the record that
+    made q0)."""
+    from scipy.optimize import minimize_scalar
+    rows = np.arange(L.shape[0])
+
+    def nll(tau):
+        tot, n = 0.0, 0
+        for q0, t, a in zip(q0s, truths, answers):
+            post, _ = workup_posteriors(q0, L, tau)
+            tot -= np.log(np.clip(post[rows, a, t], 1e-300, None)).sum()
+            n += rows.size
+        return tot / max(n, 1)
+    return float(minimize_scalar(nll, bounds=(lo, hi), method="bounded").x)
+
+
+def _spearman(x, y):
+    from scipy.stats import spearmanr
+    if np.ptp(x) == 0 or np.ptp(y) == 0:
+        return float("nan")
+    return float(spearmanr(x, y).correlation)
+
+
+WK_EIG_BINS = (0.0, 1e-3, 3e-3, 1e-2, 3e-2, 0.1, 0.3, np.inf)
+
+
+def evaluate_workup(q0s, truths, answers, L, pri, tau, *, ks=(1, 3)):
+    """R1-R4 of the spec over every (patient, candidate) pair. `q0s` (n, M) beliefs,
+    `truths` (n,) member index, `answers` (n, n_cand) true answers, `L` the
+    likelihoods, `pri` the training prior (the population ranking's belief), `tau`
+    one temper or one per patient (each cross-fit half fits its own).
+
+    Realized gain of a fact, `g = log q(true | a_true) − log q0(true)`, is a proper
+    score whose expectation under a calibrated model is the fact's EIG."""
+    n_c = L.shape[0]
+    rows = np.arange(n_c)
+    taus = np.broadcast_to(np.asarray(tau, dtype=np.float64), (len(truths),))
+    post_p, pa_p = workup_posteriors(pri, L, float(np.mean(taus)) if len(taus) else 1.0)
+    pop_order = np.argsort(-workup_eig(pri, post_p, pa_p), kind="stable")
+    r1, top, rnd, popg, orc, chg, toward, right = [], {k: [] for k in ks}, [], [], [], [], [], []
+    bins = np.zeros((len(WK_EIG_BINS) - 1, 3))           # n, sum eig, sum g
+    sxx = sxy = 0.0
+    for q0, t, a, tau_i in zip(q0s, truths, answers, taus):
+        post, pa = workup_posteriors(q0, L, tau_i)
+        eig = workup_eig(q0, post, pa)
+        q_after = post[rows, a]                            # (n_c, M)
+        g = np.log(np.clip(q_after[:, t], 1e-300, None)) - np.log(max(q0[t], 1e-300))
+        r1.append(_spearman(eig, g))
+        order = np.argsort(-eig, kind="stable")
+        for k in ks:
+            top[k].append(float(g[order[:k]].mean()))
+        rnd.append(float(g.mean()))
+        popg.append(float(g[pop_order[0]]))
+        orc.append(float(g.max()))
+        b = order[0]
+        new = int(np.argmax(q_after[b]))
+        chg.append(new != int(np.argmax(q0)))
+        toward.append(bool(q_after[b, t] > q0[t]))
+        right.append(new == int(t))
+        j = np.clip(np.searchsorted(WK_EIG_BINS, eig, side="right") - 1, 0,
+                    len(WK_EIG_BINS) - 2)
+        np.add.at(bins, (j, 0), 1.0)
+        np.add.at(bins, (j, 1), eig)
+        np.add.at(bins, (j, 2), g)
+        sxx += float(eig @ eig)
+        sxy += float(eig @ g)
+    mean = lambda x: float(np.nanmean(x)) if len(x) else float("nan")
+    q = lambda x: [float(v) for v in np.nanpercentile(x, [25, 50, 75])] if len(x) else []
+    chg = np.asarray(chg, bool)
+    return {
+        "n": len(truths), "n_candidates": int(n_c),
+        "tau": sorted({round(float(x), 4) for x in taus}),
+        "R1_spearman_quartiles": q(r1),
+        "R2": {**{f"top{k}": mean(v) for k, v in top.items()}, "random": mean(rnd),
+               "population_top1": mean(popg), "oracle": mean(orc)},
+        "R3": {"bins": [{"lo": float(WK_EIG_BINS[i]), "n": int(bins[i, 0]),
+                         "mean_eig": float(bins[i, 1] / bins[i, 0]),
+                         "mean_gain": float(bins[i, 2] / bins[i, 0])}
+                        for i in range(bins.shape[0]) if bins[i, 0] > 0],
+               "slope": float(sxy / sxx) if sxx > 0 else float("nan")},
+        "R4": {"top1_changes_call": float(chg.mean()) if chg.size else float("nan"),
+               "top1_moves_toward_truth": mean(toward),
+               "changed_call_is_right": (float(np.asarray(right)[chg].mean())
+                                         if chg.any() else float("nan"))},
+    }
+
+
+def workup_coverage(window_days, answers):
+    """Coverage of the scored patients' windows: length quartiles (days), the share
+    with at least one non-default answer among the candidates, the median count."""
+    wd = np.asarray([w for w in window_days if w is not None], dtype=np.float64)
+    nd = np.asarray([(np.asarray(a) > 0).sum() for a in answers], dtype=np.float64)
+    return {"window_days_quartiles": ([float(v) for v in np.percentile(wd, [25, 50, 75])]
+                                      if wd.size else []),
+            "share_with_any": float((nd > 0).mean()) if nd.size else float("nan"),
+            "median_non_default": float(np.median(nd)) if nd.size else float("nan")}
