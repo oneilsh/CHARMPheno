@@ -76,6 +76,23 @@ def test_paired_by_group_name(tmp_path, capsys):
     assert "1 shared groups" in out and "A better in 1 of 1" in out
 
 
+def test_paired_compares_framing2_and_code_counts(tmp_path, capsys):
+    """Exp 0166: two code selections on one run, paired on framing 2 as well."""
+    _nested_run(tmp_path, 0.6)
+    js = json.loads((tmp_path / "differential_s.json").read_text())
+    for tag, v5, n in (("a", 0.30, 1800), ("b", 0.25, 3000)):
+        g = dict(js["group A"], e5_n_codes=n, next_question={
+            "visible": {"p_true": 0.2}, "full": {"p_true": 0.4},
+            "by": {"VOI (codes)@5": {"p_true": v5},
+                   "population table@5": {"p_true": 0.24}}})
+        (tmp_path / f"differential_{tag}.json").write_text(json.dumps({"group A": g}))
+    assert sa.main(["x", str(tmp_path), "a", str(tmp_path), "b"]) == 0
+    out = capsys.readouterr().out
+    assert "F2 gap closed by 5 questions: A − B quartiles +0.250" in out
+    assert "F2 VOI − table @5: A − B quartiles +0.050" in out
+    assert "E5 codes selected, median A / B: 1800 / 3000" in out
+
+
 def test_select_groups_with_identical_top_level_members(tmp_path):
     import select_survey_groups as ssg
     nested, flat = tmp_path / "n", tmp_path / "f"
