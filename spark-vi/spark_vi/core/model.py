@@ -27,9 +27,10 @@ class VIModel(ABC):
     def initialize_global(self, data_summary: Any | None) -> dict[str, np.ndarray]:
         """Return starting values of the global variational parameters.
 
-        data_summary: optional model-defined summary produced by the framework
-            in a pre-pass (e.g., vocabulary size). Models that need nothing
-            can ignore this argument.
+        data_summary: optional model-defined summary (e.g., vocabulary size)
+            that the caller passes to the runner's `fit(data_summary=...)`;
+            the runners forward it unchanged. Models that need nothing can
+            ignore this argument.
         """
 
     @abstractmethod
