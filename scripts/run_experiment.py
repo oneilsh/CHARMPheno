@@ -674,7 +674,10 @@ def build_dag_gated_args(
     """Build argv for analysis/cloud/dag_gated_fit.py (Gated-PC case-finding).
 
     The DAG-gated LDA fit on the cached case-finding bundle; K is emergent
-    (n_bg + nodes*tpn). Resume is unsupported here (v1); resume_from is ignored.
+    (n_bg + nodes*tpn). `resume_from` is not used: with `fit_save_interval` > 0
+    the driver checkpoints to <out>/fit_ckpt and a re-run resumes from it by
+    itself (refusing a checkpoint made for another corpus or configuration);
+    `fresh_fit: true` in the spec discards it instead.
     """
     _refuse_removed_dag_gated_options(effective)
     cdr, billing = _require_workspace_env()
@@ -709,6 +712,8 @@ def build_dag_gated_args(
         "--fit-save-interval", str(effective.get("fit_save_interval", 0)),
         "--out-dir", str(out_dir),
     ]
+    if effective.get("fresh_fit"):
+        args.append("--fresh-fit")
     if effective.get("seed") is not None:
         args.extend(["--seed", str(effective["seed"])])
     if effective.get("cache_uri"):

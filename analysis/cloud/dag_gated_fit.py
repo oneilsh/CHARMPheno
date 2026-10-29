@@ -402,6 +402,69 @@ def _dump_partial_results(out, results, name="results_partial.json"):
     tmp.replace(out / name)
 
 
+# --------------------------------------------------------------------------- #
+# Fit resume: the engine's own checkpoint under <run>/fit_ckpt.                #
+# --------------------------------------------------------------------------- #
+FIT_CKPT_DIR = "fit_ckpt"
+FIT_IDENTITY_FILE = "fit_identity.json"
+# Estimator Params that may differ between the interrupted run and its resume:
+# the iteration budget (a resume finishes or extends it) and the persistence plumbing.
+_RESUME_FREE_PARAMS = frozenset({"maxIter", "saveDir", "saveInterval", "resumeFrom"})
+
+
+def fit_identity(est, bundle_key):
+    """What must match for a checkpoint to be resumed: the corpus (the bundle cache
+    key, which folds the spec AND the assembler's source) and every estimator Param
+    except the budget and the persistence plumbing. A long value (the gate DAG, a
+    seed profile) is kept as its hash, so the file stays small and readable."""
+    import hashlib
+    params = {}
+    for p in est.params:
+        if p.name in _RESUME_FREE_PARAMS or not (est.isSet(p) or est.hasDefault(p)):
+            continue
+        v = json.dumps(est.getOrDefault(p), sort_keys=True, default=str)
+        params[p.name] = (v if len(v) <= 200 else
+                          "sha256:" + hashlib.sha256(v.encode()).hexdigest()[:16])
+    return {"bundle_key": str(bundle_key), "params": params}
+
+
+def plan_fit_resume(ckpt_dir, identity, max_iter, *, fresh=False):
+    """`("fresh", 0)`, `("resume", n_done)` or `("done", n_done)` for this fit.
+
+    A checkpoint is resumed only when its recorded identity equals this run's; a
+    mismatch, or a checkpoint without an identity, raises SystemExit(2) naming the
+    difference, because warm-starting a different corpus or configuration would
+    train silently on the wrong thing. `max_iter` is the TOTAL budget: a resume runs
+    the remaining `max_iter - n_done` iterations, and a checkpoint already at the
+    budget is "done" (load it, do not refit). `fresh=True` discards the checkpoint."""
+    import shutil
+    ckpt_dir = Path(ckpt_dir)
+    if fresh and ckpt_dir.exists():
+        shutil.rmtree(ckpt_dir)
+    if not (ckpt_dir / "manifest.json").exists():
+        return "fresh", 0
+    idp = ckpt_dir / FIT_IDENTITY_FILE
+    if not idp.exists():
+        raise SystemExit(f"[driver] ERROR: {ckpt_dir} holds a fit checkpoint with no "
+                         f"{FIT_IDENTITY_FILE}, so it cannot be checked against this "
+                         "run; pass --fresh-fit to discard it.")
+    saved = json.loads(idp.read_text())
+    if saved != identity:
+        diffs = []
+        if saved.get("bundle_key") != identity["bundle_key"]:
+            diffs.append(f"bundle_key {saved.get('bundle_key')} != "
+                         f"{identity['bundle_key']}")
+        sp, ip = saved.get("params", {}), identity["params"]
+        diffs += [f"{k}: {sp.get(k)} != {ip.get(k)}"
+                  for k in sorted(set(sp) | set(ip)) if sp.get(k) != ip.get(k)]
+        raise SystemExit("[driver] ERROR: refusing to resume the fit checkpoint in "
+                         f"{ckpt_dir}; it was made for a different corpus or "
+                         "configuration:\n  " + "\n  ".join(diffs) +
+                         "\nRevert the change, or pass --fresh-fit to start over.")
+    n_done = int(json.loads((ckpt_dir / "manifest.json").read_text())["n_iterations"])
+    return ("done" if n_done >= int(max_iter) else "resume"), n_done
+
+
 def _save_fit(out, gp, C, manifest_fields, *, results=None, domain_mass=None,
               partial=None):
     """Write `<out>/gated_pc_result.npz` + `manifest.json`. Called TWICE per run.
@@ -1162,14 +1225,18 @@ def parse_args(argv=None):
     p.add_argument("--cavi-tol", type=float, default=1e-3)
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--fit-save-interval", type=int, default=0,
-                   help="checkpoint the fit-only result (gated_pc_result.npz + "
-                        "manifest.json, partial='fit-only') every N SVI iters (0 = "
-                        "off, only the end-of-fit save). Crash insurance for long "
-                        "co-fit runs: a death at iter M leaves iter-M lambda on disk, "
-                        "re-scoreable with dag_gated_readout — no resume needed (and "
-                        "profile-eta fits cannot resume anyway, D5). Writes are "
-                        "atomic; the cost is one npz+manifest dump per interval, so "
-                        "keep it modest (e.g. 5).")
+                   help="checkpoint the fit every N SVI iters (0 = off). Two "
+                        "artifacts per interval: the engine's resumable checkpoint "
+                        "<out>/fit_ckpt (re-running the same command resumes from "
+                        "it, finishing --max-iter in total), and the fit-only result "
+                        "(gated_pc_result.npz + manifest.json, partial='fit-only') "
+                        "that dag_gated_readout can score mid-fit. Both writes are "
+                        "atomic; each costs a lambda dump, so keep N modest (e.g. "
+                        "10). fit_ckpt is removed once the finished fit is saved.")
+    p.add_argument("--fresh-fit", action="store_true",
+                   help="discard an existing <out>/fit_ckpt and fit from scratch "
+                        "(otherwise a matching checkpoint is resumed, and a "
+                        "mismatched one is refused).")
     p.add_argument("--num-partitions", type=int, default=0,
                    help="repartition the corpus to this many partitions before "
                         "fitting (0 = leave as-is). Few parquet part-files pin the "
@@ -1419,6 +1486,23 @@ def main() -> int:
 
         with _phase(f"gated_pc fit (DagGatedLDAEstimator, K={lay.K})"):
             pc_est = _build_estimator(args)
+            # Resume (the engine's own checkpoint, <out>/fit_ckpt): a re-run of the
+            # same command continues an interrupted fit when the checkpoint's
+            # identity (bundle key + every estimator Param but the budget) matches.
+            ckpt = out / FIT_CKPT_DIR
+            identity = fit_identity(pc_est, multidomain_cache_key(corpus_spec))
+            action, n_done = plan_fit_resume(ckpt, identity, args.max_iter,
+                                             fresh=bool(args.fresh_fit))
+            if action == "resume":
+                pc_est.setResumeFrom(str(ckpt))
+                pc_est.setMaxIter(int(args.max_iter) - n_done)
+                _cprint(f"[driver]   RESUMING the fit from {ckpt} at iteration "
+                        f"{n_done}; {args.max_iter - n_done} to go", flush=True)
+            if args.fit_save_interval > 0:
+                ckpt.mkdir(parents=True, exist_ok=True)
+                (ckpt / FIT_IDENTITY_FILE).write_text(json.dumps(identity, indent=1))
+                pc_est.setSaveDir(str(ckpt))
+                pc_est.setSaveInterval(int(args.fit_save_interval))
             # Per-iteration hook: the optional fit checkpoint (fit_save_interval).
             if args.fit_save_interval > 0 and out is not None:
                 def _fit_ckpt(it, gp, _elbo, _out=out, _C=C, _mf=manifest_fields,
@@ -1431,7 +1515,17 @@ def main() -> int:
                         _cprint(f"[driver]   fit checkpoint @ iter {it} "
                               "(re-scoreable with dag_gated_readout)", flush=True)
                 pc_est.setOnIteration(_fit_ckpt)
-            pc_model = pc_est.fit(bundle.train_df)
+            if action == "done":
+                # The checkpoint already holds the whole budget (the driver died
+                # after the last checkpoint but before the save below).
+                from spark_vi.io.export import load_result
+                from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAModel
+                pc_model = DagGatedLDAModel(load_result(ckpt))
+                _cprint(f"[driver]   fit checkpoint {ckpt} is already at "
+                        f"{n_done}/{args.max_iter} iterations; not refitting",
+                        flush=True)
+            else:
+                pc_model = pc_est.fit(bundle.train_df)
             # EARLY SAVE, before any readout work touches the cluster: the fit is
             # the hours-long unrepeatable half and the readout is where runs die,
             # so the model reaches durable storage the moment it exists. The final
@@ -1442,6 +1536,11 @@ def main() -> int:
                       partial="fit-only")
             _cprint(f"[driver]   saved FIT-ONLY result to {out} (readout pending; "
                   "re-scoreable with dag_gated_readout)", flush=True)
+            if ckpt.exists():
+                # The finished fit is durable in the npz; the resume checkpoint has
+                # done its job (and is another lambda-sized copy on disk).
+                import shutil
+                shutil.rmtree(ckpt, ignore_errors=True)
             # The fit ends here (cleanup 2026-10): every readout and evaluation is
             # `dag_gated_readout.py` against this saved fit. Per-node per-domain λ
             # mass needs no readout, so it is still reported with the fit.

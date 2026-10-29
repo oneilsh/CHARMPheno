@@ -1,4 +1,5 @@
 """VIResult.save + load roundtrip via JSON + .npy sidecar files."""
+import pytest
 import numpy as np
 
 
@@ -574,3 +575,22 @@ def test_export_can_be_imported_before_core():
     code = ("import spark_vi.io.export as e; import spark_vi.core; "
             "assert callable(e.load_result)")
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_a_save_that_fails_midway_leaves_the_previous_checkpoint(tmp_path):
+    """Files are staged then committed, manifest last: a save that dies after
+    writing some params (here: an unsaveable second param) must leave the previous
+    save loadable and unchanged, not a manifest over mixed-iteration params."""
+    from spark_vi.core.result import VIResult
+    from spark_vi.io.export import UnsupportedGlobalParamError, load_result, save_result
+
+    first = VIResult(global_params={"a": np.zeros(3), "b": np.ones(2)},
+                     elbo_trace=[-1.0], n_iterations=1, converged=False)
+    save_result(first, tmp_path)
+    broken = VIResult(global_params={"a": np.full(3, 7.0), "b": np.array([1, None], dtype=object)},
+                      elbo_trace=[-1.0, -0.5], n_iterations=2, converged=False)
+    with pytest.raises(UnsupportedGlobalParamError):
+        save_result(broken, tmp_path)
+    back = load_result(tmp_path)
+    assert back.n_iterations == 1
+    np.testing.assert_array_equal(back.global_params["a"], np.zeros(3))

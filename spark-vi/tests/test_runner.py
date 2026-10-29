@@ -272,9 +272,8 @@ def test_vi_runner_mini_batch_is_reproducible_with_seed(spark):
 def test_vi_runner_mini_batch_empty_batch_path_does_not_crash(spark):
     """Tiny fraction on small data sometimes produces an empty batch.
 
-    The runner must skip the global update for empty batches without crashing.
-    Exact iteration counts are sampling-dependent; we only require that the
-    result is well-formed.
+    The runner must skip the global update for empty batches without crashing,
+    and still record the iteration.
     """
     from spark_vi.core import VIConfig, VIRunner
     from spark_vi.models.topic.counting import CountingModel
@@ -293,12 +292,10 @@ def test_vi_runner_mini_batch_empty_batch_path_does_not_crash(spark):
     )
     result = runner.fit(rdd)
 
-    # Loop ran to max_iterations; some iterations may have been skipped.
+    # Loop ran to max_iterations; an empty batch counts, with a NaN ELBO.
     assert result.n_iterations == 5
     assert result.converged is False
-    # ELBO trace length equals number of non-skipped iterations and may be
-    # less than max_iterations.
-    assert len(result.elbo_trace) <= 5
+    assert len(result.elbo_trace) == 5
 
 
 def test_vi_runner_full_batch_path_unchanged_when_fraction_none(spark):
@@ -557,3 +554,44 @@ def test_runner_transform_propagates_not_implemented(spark):
         out.collect()
     # The Spark task wraps the original error; the message survives.
     assert "CountingModel" in str(exc.value)
+
+
+class _FailOnceCounting:
+    """CountingModel whose local_update raises on its FIRST executor call (a flag
+    file marks that it has), standing in for a task lost to a preemption wave."""
+
+    def __new__(cls, flag):
+        from spark_vi.models.topic.counting import CountingModel
+
+        class _M(CountingModel):
+            def local_update(self, rows, global_params, _flag=str(flag)):
+                import os
+                if not os.path.exists(_flag):
+                    open(_flag, "w").close()
+                    raise RuntimeError("simulated executor loss")
+                return super().local_update(rows, global_params)
+        return _M(early_stop=False)
+
+
+def test_vi_runner_retries_a_failed_e_step_job(spark, tmp_path, monkeypatch):
+    """A job that dies mid-fit is re-run by retry_spark_action (new broadcast, same
+    batch), and the fit lands where an unfailed fit does."""
+    import time as _time
+
+    from spark_vi.core import VIConfig, VIRunner
+    from spark_vi.models.topic.counting import CountingModel
+
+    slept, real_sleep = [], _time.sleep
+
+    def _sleep(s):                               # record the backoffs, not pyspark's
+        slept.append(s) if s >= 30 else real_sleep(s)
+    monkeypatch.setattr(_time, "sleep", _sleep)
+    data = [1] * 70 + [0] * 30
+    rdd = spark.sparkContext.parallelize(data, numSlices=4).persist()
+    rdd.count()
+    cfg = VIConfig(max_iterations=4, mini_batch_fraction=0.5, random_seed=7)
+    want = VIRunner(CountingModel(early_stop=False), cfg).fit(rdd)
+    got = VIRunner(_FailOnceCounting(tmp_path / "failed"), cfg).fit(rdd)
+    assert slept == [60.0]                       # exactly one retry, one backoff
+    np.testing.assert_allclose(got.global_params["alpha"], want.global_params["alpha"])
+    np.testing.assert_allclose(got.elbo_trace, want.elbo_trace)

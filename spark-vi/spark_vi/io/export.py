@@ -21,6 +21,7 @@ docs/decisions/0006-unified-persistence-format.md.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -175,11 +176,27 @@ def save_result(result: VIResult, out_dir: Path | str) -> None:
     NUMERIC array (see `_check_saveable_param`). `diagnostic_traces` are
     unaffected: they have their own sidecar path and are loaded with
     allow_pickle=True.
+
+    Staged, then committed: every file is first written under a `.tmp` name, and
+    only after ALL of them are on disk are they renamed into place, manifest.json
+    last. The same directory serves as the resume checkpoint, rewritten every
+    `checkpoint_interval` iterations, and the slow part (hundreds of MB of λ) is
+    the write; a process killed during it leaves the previous checkpoint intact
+    instead of a manifest from one iteration over params from another. The
+    remaining window is the renames themselves.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     params_dir = out / "params"
     params_dir.mkdir(exist_ok=True)
+    staged: list[Path] = []
+
+    def _stage_npy(path: Path, arr) -> None:
+        # np.save appends ".npy" to a bare str/Path; a file object keeps the name.
+        tmp = path.with_name(path.name + ".tmp")
+        with open(tmp, "wb") as f:
+            np.save(f, arr)
+        staged.append(path)
 
     # A dict-valued param is stored per key, NOT as one array: the blocks have
     # different widths (V_m differs per domain), so there is no single array to
@@ -190,11 +207,11 @@ def save_result(result: VIResult, out_dir: Path | str) -> None:
         if isinstance(arr, dict):
             keys = sorted(arr)
             for k in keys:
-                np.save(params_dir / f"{name}_{k}.npy",
-                        _check_saveable_param(f"{name}[{k}]", arr[k]))
+                _stage_npy(params_dir / f"{name}_{k}.npy",
+                           _check_saveable_param(f"{name}[{k}]", arr[k]))
             dict_param_keys[name] = [int(k) for k in keys]
         else:
-            np.save(params_dir / f"{name}.npy", _check_saveable_param(name, arr))
+            _stage_npy(params_dir / f"{name}.npy", _check_saveable_param(name, arr))
 
     # Split diagnostic_traces by storage strategy. Array traces go to
     # traces/<name>.npy; scalar (and empty) traces stay inline in JSON.
@@ -223,7 +240,7 @@ def save_result(result: VIResult, out_dir: Path | str) -> None:
                 traces_dir = out / "traces"
                 traces_dir.mkdir(exist_ok=True)
             stacked = np.stack([np.asarray(x) for x in trace], axis=0)
-            np.save(traces_dir / f"{name}.npy", stacked)
+            _stage_npy(traces_dir / f"{name}.npy", stacked)
             diagnostic_traces_manifest[name] = {"file": f"traces/{name}.npy"}
 
     manifest = {
@@ -236,7 +253,12 @@ def save_result(result: VIResult, out_dir: Path | str) -> None:
         "diagnostic_traces": diagnostic_traces_manifest,
         "dict_param_keys": dict_param_keys,
     }
-    (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    manifest_tmp = out / "manifest.json.tmp"
+    manifest_tmp.write_text(json.dumps(manifest, indent=2))
+    # Commit: every staged file, then the manifest that names them.
+    for path in staged:
+        os.replace(path.with_name(path.name + ".tmp"), path)
+    os.replace(manifest_tmp, out / "manifest.json")
 
 
 def load_result(in_dir: Path | str) -> VIResult:
