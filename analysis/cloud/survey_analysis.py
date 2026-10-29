@@ -245,6 +245,13 @@ def workup_summary(js):
         slope = [x["R3"]["slope"] for _, x in es]
         chg = [x["R4"]["top1_changes_call"] for _, x in es]
         q = lambda v: " / ".join(f"{z:+.3f}" for z in np.nanpercentile(v, [25, 50, 75]))
+        fs = [x.get("facts", {}).get("spearman_mean_eig_vs_mean_gain") for _, x in es]
+        fs = [v for v in fs if v is not None and v == v]
+        if fs:
+            print(f"- {e} fact-level Spearman (mean EIG vs mean realized gain), "
+                  f"{len(fs)} groups: " + " / ".join(
+                      f"{z:+.2f}" for z in np.percentile(fs, [25, 50, 75]))
+                  + f" (> 0 in {sum(v > 0 for v in fs)})")
         print(f"- {e} ({len(es)} groups): R1 median Spearman {q(r1)} · top-1 − random "
               f"{q(d_rand)} (> 0 in {sum(d > 0 for d in d_rand)}) · top-1 − "
               f"population {q(d_pop)} (> 0 in {sum(d > 0 for d in d_pop)}) · top-1 / "
