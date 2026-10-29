@@ -137,3 +137,64 @@ def test_parse_args_surface_defaults_and_arms():
         parse_args(["--cdr", "p.d", "--billing", "bp", "--out-dir", "/t", "--k", "4"])
 
 
+class _FakeParam:
+    def __init__(self, name):
+        self.name = name
+
+
+class _FakeEst:
+    """Just the Params surface `fit_identity` reads."""
+
+    def __init__(self, **vals):
+        self.vals = vals
+        self.params = [_FakeParam(k) for k in vals]
+
+    def isSet(self, p):
+        return True
+
+    def hasDefault(self, p):
+        return True
+
+    def getOrDefault(self, p):
+        return self.vals[p.name]
+
+
+def _ckpt(tmp_path, identity, n_done):
+    import json
+    d = tmp_path / "fit_ckpt"
+    d.mkdir()
+    (d / "manifest.json").write_text(json.dumps({"n_iterations": n_done}))
+    if identity is not None:
+        (d / "fit_identity.json").write_text(json.dumps(identity))
+    return d
+
+
+def test_fit_identity_skips_the_budget_and_hashes_long_values():
+    from dag_gated_fit import fit_identity
+    est = _FakeEst(maxIter=100, saveDir="/x", subsamplingRate=0.05,
+                   gateParent="{" + "1: [0], " * 100 + "}")
+    ident = fit_identity(est, "abc")
+    assert ident["bundle_key"] == "abc"
+    assert set(ident["params"]) == {"subsamplingRate", "gateParent"}
+    assert ident["params"]["gateParent"].startswith("sha256:")
+
+
+def test_plan_fit_resume_fresh_resume_done_and_refusals(tmp_path):
+    import pytest
+    from dag_gated_fit import fit_identity, plan_fit_resume
+    ident = fit_identity(_FakeEst(subsamplingRate=0.05), "abc")
+    assert plan_fit_resume(tmp_path / "fit_ckpt", ident, 100) == ("fresh", 0)
+    d = _ckpt(tmp_path, ident, 40)
+    assert plan_fit_resume(d, ident, 100) == ("resume", 40)
+    assert plan_fit_resume(d, ident, 40) == ("done", 40)
+    other = fit_identity(_FakeEst(subsamplingRate=0.1), "abc")
+    with pytest.raises(SystemExit, match="subsamplingRate"):
+        plan_fit_resume(d, other, 100)
+    with pytest.raises(SystemExit, match="bundle_key"):
+        plan_fit_resume(d, fit_identity(_FakeEst(subsamplingRate=0.05), "zzz"), 100)
+    assert plan_fit_resume(d, other, 100, fresh=True) == ("fresh", 0)
+    assert not d.exists()
+    d = _ckpt(tmp_path, None, 10)                 # a checkpoint with no identity
+    with pytest.raises(SystemExit, match="--fresh-fit"):
+        plan_fit_resume(d, ident, 100)
+

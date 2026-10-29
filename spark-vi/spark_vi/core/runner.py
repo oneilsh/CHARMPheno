@@ -8,6 +8,8 @@ Each iteration executes the canonical distributed-VI step:
     4. treeReduce: tree-shaped sum of stats across partitions
        (via model.combine_stats), keeping driver memory bounded to a single
        per-partition stats dict rather than the sum of all of them.
+       Steps 2-4 (and the batch count) run under `retry_spark_action`, so a
+       job aborted by a preemption wave is re-run rather than killing the fit.
     5. Driver: pre-scale the aggregated stats to a corpus-equivalent target
        (corpus_size / batch_size) when in mini-batch mode, then call
        model.update_global with Robbins-Monro learning rate.
@@ -41,6 +43,7 @@ from spark_vi.core.config import VIConfig
 from spark_vi.core.loop import run_svi_loop
 from spark_vi.core.model import VIModel
 from spark_vi.core.result import VIResult
+from spark_vi.core.retry import retry_spark_action
 from spark_vi.diagnostics.persist import assert_persisted
 
 log = logging.getLogger(__name__)
@@ -166,7 +169,9 @@ class VIRunner:
                        else None)
 
         def _estep(global_params, seed):
-            # 1. Sample a mini-batch (or use the full RDD).
+            # 1. Sample a mini-batch (or use the full RDD). The sample is a pure
+            # function of (data_rdd, seed), so a retried action that recomputes
+            # lost partitions from lineage gets the same batch.
             if seed is not None:
                 batch_rdd = data_rdd.sample(
                     withReplacement=cfg.sample_with_replacement,
@@ -174,46 +179,55 @@ class VIRunner:
                     seed=seed,
                 )
                 # Cache the sampled RDD so count() and mapPartitions don't each
-                # recompute the sample lineage. Without persistence, sampling
-                # would be triggered twice per iteration.
+                # recompute the sample lineage.
                 batch_rdd = batch_rdd.persist(StorageLevel.MEMORY_AND_DISK)
-                batch_size = batch_rdd.count()
-                if batch_size == 0:
-                    batch_rdd.unpersist(blocking=False)
-                    return None, 0
             else:
                 batch_rdd = data_rdd
-                batch_size = None
 
-            # 2. Broadcast current global params.
-            bcast = sc.broadcast(global_params)
+            def _aggregate():
+                # 2. Broadcast current global params — INSIDE the retried action,
+                # so a retry re-broadcasts instead of reusing blocks that may have
+                # died with the executors (retry_spark_action's contract).
+                bcast = sc.broadcast(global_params)
 
-            # 3 & 4. Distributed E-step + aggregate.
-            # Default-arg capture binds bcast and model by value at definition
-            # time (stored in __defaults__), the Spark-safe closure idiom.
-            def _local(rows, _bcast=bcast, _model=model):
-                return [_model.local_update(rows, _bcast.value)]
+                # Default-arg capture binds bcast and model by value at definition
+                # time (stored in __defaults__), the Spark-safe closure idiom.
+                def _local(rows, _bcast=bcast, _model=model):
+                    return [_model.local_update(rows, _bcast.value)]
 
-            # treeReduce is the tree-shaped tree-aggregate; driver memory holds
-            # one merged stats dict, not the per-partition list. Requires
-            # combine_stats to be associative + commutative (already required
-            # by the VIModel contract for additive sufficient statistics).
-            # Depth is sized from the stats payload (see _agg_depth): each
-            # per-partition partial is a DENSE lambda-shaped dict (~355 MB at
-            # whole-Mondo scale), and depth 3 moves one more combine round onto
-            # the executors so fewer of them land on the driver at once.
+                # 3 & 4. Distributed E-step + tree-shaped aggregate: the driver
+                # holds one merged stats dict, not the per-partition list.
+                # Requires combine_stats to be associative + commutative (already
+                # required by the VIModel contract for additive statistics).
+                # Depth is sized from the stats payload (see _agg_depth): each
+                # per-partition partial is a DENSE lambda-shaped dict (~355 MB at
+                # whole-Mondo scale), and depth 3 moves one more combine round
+                # onto the executors so fewer of them land on the driver at once.
+                try:
+                    return batch_rdd.mapPartitions(_local).treeReduce(
+                        model.combine_stats, depth=_agg_depth(global_params))
+                finally:
+                    # DESTROY the broadcast once the aggregate has returned (or
+                    # failed), not unpersist: unpersist frees only the executor
+                    # copies, while the driver's block-manager copy and its
+                    # pickled temp file on local disk survive until destroy(). At
+                    # ~355 MB of λ per iteration that fills the master's disk over
+                    # a long fit. See RISKS_AND_MITIGATIONS.md §Broadcast lifecycle.
+                    _destroy_broadcast(bcast)
+
+            # Each Spark action is retried across preemption waves (a fresh job
+            # resets the per-taskset excludeOnFailure lists); deterministic and
+            # application-level failures still fail fast. See spark_vi.core.retry.
             try:
-                aggregated = batch_rdd.mapPartitions(_local).treeReduce(
-                    model.combine_stats, depth=_agg_depth(global_params))
+                if seed is not None:
+                    batch_size = retry_spark_action(batch_rdd.count,
+                                                    label="fit batch count")
+                    if batch_size == 0:
+                        return None, 0
+                else:
+                    batch_size = None
+                aggregated = retry_spark_action(_aggregate, label="fit E-step")
             finally:
-                # DESTROY the broadcast once the aggregate has returned, not
-                # unpersist: unpersist frees only the executor copies, while the
-                # driver's block-manager copy and its pickled temp file on local
-                # disk survive until destroy(). At ~355 MB of λ per iteration that
-                # fills the master's disk over a long fit. Safe here because the
-                # treeReduce action has completed. See RISKS_AND_MITIGATIONS.md
-                # §Broadcast lifecycle.
-                _destroy_broadcast(bcast)
                 # Free the cached batch RDD before the next iteration's sample.
                 if seed is not None:
                     batch_rdd.unpersist(blocking=False)

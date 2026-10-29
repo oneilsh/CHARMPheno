@@ -238,6 +238,25 @@ def test_resume_continues_the_iteration_counter(tmp_path, spark):
     assert not np.allclose(rb.global_params["lambda"], lam_a)
 
 
+def test_minibatch_resume_with_a_gate_schedule_is_the_continuous_fit(tmp_path, spark):
+    """Checkpoint + resume through the shim reproduces the uninterrupted fit: the
+    seed stream, the Robbins-Monro counter and the leaves-first gate state (which
+    rides global_params) all continue across the resume."""
+    df = _df(spark, n=60)
+    kw = dict(seed=5, subsamplingRate=0.5, gateWarm=2, gateOpenSeed=False)
+    want = _est(maxIter=6, **kw).fit(df).result
+    a = _est(maxIter=3, **kw)
+    a.setSaveDir(str(tmp_path / "ck"))
+    a.fit(df)
+    b = _est(maxIter=3, **kw)
+    b.setResumeFrom(str(tmp_path / "ck"))
+    got = b.fit(df).result
+    assert got.n_iterations == 6
+    np.testing.assert_allclose(got.global_params["lambda"], want.global_params["lambda"],
+                               rtol=1e-10)
+    np.testing.assert_allclose(got.elbo_trace, want.elbo_trace, rtol=1e-10)
+
+
 def test_profile_seed_lands_in_the_primary_domain_slice():
     """gateSeedDomain names the domain the profile / own codes index; its local ids
     are shifted to that domain's span of the concatenated vocabulary."""

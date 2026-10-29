@@ -342,8 +342,8 @@ result = runner.fit(df, **data_kwargs)
 
 1. If `mini_batch_fraction` is set, sample a fresh mini-batch from the input RDD
    (with replacement by default; per-iteration seed derived from `random_seed`).
-   Cache the batch and call `count()` to obtain `batch_size`. If empty, skip to
-   the next iteration. Otherwise compute `stats_scale = corpus_size / batch_size`.
+   Cache the batch and call `count()` to obtain `batch_size`. If empty, leave the
+   parameters unchanged and record the iteration with a NaN ELBO. Otherwise compute `stats_scale = corpus_size / batch_size`.
    Otherwise (full-batch mode) `batch = full_rdd` and `stats_scale = 1.0`.
 2. Broadcast `global_params` to all workers
 3. `mapPartitions` $\rightarrow$ `model.local_update` $\rightarrow$ collect
@@ -351,12 +351,16 @@ result = runner.fit(df, **data_kwargs)
 4. `treeAggregate` with `model.combine_stats` (default: elementwise sum). Implemented
    in PySpark via `RDD.treeReduce(model.combine_stats)` — equivalent to `treeAggregate`
    for our associative + commutative combiner, with a slightly simpler API.
+   Steps 2–4 and the batch count run under `spark_vi.core.retry.retry_spark_action`:
+   a job aborted by a preemption wave is re-run with a fresh broadcast (the sample
+   is a pure function of the seed, so the batch is the same); schema errors, a
+   stopped SparkContext and a full-disk node cascade fail fast.
 5. Pre-scale aggregated stats by `stats_scale` to form `target_stats`; the raw
    aggregated stats are also retained for ELBO computation.
 6. `model.update_global(global_params, target_stats, learning_rate)` on driver: `learning_rate` is
    the Robbins–Monro ρ_t = (τ0 + t + 1)^-κ in mini-batch mode and **1** in full-batch
    mode (batch variational EM: a decaying step toward a deterministic target freezes
-   the parameters short of the fixed point; fix `3f71de55`, ported with ADR 0051)
+   the parameters short of the fixed point)
 7. `model.compute_elbo(global_params, aggregated_stats)` for diagnostics; log
    metrics (parameter deltas, ELBO if available, wall time)
 8. Push metrics to notebook display (or logger in batch mode)
@@ -364,8 +368,8 @@ result = runner.fit(df, **data_kwargs)
 
 Beyond `fit`, `VIRunner` also exposes `transform(rdd, global_params)` —
 a one-pass per-row inference orchestrator. It broadcasts the trained
-global params, maps `model.infer_local` over the RDD, and unpersists
-the broadcast on completion. Models that don't implement `infer_local`
+global params and maps `model.infer_local` over the RDD; the broadcast lives as
+long as the returned (lazy) RDD and is reclaimed by Spark's ContextCleaner. Models that don't implement `infer_local`
 produce a clear NotImplementedError when the resulting RDD is collected.
 
 ### The LocalRunner (in-memory engine)
@@ -459,7 +463,11 @@ one is the only one needed for resume). The two fields are coupled: setting
 one without the other raises `ValueError` at construction. The on-disk format
 is the same `manifest.json + params/*.npy` layout used for `save_result`, so
 auto-checkpoints can be loaded directly via `load_result` or fed into
-`VIRunner.fit(rdd, resume_from=path)` to continue training. See ADR 0006.
+`VIRunner.fit(rdd, resume_from=path)` to continue training: the Robbins–Monro
+counter, the minibatch seed stream and the diagnostic traces all continue, so
+checkpoint + resume is the uninterrupted fit (given `random_seed`). Writes are
+staged and committed manifest-last, so a process killed mid-save leaves the
+previous checkpoint intact. See ADR 0006.
 
 **Mini-batch fields** (`mini_batch_fraction`, `sample_with_replacement`, `random_seed`)
 adopt the MLlib `OnlineLDAOptimizer` `subsamplingRate` pattern. With
