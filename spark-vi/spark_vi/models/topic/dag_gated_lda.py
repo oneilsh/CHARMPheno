@@ -131,8 +131,8 @@ class DagGatedOnlineLDA(OnlineLDA):
                           init_seed: np.ndarray | None = None) -> None:
         """Fit in ROUNDS by node height: leaves first, then each level up.
 
-        Exp 0152 read 3b: in a single-round gated fit a parent block can hold its
-        dominant child's vocabulary while a minor child fills with comorbidity. The
+        Why: in a single-round gated fit a parent block can hold its dominant
+        child's vocabulary while a minor child fills with comorbidity. The
         schedule lets every child claim its own words before its parent's block
         exists: for the first `warm` iterations a document's gate admits only
         closure nodes of height 0 (leaves), the next `warm` height <= 1, and so on;
@@ -143,7 +143,7 @@ class DagGatedOnlineLDA(OnlineLDA):
         A CLOSED block's lambda is frozen (its zero sufficient statistics would pull
         it to the flat prior every step). A block opened late onto already-sharp
         competitors starts flat, wins no responsibility and decays — dead on arrival
-        (report 2026-10-19-leaves-first-gate-sim) — so `open_seed`, a (K, V) array
+        (docs/reports/2026-10-19-leaves-first-gate-sim) — so `open_seed`, a (K, V) array
         over the concatenated vocabulary, gives each block a start the moment it
         opens: its row is the word counts of the documents whose gate admits the
         block (`gated_init.gate_open_seed_counts`), normalized and scaled to a typical
@@ -158,8 +158,11 @@ class DagGatedOnlineLDA(OnlineLDA):
         domain replaces only that domain's start.
 
         The state rides global_params (`gate_iter`, `gate_open_at`), so executors see
-        the round every iteration; the seeds are driver-only (`__getstate__` drops
-        them). `warm=0` (the default) is the production gate, byte-identical."""
+        the round every iteration and a resumed fit continues the schedule; the seeds
+        are driver-only (`__getstate__` drops them). The clock is M-steps
+        (`gate_iter` advances in update_global), so an iteration whose minibatch came
+        up empty does not advance the schedule. `warm=0` (the default) is the
+        production gate, byte-identical."""
         self.gate_warm = int(warm)
         self._init_seed = None
         if self.gate_warm <= 0:
