@@ -496,10 +496,9 @@ def _save_fit(out, gp, C, manifest_fields, *, results=None, domain_mass=None,
         lam_arrays = {f"lambda_{m}": lam[m] for m in sorted(lam)}
     else:
         lam_arrays = {"lambda": lam}
-    # Atomic writes (tmp + os.replace). _save_fit is called mid-fit as a periodic
-    # checkpoint (--fit-save-interval) with the fit still running, so a crash DURING
-    # a write must not tear the npz/manifest that is the crash insurance itself —
-    # the same rule the readout checkpoint (_write_readout_checkpoint) follows.
+    # Atomic writes (tmp + os.replace): the final write OVERWRITES the fit-only
+    # one, so a crash DURING it must not tear the npz/manifest that is the fit's
+    # only durable copy — the same rule the readout checkpoint follows.
     # os.replace is atomic within a filesystem; the run dir is the driver's local
     # workspace mount. np.savez gets a FILE OBJECT so it does not append '.npz' to
     # the tmp name (the same gotcha noted at the readout-checkpoint site).
@@ -1225,14 +1224,11 @@ def parse_args(argv=None):
     p.add_argument("--cavi-tol", type=float, default=1e-3)
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--fit-save-interval", type=int, default=0,
-                   help="checkpoint the fit every N SVI iters (0 = off). Two "
-                        "artifacts per interval: the engine's resumable checkpoint "
-                        "<out>/fit_ckpt (re-running the same command resumes from "
-                        "it, finishing --max-iter in total), and the fit-only result "
-                        "(gated_pc_result.npz + manifest.json, partial='fit-only') "
-                        "that dag_gated_readout can score mid-fit. Both writes are "
-                        "atomic; each costs a lambda dump, so keep N modest (e.g. "
-                        "10). fit_ckpt is removed once the finished fit is saved.")
+                   help="checkpoint the fit every N SVI iters (0 = off) to "
+                        "<out>/fit_ckpt; re-running the same command resumes from it, "
+                        "finishing --max-iter in total. Writes are atomic; each costs "
+                        "a lambda dump, so keep N modest (e.g. 10). fit_ckpt is "
+                        "removed once the finished fit is saved.")
     p.add_argument("--fresh-fit", action="store_true",
                    help="discard an existing <out>/fit_ckpt and fit from scratch "
                         "(otherwise a matching checkpoint is resumed, and a "
@@ -1503,18 +1499,6 @@ def main() -> int:
                 (ckpt / FIT_IDENTITY_FILE).write_text(json.dumps(identity, indent=1))
                 pc_est.setSaveDir(str(ckpt))
                 pc_est.setSaveInterval(int(args.fit_save_interval))
-            # Per-iteration hook: the optional fit checkpoint (fit_save_interval).
-            if args.fit_save_interval > 0 and out is not None:
-                def _fit_ckpt(it, gp, _elbo, _out=out, _C=C, _mf=manifest_fields,
-                              _every=int(args.fit_save_interval)):
-                    # VIRunner calls this after each iter with that iter's params;
-                    # dump the fit-only result every _every iters so a crash leaves
-                    # a readout-able lambda. Atomic (see _save_fit). Never mutates gp.
-                    if it % _every == 0:
-                        _save_fit(_out, gp, _C, _mf, partial="fit-only")
-                        _cprint(f"[driver]   fit checkpoint @ iter {it} "
-                              "(re-scoreable with dag_gated_readout)", flush=True)
-                pc_est.setOnIteration(_fit_ckpt)
             if action == "done":
                 # The checkpoint already holds the whole budget (the driver died
                 # after the last checkpoint but before the save below).

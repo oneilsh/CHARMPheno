@@ -101,15 +101,17 @@ def _error_first_line(exc):
 
 
 def _is_bad_node_failure(exc):
-    """True when a Spark job failure carries the YARN NODE-HEALTH / bad-node
-    cascade signature — a DISK/health failure a backoff sleep cannot heal.
+    """True when a Spark job failure carries a NODE-HEALTH / bad-node cascade
+    signature — a DISK/health failure a backoff sleep cannot heal.
 
-    The failure this names: a full worker local disk makes YARN mark the
-    NodeManager UNHEALTHY and SIGTERM its containers, which surface to the driver
-    as `ExecutorLostFailure ... Container from a bad node` (exit 143). Unlike a
+    CLUSTER-MANAGER SPECIFIC: the needles are YARN's wording. Under YARN a full
+    worker local disk marks the NodeManager UNHEALTHY and SIGTERMs its
+    containers, which surface to the driver as `ExecutorLostFailure ... Container
+    from a bad node` (exit 143). On other cluster managers (Kubernetes,
+    standalone) nothing matches and the failure gets the normal retry. Unlike a
     spot-preemption `ExecutorLostFailure` — which self-heals on the backoff
-    because YARN replaces the container and a fresh job resets the per-taskset
-    exclude lists — this one does NOT self-heal: the disk is still full, and
+    because the cluster manager replaces the executor and a fresh job resets the
+    per-taskset exclude lists — this one does NOT self-heal: the disk is still full, and
     re-running a shuffle-heavy pass into a disk-pressured cluster spreads the
     failure to more nodes. So it fails fast (like the schema and dead-context
     cases) rather than feeding the cascade through the backoff.
@@ -157,10 +159,10 @@ def retry_spark_action(fn, *, attempts=4, base_sleep_s=60, label=""):
     **Why a retry fixes the failure it is aimed at.** Spot-VM preemption waves
     accumulate Spark `excludeOnFailure` state until a task retry has no
     schedulable executor left and Spark aborts the TaskSet ("cannot run anywhere
-    due to node and executor excludeOnFailure"). During the sleep YARN replaces
-    the killed containers within a couple of minutes, and — decisively — the
-    per-taskset exclusion lists are per-JOB, so a NEW job starts with a clean
-    slate regardless of how poisoned the aborted one's were. The sleeps are
+    due to node and executor excludeOnFailure"). During the sleep the cluster
+    manager replaces the lost executors (minutes, on YARN or Kubernetes), and —
+    decisively — the per-taskset exclusion lists are per-JOB, so a NEW job starts
+    with a clean slate regardless of how poisoned the aborted one's were. The sleeps are
     sized for that: 60s, 120s, 240s.
 
     Retries on ANY Spark JOB failure rather than pattern-matching the abort
@@ -171,7 +173,7 @@ def retry_spark_action(fn, *, attempts=4, base_sleep_s=60, label=""):
     propagate on the first raise.
 
     Three cases fail FAST instead, because a sleep cannot change them:
-    `AnalysisException` (by type; `_spark_deterministic_failure_types`), the YARN
+    `AnalysisException` (by type; `_spark_deterministic_failure_types`), the
     bad-node / unhealthy-node cascade (by message; `_is_bad_node_failure`,
     matched narrowly so ordinary preemption keeps its full budget), and a
     SparkContext that stopped during the action (the application died; a rerun
@@ -183,9 +185,10 @@ def retry_spark_action(fn, *, attempts=4, base_sleep_s=60, label=""):
     import time
 
     # A retry only helps while the APPLICATION is alive: a job abort leaves the
-    # SparkContext healthy, but when YARN fails the whole application (e.g. an
-    # unmanaged-AM heartbeat timeout) the client backend stops the context, and
-    # every further attempt fails at `broadcast` before any work is submitted.
+    # SparkContext healthy, but when the cluster manager fails the whole
+    # application (e.g. a YARN AM heartbeat timeout) the backend stops the
+    # context, and every further attempt fails at `broadcast` before any work is
+    # submitted.
     # Sleeping through 3 more attempts then only delays the exit — a rerun of the
     # same command is the actual recovery.
     # "Dead" is judged RELATIVE TO ENTRY: `sc.stop()` nulls
@@ -229,12 +232,12 @@ def retry_spark_action(fn, *, attempts=4, base_sleep_s=60, label=""):
                             "signature (a DISK/health cascade, not spot "
                             "preemption). A backoff cannot heal a full disk and a "
                             "retry would feed the cascade, so failing fast: rerun "
-                            "the command once YARN has recovered the nodes. "
+                            "the command once the cluster has recovered the nodes. "
                             "Original error: %s", tag, _error_first_line(exc))
                 raise
             if _context_is_dead():
                 log.warning("%sspark action FAILED and the SparkContext has STOPPED "
-                            "(application-level failure — YARN failed or killed "
+                            "(application-level failure — the cluster manager failed or killed "
                             "the app). Retrying cannot help; rerun the same command "
                             "to resume from the last checkpoint. Original error: "
                             "%s", tag, _error_first_line(exc))
@@ -247,8 +250,8 @@ def retry_spark_action(fn, *, attempts=4, base_sleep_s=60, label=""):
             log.warning("%sspark action FAILED on attempt %d/%d: %s",
                         tag, k + 1, attempts, _error_first_line(exc))
             log.warning("%sretrying in %.0fs (a fresh job resets per-taskset "
-                        "excludeOnFailure state; YARN replaces preempted "
-                        "containers meanwhile)", tag, sleep_s)
+                        "excludeOnFailure state; the cluster manager replaces "
+                        "lost executors meanwhile)", tag, sleep_s)
             time.sleep(sleep_s)
     raise AssertionError("unreachable")          # pragma: no cover
 
