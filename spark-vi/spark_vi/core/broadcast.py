@@ -2,7 +2,7 @@
 
 One definition of `destroy_broadcast`, imported by the runner, the gate seeds, the
 scalable spectral init, the coherence eval, the STM shim and the predictive-gain
-eval (six copies before ADR 0050).
+eval.
 """
 from __future__ import annotations
 
@@ -17,9 +17,8 @@ def destroy_broadcast(bcast) -> None:
 
     ``unpersist`` frees only the executor copies; the other two survive until
     ``destroy`` and accumulate at one pickle per call — at whole-Mondo scale a
-    λ-sized (~355 MB) pickle per fit iteration filled the master's disk over a
-    100-iteration fit and killed the run's post-fit readout with ENOSPC (exp 0104,
-    2026-08-30). Cleanup must never outrank the work it follows, so failures
+    λ-sized (~355 MB) pickle per fit iteration, enough to fill the master's disk
+    over a long fit. Cleanup must never outrank the work it follows, so failures
     degrade to unpersist and a log line rather than raising."""
     try:
         bcast.destroy()

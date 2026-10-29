@@ -56,10 +56,10 @@ def _agg_depth(global_params: dict) -> int:
     of the global params — for the topic models, a lambda-shaped (K, V) dict —
     so the params' ndarray bytes are a driver-side proxy for the partial size
     the reduce will ship. At depth d over P partitions the driver receives
-    ~P^(1/d) partials in one burst: fine at 41 MB/partial (K=444), fatal at
-    355 MB/partial (whole-Mondo K~3,800, exp 0104 smoke: driver-JVM heap OOM at
-    iteration 11 under depth 2 / 8g). Above the threshold, depth 3 trades one
-    extra executor combine round for a ~P^(1/6)-fold smaller driver burst.
+    ~P^(1/d) partials in one burst: fine at 41 MB/partial (K=444), too much for
+    an 8 GB driver heap at 355 MB/partial (whole-Mondo K~3,800) under depth 2.
+    Above the threshold, depth 3 trades one extra executor combine round for a
+    ~P^(1/6)-fold smaller driver burst.
     Recurses because multi-domain lambda is a dict-of-arrays inside the dict.
     """
     def _nbytes(v) -> int:
@@ -121,7 +121,8 @@ class VIRunner:
 
         Parameters:
             data_rdd: input RDD to train on.
-            data_summary: optional pre-pass metadata for model.initialize_global.
+            data_summary: optional model-defined summary, forwarded unchanged
+                to model.initialize_global.
             start_iteration: offsets the Robbins-Monro step counter. Internal —
                 callers wanting to resume a checkpointed run should prefer
                 resume_from, which sets this automatically.
@@ -129,9 +130,12 @@ class VIRunner:
                 path (written by save_result or by the runner's own
                 auto-checkpoint mechanism) and continue training. The loaded
                 global_params replace what model.initialize_global would have
-                returned; the loaded elbo_trace seeds this run's trace; and
+                returned; the loaded elbo_trace and diagnostic_traces continue;
                 start_iteration is set to the loaded result's n_iterations so
-                the Robbins-Monro schedule matches a continuous run.
+                the Robbins-Monro schedule matches a continuous run; and the
+                minibatch seed stream resumes where the checkpoint left it, so
+                checkpoint + resume is the same fit as one uninterrupted run
+                (given random_seed).
             on_iteration: optional diagnostic callback invoked after each
                 iteration as `fn(iter_num, global_params, elbo_trace)`.
                 Kwarg-on-fit rather than a method on VIModel because the
@@ -185,16 +189,8 @@ class VIRunner:
             bcast = sc.broadcast(global_params)
 
             # 3 & 4. Distributed E-step + aggregate.
-            # Default-arg closure capture (`_bcast=bcast, _model=model`) is the
-            # Spark-safe convention for shipping closures to executors. Python
-            # would otherwise capture `bcast` and `model` as free variables via
-            # `__closure__`, which leaves them subject to two failure modes:
-            # (1) if the enclosing scope mutates the name between definition
-            # and pickling, the closure picks up the mutated value; (2)
-            # cloudpickle's handling of deeply-nested lexical scopes has been
-            # historically inconsistent. Default args are bound at function-
-            # definition time and stored in `__defaults__`, which is pinned-by-
-            # value and pickles cleanly. Same idiom used in transform() below.
+            # Default-arg capture binds bcast and model by value at definition
+            # time (stored in __defaults__), the Spark-safe closure idiom.
             def _local(rows, _bcast=bcast, _model=model):
                 return [_model.local_update(rows, _bcast.value)]
 
@@ -203,30 +199,20 @@ class VIRunner:
             # combine_stats to be associative + commutative (already required
             # by the VIModel contract for additive sufficient statistics).
             # Depth is sized from the stats payload (see _agg_depth): each
-            # per-partition partial is a DENSE lambda-shaped dict, so at
-            # whole-Mondo scale (K~3,800 x V~11,600 = ~355 MB float64) a
-            # depth-2 tree still lands ~sqrt(P) such partials on the driver
-            # JVM in one burst per iteration — which is exactly how exp 0104's
-            # first smoke OOM'd an 8g driver heap at iteration 11. Depth 3
-            # pushes one more combine round onto the executors and cuts the
-            # driver burst to ~P^(1/3) partials, for one extra shuffle round
-            # that is noise next to the E-step.
+            # per-partition partial is a DENSE lambda-shaped dict (~355 MB at
+            # whole-Mondo scale), and depth 3 moves one more combine round onto
+            # the executors so fewer of them land on the driver at once.
             try:
                 aggregated = batch_rdd.mapPartitions(_local).treeReduce(
                     model.combine_stats, depth=_agg_depth(global_params))
             finally:
-                # DESTROY the broadcast once the aggregate has returned — and
-                # destroy, not unpersist, because unpersist frees the EXECUTOR
-                # copies only. pyspark writes every broadcast's pickle to a temp
-                # file on the DRIVER's local disk and keeps a driver
-                # block-manager copy, and both survive until destroy(). At
-                # whole-Mondo scale that is ~355 MB of λ per fit iteration: exp
-                # 0104's 100-iteration record fit (2026-08-30) leaked the
-                # master's whole disk and its post-fit readout died on
-                # `[Errno 28] No space left on device` from `sc.broadcast`
-                # itself. Safe because the treeReduce action has completed, so
-                # nothing references this broadcast any more. See
-                # RISKS_AND_MITIGATIONS.md §Broadcast lifecycle.
+                # DESTROY the broadcast once the aggregate has returned, not
+                # unpersist: unpersist frees only the executor copies, while the
+                # driver's block-manager copy and its pickled temp file on local
+                # disk survive until destroy(). At ~355 MB of λ per iteration that
+                # fills the master's disk over a long fit. Safe here because the
+                # treeReduce action has completed. See RISKS_AND_MITIGATIONS.md
+                # §Broadcast lifecycle.
                 _destroy_broadcast(bcast)
                 # Free the cached batch RDD before the next iteration's sample.
                 if seed is not None:
@@ -262,7 +248,7 @@ class VIRunner:
 
         # Do NOT eagerly unpersist bcast here. The returned RDD captures it in
         # the closure, so the broadcast must live as long as the RDD is used.
-        # Unlike fit() — whose per-iteration broadcasts are unpersisted AFTER
+        # Unlike fit() — whose per-iteration broadcasts are destroyed AFTER
         # that iteration's action has read them — a lazy transform has no action
         # of its own, so unpersisting now frees nothing and forces a re-broadcast
         # on every downstream action. Spark's ContextCleaner reclaims the
