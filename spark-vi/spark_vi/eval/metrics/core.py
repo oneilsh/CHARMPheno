@@ -152,3 +152,10 @@ def ece_from_bins(bins):
     if n == 0:
         return None
     return float(np.sum(np.abs(sp - sy)) / n)
+
+
+def ece(p, y, n_bins=10):
+    """Expected calibration error of in-memory scores: `ece_from_bins` over one
+    `calibration_bins` call. `p` the predicted probability (or a top-1 confidence),
+    `y` the 0/1 outcome (or top-1 correctness); None when empty."""
+    return ece_from_bins(calibration_bins(p, y, n_bins))

@@ -680,7 +680,7 @@ spark_vi/
 │   ├── local.py            # LocalReadoutData: a pass = numpy over rows held once
 │   ├── stacked.py          # closure product over a label DAG
 │   └── evaluate.py         # the readout's metrics from score blocks (no collect)
-├── eval/topic/             # coherence (incl. gated NPMI), concentration
+├── eval/topic/             # coherence, gated NPMI (gated_npmi.py), concentration
 ├── eval/metrics/           # exact AUC / AP / P@R / R@FDR / top-k / curves / ECE
 │   ├── core.py             #   from mergeable score tallies (pure numpy)
 │   ├── spark.py, local.py  #   per-key metrics: merged in the shuffle / in memory

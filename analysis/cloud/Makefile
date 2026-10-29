@@ -436,7 +436,7 @@ dag-gated-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	    --conf spark.dataproc.listeners= \
 	    $$EXP_CONF_FLAGS \
 	    $(foreach kv,$(DGR_SPARK_CONF),--conf $(kv)) \
-	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/preindex_closure.py,$(REPO_ROOT)/analysis/cloud/topic_npmi.py,$(REPO_ROOT)/analysis/cloud/prevalence_check.py \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/topic_npmi.py,$(REPO_ROOT)/analysis/cloud/prevalence_check.py,$(REPO_ROOT)/analysis/cloud/framings.py \
 	    $(REPO_ROOT)/analysis/cloud/dag_gated_readout.py \
 	    --run-dir "$(DGR_RUN_DIR)" \
 	    --cache-uri $(DGR_CACHE_URI) \
@@ -569,7 +569,7 @@ build-conversion-sidecar: zip cluster-overlay $(WORKSPACE_ENV)
 	    --conf spark.executor.memoryOverhead=2g \
 	    --conf spark.task.maxFailures=8 \
 	    --conf spark.excludeOnFailure.enabled=true \
-	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/preindex_closure.py,$(REPO_ROOT)/analysis/cloud/conversion_sidecar.py \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/conversion_sidecar.py \
 	    $(REPO_ROOT)/analysis/cloud/conversion_sidecar.py \
 	    --run-dir "$(RUNS_DIR)/$(shell printf '%04d' $(ID))-*" \
 	    $(if $(DGR_SIDECAR_URI),--sidecar-uri $(DGR_SIDECAR_URI),) \

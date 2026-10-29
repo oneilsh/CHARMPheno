@@ -55,15 +55,6 @@ __all__ = [
 
 ROOT = 0
 FIT_ROOT_CID = -1          # charmpheno.mondo.native_dag.MONDO_NATIVE_ROOT_CID
-_PREFIX = "MONDO:"
-
-
-def _curie(cid) -> str:
-    return f"{_PREFIX}{int(cid):07d}"
-
-
-def _cid(curie) -> int:
-    return int(str(curie)[len(_PREFIX):])
 
 
 @dataclass
@@ -133,7 +124,8 @@ def build_readout_dag(int2cid_fit, parent_adj, *, names=None, min_descendants=2,
     """The readout DAG over the fit's label nodes (`int2cid_fit`: engine id ->
     Mondo cid, root included) from Mondo's full `parent_adj`. Pure; see the
     module docstring for the construction and the two redundancy rules."""
-    from charmpheno.mondo.native_dag import ancestor_closure, induced_hasse_parents
+    from charmpheno.mondo.native_dag import (ancestor_closure, induced_hasse_parents,
+                                             mondo_cid, mondo_curie)
 
     names = dict(names or {})
     label_eng = {int(e): int(c) for e, c in int2cid_fit.items()
@@ -141,7 +133,7 @@ def build_readout_dag(int2cid_fit, parent_adj, *, names=None, min_descendants=2,
     if ROOT not in {int(e) for e in int2cid_fit}:
         raise ValueError("int2cid has no root (engine id 0)")
     C_fit = max(int(e) for e in int2cid_fit) + 1
-    term_of = {e: _curie(c) for e, c in label_eng.items()}
+    term_of = {e: mondo_curie(c) for e, c in label_eng.items()}
     eng_of_term = {t: e for e, t in term_of.items()}
     all_labels = frozenset(label_eng)
 
@@ -183,7 +175,7 @@ def build_readout_dag(int2cid_fit, parent_adj, *, names=None, min_descendants=2,
                    if not any(a in _strict_anc(b) for b in group if b != a)]
         kept_anc.extend(minimal)
         n_rungs += len(group) - len(minimal)
-    kept_anc = sorted(kept_anc, key=_cid)
+    kept_anc = sorted(kept_anc, key=mondo_cid)
 
     # Readout ids: label nodes keep theirs; ancestors appended in curie order.
     r_of_term = dict(eng_of_term)
@@ -210,8 +202,8 @@ def build_readout_dag(int2cid_fit, parent_adj, *, names=None, min_descendants=2,
     int2cid = {int(e): int(c) for e, c in int2cid_fit.items()}
     name_by_id = {}
     for a in kept_anc:
-        int2cid[r_of_term[a]] = _cid(a)
-        name_by_id[_cid(a)] = names.get(a, a)
+        int2cid[r_of_term[a]] = mondo_cid(a)
+        name_by_id[mondo_cid(a)] = names.get(a, a)
 
     children: dict = {}
     for c, ps in parent_int.items():

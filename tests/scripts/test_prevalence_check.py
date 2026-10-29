@@ -1,5 +1,5 @@
 """Insight 0100 measurement: AUC with prior-diagnosis patients set aside
-(prevalence_check.py, dag_gated_readout.run_prevalence_check)."""
+(prevalence_check.py, framings.run_prevalence_check)."""
 import json
 import os
 import sys
@@ -58,7 +58,7 @@ def test_run_prevalence_check_end_to_end(spark, tmp_path):
     from pyspark.ml.linalg import Vectors
     from pyspark.sql import Row
     from test_inspect_topics import _make_census_run
-    import dag_gated_readout as gpr
+    import framings as gpr
     _make_census_run(tmp_path)
     C, K = 4, 10
     parent_int = {0: [], 1: [0], 2: [0], 3: [0]}
@@ -126,7 +126,7 @@ def test_run_prevalence_check_whole_history(spark, tmp_path):
     from pyspark.ml.linalg import Vectors
     from pyspark.sql import Row
     from test_inspect_topics import _make_census_run
-    import dag_gated_readout as gpr
+    import framings as gpr
     _make_census_run(tmp_path)
     C, K = 4, 10
     (tmp_path / "readout_dag.json").write_text(json.dumps({
@@ -191,34 +191,21 @@ def test_run_prevalence_check_whole_history(spark, tmp_path):
     assert "WHOLE-HISTORY prior" in (tmp_path / "prevalence_check_h.md").read_text()
 
 
-def test_ever_member_frame_and_collect_with_ever(spark, tmp_path):
-    import datetime as dt
+def test_collect_set_patients_reads_the_members_labels(spark):
     from pyspark.ml.linalg import Vectors
     from pyspark.sql import Row
-    import dag_gated_readout as gpr
-    uri = tmp_path / "sc"
-    spark.createDataFrame([
-        Row(person_id=1, node_cid=1005, first_attested_date=dt.date(2010, 1, 1)),
-        Row(person_id=2, node_cid=1002, first_attested_date=dt.date(2030, 1, 1)),
-        Row(person_id=3, node_cid=7777, first_attested_date=dt.date(2010, 1, 1)),
-    ]).write.parquet(str(uri / "k" / "first_attestation.parquet"))
-    (tmp_path / "conversion_sidecar.json").write_text(json.dumps(
-        {"key": "k", "sidecar_uri": str(uri)}))
-    padj = {"MONDO:0001005": ["MONDO:0001001"]}
-    ever = gpr.ever_member_frame(spark, tmp_path, [1, 2], [1001, 1002], padj)
-    got = {r["person_id"]: sorted(r["__ever"]) for r in ever.collect()}
-    assert got == {1: [0], 2: [1]}                       # 1005 rolls up to member 0
+    import framings as fr
     df_ = spark.createDataFrame([
-        Row(person_id=i, label=[1.0, float(i == 4), 0.0],
+        Row(person_id=i, label=[1.0, float(i != 3), float(i >= 3)],
             features_0=Vectors.sparse(5, [0], [1.0])) for i in (1, 2, 3, 4)])
-    out, n = gpr.collect_set_patients(df_, [1, 2], 1, ever_df=ever)
-    assert sorted(t for t, _, _ in out) == [[0], [0], [1]] and n == 3
+    out, n = fr.collect_set_patients(df_, [1, 2], 1)
+    assert sorted(t for t, _, _ in out) == [[0], [0], [0, 1], [1]] and n == 4
 
 
 def test_incident_test_frame_drops_prior_diagnosed_persons(spark, tmp_path):
     import datetime as dt
     from pyspark.sql import Row
-    import dag_gated_readout as gpr
+    import framings as gpr
     uri = tmp_path / "sc"
     spark.createDataFrame([
         Row(person_id=1, node_cid=1005, first_attested_date=dt.date(2015, 1, 1)),  # prior, under member

@@ -21,69 +21,6 @@ def test_filter_record_drops_excluded_codes_and_counts_distinct():
     assert bags == {0: {1: 3.0}, 1: {5: 2.0}} and lens == {0: 1.0, 1: 1.0}
 
 
-def _presence_world():
-    # topics: 0 background (flat); 1 = A's aortic subtype (code 0); 2 = A's skeletal
-    # subtype (code 1); 3 = B's profile (code 2). Every profile also carries the
-    # shared codes 5 and 6, as real signatures carry common care codes.
-    lam = np.full((4, V), 1.0)
-    lam[1:, 5] = lam[1:, 6] = 60.0
-    lam[1, 0] = 200.0
-    lam[2, 1] = 200.0
-    lam[3, 2] = 200.0
-    ev = np.array([100.0, 1000.0, 200.0, 800.0])
-    subtypes = {10: [(1, 1000.0), (2, 200.0)], 20: [(3, 800.0)]}
-    return [lam], subtypes, ev
-
-
-def test_subtype_mixture_recognizes_the_minor_subtype_that_averaging_dilutes():
-    lams, subtypes, ev = _presence_world()
-    eng = df.PresenceSubtypeEngine(lams, subtypes, 1, ev, [10, 20], {})
-    # a skeletal-type A patient: code 1 present (and a few shared codes), no code 0
-    bags, lens = df.filter_record({0: {1: 1.0, 5: 1.0, 6: 1.0}}, {})
-    s = eng.scores(eng.subtype_ll(bags, lens))
-    assert s[0] > s[1]                       # A wins through its skeletal subtype
-    # an averaged-profile A (one subtype with both codes diluted) does worse here
-    avg = df.PresenceSubtypeEngine(
-        [np.vstack([lams[0], (1000 * lams[0][1] / lams[0][1].sum()
-                              + 200 * lams[0][2] / lams[0][2].sum())[None, :] * 50])],
-        {10: [(4, 1.0)], 20: [(3, 1.0)]}, 1, np.append(ev, 1.0), [10, 20], {})
-    s_avg = avg.scores(avg.subtype_ll(bags, lens))
-    assert (s[0] - s[1]) > (s_avg[0] - s_avg[1])
-    r = eng.reasons(eng.subtype_ll(bags, lens), 10)
-    assert max(r, key=r.get) == (0, 1)
-
-
-def test_excluded_codes_leave_the_absent_term_consistent():
-    lams, subtypes, ev = _presence_world()
-    eng = df.PresenceSubtypeEngine(lams, subtypes, 1, ev, [10, 20], {0: {0}})
-    bags, lens = df.filter_record({0: {0: 2.0, 1: 1.0}}, {0: {0}})
-    s = eng.scores(eng.subtype_ll(bags, lens))
-    assert np.all(np.isfinite(s)) and lens[0] == 1.0
-
-
-def _gated_world():
-    # K = 4: 0, 1 background; 2 = block of member 10 (code 0); 3 = block of 20 (code 1)
-    lam = np.full((4, V), 0.5)
-    lam[0, 3:] = 40.0
-    lam[1, 3:] = 40.0
-    lam[2, 0] = 200.0
-    lam[3, 1] = 200.0
-    from scipy.special import digamma
-    eb = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
-    return eb, np.full(4, 0.5), {10: [0, 1, 2], 20: [0, 1, 3]}
-
-
-def test_gated_likelihood_prefers_the_member_whose_block_explains_the_record():
-    eb, alpha, gates = _gated_world()
-    eng = df.GatedLikelihoodEngine(eb, alpha, gates, [10, 20])
-    e, lphi = eng.elbos([3, 4, 1], [2.0, 1.0, 3.0])          # marker of member 20
-    assert e[1] > e[0]
-    r = eng.reasons([3, 4, 1], [2.0, 1.0, 3.0], lphi, 20)
-    assert max(r, key=r.get) == 1
-    e0, _ = eng.elbos([3, 4], [2.0, 1.0])                    # no marker: near tie
-    assert abs(e0[0] - e0[1]) < abs(e[0] - e[1])
-
-
 def test_multiclass_head_learns_a_separable_problem_and_predicts_simplex_rows():
     rng = np.random.default_rng(0)
     n, K = 400, 30
@@ -97,21 +34,11 @@ def test_multiclass_head_learns_a_separable_problem_and_predicts_simplex_rows():
     assert np.mean(P.argmax(axis=1) == y[300:]) > 0.9
 
 
-def test_fit_tau_shrinks_overconfident_scores_and_metrics_are_pooled():
-    rng = np.random.default_rng(1)
-    truths, scores = [], []
-    for i in range(200):
-        t = int(rng.integers(0, 2))
-        # scores say the truth by a margin of 30 nats but are right only 70% of the time
-        good = rng.random() < 0.7
-        s = np.zeros(2); s[t if good else 1 - t] = 30.0
-        truths.append([t]); scores.append(s)
-    lp = np.log([0.5, 0.5])
-    tau, _ = df.fit_tau_scores(lp, scores, truths)
-    assert tau < 0.1
-    posts = [df.posterior_from_scores(lp, s, tau) for s in scores]
-    m = df.metrics(posts, truths)
-    assert 0.6 < m["top1"] < 0.8 and m["ece"] < 0.1 and m["top3"] == 1.0
+def test_metrics_are_pooled_over_patients():
+    posts = [np.array([0.9, 0.1]), np.array([0.6, 0.4]), np.array([0.2, 0.8])]
+    m = df.metrics(posts, [[0], [1], [1]])
+    assert m["top1"] == pytest.approx(2 / 3) and m["top3"] == 1.0
+    assert m["n"] == 3
 
 
 def test_pool_reasons_suppresses_small_members():
@@ -126,7 +53,7 @@ def test_run_differential_end_to_end_on_a_tiny_run(tmp_path, monkeypatch):
     sys.path.insert(0, str(REPO_ROOT / "tests" / "scripts"))
     sys.path.insert(0, str(REPO_ROOT / "charmpheno"))
     from test_inspect_topics import _make_census_run
-    import dag_gated_readout as gpr
+    import framings as gpr
     _make_census_run(tmp_path)                       # node1 sig idx 0; node2 sigs idx 2, 3
     K, C = 10, 4
     (tmp_path / "readout_dag.json").write_text(json.dumps({
@@ -160,64 +87,37 @@ def test_run_differential_end_to_end_on_a_tiny_run(tmp_path, monkeypatch):
     (tmp_path / "concept_names.csv").write_text("concept_id,concept_name\n507,node1\n"
                                                 "500,marker one\n")
     js = gpr.run_differential("test", "train", tmp_path, "^node1$|^node2$", adhoc=True,
-                              tag="t", next_question=True, nq_pool=6)
+                              tag="t")
     rep = (tmp_path / "differential_t.md").read_text()
-    m = js[next(iter(js))]["metrics"]
-    for k in ("E1 presence subtypes", "E2 stacked heads", "E3 multiclass head",
-              "E4 gated likelihood"):
+    g = js[next(iter(js))]
+    m = g["metrics"]
+    for k in ("E2 stacked heads", "E3 multiclass head", "E5 code head", "E6 θ + codes"):
         assert k in m and k in rep
-    assert m["E1 presence subtypes"]["top1"] > 0.9
-    assert m["E4 gated likelihood"]["top1"] > 0.9
-    assert m["E3 multiclass head"]["top1"] > 0.9
-    assert js[next(iter(js))]["n_eval"] == 60
-    assert "E1 reasons" in rep and "E3 reasons" in rep
-    assert "### Next question" in rep and "| VOI (E3) | 3 |" in rep
-    assert "| VOI (E1) | 3 |" in rep
-    for k in ("E5 code head", "E6 θ + codes"):                 # exp 0148
-        assert k in m and m[k]["top1"] > 0.9
-    assert "| VOI (codes) | 3 |" in rep and "code differential:" in rep
-    assert js[next(iter(js))]["nq_code_engine"]["chosen"] in ("E5 codes", "E6 θ + codes")
-    assert js[next(iter(js))]["next_question"]["n"] == 60
-    reasons = rep.split("E1 reasons")[1].split("###")[0]
+    for k in ("E3 multiclass head", "E5 code head", "E6 θ + codes"):
+        assert m[k]["top1"] > 0.9
+    assert g["n_eval"] == 60
+    assert "E3 reasons" in rep and "E5 reasons" in rep
+    reasons = rep.split("E5 reasons")[1].split("###")[0]
     assert "marker one" in reasons and "· node1" not in reasons and ": node1" not in reasons
-    # exp 0149: multi-positive patients as soft targets + cross-fit over both halves
+    # cross-fit over both halves, and the survey table
     js2 = gpr.run_differential("test", "train", tmp_path, "^node1$|^node2$", adhoc=True,
-                               tag="t2", multi=True, crossfit=True)
+                               tag="t2", crossfit=True, max_members=5)
     g2 = js2[next(iter(js2))]
-    assert g2["n_eval"] == 120 and g2["crossfit"] and len(g2["tau_e1"]) == 2
-    assert g2["n_train_multi"] == 1 and "E6 θ + codes" in g2["metrics_multi"]
+    assert g2["n_eval"] == 120 and g2["crossfit"]
     assert g2["metrics"]["E3 multiclass head"]["top1"] > 0.9
-    # exp 0150 survey mode: fast engines, framing 2 on E5, the survey table
-    js3 = gpr.run_differential("test", "train", tmp_path, "^node1$|^node2$", adhoc=True, tag="t3",
-                               next_question=True, nq_pool=6, fast=True, max_members=5,
-                               crossfit=True)
-    sv = (tmp_path / "differential_t3_survey.md").read_text()
+    sv = (tmp_path / "differential_t2_survey.md").read_text()
     assert "differential survey" in sv and "groups scored" in sv
-    g3 = js3[next(iter(js3))]
-    assert "E4 gated likelihood" not in g3["metrics"] and "E6 θ + codes" in g3["metrics"]
-
-
-def test_hide_split_and_question_values():
-    rng = np.random.default_rng(0)
-    fb = {0: {i: 1.0 for i in range(8)}, 1: {0: 2.0, 1: 1.0}}
-    vis, hid = df.hide_split(fb, 0.2, rng)
-    assert len(hid) == 2 and sum(len(b) for b in vis.values()) == 8
-    assert df.hide_split({0: {1: 1.0}}, 0.2, rng) is None
-    q0 = np.array([0.5, 0.5])
-    qa = np.array([[0.5, 0.5], [0.9, 0.1], [0.9, 0.1]])
-    v = df.question_values(q0, qa, [1.0, 1.0, 0.1])
-    assert v[0] == 0.0 and v[1] > v[2] > 0.0
 
 
 def _toy_engine_and_head():
-    import model_acquisition as ma
+    from model_engine import ModelEngine
     # K = 4 topics: 0, 1 background; 2 emits code 0 (member A); 3 emits code 1 (member B)
     lam = np.full((4, V), 0.5)
     lam[0, 3:] = lam[1, 3:] = 40.0
     lam[2, 0] = 200.0
     lam[3, 1] = 200.0
     heads = (np.zeros((3, 4)), np.zeros(3), np.zeros(3, bool), np.zeros(3), 0)
-    eng = ma.ModelEngine([lam], np.full(4, 0.5), heads, {1: [0, 1], 2: [0, 2]}, [1, 2])
+    eng = ModelEngine([lam], np.full(4, 0.5), heads, {1: [0, 1], 2: [0, 2]}, [1, 2])
     rng = np.random.default_rng(0)
     pats = []
     for i in range(160):
@@ -245,49 +145,6 @@ def test_e3_reasons_point_at_the_marker_code():
     assert list(b[0])[int(np.argmax(c))] == marker
 
 
-def test_next_question_voi_finds_hidden_markers_more_than_random():
-    eng, head, pats, _ = _toy_engine_and_head()
-    pool = [(0, v) for v in range(V)]
-    r = df.evaluate_next_question(eng, head, pats, pool, {}, np.random.default_rng(1),
-                                  ks=(1, 3), frac=0.5)
-    assert r["n"] == len(pats)
-    assert 0.0 <= r["by"]["VOI (E3)@1"]["yield"] <= 1.0
-    # revealing every hidden code restores the full-record call
-    assert r["full"]["top1"] >= r["visible"]["top1"]
-    assert r["by"]["random hidden@3"]["yield"] == 1.0
-    assert sum(r["recommended"].values()) == 3 * len(pats)
-
-
-def test_e1_candidate_scores_match_a_full_recompute():
-    lams, subtypes, ev = _presence_world()
-    eng = df.PresenceSubtypeEngine(lams, subtypes, 1, ev, [10, 20], {0: {9}})
-    bags = {0: {5: 1.0, 6: 1.0}}
-    lens = {0: 2.0}
-    cand = [(0, 0), (0, 1), (0, 2)]
-    S, P = eng.candidate_scores(bags, lens, cand)
-    for c, (d, v) in enumerate(cand):
-        b = {0: dict(bags[0])}
-        b[0][v] = 1.0
-        full = eng.scores(eng.subtype_ll(b, {0: 3.0}))
-        assert np.allclose(S[c], full)
-    assert np.all((P > 0) & (P < 1))
-    # code 0 (A's aortic marker) is far more likely present under A than under B
-    assert P[0, 0] > P[0, 1]
-
-
-def test_next_question_with_the_e1_engine_reports_both_differentials():
-    eng, head, pats, _ = _toy_engine_and_head()
-    lams = [np.exp(np.log(eng.eb[:, :V]))]                     # any positive rows
-    e1 = df.PresenceSubtypeEngine(lams, {1: [(2, 1.0)], 2: [(3, 1.0)]}, 2,
-                                  np.ones(4), [1, 2], {})
-    r = df.evaluate_next_question(eng, head, pats, [(0, v) for v in range(V)], {},
-                                  np.random.default_rng(2), ks=(1,), frac=0.8, e1=e1,
-                                  e1_lp=np.log([0.5, 0.5]), e1_tau=1.0)
-    assert "VOI (E1)" in r["strategies"] and r["frac_hidden"] == 0.8
-    x = r["by"]["VOI (E1)@1"]
-    assert 0.0 <= x["p_true_e1"] <= 1.0 and 0.0 <= x["p_true"] <= 1.0
-
-
 def _marker_bags(n, seed):
     rng = np.random.default_rng(seed)
     out = []
@@ -310,20 +167,10 @@ def test_code_head_learns_markers_and_candidates_match_predict():
     t, b = te[0]
     r = h.reasons(b, t)
     assert max(r, key=r.get) == (0, 0 if t == 0 else 1)
-    # a candidate's differential == predict on the record with the code added
-    base = {0: {5: 1.0, 6: 1.0}}
-    cand = [(0, 0), (0, 1), (0, 7)]
-    Q = h.candidates(base, cand)
-    for i, (d, v) in enumerate(cand):
-        bb = {0: dict(base[0])}
-        bb[0][v] = 1.0
-        assert np.allclose(Q[i], h.predict([bb])[0])
-    py = h.p_yes(np.array([1.0, 0.0]), cand)
-    assert py[0] > py[1]                                   # marker of class 0
 
 
 @pytest.mark.slow
-def test_hybrid_code_head_and_next_question_with_codes():
+def test_hybrid_code_head_reads_codes_and_theta():
     eng, head, pats, th = _toy_engine_and_head()
     tr = _marker_bags(200, 5)
     thr = []
@@ -333,15 +180,8 @@ def test_hybrid_code_head_and_next_question_with_codes():
     h6 = df.CodeHead(2, min_df=3, theta_topics=np.arange(4)).fit(
         [b for _, b in tr], [t for t, _ in tr], np.stack(thr))
     assert np.allclose(h6.predict([pats[0][1]], th[:1]).sum(), 1.0)
-    for h in (df.CodeHead(2, min_df=3).fit([b for _, b in tr], [t for t, _ in tr]), h6):
-        r = df.evaluate_next_question(eng, head, pats, [(0, v) for v in range(V)], {},
-                                      np.random.default_rng(1), ks=(1, 3), frac=0.5,
-                                      code_head=h)
-        assert "VOI (codes)" in r["strategies"]
-        x = r["by"]["VOI (codes)@1"]
-        assert 0.0 <= x["p_true_c"] <= 1.0 and 0.0 <= x["yield"] <= 1.0
-        assert r["full"]["top1_c"] >= r["visible"]["top1_c"] - 1e-9
-        assert sum(r["recommended_codes"].values()) == 3 * r["n"]
+    assert np.mean(h6.predict([b for _, b in pats], th).argmax(axis=1)
+                   == np.array([t[0] for t, _ in pats])) > 0.9
 
 
 def test_soft_targets_spread_weight_over_true_members():
@@ -350,26 +190,15 @@ def test_soft_targets_spread_weight_over_true_members():
     assert np.allclose(df.label_matrix([2, 0], 3), [[0, 0, 1], [1, 0, 0]])
 
 
-def test_next_question_codes_only():
-    tr = _marker_bags(200, 7)
-    h = df.CodeHead(2, min_df=3).fit([b for _, b in tr], [t for t, _ in tr])
-    pats = [([t], b) for t, b in _marker_bags(60, 8)]
-    r = df.evaluate_next_question_codes(h, pats, [(0, v) for v in range(V)],
-                                        np.random.default_rng(0), ks=(1, 3), frac=0.5)
-    assert r["n"] == 60 and r["by"]["random hidden@3"]["yield"] == 1.0
-    assert r["full"]["top1"] >= r["visible"]["top1"]
-    assert r["by"]["VOI (codes)@3"]["p_true"] >= r["by"]["random@3"]["p_true"]
-
-
 def test_most_specific_members_drops_ancestors():
-    import dag_gated_readout as gpr
+    import framings as gpr
     pi = {"1": [0], "2": [1], "3": [1], "4": [0]}
     assert gpr.most_specific_members([1, 2, 3, 4], pi) == [2, 3, 4]
     assert gpr.most_specific_members([2, 4], pi) == [2, 4]
 
 
 def test_top_members_rolls_up_subtypes_and_drops_the_group():
-    import dag_gated_readout as gpr
+    import framings as gpr
     # group 5 -> {1 (hep C), 4 (hep A)}; 1 -> {2 (chronic), 3 (acute)}
     pi = {"1": [5], "2": [1], "3": [1], "4": [5], "5": [0]}
     assert gpr.top_members([1, 2, 3, 4, 5], pi, group=5) == [1, 4]
@@ -501,7 +330,7 @@ def test_workup_block_on_synthetic_rows():
     Measurement token 900*100+3 (test 900 high) marks member 1; condition code 501 is
     attestation (excluded); 502 is noise; prevalent rows (no window) are skipped."""
     from types import SimpleNamespace
-    import dag_gated_readout as gpr
+    import framings as gpr
 
     rng = np.random.default_rng(0)
     inv = [{0: 501, 1: 502}, {}, {0: 90003, 1: 90002, 2: 90000}]

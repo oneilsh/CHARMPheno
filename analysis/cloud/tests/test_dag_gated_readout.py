@@ -22,7 +22,7 @@ def _manifest(**over):
 
 
 def test_resolve_run_dir_disambiguates_collision(tmp_path):
-    from dag_gated_readout import resolve_run_dir
+    from run_dirs import resolve_run_dir
     runs = tmp_path / "runs"
     ours = runs / "0076-gated-pc-rare6-smooshed"
     other = runs / "0076-multidomain-rare-priority-cond-drug-obs"
@@ -37,7 +37,7 @@ def test_resolve_run_dir_disambiguates_collision(tmp_path):
 
 def test_resolve_run_dir_errors_when_none_finished(tmp_path):
     import pytest
-    from dag_gated_readout import resolve_run_dir
+    from run_dirs import resolve_run_dir
     runs = tmp_path / "runs"
     (runs / "0076-gated-pc-rare6-smooshed").mkdir(parents=True)   # no npz yet
     with pytest.raises(SystemExit, match="no run dir with gated_pc_result.npz"):

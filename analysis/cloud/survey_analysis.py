@@ -41,7 +41,7 @@ def spearman(x, y):
 
 def most_specific(members, parent_int):
     """Members that are not an ancestor of another member — the survey's own rule on
-    a NESTED label space (`dag_gated_readout.most_specific_members`, exp 0152), copied
+    a NESTED label space (`framings.most_specific_members`, exp 0152), copied
     here so this reader needs no Spark import."""
     anc = set()
     for m in members:
@@ -57,7 +57,7 @@ def most_specific(members, parent_int):
 
 def top_level(members, parent_int, group):
     """Members with no proper ancestor among the others, the group node excluded —
-    `dag_gated_readout.top_members` (the nested default from exp 0152 read 4b)."""
+    `framings.top_members` (the nested default from exp 0152 read 4b)."""
     mem = [m for m in members if m != group]
     ms = set(mem)
     out = []

@@ -264,17 +264,6 @@ def _meta_dict(bundle) -> dict:
         meta["vocab_map"] = {str(c): i for c, i in bundle.vocab_map.items()}
     else:
         meta["vocab_maps"] = [{str(c): i for c, i in vm.items()} for vm in vocab_maps]
-    # E1's WITNESS (R1.4). The pre-index closure column rides in the parquet, and
-    # the parquet writes take the frames as they are — so without this a
-    # mixed-vintage cache dir would hand a readout a bundle WITHOUT the column and
-    # die at `select` with a Spark column error, which names neither the cause nor
-    # the fix. Recording it here (and restoring it below) is what lets
-    # `preindex_closure.require_preindex_closure` refuse such a bundle by name.
-    # Written ONLY when the bundle has one, so every existing entry's meta is
-    # byte-identical and `_restore_meta` stays backward-compatible.
-    witness = getattr(bundle, "preindex_closure", None)
-    if witness:
-        meta["preindex_closure"] = dict(witness)
     # WP-C' (exp 0136): the native `(std_cid, node_cid)` attestation map, same
     # attribute precedent, written only when the assembler attached one.
     code_map = getattr(bundle, "native_code_map", None)
@@ -297,11 +286,6 @@ def _restore_meta(meta: dict) -> dict:
                              for vm in meta["vocab_maps"]]
     else:                                    # single-domain (incl. every old entry)
         out["vocab_map"] = {int(c): int(i) for c, i in meta["vocab_map"].items()}
-    # E1's witness, absent from every entry written before it existed — which is
-    # exactly what "this bundle has no pre-index column" means, so the absence is
-    # the correct reading, not a compatibility hole.
-    if "preindex_closure" in meta:
-        out["preindex_closure"] = dict(meta["preindex_closure"])
     if "native_code_map" in meta:
         out["native_code_map"] = [(int(a), int(b)) for a, b in meta["native_code_map"]]
     return out
@@ -348,14 +332,6 @@ def try_load(spark, cache_uri, key) -> Optional["CaseFindingBundle"]:
     else:
         from charmpheno.omop.case_finding_assembly import CaseFindingBundle
         bundle = CaseFindingBundle(vocab_map=meta["vocab_map"], **common)
-    # E1's witness rides as an ATTRIBUTE, not a dataclass field: both bundle
-    # dataclasses live in source-hashed modules that may not be edited (a field
-    # would move `assembly_src`/`multi_domain_src` and orphan every cached bundle
-    # in the repo). Consumers read it through
-    # `preindex_closure.bundle_preindex_witness`, which defaults to None — so a
-    # bundle from before this existed answers "no column", correctly.
-    if "preindex_closure" in meta:
-        bundle.preindex_closure = meta["preindex_closure"]
     if "native_code_map" in meta:
         bundle.native_code_map = meta["native_code_map"]
     return bundle

@@ -435,28 +435,6 @@ def test_multidomain_bundle_round_trips_through_the_cache(spark, tmp_path):
 
 
 @pytest.mark.slow
-def test_the_preindex_witness_round_trips_through_save_and_try_load(spark,
-                                                                    tmp_path):
-    """R1.4 end to end. The extra parquet column would otherwise ride SILENTLY —
-    `_meta_dict` records only the DAG maps + vocab — so a mixed-vintage cache dir
-    would hand a readout a bundle without it and die at `select`. A bundle with
-    the witness comes back with it; one without comes back saying so, which is the
-    correct reading for every entry written before this existed."""
-    import preindex_closure as pic
-
-    bundle = _md_bundle(spark)
-    uri = f"file://{tmp_path}/cache-witness"
-    ccache.save(spark, bundle, uri, "nowitness")
-    assert pic.bundle_preindex_witness(
-        ccache.try_load(spark, uri, "nowitness")) is None
-
-    bundle.preindex_closure = pic.preindex_witness()
-    ccache.save(spark, bundle, uri, "witness")
-    loaded = ccache.try_load(spark, uri, "witness")
-    assert pic.bundle_preindex_witness(loaded) == pic.preindex_witness()
-
-
-@pytest.mark.slow
 def test_single_domain_bundle_round_trip_is_unchanged(spark, tmp_path):
     """The old shape still writes the old meta (`vocab_map`, no `vocab_maps`) and
     still comes back a CaseFindingBundle — nothing about an existing entry moved."""

@@ -1,7 +1,7 @@
 # ADR 0051 — spark-vi layout, two engines (Spark and local), and a model-agnostic readout
 
 **Date:** 2026-10-28
-**Status:** Accepted (2026-10-28)
+**Status:** Accepted (2026-10-28); §5 amended 2026-10-29
 
 ## Context
 
@@ -93,3 +93,22 @@ code into charmpheno: one announced cache drop, tripwires re-pinned; (4)
 throughout. Updates
 `docs/architecture/SPARK_VI_FRAMEWORK.md` (layout, runners) in the commits that make
 each change. The walkthrough follows step 6.
+
+## Amendment (2026-10-29): §5, where the clinical rules live
+
+Maintainer's call after steps 1-6. The clinical rules **stay in `analysis/cloud`**:
+the first-attestation and workup sidecars, gate-ever attestation, the prevalence
+(new-diagnosis) rule, the framings (`framings.py`, split out of the readout driver),
+concept naming and the ribbon reader. They are driver-owned for the reason the
+sidecars already gave: each artifact keys on its own module source, and moving them
+into charmpheno would buy a package boundary at the price of another cache identity,
+with no second consumer. Only the **egress floor** moves, to one constant,
+`charmpheno.egress.EGRESS_FLOOR` (three driver copies removed; spark-vi functions that
+need a minimum count take it as an argument). The label rules are written down in
+`docs/architecture/LABEL_RULES.md`.
+
+Done in the same cleanup: gated NPMI's computation moved to
+`spark_vi.eval.topic.gated_npmi` (the driver `topic_npmi.py` keeps the run-dir I/O and
+the CLI); `ece` joined `spark_vi.eval.metrics`; the run-dir resolver became one
+module (`analysis/cloud/run_dirs.py`); Mondo curies use `native_dag.mondo_curie`.
+

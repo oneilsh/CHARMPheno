@@ -26,7 +26,8 @@ GRAIN: PER (PERSON, NODE) — AND IT IS NOT THE OTHER TWO (R4.3)
 --------------------------------------------------------------
 Three artifact grains exist across this program and are NEVER conflated:
 
-  * per-**document** — E1's `R_d` (`preindex_closure.py`), keyed on `doc_id`;
+  * per-**document** — E1's `R_d` (`preindex_closure.py`, removed 2026-10-29),
+    keyed on `doc_id`;
   * per-**(person, node)** — THIS FILE, keyed on `(person_id, node_cid)`;
   * per-**person** — ADR 0025's covariate sidecar, keyed on `person_id`.
 
@@ -114,12 +115,43 @@ HORIZON_COLUMNS = (PERSON_COL, INDEX_COL, OBS_END_COL)
 #
 # The second exists so the analysis tool needs no BigQuery at all: the index date
 # is re-derived here, at build time, by the SAME deterministic index builder the
-# assembler used (`preindex_closure.feature_window_index_table` — the pick is
+# assembler used (`feature_window_index_table` below — the pick is
 # `min hash(person_id, event_date, salt)`, resume-stable and explicitly not
 # `F.rand()`), and the observation-period end travels with it. Recomputing either
 # at analysis time would mean a second full-history scan to answer a subtraction.
 FIRST_ATTESTATION_FILE = "first_attestation.parquet"
 INDEX_HORIZON_FILE = "index_horizon.parquet"
+
+
+def feature_window_index_table(cond, *, spark, cdr, billing, date_col,
+                               label_window_days, index_mode="population",
+                               disease="rare6"):
+    """The assembler's OWN index table, rebuilt by calling the same function.
+
+    `multi_domain.assemble_multidomain_case_finding_corpus:378-392` calls exactly
+    one of these two with exactly these arguments; the prior-observation gate is
+    the intrinsic `_LOOKBACK_PRIOR_OBS_DAYS` floor, not the forward-mode
+    `prior_obs_days` knob, and passing anything else here would silently produce
+    a different index than the corpus was built on. Both callees are IMPORTED —
+    the pick (`min hash(person_id, event_date, _RANDOM_WINDOW_SALT)`, ties broken
+    by earliest date) is never reimplemented, so it cannot drift."""
+    from charmpheno.omop.case_finding_assembly import _LOOKBACK_PRIOR_OBS_DAYS
+    from charmpheno.omop.cohorts import (case_finding_index_table,
+                                         case_finding_population_index_table)
+
+    if index_mode == "population":
+        return case_finding_population_index_table(
+            cond, spark=spark, cdr_dataset=cdr, billing_project=billing,
+            date_col=date_col, prior_obs_days=_LOOKBACK_PRIOR_OBS_DAYS,
+            label_window_days=label_window_days)
+    if index_mode == "disease":
+        return case_finding_index_table(
+            cond, disease=disease, spark=spark, cdr_dataset=cdr,
+            billing_project=billing, date_col=date_col,
+            prior_obs_days=_LOOKBACK_PRIOR_OBS_DAYS,
+            label_window_days=label_window_days)
+    raise ValueError(
+        f"index_mode must be 'disease' or 'population', got {index_mode!r}")
 
 
 def _module_source_hash(module) -> str:
@@ -222,8 +254,8 @@ def observation_gate_frame(observation_period):
     into EVERY bundle cache key through `cohort_defs_version()`, so calling into it
     is free but EDITING it — which extending `_window_observed_cohort` to return a
     per-horizon frame would require — would orphan every cached bundle in the repo.
-    E1's `preindex_closure` made the same choice for the same reason and re-derived
-    the index rather than editing the index builder.
+    `feature_window_index_table` makes the same choice for the same reason: it
+    re-derives the index by calling the index builder rather than editing it.
 
     `max` over a person's periods, matching `_window_observed_cohort`'s `distinct()`
     semantics: a person passes the follow-up gate if ANY of their observation
@@ -370,8 +402,6 @@ def build_and_save(spark, *, cdr, billing, person_mod, code_map, lookback_days,
     frame plus the observation-period gate). That sharing is the plan's own note —
     pay one scan, not two — and it is why `_cond` is threaded rather than loaded
     twice."""
-    from preindex_closure import feature_window_index_table
-
     cond = _cond
     if cond is None:
         from charmpheno.omop import load_omop_bigquery
@@ -438,7 +468,7 @@ def main(argv=None) -> int:
     import json as _json
 
     from _driver_common import _phase, configure_logging, make_spark_session
-    from dag_gated_readout import resolve_run_dir
+    from run_dirs import resolve_run_dir
 
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--run-dir", required=True)

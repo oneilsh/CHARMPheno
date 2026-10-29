@@ -1010,12 +1010,6 @@ def build_spark_submit_cmd(
     py_files = [
         repo_root / "spark-vi" / "dist" / "spark_vi.zip",
         repo_root / "charmpheno" / "dist" / "charmpheno.zip",
-        # The pre-index closure post-pass (E1) attaches its column via a UDF whose
-        # functions cloudpickle serializes by MODULE REFERENCE — the executors must `import preindex_closure` when they
-        # unpickle it (exp 0110's first record attempt died of exactly this: the
-        # bundle cache write, the first action to touch the column, failed with
-        # ModuleNotFoundError on every executor). Numpy-only leaf, rides bare.
-        repo_root / "analysis" / "cloud" / "preindex_closure.py",
     ]
     overlay = cluster_overlay_path(repo_root)
     if overlay.exists():

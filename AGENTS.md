@@ -80,7 +80,8 @@ and after a refactor-only hashed edit check that a `--bundle-only` rebuild
 reproduces the corpus counts in the previous run's `bundle_meta.json`.
 
 - **Driver-owned files are free to edit:** `analysis/cloud/{dag_gated_fit,
-  dag_gated_readout,doc_key,readout_dag,prevalence_check,topic_npmi,inspect_topics}.py`,
+  dag_gated_readout,framings,differential,doc_key,readout_dag,prevalence_check,topic_npmi,
+  inspect_topics}.py`,
   `scripts/run_experiment.py`, the `Makefile`, tests. Prefer solving at a driver
   **seam** (the `attested_provider` / injection-parameter pattern) over editing
   a hashed module.
@@ -96,7 +97,7 @@ reproduces the corpus counts in the previous run's `bundle_meta.json`.
 ### Egress floor (All of Us)
 
 Aggregate outputs respect the disclosure floor: **any cell < 20 is not
-disclosable**. Per-node / per-cell tables stay workspace-internal; committed
+disclosable** (one constant, `charmpheno.egress.EGRESS_FLOOR`). Per-node / per-cell tables stay workspace-internal; committed
 reports and log banners carry pooled figures and counts-of-nodes only. **Never
 commit patient-level data** to the tree under any circumstances (see Data and
 repo hygiene).
@@ -157,6 +158,8 @@ The architectural vision lives in [`docs/architecture/`](docs/architecture/):
 - `TOPIC_STATE_MODELING.md` — research design for phenotype discovery.
 - `SPARK_VI_FRAMEWORK.md` — framework design (VIRunner, VIModel contract).
 - `RISKS_AND_MITIGATIONS.md` — known risks, constraints, deployment notes.
+- `LABEL_RULES.md` — what a case-finding row is and what it may see (index,
+  windows, split, strip, gate, incident evaluation, egress floor).
 
 External references for the Online HDP port:
 - Wang, Paisley & Blei 2011, "Online Variational Inference for the

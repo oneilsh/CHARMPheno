@@ -379,24 +379,6 @@ def format_arm_readout(name, arm):
     return "\n".join(highlight_line("[driver]   " + ln) for ln in lines)
 
 
-def _ece(y, p, n_bins=10):
-    """Expected calibration error (equal-width bins): Σ_b (n_b/N)·|conf_b − acc_b|.
-    The gap between predicted P(child|parent) and observed frequency — 0 = perfectly
-    calibrated. Required for a real diagnostic aid and mandatory for VOI (the entropy
-    H(p) must be real, not just a ranking). Pure numpy."""
-    y = np.asarray(y, float); p = np.asarray(p, float)
-    if len(y) == 0:
-        return None
-    edges = np.linspace(0.0, 1.0, n_bins + 1)
-    idx = np.clip(np.digitize(p, edges) - 1, 0, n_bins - 1)
-    ece = 0.0
-    for b in range(n_bins):
-        m = idx == b
-        if m.any():
-            ece += abs(p[m].mean() - y[m].mean()) * (m.mean())
-    return float(ece)
-
-
 def _f(v):
     """Format an optional float for the readout tables (n/a for None)."""
     return "  n/a " if v is None else f"{v:.4f}"
