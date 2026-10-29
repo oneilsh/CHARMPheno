@@ -88,32 +88,12 @@ from pathlib import Path
 
 import numpy as np
 
+from run_dirs import resolve_run_dir
+
 
 # --------------------------------------------------------------------------- #
 # Loading                                                                      #
 # --------------------------------------------------------------------------- #
-def resolve_run_dir(pattern):
-    """Resolve a run dir from an exact path or a glob (e.g. `.../0111-*`).
-
-    Mirrors dag_gated_readout's resolution: an exact dir holding
-    gated_pc_result.npz is used as-is; otherwise the pattern is globbed and
-    filtered to matched dirs that contain the npz, so a shared runs/ dir with a
-    same-numbered run from another experiment does not collide.
-    """
-    import glob as _glob
-    p = Path(pattern)
-    if p.is_dir() and (p / "gated_pc_result.npz").exists():
-        return p
-    hits = [Path(m) for m in _glob.glob(str(pattern))
-            if Path(m).is_dir() and (Path(m) / "gated_pc_result.npz").exists()]
-    if len(hits) == 1:
-        return hits[0]
-    if not hits:
-        raise SystemExit(
-            f"[inspect_topics] no run dir with gated_pc_result.npz matches "
-            f"{pattern!r} (has the fit written its result yet?)")
-    raise SystemExit(f"[inspect_topics] {pattern!r} is ambiguous: "
-                     f"{[str(h) for h in hits]}; pass an exact dir")
 
 
 def load_run(run_dir: Path):
@@ -1753,7 +1733,7 @@ def build_auc_slice(run_dir, *, bundle_meta_path=None, grep_pattern=None,
         carm = compare_arm or arm
         cmp_dir = Path(compare_dir)
         if not (cmp_dir.is_dir() and (cmp_dir / cname).exists()):
-            cmp_dir = Path(resolve_run_dir(str(compare_dir)))
+            cmp_dir = Path(resolve_run_dir(str(compare_dir), who="inspect_topics"))
         res_b = json.loads((cmp_dir / cname).read_text())
         blk_b = _results_per_node(res_b, carm, f"{cmp_dir}/{cname}")
         man_b = json.loads((cmp_dir / "manifest.json").read_text())
@@ -2107,7 +2087,7 @@ def main():
                          "code_map.tsv.")
     args = ap.parse_args()
 
-    run_dir = resolve_run_dir(args.run_dir)
+    run_dir = resolve_run_dir(args.run_dir, who="inspect_topics")
     if args.measurement_states:
         report = build_measurement_state_report(
             run_dir, bundle_meta_path=args.bundle_meta, names_path=args.concept_names)

@@ -18,19 +18,6 @@ def test_dag_children_and_depth():
     assert depth == {0: 0, 1: 1, 2: 1, 3: 2, 4: 2}
 
 
-def test_ece_perfectly_calibrated_is_zero_and_miscalibrated_is_positive():
-    from dag_gated_fit import _ece
-    import numpy as np
-    rng = np.random.default_rng(0)
-    # p == empirical frequency in each bin -> ECE ~ 0.
-    p = np.repeat([0.05, 0.25, 0.55, 0.85], 400)
-    y = np.concatenate([(rng.random(400) < q).astype(float)
-                        for q in (0.05, 0.25, 0.55, 0.85)])
-    assert _ece(y, p) < 0.05
-    # confident-but-wrong -> large ECE.
-    assert _ece(np.zeros(100), np.full(100, 0.9)) > 0.5
-
-
 def test_precision_at_recall_and_recall_at_fdr():
     """The per-node PR block the readout reports (`spark_vi.eval.metrics`, whose own
     tests hold scikit-learn as the oracle)."""

@@ -1,4 +1,4 @@
-"""Exp 0167: `dag_gated_readout.workup_frame` — the per-group workup window joined from
+"""Exp 0167: `framings.workup_frame` — the per-group workup window joined from
 the conversion sidecar (first diagnosis of a member in the label year) and the workup
 sidecar (first dates of every code after the index)."""
 import datetime as dt
@@ -29,7 +29,7 @@ def _frames(spark):
 
 
 def test_workup_frame_windows(spark):
-    import dag_gated_readout as gpr
+    import framings as gpr
     first, hz, wk = _frames(spark)
     padj = {"MONDO:0000101": ["MONDO:0000100"]}
     nodes = [101, 100, 555]

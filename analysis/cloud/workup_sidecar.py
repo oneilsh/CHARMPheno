@@ -16,7 +16,7 @@ cannot answer that: the assembler keeps the post-index window for conditions onl
 and only as label nodes; post-index drugs and measurements are discarded at windowing
 (`multi_domain.lookback_feature_frames`). So the year after the index is captured here,
 where the full-history frames still exist, and a group's window `[index, t_dx)` is
-applied at analysis time (`dag_gated_readout.workup_frame`) from the conversion
+applied at analysis time (`framings.workup_frame`) from the conversion
 sidecar's first-attestation dates.
 
 WHY ITS OWN KEY
@@ -98,7 +98,7 @@ def main(argv=None) -> int:
 
     from _driver_common import _phase, configure_logging, make_spark_session
     from conversion_sidecar import try_load_index_horizon
-    from dag_gated_readout import resolve_run_dir
+    from run_dirs import resolve_run_dir
 
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--run-dir", required=True)

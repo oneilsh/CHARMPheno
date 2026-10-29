@@ -237,3 +237,134 @@ def test_a_non_mondo_corpus_is_refused_by_name():
     driver-side code map and must say so rather than half-building one."""
     with pytest.raises(ValueError, match="no driver-side code map"):
         cs.code_map_from_manifest(None, {"dag_source": "snomed"})
+
+
+# --------------------------------------------------------------------------- #
+# The index re-derivation (moved from the removed preindex_closure.py).       #
+# --------------------------------------------------------------------------- #
+def test_the_rederivation_calls_the_assemblers_index_builder_with_its_arguments():
+    """The only way a driver-side re-derivation can diverge from the assembler
+    once the pick itself is IMPORTED: a different argument. The prior-observation
+    gate in particular is the intrinsic `_LOOKBACK_PRIOR_OBS_DAYS` floor, NOT the
+    forward-mode `prior_obs_days` knob — a lookback config inherits
+    `prior_obs_days: 0` and passing that here would silently build a different
+    index than the corpus was built on."""
+    from charmpheno.omop import cohorts
+    from charmpheno.omop.case_finding_assembly import _LOOKBACK_PRIOR_OBS_DAYS
+
+    seen = {}
+
+    def _spy(cond_df, **kw):
+        seen.update(kw)
+        seen["cond"] = cond_df
+        return "index-df"
+
+    real = cohorts.case_finding_population_index_table
+    cohorts.case_finding_population_index_table = _spy
+    try:
+        out = cs.feature_window_index_table(
+            "cond-frame", spark="S", cdr="p.d", billing="bp",
+            date_col="condition_era_start_date", label_window_days=365)
+    finally:
+        cohorts.case_finding_population_index_table = real
+
+    assert out == "index-df" and seen["cond"] == "cond-frame"
+    assert seen["prior_obs_days"] == _LOOKBACK_PRIOR_OBS_DAYS == 365
+    assert seen["label_window_days"] == 365
+    assert seen["date_col"] == "condition_era_start_date"
+    assert seen["cdr_dataset"] == "p.d" and seen["billing_project"] == "bp"
+
+
+def test_an_unknown_index_mode_is_refused_rather_than_guessed():
+    with pytest.raises(ValueError, match="index_mode"):
+        cs.feature_window_index_table(
+            None, spark=None, cdr="p.d", billing="bp", date_col="d",
+            label_window_days=365, index_mode="episode")
+
+
+class _FakeReader:
+    """`case_finding_population_index_table`'s ONLY use of `spark` is one
+    BigQuery read of `observation_period`; hand it a local frame instead so the
+    deterministic pick can be exercised off-cluster."""
+
+    def __init__(self, op_df):
+        self._op = op_df
+
+    def format(self, _fmt):
+        return self
+
+    def option(self, *_a, **_kw):
+        return self
+
+    def load(self):
+        return self._op
+
+
+class _FakeSpark:
+    def __init__(self, session, op_df):
+        self._session = session
+        self.read = _FakeReader(op_df)
+
+    def __getattr__(self, name):
+        return getattr(self._session, name)
+
+
+def _events(spark, rows):
+    """(person_id, concept_id, condition_era_start_date, source_cohort=..) — the
+    condition frame shape `load_omop_bigquery(source_table='condition_era')`
+    returns and the assembler windows."""
+    from pyspark.sql.types import (DateType, LongType, StructField, StructType)
+    schema = StructType([
+        StructField("person_id", LongType(), False),
+        StructField("concept_id", LongType(), False),
+        StructField("condition_era_start_date", DateType(), False),
+    ])
+    return spark.createDataFrame(
+        [(int(p), int(c), date(*d)) for p, c, d in rows], schema)
+
+
+def _obs(spark, rows):
+    from pyspark.sql.types import (DateType, LongType, StructField, StructType)
+    schema = StructType([
+        StructField("person_id", LongType(), False),
+        StructField("observation_period_start_date", DateType(), False),
+        StructField("observation_period_end_date", DateType(), False),
+    ])
+    return spark.createDataFrame(
+        [(int(p), date(*s), date(*e)) for p, s, e in rows], schema)
+
+
+_ROWS = [
+    # person 1: a long record with several eligible anchors
+    (1, 100, (2012, 3, 1)), (1, 300, (2014, 6, 1)), (1, 400, (2016, 9, 1)),
+    (1, 200, (2018, 2, 1)),
+    # person 2: likewise, different dates so the hash pick differs
+    (2, 200, (2012, 5, 1)), (2, 300, (2015, 1, 1)), (2, 100, (2017, 7, 1)),
+    (2, 400, (2019, 4, 1)),
+    # person 3
+    (3, 400, (2013, 8, 1)), (3, 100, (2015, 11, 1)), (3, 300, (2017, 3, 1)),
+]
+_OBS = [(1, (2010, 1, 1), (2021, 1, 1)), (2, (2010, 1, 1), (2021, 1, 1)),
+        (3, (2010, 1, 1), (2021, 1, 1))]
+
+
+@pytest.mark.slow
+def test_the_rederived_index_is_the_assemblers_own_pick(spark):
+    """THE key risk, checked against the source of truth. `_random_event_windows`
+    IS the assembler's pick (`min hash(person_id, event_date, _RANDOM_WINDOW_SALT)`,
+    ties by earliest date, gated on a fully-observed forward window). The driver's
+    re-derivation must land on the same index date for every person — not merely a
+    plausible one."""
+    from charmpheno.omop.cohorts import _random_event_windows
+    from charmpheno.omop.case_finding_assembly import _LOOKBACK_PRIOR_OBS_DAYS
+
+    cond, op = _events(spark, _ROWS), _obs(spark, _OBS)
+    theirs = {r["person_id"]: r["index_date"] for r in _random_event_windows(
+        cond, op, date_col="condition_era_start_date", window_days=365,
+        prior_obs_days=_LOOKBACK_PRIOR_OBS_DAYS).collect()}
+
+    mine = {r["person_id"]: r["index_date"] for r in cs.feature_window_index_table(
+        cond, spark=_FakeSpark(spark, op), cdr="p.d", billing="bp",
+        date_col="condition_era_start_date", label_window_days=365).collect()}
+
+    assert mine == theirs and len(theirs) == 3

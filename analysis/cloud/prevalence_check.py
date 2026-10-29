@@ -22,12 +22,11 @@ from __future__ import annotations
 
 import numpy as np
 
+from charmpheno.egress import EGRESS_FLOOR
 
 __all__ = ["auc", "framing3_sources", "vocab_to_nodes", "prior_matrix", "sidecar_nodes_to_readout",
            "prior_from_sets", "containment", "node_aucs", "summarize", "EGRESS_FLOOR",
            "prior_rows", "rows_from_node_lists", "node_aucs_from_metrics"]
-
-EGRESS_FLOOR = 20
 
 
 def auc(score, y):
@@ -107,10 +106,6 @@ def prior_matrix(keys, codes_by_key, v2n, C):
     return M
 
 
-def _curie(cid):
-    return f"MONDO:{int(cid):07d}"
-
-
 def sidecar_nodes_to_readout(node_cids, readout_int2cid, parent_adj, *, root_cid=-1):
     """{sidecar Mondo node cid: [readout nodes]} — WHOLE-HISTORY prior rule (exp 0145).
 
@@ -120,11 +115,12 @@ def sidecar_nodes_to_readout(node_cids, readout_int2cid, parent_adj, *, root_cid
     evidence for every readout node whose Mondo term is t or an ancestor of t — the
     is-a reading of "a prior diagnosis of something under X". `parent_adj` is Mondo's
     `{curie: [parent curies]}`; the readout root is never a target."""
+    from charmpheno.mondo.native_dag import mondo_curie
     cid2r = {int(c): int(r) for r, c in readout_int2cid.items()
              if int(r) != 0 and int(c) != int(root_cid)}
     out = {}
     for n in node_cids:
-        seen, stack = set(), [_curie(n)]
+        seen, stack = set(), [mondo_curie(n)]
         while stack:
             t = stack.pop()
             if t in seen:

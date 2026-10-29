@@ -107,6 +107,7 @@ def test_calibration_bins_match_the_direct_ece():
     halves = [core.calibration_bins(p[:400], y[:400]), core.calibration_bins(p[400:], y[400:])]
     merged = tuple(a + b for a, b in zip(*halves))
     assert core.ece_from_bins(merged) == pytest.approx(want, abs=1e-12)
+    assert core.ece(p, y) == pytest.approx(want, abs=1e-12)
     assert local.per_key_calibration([("a", p[:400], y[:400]), ("a", p[400:], y[400:])])[
         "a"] == pytest.approx(want, abs=1e-12)
 
@@ -166,3 +167,13 @@ def test_spark_matches_local(spark):
         [("a", s[r, 0].clip(0, 1), y[r, 0]) for r in parts], 3))
     assert cal["a"] == pytest.approx(local.per_key_calibration(
         [("a", s[r, 0].clip(0, 1), y[r, 0]) for r in parts])["a"], abs=1e-12)
+
+
+def test_ece_perfectly_calibrated_is_zero_and_miscalibrated_is_positive():
+    rng = np.random.default_rng(0)
+    p = np.repeat([0.05, 0.25, 0.55, 0.85], 400)
+    y = np.concatenate([(rng.random(400) < q).astype(float)
+                        for q in (0.05, 0.25, 0.55, 0.85)])
+    assert core.ece(p, y) < 0.05
+    assert core.ece(np.full(100, 0.9), np.zeros(100)) > 0.5
+    assert core.ece([], []) is None

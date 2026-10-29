@@ -378,7 +378,29 @@ were written with. Two docstring mentions in the source-hashed
 cache drop for a comment). The conversion and workup sidecars' keys move (their
 modules import from the renamed readout), so each rebuilds once.
 
-## Questions for the maintainer
+**Framings and placement cleanup, 2026-10-29 — done.** Maintainer's defaults accepted
+(after exps 0166 / 0167). Cut: framing 1's E1 (presence subtypes) and E4 (gated
+likelihood) engines, ever-coded training members and multi-positive soft targets; the
+hidden-record framing 2 (`evaluate_next_question*`, the VOI pool) with
+`voi_acquisition.py` and all of `model_acquisition.py` but its engine, now
+`model_engine.ModelEngine`; the pre-index closure module (`preindex_closure.py`), whose
+one live function, the index re-derivation, moved into `conversion_sidecar.py` with its
+two reproduction tests (the conversion sidecar key moves once, and with it the workup
+sidecar's). Kept: the workup framing, relevance code selection, the HPO survey / raw
+baseline / `sim_leaves_first` options. Moved: the framing runners into
+`analysis/cloud/framings.py` (out of the readout driver); gated NPMI's computation into
+`spark_vi.eval.topic.gated_npmi`. Deduplicated: the egress floor
+(`charmpheno.egress.EGRESS_FLOOR`), ECE (`spark_vi.eval.metrics.ece`), the run-dir
+resolver (`run_dirs.py`), Mondo curies (`native_dag.mondo_curie`). ADR 0051 §5 amended
+(clinical rules stay in `analysis/cloud`); the label rules are in
+`docs/architecture/LABEL_RULES.md`. Everything removed is at commit 29556f3d.
+
+## Questions for the maintainer (all answered)
+
+Answered 2026-10-26/27 (see Decisions so far): 1 yes; 2 yes, all five; 3 all cut
+(E1/E4 survived as framing engines until the 2026-10-29 cleanup); 4 yes; 5 no batched
+drop, hashed edits where they belong; 6 inside spark-vi (ADR 0051).
+
 
 1. Antidepressant/MDD (Hughes) line, including its `cohorts.py` block and the
    `analysis/pc` prototype: cut, relying on the git tag?
