@@ -21,6 +21,11 @@ class VIModel(ABC):
     Subclasses implement initialize_global, local_update, and update_global.
     Optional hooks — combine_stats, compute_elbo, has_converged — have
     sensible defaults.
+
+    The instance itself is pickled into every Spark task (VIRunner ships it in
+    the E-step closure), so keep its pickled state small: array-shaped state
+    belongs in global_params (broadcast once per iteration) or, if driver-only,
+    is dropped in `__getstate__` (as DagGatedOnlineLDA does with its seed arrays).
     """
 
     @abstractmethod
