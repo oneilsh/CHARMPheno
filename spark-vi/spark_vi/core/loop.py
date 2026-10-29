@@ -9,10 +9,12 @@ and the final save -- lives here once, so the two engines cannot drift apart.
 
 The engine supplies an `estep(global_params, seed)` callable returning
 `(aggregated_stats, batch_size)`; `aggregated_stats is None` means the sampled
-minibatch was empty and the iteration is skipped (the step counter still
-advances, as it always has in VIRunner). `seed` is the per-iteration sample
-seed, drawn here from `random.Random(cfg.random_seed)` so both engines consume
-the same seed stream; in full-batch mode it is None.
+minibatch was empty: the parameters are left as they are, and the iteration
+still counts and records a NaN ELBO, so every trace has one entry per
+iteration. `seed` is the per-iteration sample seed, drawn here from
+`random.Random(cfg.random_seed)` so both engines consume the same seed stream,
+and a resumed fit continues that stream where the checkpoint left it; in
+full-batch mode it is None.
 
 Pure Python + NumPy: importing this module does not import pyspark.
 """
@@ -88,17 +90,22 @@ def run_svi_loop(
     stats are pre-scaled by corpus_size / batch_size so update_global sees an
     unbiased corpus-equivalent target (the MLlib OnlineLDAOptimizer convention).
     """
-    # Lazy import to break a module-load cycle (fix 2cb3c45c, ported with ADR
-    # 0051): spark_vi.io.export imports spark_vi.core.result, which runs
+    # Lazy import to break a module-load cycle: spark_vi.io.export imports
+    # spark_vi.core.result, which runs
     # spark_vi.core.__init__ -> runner -> this module, so a module-level import here
     # fails for any consumer that imports export BEFORE core (e.g. a post-hoc reader
     # doing `from spark_vi.io.export import load_result` first).
     from spark_vi.io.export import load_result, save_result
 
+    # Per-iteration trajectories of model-supplied scalars/small-arrays.
+    # Populated below from model.iteration_diagnostics(); empty if the
+    # model doesn't override the default. A resume continues the loaded ones.
+    diagnostic_traces: dict[str, list[Any]] = {}
     if resume_from is not None:
         loaded = load_result(resume_from)
         global_params = loaded.global_params
         elbo_trace: list[float] = list(loaded.elbo_trace)
+        diagnostic_traces = {k: list(v) for k, v in loaded.diagnostic_traces.items()}
         start_iteration = loaded.n_iterations
         log.info(
             "Resuming from %s (n_iterations=%d, converged=%s)",
@@ -112,11 +119,11 @@ def run_svi_loop(
     if minibatch and corpus_size is None:
         raise ValueError("corpus_size is required in mini-batch mode")
     rng = random.Random(cfg.random_seed) if minibatch else None
-
-    # Per-iteration trajectories of model-supplied scalars/small-arrays.
-    # Populated below from model.iteration_diagnostics(); empty if the
-    # model doesn't override the default.
-    diagnostic_traces: dict[str, list[Any]] = {}
+    # A resumed fit continues the seed stream: skip the seeds iterations
+    # 1..start_iteration consumed, so checkpoint + resume draws the same
+    # minibatches as one uninterrupted fit with the same random_seed.
+    for _ in range(start_iteration if minibatch else 0):
+        rng.randint(0, 2 ** 31 - 1)
 
     def _result(n_iterations: int, converged: bool, **meta) -> VIResult:
         return VIResult(
@@ -135,19 +142,6 @@ def run_svi_loop(
         # 1-4. Sample a minibatch and aggregate its sufficient statistics.
         seed = rng.randint(0, 2 ** 31 - 1) if minibatch else None
         aggregated, batch_size = estep(global_params, seed)
-        if aggregated is None:
-            log.info("Iteration %d skipped: empty mini-batch", step + 1)
-            continue
-
-        # 5. Pre-scale aggregated stats to form the natural-gradient target.
-        # In mini-batch mode this multiplies each ndarray by corpus / batch
-        # so the model's update_global sees an unbiased corpus-equivalent.
-        # In full-batch mode the dict is passed through unchanged.
-        stats_scale = float(corpus_size) / float(batch_size) if minibatch else 1.0
-        if stats_scale != 1.0:
-            target_stats = {k: v * stats_scale for k, v in aggregated.items()}
-        else:
-            target_stats = aggregated
 
         # M-step step size. MINI-BATCH uses the decaying Robbins-Monro
         # schedule; FULL BATCH uses rho = 1 (batch variational EM).
@@ -158,15 +152,9 @@ def run_svi_loop(
         # by rho·‖T(old) - old‖. As rho_t -> 0 the parameters freeze while the
         # fixed-point residual is still large, so (a) the fit lands short of the
         # batch-VB fixed point at any finite budget and (b) the relative-ELBO early
-        # stop fires on the vanishing step rather than on convergence. A finite-
-        # budget defect (sum_t rho_t diverges for kappa < 1), which is why it went
-        # unnoticed. Measured on a 1600-doc gated synthetic at 200 iterations
-        # (commit 3f71de55's message): placement MRR 0.856 / top2 0.828 damped
-        # vs 0.910 / 0.988 at rho = 1; early stop at iteration 15 with 760 nats
-        # still to gain.
-        # rho = 1 is also the only full-batch regime the SVI-vs-Gibbs gates
-        # validate (tests/_stm_synth.fit_gated_svi_local: "full-batch lr=1.0").
-        # (Fix 3f71de55, from a sibling branch; ported with ADR 0051.)
+        # stop fires on the vanishing step rather than on convergence. rho = 1 is
+        # also the only full-batch regime the SVI-vs-Gibbs gates validate
+        # (tests/_stm_synth.fit_gated_svi_local: "full-batch lr=1.0").
         #
         # Mini-batch: Hoffman et al. 2013 index t from 1 so the first rho is
         # (tau0+1)^-kappa rather than (tau0)^-kappa — the latter can collapse to
@@ -176,12 +164,32 @@ def run_svi_loop(
         # Newton step, so a full-batch fit takes an UNDAMPED Newton step.
         rho_t = (1.0 if not minibatch else
                  (cfg.learning_rate_tau0 + t + 1) ** -cfg.learning_rate_kappa)
-        global_params = model.update_global(global_params, target_stats, learning_rate=rho_t)
 
-        # 6. ELBO. Pass the *raw* aggregated stats (not the pre-scaled
-        # target_stats) so ELBO terms representing observed data evidence
-        # stay correct.
-        elbo = model.compute_elbo(global_params, aggregated)
+        if aggregated is None:
+            # Empty minibatch (a tiny fraction of a tiny corpus): no update, but
+            # the iteration still counts, so it records a NaN ELBO and goes on to
+            # the diagnostics and checkpoint like any other. NaN is already the
+            # "no ELBO" value (VIModel.compute_elbo's default), and has_converged
+            # needs two finite values.
+            log.info("Iteration %d: empty mini-batch, parameters unchanged", step + 1)
+            elbo = float("nan")
+        else:
+            # 5. Pre-scale aggregated stats to form the natural-gradient target.
+            # In mini-batch mode this multiplies each ndarray by corpus / batch
+            # so the model's update_global sees an unbiased corpus-equivalent.
+            # In full-batch mode the dict is passed through unchanged.
+            stats_scale = float(corpus_size) / float(batch_size) if minibatch else 1.0
+            if stats_scale != 1.0:
+                target_stats = {k: v * stats_scale for k, v in aggregated.items()}
+            else:
+                target_stats = aggregated
+            global_params = model.update_global(global_params, target_stats,
+                                                learning_rate=rho_t)
+
+            # 6. ELBO. Pass the *raw* aggregated stats (not the pre-scaled
+            # target_stats) so ELBO terms representing observed data evidence
+            # stay correct.
+            elbo = model.compute_elbo(global_params, aggregated)
         elbo_trace.append(float(elbo))
 
         # Per-iteration progress line. INFO level so it can be surfaced
@@ -233,8 +241,7 @@ def run_svi_loop(
         # per-iteration ELBO is computed on a fresh random sub-sample, so
         # its iteration-to-iteration variance makes a two-point
         # relative-change test fire on coincidental closeness, not true
-        # convergence (repeatedly observed: false stops at iter 67 and 157
-        # of a 200-iter budget). Spark MLlib's reference online LDA
+        # convergence. Spark MLlib's reference online LDA
         # (OnlineLDAOptimizer) has NO convergence tolerance and runs exactly
         # maxIterations for this reason; we match it — mini-batch fits run
         # the full budget, full-batch fits keep the valid corpus-wide check.

@@ -30,21 +30,31 @@ def test_with_replacement_draws_duplicates():
     assert np.unique(idx).size < idx.size
 
 
+class _DiagCounting(CountingModel):
+    def iteration_diagnostics(self, global_params):
+        return {"alpha": float(global_params["alpha"])}
+
+
 def test_resume_matches_continuous_run(tmp_path):
-    """Resume continues the Robbins-Monro counter, as VIRunner's does."""
+    """Checkpoint + resume is the uninterrupted fit: the Robbins-Monro counter, the
+    minibatch seed stream and the diagnostic traces all continue."""
     from spark_vi.io.export import save_result
 
     rows = [1] * 60 + [0] * 40
     cfg = dict(convergence_tol=1e-12, mini_batch_fraction=0.3, random_seed=3)
-    continuous = LocalRunner(CountingModel(), VIConfig(max_iterations=6, **cfg)).fit(rows)
-    first = LocalRunner(CountingModel(), VIConfig(max_iterations=3, **cfg)).fit(rows)
+    continuous = LocalRunner(_DiagCounting(), VIConfig(max_iterations=6, **cfg)).fit(rows)
+    first = LocalRunner(_DiagCounting(), VIConfig(max_iterations=3, **cfg)).fit(rows)
     save_result(first, tmp_path / "ckpt")
-    resumed = LocalRunner(CountingModel(), VIConfig(max_iterations=3, **cfg)).fit(
+    resumed = LocalRunner(_DiagCounting(), VIConfig(max_iterations=3, **cfg)).fit(
         rows, resume_from=tmp_path / "ckpt")
-    assert resumed.n_iterations == 6
-    assert len(resumed.elbo_trace) == 6
-    # Different sample seeds after the resume, so not equal -- but the step sizes
-    # are, and the full-batch run below is exact.
+    assert resumed.n_iterations == continuous.n_iterations == 6
+    np.testing.assert_allclose(resumed.global_params["alpha"],
+                               continuous.global_params["alpha"])
+    np.testing.assert_allclose(resumed.elbo_trace, continuous.elbo_trace)
+    assert resumed.diagnostic_traces["alpha"] == pytest.approx(
+        continuous.diagnostic_traces["alpha"])
+    assert len(resumed.diagnostic_traces["alpha"]) == 6
+    # Full batch (no seeds) resumes exactly too.
     full = dict(convergence_tol=1e-12)
     cont = LocalRunner(CountingModel(), VIConfig(max_iterations=6, **full)).fit(rows)
     r3 = LocalRunner(CountingModel(), VIConfig(max_iterations=3, **full)).fit(rows)
@@ -52,7 +62,21 @@ def test_resume_matches_continuous_run(tmp_path):
     res = LocalRunner(CountingModel(), VIConfig(max_iterations=3, **full)).fit(
         rows, resume_from=tmp_path / "full")
     np.testing.assert_allclose(res.global_params["alpha"], cont.global_params["alpha"])
-    assert continuous.n_iterations == 6
+
+
+def test_an_empty_minibatch_counts_with_a_nan_elbo():
+    """A tiny fraction of a tiny corpus draws empty batches: those iterations leave
+    the parameters unchanged and record NaN, so every trace has n_iterations entries."""
+    cfg = VIConfig(max_iterations=20, mini_batch_fraction=0.1, random_seed=0,
+                   convergence_tol=1e-12)
+    res = LocalRunner(_DiagCounting(), cfg).fit([1, 0] * 5)   # P(empty) = e^-1
+    elbo = np.asarray(res.elbo_trace)
+    assert res.n_iterations == len(elbo) == len(res.diagnostic_traces["alpha"]) == 20
+    empty = np.isnan(elbo)
+    assert empty.any() and not empty.all()
+    a = np.asarray(res.diagnostic_traces["alpha"])
+    for i in np.flatnonzero(empty):
+        assert a[i] == (a[i - 1] if i > 0 else 1.0)       # unchanged (prior alpha 1)
 
 
 def test_checkpoint_and_final_save(tmp_path):
