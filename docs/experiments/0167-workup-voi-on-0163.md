@@ -1,7 +1,7 @@
 ---
 id: 167
 slug: workup-voi-on-0163
-status: running
+status: done
 model_class: gated_pc
 # NOT A FIT. Framing 2 as WORKUP (spec 2026-10-28 workup-voi-design) on 0163's fit:
 # every fact recorded between the index and the first diagnosis of a group member
@@ -202,4 +202,24 @@ cluster).
 - **Next (run 4, maintainer 2026-10-29):** the fact-level ranking accuracy (Spearman of
   each fact's mean EIG with its mean realized gain over the patients it is new for,
   facts new to >= 20 patients; the top-5 facts' realized gain vs all; the pooled slope).
+
+**2026-10-29 — run 4 (fact-level ranking accuracy); experiment closed.** One survey,
+6 min (the 60-min run 3 was the cluster).
+- **The ranking is real but weak.** Pooled per fact over the patients it is new for,
+  mean EIG ranks with mean realized gain in the four powered groups: exocrine +0.24
+  (E3 +0.24), aortic aneurysm +0.31 (+0.33), GI autoimmune +0.04 (+0.22), viral
+  hepatitis +0.05 (+0.16); over 8 groups E6 −0.13 / +0.14 / +0.36, positive in 6. The
+  top-5 facts by EIG realize 3-15x the all-facts mean gain (aortic 0.0068 vs 0.0006,
+  exocrine 0.0090 vs 0.0018, GI 0.0061 vs 0.0000, hepatitis E3 0.0160 vs 0.0017), but
+  in absolute terms about 0.01 nats. Slopes 0.3-0.9: EIG overstates the gain.
+- **Negative only where the group cannot test it**: thyroid (−0.63; q0 98% on one
+  member, gains ~1e-4) and phobic disorder (−0.96, 7 facts whose likelihoods drift).
+- **E3 ranks at least as well as E6** (its weaker starting belief leaves more to move).
+- **Conclusion.** Framing 2 as workup works mechanically and its ranking carries
+  signal, but on these groups the new facts a workup records add little to the belief
+  framing 1's engines already hold: 0.02-0.13 nats per patient over all new facts,
+  about 0.01-0.02 for the best one, and the patient-specific ranking barely improves on
+  one list per group. Recorded as insight 0105. Framing 2 is parked; the
+  maintainer's next direction is record forecasting and twin retrieval (framings "1"
+  and "2" of the 2026-10-29 discussion), not within-group discrimination.
 
