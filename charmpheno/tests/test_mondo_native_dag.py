@@ -372,12 +372,12 @@ def test_frontier_to_label_single_parent_arm_does_not_see_the_other_arm():
     assert mask[1] == 1.0              # B is a sibling of C under the root
 
 
-def test_dag_children_and_depth_is_multi_parent_safe():
-    """`_dag_children_and_depth` feeds the conditional readout's cohorts; a child
+def test_dag_children_and_min_depth_is_multi_parent_safe():
+    """`_dag_children_and_min_depth` feeds the conditional readout's cohorts; a child
     with two kept parents must appear under BOTH."""
-    from spark_vi.dag.ops import children_and_depth as _dag_children_and_depth
+    from spark_vi.dag.ops import children_and_min_depth as _dag_children_and_min_depth
 
-    children, depth = _dag_children_and_depth(
+    children, depth = _dag_children_and_min_depth(
         {0: [], 1: [0], 2: [0], 3: [1, 2], 4: [2]}, 5)
     assert 3 in children[1] and 3 in children[2]
     assert depth[3] == 2

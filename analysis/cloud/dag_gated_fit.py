@@ -35,7 +35,7 @@ from disk_telemetry import start_disk_telemetry
 # driver keeps the clinical seams: the doc key (`doc_key.py`, driver-side only),
 # the metrics and their formatting.
 import doc_key as _dk
-from spark_vi.dag import children_and_depth
+from spark_vi.dag import children_and_min_depth
 from spark_vi.readout import (LocalReadoutData, SparkReadoutData, closure_matrix,
                               collect_lean_proba, fit_heads, write_heads)
 from spark_vi.readout import evaluate as _ev
@@ -218,7 +218,7 @@ def stacked_readout(blocks, parent_int, C, *, recall_targets, fdr_targets,
             curve_columns=curve_columns)
         root_det = _ev.detection(sb, recall_targets, columns="root",
                                  unit_divisor=unit)
-        _, depth = children_and_depth(parent_int, C)
+        _, depth = children_and_min_depth(parent_int, C)
         n_terms = M.sum(axis=1)
         # HSLDA's own read — per-node AUC over ALL test docs (y_c vs everyone, no
         # cohort): the de-novo case-finding question the within-cohort ranking never
@@ -298,7 +298,7 @@ def format_stacked_readout(block) -> str:
                      f"wins/losses/ties={a['wins']}/{a['losses']}/{a['ties']} "
                      f"(n={a['n']})")
         for d, s in pv["by_depth"].items():
-            lines.append(f"    depth {d}: n={s['n']} median={_med(s['median'])} "
+            lines.append(f"    min depth {d}: n={s['n']} median={_med(s['median'])} "
                          f"wins/losses={s['wins']}/{s['losses']}")
     mg = block.get("marginal_ranking")
     if mg:
@@ -314,14 +314,14 @@ def format_stacked_readout(block) -> str:
                      f"wins/losses/ties={a['wins']}/{a['losses']}/{a['ties']} "
                      f"(n={a['n']})")
         for d, st in mg["paired"]["by_depth"].items():
-            lines.append(f"      depth {d}: n={st['n']} median={_med(st['median'])} "
+            lines.append(f"      min depth {d}: n={st['n']} median={_med(st['median'])} "
                          f"wins/losses={st['wins']}/{st['losses']}")
     ece = block.get("marginal_ece_by_depth") or {}
     if ece:
         lines.append("  marginal ECE over ALL test docs (flat sigma(z_c) vs "
-                     "stacked), by depth [depth 0 = root head]:")
+                     "stacked), by min depth [0 = root head]:")
         for d, s in ece.items():
-            lines.append(f"    depth {d}: n_nodes={s['n_nodes']} flat="
+            lines.append(f"    min depth {d}: n_nodes={s['n_nodes']} flat="
                          f"{_f(s['flat']).strip()} stacked={_f(s['stacked']).strip()}")
     return "\n".join("[driver] " + ln if not ln.startswith("[") else ln
                      for ln in lines)

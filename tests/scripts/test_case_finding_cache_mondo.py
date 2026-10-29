@@ -83,7 +83,9 @@ _SNOMED_BASE = dict(
 # RE-PINNED by the 2026-10-29 walkthrough: `spark_vi/dag/layout.py` (folded into
 # every key as `dag_layout_src`) lost the dead `allowed(v)` and got an ancestor-walk
 # `frontier_from_coded` (same output, no quadratic subtree scans). Announced full
-# drop; these are the post-drop values.
+# drop; these are the post-drop values. The same day `spark_vi/dag/ops.py` (folded
+# into the native-Mondo key only) was cleaned up (shared nearest-kept walk,
+# `children_and_min_depth`, generic docstrings): the native key moved again.
 _SNOMED_KEY = "c90bbd9e8a763d48"
 _SNOMED_LABELED_KEY = "08ad48499f5b3541"          # emit_labels + closure mask
 _SNOMED_LOOKBACK_KEY = "4144be6f22528291"         # lookback windowing + strip both
@@ -122,7 +124,7 @@ _MD_BASE = dict(_SNOMED_BASE, multidomain=True, extra_domains=("drug",),
 # the exp-0109 `dag_collapse` option, the DisMech `label_set` and E1's
 # `preindex_closure` fold were removed with it (the driver had refused them since
 # the 2026-10 cleanup). Post-drop value.
-_MONDO_NATIVE_KEY = "3584017528f8ba40"
+_MONDO_NATIVE_KEY = "ae1bb87cbe283eae"
 
 
 def test_the_native_mondo_key_is_byte_identical():

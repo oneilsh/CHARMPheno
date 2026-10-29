@@ -5,7 +5,7 @@ native-DAG suite and the readout's stacked tests; these pin the primitives below
 """
 import numpy as np
 
-from spark_vi.dag.ops import (ancestor_closure, children_and_depth, closure_matrix,
+from spark_vi.dag.ops import (ancestor_closure, children_and_min_depth, closure_matrix,
                               descendants, nearest_kept_ancestors, nearest_kept_parents,
                               parent_adjacency, transitive_reduction_parents)
 
@@ -53,7 +53,7 @@ def test_transitive_reduction_drops_the_redundant_sibling_edge():
 
 def test_depth_and_closure_matrix_on_a_diamond():
     parent_int = {1: [0], 2: [0], 3: [1, 2]}
-    _children, depth = children_and_depth(parent_int, 4)
+    _children, depth = children_and_min_depth(parent_int, 4)
     assert depth == {0: 0, 1: 1, 2: 1, 3: 2}
     M = closure_matrix(parent_int, 4)
     np.testing.assert_array_equal(M[3], [1, 1, 1, 1])     # root counted once

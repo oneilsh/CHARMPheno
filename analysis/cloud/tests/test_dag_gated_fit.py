@@ -8,11 +8,11 @@ import numpy as np
 import pytest
 
 
-def test_dag_children_and_depth():
-    from spark_vi.dag import children_and_depth as _dag_children_and_depth
+def test_dag_children_and_min_depth():
+    from spark_vi.dag import children_and_min_depth as _dag_children_and_min_depth
     # 0 root; 1,2 -> 0; 3,4 -> 1. C=5.
     parent_int = {1: [0], 2: [0], 3: [1], 4: [1]}
-    children, depth = _dag_children_and_depth(parent_int, C=5)
+    children, depth = _dag_children_and_min_depth(parent_int, C=5)
     assert children[0] == [1, 2] and sorted(children[1]) == [3, 4]
     assert children[3] == [] and children[4] == []
     assert depth == {0: 0, 1: 1, 2: 1, 3: 2, 4: 2}
