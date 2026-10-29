@@ -60,7 +60,7 @@ def _agg_depth(global_params: dict) -> int:
     so the params' ndarray bytes are a driver-side proxy for the partial size
     the reduce will ship. At depth d over P partitions the driver receives
     ~P^(1/d) partials in one burst: fine at 41 MB/partial (K=444), too much for
-    an 8 GB driver heap at 355 MB/partial (whole-Mondo K~3,800) under depth 2.
+    an 8 GB driver heap at 355 MB/partial (K~3,800, V~11,600) under depth 2.
     Above the threshold, depth 3 trades one extra executor combine round for a
     ~P^(1/6)-fold smaller driver burst.
     Recurses because multi-domain lambda is a dict-of-arrays inside the dict.
@@ -201,7 +201,7 @@ class VIRunner:
                 # required by the VIModel contract for additive statistics).
                 # Depth is sized from the stats payload (see _agg_depth): each
                 # per-partition partial is a DENSE lambda-shaped dict (~355 MB at
-                # whole-Mondo scale), and depth 3 moves one more combine round
+                # K~3,800 x V~11,600), and depth 3 moves one more combine round
                 # onto the executors so fewer of them land on the driver at once.
                 try:
                     return batch_rdd.mapPartitions(_local).treeReduce(

@@ -16,7 +16,7 @@ def destroy_broadcast(bcast) -> None:
     AND the driver-local pickled temp file.
 
     ``unpersist`` frees only the executor copies; the other two survive until
-    ``destroy`` and accumulate at one pickle per call — at whole-Mondo scale a
+    ``destroy`` and accumulate at one pickle per call — at K~3,800 x V~11,600 a
     λ-sized (~355 MB) pickle per fit iteration, enough to fill the master's disk
     over a long fit. Cleanup must never outrank the work it follows, so failures
     degrade to unpersist and a log line rather than raising."""

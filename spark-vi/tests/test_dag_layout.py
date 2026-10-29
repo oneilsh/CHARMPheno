@@ -13,9 +13,9 @@ def test_daglayout_structure_and_masks():
     assert lay.closure(3) == [0, 1, 3]         # root..v
     assert lay.subtree(1) == {1, 3, 4}
     assert lay.depth(3) == 2 and lay.depth(1) == 1
-    # allowed(v) = bg ∪ blocks along closure(v), excluding root
-    assert list(lay.allowed(3)) == [0, 1] + lay.block[1] + lay.block[3]
-    assert list(lay.allowed(1)) == [0, 1] + lay.block[1]
+    # allowed_set({v}) = bg ∪ blocks along closure(v), excluding root
+    assert list(lay.allowed_set({3})) == [0, 1] + lay.block[1] + lay.block[3]
+    assert list(lay.allowed_set({1})) == [0, 1] + lay.block[1]
 
 def test_daglayout_tpn_two():
     lay = DagLayout(PARENT, n_bg=1, tpn=2)
@@ -76,8 +76,8 @@ def test_daglayout_multiparent_diamond():
 def test_daglayout_singleparent_backward_compat():
     lay = DagLayout(PARENT, n_bg=2, tpn=1)               # scalar-parent map still works
     assert lay.closure(3) == [0, 1, 3]                   # exact old list ordering
-    assert list(lay.allowed(3)) == [0, 1] + lay.block[1] + lay.block[3]
-    assert list(lay.allowed(1)) == [0, 1] + lay.block[1]
+    assert list(lay.allowed_set({3})) == [0, 1] + lay.block[1] + lay.block[3]
+    assert list(lay.allowed_set({1})) == [0, 1] + lay.block[1]
     assert lay.depth(3) == 2 and lay.depth(1) == 1
     assert lay.subtree(1) == {1, 3, 4}
 
@@ -152,3 +152,19 @@ def test_cost_report_reports_k_fanout_and_lambda_size():
     d2, _ = DagLayout(flat, n_bg=2, tpn=1).cost_report()
     assert d2["fanout_max"] == 6
     assert d2["lambda_bytes"] is None                       # vocab_size omitted
+
+
+def test_frontier_from_coded_matches_the_subtree_definition_on_random_dags():
+    """The ancestor walk equals the definition (drop c when another attested node is
+    in c's subtree) on random multi-parent DAGs and random attested sets."""
+    import random
+    rng = random.Random(0)
+    for _ in range(50):
+        n = rng.randint(3, 25)
+        parent = {c: sorted(rng.sample(range(c), rng.randint(1, min(3, c))))
+                  for c in range(1, n)}
+        lay = DagLayout(parent)
+        coded = rng.sample(range(1, n), rng.randint(1, n - 1))
+        want = frozenset(c for c in coded
+                         if not any(c2 != c and c2 in lay.subtree(c) for c2 in coded))
+        assert frontier_from_coded(coded, lay) == want

@@ -332,7 +332,7 @@ def test_daglayout_closure_visits_a_diamond_once():
 
 def test_daglayout_allowed_set_on_a_diamond_has_no_repeated_topic():
     lay = _diamond_layout()
-    allowed = list(lay.allowed(3))
+    allowed = list(lay.allowed_set({3}))
     assert allowed == sorted(set(allowed))
     # background block + one block per closure node except the root
     assert len(allowed) == lay.n_bg + 3 * lay.tpn

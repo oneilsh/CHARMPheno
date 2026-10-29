@@ -7,8 +7,7 @@ gate (background plus every node in the closure of the frontier); `depth`, `heig
 `closure`, `subtree` and `descendants` are the DAG queries the layout and its callers
 need. `frontier_from_coded` turns a set of attested nodes into the most-specific ones.
 
-Moved from `models/topic/dag_placement.py` with ADR 0051 (that module's collapsed-Gibbs
-oracle went to the test suite). Generic: nothing here knows what the nodes mean.
+Generic: nothing here knows what the nodes mean.
 """
 import numpy as np
 
@@ -41,9 +40,9 @@ class DagLayout:
     def depth(self, v, _stack=()):
         """Longest path length from root to v (root = 0). Memoized; cycle-guarded.
 
-        Input parent maps are acyclic by construction (ConditionDag.to_engine), but
-        DagLayout is the domain-agnostic public entry and can be built from any integer
-        map, so the _stack guard prevents a malformed cyclic map from recursing forever.
+        The label-DAG builders produce acyclic maps, but DagLayout can be built from any
+        integer map, so the _stack guard keeps a malformed cyclic map from recursing
+        forever.
         """
         if v in self._depth:
             return self._depth[v]
@@ -81,6 +80,7 @@ class DagLayout:
         return sorted(seen, key=lambda u: (self.depth(u), u))
 
     def subtree(self, u):
+        """u and all of its descendants, as a set."""
         out = {u}
         stack = [u]
         while stack:
@@ -101,16 +101,9 @@ class DagLayout:
         return sorted((v for v in self.subtree(u) if v != u),
                       key=lambda v: (self.depth(v), v))
 
-    def allowed(self, v):
-        al = list(range(self.n_bg))
-        for u in self.closure(v):
-            if u != 0:
-                al += self.block[u]
-        return np.array(sorted(al), dtype=int)
-
     def cost_report(self, *, vocab_size=None):
         """PRE-FLIGHT size profile for a gated fit over this layout, logged at the
-        data-build boundary so a big (e.g. whole-Mondo) fit's shape is visible
+        data-build boundary so a big fit's shape (K in the thousands) is visible
         BEFORE compute is committed: K, the DAG fan-out (children per parent) and,
         given `vocab_size`, the lambda size (K * V * 8 bytes). Pure numpy; returns
         (metrics dict, formatted str)."""
@@ -160,9 +153,15 @@ def frontier_from_coded(coded_nodes, lay):
     """The set-valued truth: the most-specific attested nodes = attested nodes with NO attested
     descendant. Drops attested ancestors (same-path -> most-specific), keeps incomparable attested
     nodes as a set (comorbid or contradictory — the DAG cannot tell these apart, so we do not roll
-    them up). Returns a frozenset."""
+    them up). Returns a frozenset.
+
+    Walks UP from each attested node (its closure is a short ancestor path) rather than down
+    (a high node's subtree can be most of the DAG): c is dropped when it is a proper ancestor
+    of another attested node."""
     C = set(coded_nodes)
-    return frozenset(c for c in C
-                     if not any((c2 != c) and (c2 in lay.subtree(c)) for c2 in C))
+    covered = set()
+    for c2 in C:
+        covered.update(a for a in lay.closure(c2) if a != c2)
+    return frozenset(C - covered)
 
 
