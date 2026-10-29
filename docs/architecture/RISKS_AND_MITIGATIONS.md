@@ -108,10 +108,10 @@ over all patients). HDP and other stochastic-VI models opt in to mini-batching v
 `VIConfig.mini_batch_fraction`, which puts them in the regime the Robbins-Monro
 schedule was designed for; see ADR 0005.
 
-**Mitigation:** Two paths. (1) Set `VIConfig.mini_batch_fraction` to a non-None
-value to make iterations stochastic, validating the schedule's assumptions. (2) For
-full-batch models, override `kappa` toward 1.0 to slow the decay, or eventually
-extend the framework to support model-specified learning-rate schedules.
+**Mitigation (resolved, ADR 0051):** the shared loop (`spark_vi/core/loop.py`) steps at
+rho = 1 in full-batch mode, i.e. batch variational EM, and uses the Robbins-Monro
+schedule only for mini-batch fits. `tau0` / `kappa` are ignored in full-batch mode, and
+the relative-ELBO early stop runs only there (a minibatch ELBO is too noisy for it).
 
 ### Mini-batch sampling: variance, reproducibility, and overhead
 

@@ -20,17 +20,20 @@ class VIConfig:
             or shim resumeFrom), this is the number of *additional* iters
             to run, not a target total — i.e. resuming a 50-iter
             checkpoint with max_iterations=30 yields 80 total iters.
-        learning_rate_tau0: delay parameter in rho_t = (tau0 + t)^-kappa, where
+        learning_rate_tau0: delay parameter in the MINI-BATCH step size
+            rho_t = (tau0 + t)^-kappa, where
             t indexes iterations from 1 per Hoffman et al. 2013. The runner
             indexes iterations from 0 internally, so it evaluates the
             equivalent (tau0 + t + 1)^-kappa; both forms yield the same step
             sizes.
-        learning_rate_kappa: decay exponent. Validation accepts (0, 1]; the
+        learning_rate_kappa: mini-batch decay exponent. Validation accepts (0, 1]; the
             Robbins-Monro convergence guarantee (sum rho_t = inf and
             sum rho_t^2 < inf) holds only for kappa in (0.5, 1]. Values in
             (0, 0.5] are permitted for experimentation but are not guaranteed
             to converge.
-        convergence_tol: relative ELBO improvement threshold for early stop.
+        convergence_tol: relative ELBO improvement threshold for early stop,
+            checked in FULL-BATCH mode only (a minibatch ELBO is too noisy for
+            a two-point test, so mini-batch fits run max_iterations).
         checkpoint_interval: if set, the runner writes a VIResult to
             checkpoint_dir every N iterations during fit() (overwriting the
             previous checkpoint — last one is the only one needed for resume).
@@ -42,10 +45,10 @@ class VIConfig:
         mini_batch_fraction: if set, the runner samples this fraction of the
             input RDD per iteration (with replacement by default), matching
             the OnlineLDAOptimizer subsamplingRate convention. Must lie in
-            (0, 1]. None means "use the full RDD every iteration" (legacy
-            full-batch behavior). Without sampling, the Robbins-Monro decaying
-            step size will eventually stall full-batch updates before
-            convergence; mini-batching is what makes the schedule appropriate.
+            (0, 1]. None means "use the full RDD every iteration": batch
+            variational EM, which steps at rho = 1 and ignores tau0 / kappa
+            (a decaying step would freeze a deterministic full-batch update
+            short of its fixed point; see core/loop.py).
         sample_with_replacement: passed through to RDD.sample. Default True
             matches MLlib OnlineLDAOptimizer and the standard SVI assumption
             that each iteration draws an i.i.d. batch.
@@ -56,8 +59,8 @@ class VIConfig:
 
     Why these defaults: tau0=1.0, kappa=0.7 is Hoffman et al. 2013's common
     choice for stochastic VI on text corpora; it biases toward faster initial
-    progress at the cost of larger late-iteration updates. Models processing
-    full batches should override kappa (see RISKS_AND_MITIGATIONS.md).
+    progress at the cost of larger late-iteration updates. They apply to
+    mini-batch fits only.
     """
     max_iterations: int = 100
     learning_rate_tau0: float = 1.0
