@@ -1,35 +1,39 @@
-"""The DAG-gated LDA engine: the SVI (variational) twin of the collapsed-Gibbs placement oracle.
+"""The DAG-gated LDA engine: LDA whose topics are laid out in blocks over a label DAG.
 
-Overrides local_update, initialize_global, and update_global (the gated per-node α step);
-compute_elbo, infer_local and iteration_summary are ALSO overridden, but only branch away
-from the inherited OnlineLDA behavior in multi-domain mode — with domains=None they
-delegate to super().
-  * local_update — restrict each training doc's CAVI to DagLayout.allowed_set(frontier)
-    (the exact variational analogue of the Gibbs gate in the test-suite oracle _gibbs_oracle.fit_gated); sstats
-    for disallowed topics stay zero, welding each node's topic to its subtree's documents.
-    An empty frontier is a labeled background doc, gated to the background block only (NOT
-    full-K) — the same convention as the Gibbs oracle and the gated STM.
+THE MODEL. `DagLayout` gives every non-root DAG node a block of `tpn` topics, plus a
+shared background block. A TRAINING document may use only the background and the
+blocks of the nodes in the closure of its frontier (its most-specific labels and all
+their ancestors): its CAVI runs over that allowed set, and every other topic gets zero
+sufficient statistics from it. So no label enters the likelihood — the supervision is
+which topics a document may use, and it welds each node's block to the documents in
+its subtree. A document with an empty frontier is a labeled background document and
+may use the background block only (not all K). DEPLOYMENT is different: the MLlib
+model's transform folds a held-out document in UNGATED over all K topics (its label is
+unknown at scoring time, which is the point) -> theta.
+
+WHAT THIS CLASS CHANGES in OnlineLDA:
+  * local_update — the gated CAVI above (and the leaves-first schedule's height cap,
+    `set_gate_schedule`).
   * initialize_global — the random Gamma draw (per domain when multi-domain), plus the
-    leaves-first schedule's gate seeds when set (`set_gate_schedule`).
+    leaves-first schedule's seeds when set.
+  * update_global — optional per-node tied empirical-Bayes alpha (`set_alpha_policy`,
+    `gated_alpha_newton_step`), and the schedule's frozen / newly opened blocks.
+  * compute_elbo, infer_local, iteration_summary — differ only in multi-domain mode.
 
 Multi-domain (MixEHR-style; Li, Nair, Lu et al. 2020, Nat. Commun.), keyed on the `domains`
 constructor arg (a sequence of per-domain vocab sizes summing to vocab_size): global_params
-["lambda"] becomes a literal per-domain dict {m: (K, V_m)} instead of one (K, V) array, each
-block independently row-normalized (`_assemble_expElogbeta`/`_split_to_domains`) under the
-one scalar eta prior. The gated CAVI never changes — it only ever sees a concatenated
-(K, V) expElogbeta and per-doc concatenated indices — so each override branches on
-`self.domains is None` and the sufficient statistics stay one concatenated array
-(combine_stats and VIRunner integration are untouched).
+["lambda"] becomes a per-domain dict {m: (K, V_m)} instead of one (K, V) array, each block
+row-normalized on its own under the one scalar eta prior. The gated CAVI never changes —
+it sees one concatenated (K, V) expElogbeta and per-doc concatenated indices — so the
+sufficient statistics stay one concatenated array (combine_stats and the runners are
+untouched).
 
-TRAINING is gated (above); DEPLOYMENT is different — the MLlib model's transform folds held-out
-docs in UNGATED full-K CAVI (the label is unknown at scoring time, which is the whole point)
--> theta.
-
-Validated against the collapsed-Gibbs oracle (the test-suite oracle _gibbs_oracle.fit_gated): placement (node-AUC by
-depth, MRR, top2) matches at every depth; the DAG gate supplies the identifiability a
-spectral init provides in ungated LDA, so lambda starts from the random draw (plus the
-data-driven gate seeds). References: Hoffman, Blei, Bach (2010) Online LDA; Griffiths &
-Steyvers (2004) the oracle; docs/superpowers/specs/2026-07-15-gated-svi-placement-engine-design.md.
+VALIDATED against a collapsed-Gibbs sampler of the same gated model (the test-suite
+oracle `_gibbs_oracle.fit_gated`): placement (node AUC by depth, MRR, top-2) matches at
+every depth. The gate supplies the identifiability a spectral init provides in ungated
+LDA, so lambda starts from the random draw (plus the optional gate seeds). References:
+Hoffman, Blei, Bach (2010) Online LDA; Griffiths & Steyvers (2004);
+docs/superpowers/specs/2026-07-15-gated-svi-placement-engine-design.md.
 """
 from __future__ import annotations
 
