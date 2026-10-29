@@ -488,6 +488,9 @@ def test_workup_eig_ranks_the_separating_test_and_is_calibrated():
     assert r["R2"]["oracle"] >= r["R2"]["top1"]
     assert 0.7 < r["R3"]["slope"] < 1.3                      # calibrated EIG
     assert r["R1_spearman_quartiles"][1] > 0
+    assert r["facts"]["n_facts"] == 3
+    assert r["facts"]["spearman_mean_eig_vs_mean_gain"] > 0.9   # the test ranks first
+    assert r["facts"]["top5_mean_gain"] >= r["facts"]["all_mean_gain"] - 1e-12
     cov = df.workup_coverage([10, 20, None, 40], A[:4])
     assert cov["window_days_quartiles"][1] == 20.0
 
@@ -597,3 +600,32 @@ def test_workup_diagnostics_find_the_activity_confound():
     terc = {b["tercile"]: b for b in d["by_activity"]}
     assert terc["low"]["R1_median"] < terc["high"]["R1_median"]
     assert d["default_pairs"]["n"] + d["nondefault_pairs"]["n"] == len(te) * len(cands)
+
+
+def test_fact_level_ranking_survives_the_per_patient_sign_artifact():
+    """The activity-correlated toy: per-patient R1 is near zero, but pooled over
+    patients each fact's mean realized gain ranks with its mean EIG."""
+    rng = np.random.default_rng(0)
+
+    def draw(n):
+        ans, ys = [], []
+        for _ in range(n):
+            m = int(rng.random() < 0.5)
+            lvl = rng.choice([0.2, 1.0, 1.8])
+            base = (0.45 if m == 0 else 0.25) * lvl
+            ans.append({("c", 0, v): 1 for v in range(20)
+                        if rng.random() < min(base * (1 + v / 20), 0.95)})
+            ys.append(m)
+        return ans, np.array(ys)
+    tr, ytr = draw(3000)
+    cands = df.workup_candidates(tr)
+    L = df.answer_likelihoods(tr, np.eye(2)[ytr], cands)
+    te, yte = draw(2000)
+    A = [df.answer_vector(a, cands) for a in te]
+    r = df.evaluate_workup([np.array([0.5, 0.5])] * len(te), yte, A, L,
+                           np.array([0.5, 0.5]), 1.0)
+    assert abs(r["R1_spearman_quartiles"][1]) < 0.15
+    # pooled per fact the gains are EIG in level (calibrated); the 20 facts' EIGs
+    # are close together, so their order is only moderately recovered at n = 2000
+    assert 0.85 < r["facts"]["slope"] < 1.15
+    assert r["facts"]["spearman_mean_eig_vs_mean_gain"] > 0.2

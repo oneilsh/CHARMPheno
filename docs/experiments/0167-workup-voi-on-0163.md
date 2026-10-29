@@ -169,3 +169,37 @@ surveys about 9 min. 9 groups, 59-259 scored patients each; pooled figures only.
   high-activity tercile). Run 3 adds the diagnostic (likelihood transfer train vs
   test, gain by answer type, R1 by window-activity tercile).
 
+**2026-10-29 — run 3 (the diagnostic).** One new-facts survey with the diagnostic; the
+survey phase took 60 min against 9 before (the added computation is small; likely the
+cluster).
+- **No shift, no bug.** In the powered groups the test log P(true answer | true member)
+  equals the training value within 0.01-0.03 (aortic −0.170 vs −0.181, GI −0.220 vs
+  −0.230, hepatitis −0.219 vs −0.229, exocrine −0.191 vs −0.225); predicted vs observed
+  non-default rate within about a point (e.g. 0.064 vs 0.056). The two smallest groups
+  drift (neuropathy, phobic: 2-7 facts).
+- **Activity hypothesis rejected.** R1 is negative in every activity tercile where it
+  is negative at all (septal defect −0.88 / −0.71 / −0.55, phobic −0.90 / −0.82 / −0.43,
+  aortic −0.38 / −0.41 / −0.01); high activity helps somewhat, and the top fact's
+  realized gain grows with activity.
+- **Where the gain is.** 94-96% of (patient, fact) pairs have the default answer; their
+  realized gain is about zero while EIG credits them about as much as recorded answers.
+  Recorded answers carry the gain (aortic +0.028 nats per pair, exocrine +0.035, eating
+  +0.051). Per patient the realized total is 30-70% of the predicted (aortic 0.10 of
+  0.17, exocrine 0.13 of 0.19, GI 0.05 of 0.16, hepatitis 0.02 of 0.07): somewhat
+  overconfident, pointed the right way.
+- **Why R1 is negative.** It is a property of the metric, not of the ranking. With
+  sparse windows a patient's realized answers are mostly the default; for a fact the
+  patient's own member records more often, that default is correctly evidence against
+  the truth, and EIG is larger the more discriminating the fact is in either direction.
+  Where the high-EIG facts are care markers of the likely member (septal defect:
+  hypertension, IV potassium / sodium chloride, aspirin), the per-patient correlation
+  goes strongly negative while the model is right on average. Per-patient R1 is
+  therefore demoted; ranking accuracy is measured per FACT, pooled over patients (run 4).
+- **Substantive read so far.** Top fact by EIG vs random (R2): aortic +0.020 vs +0.001,
+  hepatitis +0.016 vs 0.000, eating +0.036 vs +0.005; vs the population ranking only
+  hepatitis and eating gain. The information new workup facts add to E6's belief is
+  small: 0.02-0.13 nats per patient over all of them, about 0.02 for the best single one.
+- **Next (run 4, maintainer 2026-10-29):** the fact-level ranking accuracy (Spearman of
+  each fact's mean EIG with its mean realized gain over the patients it is new for,
+  facts new to >= 20 patients; the top-5 facts' realized gain vs all; the pooled slope).
+

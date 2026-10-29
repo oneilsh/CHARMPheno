@@ -753,7 +753,7 @@ def _format_workup(w, window):
            f"{100 * c['share_with_any']:.0f}% with any non-default answer (median "
            f"{c['median_non_default']:.0f}; {c.get('eligible_median', float('nan')):.0f} "
            f"candidates new to the median patient)", "",
-           "| q0 | n | tau | R1 Spearman (q1/med/q3) | gain top-1 | top-3 | random | "
+           "| q0 | n | tau | per-patient R1 Spearman (q1/med/q3) | gain top-1 | top-3 | random | "
            "population | oracle | R3 slope | top-1 changes call | toward truth |",
            "|---|--:|---|---|--:|--:|--:|--:|--:|--:|--:|--:|"]
     for e in ("E6", "E3"):
@@ -767,6 +767,14 @@ def _format_workup(w, window):
                   f"{g['population_top1']:+.4f} | {g['oracle']:+.4f} | "
                   f"{r['R3']['slope']:.2f} | {r['R4']['top1_changes_call']:.2f} | "
                   f"{r['R4']['top1_moves_toward_truth']:.2f} |")
+    for e in ("E6", "E3"):
+        f = (w.get(e) or {}).get("facts") or {}
+        if "spearman_mean_eig_vs_mean_gain" in f:
+            L_.append(f"fact-level ranking ({e}, {f['n_facts']} facts new to >= 20 "
+                      f"patients): Spearman mean EIG vs mean realized gain "
+                      f"{f['spearman_mean_eig_vs_mean_gain']:+.2f} · top-5 facts' mean "
+                      f"gain {f['top5_mean_gain']:+.4f} vs all {f['all_mean_gain']:+.4f}"
+                      f" · slope {f['slope']:.2f}")
     if w.get("top_facts"):
         L_ += ["", "most informative facts (mean EIG, E6): " + " · ".join(w["top_facts"])]
     d = w.get("diagnostics")

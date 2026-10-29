@@ -1090,6 +1090,7 @@ def evaluate_workup(q0s, truths, answers, L, pri, tau, *, ks=(1, 3), eligible=No
     r1, top, rnd, popg, orc = [], {k: [] for k in ks}, [], [], []
     chg, toward, right, n_el = [], [], [], []
     bins = np.zeros((len(WK_EIG_BINS) - 1, 3))           # n, sum eig, sum g
+    f_n, f_e, f_g = np.zeros(n_c), np.zeros(n_c), np.zeros(n_c)   # per fact
     sxx = sxy = 0.0
     for q0, t, a, Li, el, tau_i in zip(q0s, truths, answers, Ls, els, taus):
         el = np.ones(n_c, bool) if el is None else np.asarray(el, bool)
@@ -1101,6 +1102,9 @@ def evaluate_workup(q0s, truths, answers, L, pri, tau, *, ks=(1, 3), eligible=No
         g = np.log(np.clip(q_after[:, t], 1e-300, None)) - np.log(max(q0[t], 1e-300))
         ix = np.flatnonzero(el)
         e_, g_ = eig[ix], g[ix]
+        f_n[ix] += 1.0
+        f_e[ix] += e_
+        f_g[ix] += g_
         n_el.append(ix.size)
         r1.append(_spearman(e_, g_))
         order = ix[np.argsort(-e_, kind="stable")]
@@ -1124,8 +1128,27 @@ def evaluate_workup(q0s, truths, answers, L, pri, tau, *, ks=(1, 3), eligible=No
     mean = lambda x: float(np.nanmean(x)) if len(x) else float("nan")
     q = lambda x: [float(v) for v in np.nanpercentile(x, [25, 50, 75])] if len(x) else []
     chg = np.asarray(chg, bool)
+    # Fact-level ranking accuracy (run 3): does a fact's mean EIG over the patients
+    # it is new for rank with its mean REALIZED gain over the same patients? Pooling
+    # over patients is what a proper score licenses (E[g] = EIG per fact under a
+    # calibrated model); the per-patient R1 is not, because with sparse windows most
+    # realized answers are the default, and a default that is correctly evidence
+    # AGAINST the truth is commonest on the most discriminating facts.
+    ok = f_n >= EGRESS_FLOOR
+    fe = np.divide(f_e, f_n, out=np.zeros(n_c), where=f_n > 0)
+    fg = np.divide(f_g, f_n, out=np.zeros(n_c), where=f_n > 0)
+    facts = {"n_facts": int(ok.sum())}
+    if ok.sum() >= 3:
+        oi = np.flatnonzero(ok)
+        top5 = oi[np.argsort(-fe[oi], kind="stable")[:5]]
+        facts.update({
+            "spearman_mean_eig_vs_mean_gain": _spearman(fe[oi], fg[oi]),
+            "top5_mean_gain": float(fg[top5].mean()),
+            "all_mean_gain": float(fg[oi].mean()),
+            "slope": (float(fe[oi] @ fg[oi] / (fe[oi] @ fe[oi]))
+                      if fe[oi] @ fe[oi] > 0 else float("nan"))})
     return {
-        "n": len(r1), "n_candidates": int(n_c),
+        "n": len(r1), "n_candidates": int(n_c), "facts": facts,
         "eligible_per_patient_median": float(np.median(n_el)) if n_el else 0.0,
         "tau": sorted({round(float(x), 4) for x in taus}),
         "R1_spearman_quartiles": q(r1),
