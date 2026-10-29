@@ -439,7 +439,12 @@ class DagGatedOnlineLDA(OnlineLDA):
             }
         new_alpha = alpha
         if self.optimize_alpha:
-            new_alpha = self._gated_alpha_update(alpha, target_stats, learning_rate)
+            # The round local_update gated this iteration's documents with, so the
+            # Newton step's sub-simplices are the ones the E[log theta] came from.
+            gate_level = (self._gate_level(int(global_params["gate_iter"]))
+                          if "gate_iter" in global_params else None)
+            new_alpha = self._gated_alpha_update(alpha, target_stats, learning_rate,
+                                                 max_height=gate_level)
         out = {"lambda": new_lam, "alpha": new_alpha, "eta": eta}
         if "gate_iter" in global_params:
             out.update(self._gate_step(global_params, new_lam))
@@ -484,11 +489,18 @@ class DagGatedOnlineLDA(OnlineLDA):
         self.optimize_alpha = bool(optimize)
         return self
 
-    def _gated_alpha_update(self, alpha_full, target_stats, learning_rate):
+    def _gated_alpha_update(self, alpha_full, target_stats, learning_rate, *,
+                            max_height=None):
         """Contract α to tied space, take one damped gated Newton step, expand back.
 
         Blei-Ng-Jordan 2003 A.4.2 generalized to per-node tying + gated
         sub-simplices; see gated_alpha_newton_step. Floors α at 1e-3.
+
+        `max_height` is the leaves-first round (None = the full gate). Each group's
+        sub-simplex must be the allowed set its documents were actually fit on: in
+        a warm round a closed block got no E[log theta] from any document, and
+        counting it in a group would push its alpha on the prior term alone. Under
+        the cap a closed block is in no group, so its alpha stays put (Δ = 0).
         """
         nodes = self.lay.nodes
         B = self._block_sizes.shape[0]
@@ -502,7 +514,7 @@ class DagGatedOnlineLDA(OnlineLDA):
         group_counts = np.array([c for _, c in groups], dtype=np.float64)
         memb = np.zeros((len(groups), B), dtype=bool)
         for g, (frontier, _) in enumerate(groups):
-            for k in self.lay.allowed_set(frontier):
+            for k in self.lay.allowed_set(frontier, max_height=max_height):
                 memb[g, self._topic_to_tied[k]] = True
         delta = gated_alpha_newton_step(
             a_tied, self._block_sizes,

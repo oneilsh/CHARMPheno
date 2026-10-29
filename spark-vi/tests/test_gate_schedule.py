@@ -173,3 +173,22 @@ def test_leaf_rows_seeded_from_their_own_documents(spark):
         assert on[k2].tolist() == [1, 0, 0, 0, 0, 1, 0, 0]       # own code kept for a leaf
         assert on[k4].tolist() == [0, 0, 0, 0, 0, 0, 1, 0]       # top-level leaf too
         assert np.allclose(on[k1], off[k1])                      # parents unchanged
+
+
+def test_optimized_alpha_leaves_closed_blocks_alone_during_warm_rounds():
+    """The gated alpha step must use the sub-simplices the documents were fit on: in
+    a warm round a closed block received no E[log theta], so its alpha stays at its
+    start; once the gate is full every covered block moves."""
+    from collections import Counter
+    lay = DagLayout(PARENT, n_bg=1, tpn=1)
+    docs = _docs()
+    m = DagGatedOnlineLDA(lay, vocab_size=12, alpha=0.5, random_seed=0)
+    m.set_alpha_policy(Counter(d.frontier for d in docs), optimize=True)
+    m.set_gate_schedule(warm=2)
+    hist = _fit(m, docs, iters=6)
+    inner = [k for u in lay.nodes if lay.height(u) > 0 for k in lay.block[u]]
+    leaf = [k for u in lay.nodes if lay.height(u) == 0 for k in lay.block[u]]
+    for gp in hist[:3]:                        # iterations 0..1: leaves only
+        np.testing.assert_allclose(gp["alpha"][inner], 0.5)
+    assert not np.allclose(hist[2]["alpha"][leaf], 0.5)
+    assert not np.allclose(hist[-1]["alpha"][inner], 0.5)
