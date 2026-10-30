@@ -152,8 +152,8 @@ class DagGatedOnlineLDA(OnlineLDA):
         already explain, leaving the parent its shared stratum.
 
         `init_seed` (K, V), optional: rows applied at iteration 0 to the blocks that
-        are open from the start (the leaves), e.g. an external phenotype profile
-        (HPO) where one exists. In either seed a row with no mass in a domain leaves
+        are open from the start (the leaves), e.g. an external per-node profile
+        where one exists. In either seed a row with no mass in a domain leaves
         that domain's lambda as it was, so a profile that covers only the primary
         domain replaces only that domain's start.
 
@@ -476,7 +476,7 @@ class DagGatedOnlineLDA(OnlineLDA):
 
     def set_alpha_policy(self, frontier_histogram, *, optimize):
         """Attach the static frontier histogram and turn the per-node tied
-        empirical-Bayes alpha (the gated Newton step, insight 0059) on or off after
+        empirical-Bayes alpha (the gated Newton step) on or off after
         construction — the seam the MLlib estimator uses, because the histogram
         comes from the persisted document RDD, which exists only after the engine
         has been built. Call before the fit starts. Idempotent."""

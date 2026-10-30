@@ -273,7 +273,8 @@ def readout_metrics(blocks, C, *, recall_targets, fdr_targets, min_count=0,
 
 def calibration_by_group(blocks, groups, *, scores=("proba",), n_bins=10):
     """`{(score, group): ECE}` pooled over every row and every column of each group
-    (`groups` = `{name: [columns]}`): the marginal calibration, not a subgroup's."""
+    (`groups` = `{name: [columns]}`): the marginal calibration, pooled over every
+    row rather than over each node's observed rows."""
     g = {k: np.asarray(v, dtype=np.int64) for k, v in groups.items()}
     bg = blocks.broadcast(g)
 

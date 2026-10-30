@@ -55,7 +55,7 @@ class TopicBlockPartition:
 
     def allowed_indices(self, groups: frozenset[str]) -> np.ndarray:
         # A group with no foreground block contributes nothing (background-only).
-        # This is what lets a large "common" cohort inform the background while
+        # This is what lets a large "common" group inform the background while
         # only rare groups carry foreground topics.
         known = set(self.groups)
         parts = [self.background_indices()]

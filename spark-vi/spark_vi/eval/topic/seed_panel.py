@@ -58,7 +58,7 @@ def signature_seeds(
     it has no "own" concentration to recover and seeding it is degenerate.
 
     ``exclude_background=True`` (the default) restricts seeding to the
-    group's foreground topics -- the rare, clinically interesting topics the
+    group's foreground topics -- the rare, substantively interesting topics the
     tool exists to surface, and the ones a reviewer would worry about
     over-committing on. ``exclude_background=False`` widens the panel to the
     shared background topics too.

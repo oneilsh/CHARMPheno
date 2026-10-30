@@ -1,6 +1,5 @@
 """Gated NPMI: topic coherence with each node block of a DAG-gated fit scored on the
-documents its gate admits (exp 0159; moved here from `analysis/cloud/topic_npmi.py`,
-which keeps the run-dir I/O and the CLI).
+documents its gate admits.
 
 Why a per-block reference. A gated fit trains node u's block only on documents whose
 gate admits it: u in closure(frontier), i.e. a document coded somewhere in u's

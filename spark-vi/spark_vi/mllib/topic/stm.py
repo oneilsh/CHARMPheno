@@ -55,7 +55,7 @@ def resolve_spectral_method(
 
 def _formula_mentions(group_var: str, covariate_names: list[str]) -> bool:
     """True if group_var appears as a factor in any design-column name,
-    e.g. group_var='source_cohort' matches 'C(source_cohort)[T.dementia]'."""
+    e.g. group_var='group' matches 'C(group)[T.b]'."""
     needle = f"({group_var})"
     return any(needle in name or name == group_var for name in covariate_names)
 
@@ -64,7 +64,7 @@ def corpus_mean_topic_proportions_rdd(cov_rdd, Gamma: np.ndarray, depth: int = 2
     """Distributed α-equivalent: (1/D) Σ_d softmax(Γᵀ x_d) over an RDD.
 
     ``cov_rdd`` is an RDD of length-P covariate vectors (bare numpy arrays —
-    no person_id, honoring the spark-vi layering rule). Mirrors the engine's
+    no row ids, honoring the spark-vi layering rule). Mirrors the engine's
     mapPartitions+treeReduce idiom (see ``core/runner.py``): each partition
     accumulates a (K-vector sum, count) locally and the tree-reduce combines
     them, so only a K-vector and a scalar ever reach the driver. Scales to any
@@ -96,7 +96,7 @@ def corpus_mean_topic_proportions_rdd(cov_rdd, Gamma: np.ndarray, depth: int = 2
     finally:
         # The treeReduce has returned, so nothing references the broadcast any
         # more: destroy (not unpersist) to also free the driver-side pickle —
-        # the exp 0104 ENOSPC leak class.
+        # the broadcast temp-file (ENOSPC) leak class.
         _destroy_broadcast(bcast)
 
 
@@ -116,7 +116,7 @@ def corpus_mean_topic_proportions_gated_rdd(
     collected) does not. Output is identical to that pure-numpy version.
 
     ``cov_group_rdd`` is an RDD of ``(x, groups)`` pairs: ``x`` a length-P
-    covariate vector (bare array — no person_id, honoring the spark-vi layering
+    covariate vector (bare array — no row ids, honoring the spark-vi layering
     rule) and ``groups`` a frozenset[str] of the doc's gating-group labels. Γ and
     the (small, frozen) partition are broadcast. Returns a length-K probability
     vector.
@@ -152,7 +152,7 @@ def corpus_mean_topic_proportions_gated_rdd(
         return sum_vec / count
     finally:
         # Destroy (not unpersist) once the treeReduce has returned — unpersist
-        # would leave the driver-side pickle behind (exp 0104 ENOSPC leak class).
+        # would leave the driver-side pickle behind (the broadcast temp-file ENOSPC leak class).
         _destroy_broadcast(g_bcast)
         _destroy_broadcast(p_bcast)
 
@@ -375,7 +375,7 @@ def corpus_eta_variance_gated_rdd(
         return _welford_variance(n, M2, reference=reference)
     finally:
         # Destroy (not unpersist) once the treeReduce has returned — unpersist
-        # would leave the driver-side pickle behind (exp 0104 ENOSPC leak class).
+        # would leave the driver-side pickle behind (the broadcast temp-file ENOSPC leak class).
         _destroy_broadcast(gp_bcast)
         _destroy_broadcast(p_bcast)
 
@@ -517,7 +517,7 @@ def corpus_concentration_stm_rdd(
         return acc.summary()
     finally:
         # Destroy (not unpersist) once the treeReduce has returned — unpersist
-        # would leave the driver-side pickle behind (exp 0104 ENOSPC leak class).
+        # would leave the driver-side pickle behind (the broadcast temp-file ENOSPC leak class).
         _destroy_broadcast(gp_bcast)
         _destroy_broadcast(p_bcast)
 
@@ -547,8 +547,7 @@ def corpus_theta_gated_rdd(
     behavior. At the calibrated held-out ``eta_scale`` (c ~ 4.6) the prior
     penalty is 1/scale, so eta_hat is more data-driven and theta_hat is PEAKIER,
     giving the honest per-doc concentration instead of the over-diffuse
-    unit-scale fit (the project's "unit-prior per-doc outputs are not
-    measurements" result). ``scale`` is a passed-in calibrated value, not a
+    unit-scale fit (unit-prior per-doc outputs are not measurements). ``scale`` is a passed-in calibrated value, not a
     heuristic constant. Inference is on the FULL document -- NOT the held-out
     split the generative-scale sweep (``corpus_heldout_scale_sweep_gated_rdd``)
     uses. A foreground topic outside a doc's allowed set is structurally EXACTLY
@@ -631,7 +630,7 @@ def corpus_theta_gated_rdd(
         return np.asarray(theta_rows, dtype=np.float64)
     finally:
         # Destroy (not unpersist) once the collect(s) have returned — unpersist
-        # would leave the driver-side pickle behind (exp 0104 ENOSPC leak class).
+        # would leave the driver-side pickle behind (the broadcast temp-file ENOSPC leak class).
         _destroy_broadcast(gp_bcast)
         _destroy_broadcast(p_bcast)
 
@@ -707,7 +706,7 @@ def corpus_eta_scale_gated(
     in ~5-10 rounds and stays bounded because beta is frozen and c is a single
     pooled number -- a low-ess topic's noise is averaged against every other
     topic's, so it cannot self-amplify the way a per-topic free diagonal did
-    (insight 0033 variance runaway). It under-corrects modestly (Laplace
+    (the variance runaway). It under-corrects modestly (Laplace
     posterior-variance bias); that is expected and acceptable.
 
     ``docs`` is an in-memory list of STMDocument; ``global_params`` is the dict with
@@ -898,7 +897,7 @@ def corpus_eta_scale_gated_rdd(
     finally:
         work_rdd.unpersist(blocking=False)
         # The round loop is done, so nothing references these any more: destroy
-        # (not unpersist) also frees the driver-side pickle of each — the exp 0104
+        # (not unpersist) also frees the driver-side pickle of each — the
         # ENOSPC leak class, and gp_bcast carries a full lambda.
         _destroy_broadcast(gp_bcast)
         _destroy_broadcast(p_bcast)
@@ -913,7 +912,7 @@ def corpus_heldout_scale_sweep_gated(
     generative covariance scale c, for a GATED fit.
 
     This is the gated, distributed-ready counterpart of the LOCAL, non-gated
-    diagnostic validated by insight 0038
+    diagnostic validated in simulation
     (``spark_vi.eval.topic.concentration_recovery``): held-out within-document
     token prediction, swept over a concentration knob, recovers the true
     generative concentration. Here the knob is the scalar scale c in
@@ -1128,7 +1127,7 @@ def corpus_heldout_scale_sweep_gated_rdd(
         return {"lls": lls, "argmax_c": argmax_c, "n_docs": n_docs}
     finally:
         # Destroy (not unpersist) once the treeReduce has returned — unpersist
-        # would leave the driver-side pickle behind (exp 0104 ENOSPC leak class).
+        # would leave the driver-side pickle behind (the broadcast temp-file ENOSPC leak class).
         _destroy_broadcast(gp_bcast)
         _destroy_broadcast(p_bcast)
         _destroy_broadcast(c_bcast)
@@ -1542,7 +1541,7 @@ class StreamingSTM:
         rdd = rdd.persist(StorageLevel.MEMORY_AND_DISK)
         rdd.count()
 
-        # Optional spectral (anchor-word) β seed (insight 0029, ADR 0031/0032).
+        # Optional spectral (anchor-word) β seed.
         # spectral_method selects dense (exact V×V on the driver, the validated
         # default) vs scalable (random-projection sketch for large vocabularies).
         # Dense path: collect the (already-materialized) docs to the driver and
@@ -1551,7 +1550,7 @@ class StreamingSTM:
         # seeds λ = β·gamma_shape from it instead of random gamma, curing the
         # sigma_init-dependent collapse/blow-up. Skipped when resuming, where the
         # runner restores λ from the checkpoint and never calls initialize_global.
-        # Fine at the cancer scale (V≈3691, ~11k docs → ~18s/109MB); the large-V
+        # Fine at V≈3,700 over ~11k docs (~18s/109MB); the large-V
         # scalable rewrite (distributed co-occurrence + random projection) is a
         # separate arc (ADR 0032).
         # Resolve spectral_method="auto" to dense/scalable by vocab size (ADR 0037);
