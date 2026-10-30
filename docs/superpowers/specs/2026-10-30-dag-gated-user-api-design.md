@@ -74,6 +74,12 @@ per-node label / mask vectors itself (closure labels, `label_mask_mode` as a Par
 outputs are keyed by user node id too. The dense `label` / `labelMask` columns stop being
 an input contract.
 
+Nodes the heads cannot fit are REPORTED, not silent: a node whose observed training
+rows are empty, all-negative or all-positive has no finite optimum, so the readout
+predicts its lone class as a constant (`readout.heads.fit_heads`, the sklearn oracle's
+fallback). The fitted model exposes `degenerateNodes()` -> `{node: constant}` beside
+`prunedNodes()` (R5), and `fit` logs the count.
+
 **R7. Seed extras in user ids.** The node -> attesting-terms relation (`nodeTerms`
 `{node: [term]}`, today `gateSeedOwnCodes`) and the external profile (`gateSeedProfile`
 `{node: {term: weight}}`) are keyed by user node ids and TERM ids: the identifiers of the
@@ -124,6 +130,20 @@ Users with vector columns already skip it and pass `featuresCols` + `vocabularie
 Multi-domain is the DAG-gated engine's alone today (`OnlineLDA`, `OnlineHDP` and STM take
 one `featuresCol`); the prep stage is written so another engine could take the same
 multi-domain input later.
+
+**R13. Persistence follows one convention, on any Hadoop filesystem.** Today every
+file spark-vi writes is opt-in (nothing is written unless a path Param or argument is
+set): the topic shims' `saveDir` / `saveInterval` / `resumeFrom`, `DagHeadsModel.save`,
+and `fit_heads(checkpoint_path=)` (set only by the readout driver). But the paths are
+LOCAL (`pathlib` + `open` on the driver), and the readout checkpoint has its own format
+and no shim Params. The redesign:
+- `DagHeadsEstimator` gains the same `saveDir` / `saveInterval` / `resumeFrom` Params
+  as the topic shims, mapped onto `fit_heads`' checkpoint;
+- model `save` / `load` (and the checkpoints) accept any Hadoop-filesystem URI
+  (`hdfs://`, `gs://`, `file://`), as MLlib's own `MLWriter` does: a driver-local path
+  is wrong under cluster deploy mode, where the driver runs on an arbitrary worker;
+- every write stays atomic (stage, then rename / commit), as `save_result` and the
+  heads file already are locally.
 
 ## What changes outside spark-vi
 
