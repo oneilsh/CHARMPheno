@@ -156,11 +156,11 @@ def ranking_and_pr(per_col, C, *, recall_targets, fdr_targets, min_count=0,
              "macro": report.pr_macro(per_pr, recall_targets, fdr_targets)})
 
 
-def detection(blocks, recall_targets, *, score="proba", columns="disease",
+def detection(blocks, recall_targets, *, score="proba", columns="nonroot",
               unit_divisor=None):
     """Case vs background on one pooled column: per row the max over the
-    INFORMATIVE disease columns (node 0 is the root; `columns="root"` uses the root
-    column alone), the foreground indicator the root's label. Constant columns are
+    INFORMATIVE non-root node columns (node 0 is the root; `columns="root"` uses the
+    root column alone), the foreground indicator the root's label. Constant columns are
     excluded (a constant column in the max can pin it, and the AUC at 0.5). With
     `unit_divisor`, rows pool onto units `ids // unit_divisor` by max (documents onto
     persons), so a person with several documents is one case."""
@@ -189,7 +189,7 @@ def detection(blocks, recall_targets, *, score="proba", columns="disease",
         n_const = int(np.sum(hi[1:] == lo[1:]))
     info = sel[hi[sel] > lo[sel]]
     if info.size == 0:
-        return {"skipped": "all disease-node scores are constant",
+        return {"skipped": "all non-root node scores are constant",
                 "n_constant_nodes": n_const}
     binfo = blocks.broadcast(info)
 
