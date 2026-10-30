@@ -1,7 +1,7 @@
 # The DAG-gated estimators take a DAG and labelled documents; the rest is internal
 
 **Date:** 2026-10-30
-**Status:** draft for maintainer review (from the 2026-10-29/30 walkthrough of `spark_vi`)
+**Status:** draft; maintainer decisions of 2026-10-30 recorded below (open: Mondo pruning)
 **Touches:** `spark_vi.mllib.topic.dag_gated_lda`, `spark_vi.mllib.readout` (DagHeads),
 `charmpheno.omop` assembler (bundle columns), `charmpheno.mondo.native_dag` (pruning),
 the fit and readout drivers.
@@ -43,8 +43,9 @@ Nodes with no parent hang from a synthetic root the estimator adds. The estimato
 validates the DAG (acyclic; every label in the data is a DAG node, or is refused by
 name) before any Spark work.
 
-**R2. The labels** are one column, `labelsCol`: an array of the node ids each document
-attests. Any nodes: not reduced to the most specific, ancestors allowed, duplicates
+**R2. The labels** are one column, `labelsCol`: an ARRAY column (`array<string>` or
+`array<int>`, as `CountVectorizer` takes) of the node ids each document attests; the
+prep stage (R12) builds it from a long table for users who have one. Any nodes: not reduced to the most specific, ancestors allowed, duplicates
 allowed. Empty or null = a background document. The estimator computes the gate from
 it (the frontier reduction is internal; `allowed_set(frontier)` equals
 `allowed_set(labels)` because an ancestor's closure is inside its descendant's).
@@ -73,12 +74,23 @@ per-node label / mask vectors itself (closure labels, `label_mask_mode` as a Par
 outputs are keyed by user node id too. The dense `label` / `labelMask` columns stop being
 an input contract.
 
-**R7. Seed extras in user ids.** `gateSeedOwnCodes` `{node: [term]}` and
-`gateSeedProfile` `{node: {term: weight}}` are keyed by user node ids and TERM ids: the
-identifiers of the feature vocabulary. The estimator takes the vocabulary per feature
-column (`vocabularies`, e.g. `CountVectorizerModel.vocabulary`) and translates; the
-domain is implied by which vocabulary the term is in, so `gateSeedDomain` goes. Both stay
-optional: a generic user has neither.
+**R7. Seed extras in user ids.** The node -> attesting-terms relation (`nodeTerms`
+`{node: [term]}`, today `gateSeedOwnCodes`) and the external profile (`gateSeedProfile`
+`{node: {term: weight}}`) are keyed by user node ids and TERM ids: the identifiers of the
+feature vocabulary. The estimator gets the vocabulary of each feature column from the
+prep stage (R12) and translates; the domain is implied by which vocabulary a term is
+in, so `gateSeedDomain` goes. Both stay optional: a generic user has neither.
+
+Labels and terms may be one vocabulary or two. When the labels ARE terms (e.g. the
+DAG is the ICD hierarchy and a document's labels are its own diagnosis codes),
+`nodeTerms` is the identity on the shared ids. When they are a separate vocabulary
+linked by a domain mapping (Mondo nodes attested by OMOP condition concepts through
+charmpheno's code ladder), the consuming package supplies `nodeTerms`. spark-vi only
+reads the relation, for the balanced seed; it never decides it.
+
+**Stripping a label's attesting terms from TEST features stays out of spark-vi.** It is
+an evaluation-protocol rule (leakage), stated in `docs/architecture/LABEL_RULES.md` and
+applied by the consuming package's data prep.
 
 **R8. Separate gate labels and readout labels stay possible.** The gate may be fit on
 one attestation (e.g. all-ever, exp 0146) and the heads on another (the label year):
@@ -95,6 +107,24 @@ MLlib-like with a documented "recommended" preset.
 **R11. Help text is domain-neutral** (no Mondo / HPO / experiment numbers in spark-vi;
 those references move to the charmpheno driver that sets the Params).
 
+**R12. A prep stage** (`DagGatedFeaturizer`, an Estimator -> Model, the role
+`Tokenizer` + `CountVectorizer` play before MLlib's `LDA`) builds the estimator's inputs
+from tables a non-specialist has:
+- per domain, either an `array<string>` column of terms per document or a long table
+  `(doc_id, term[, count])`; it learns each domain's vocabulary (min document frequency,
+  max size: `CountVectorizer`'s Params) and emits one sparse vector column per domain;
+- labels from an `array` column or a long table `(doc_id, node)`, collected to the R2
+  array column;
+- the fitted prep model carries the vocabularies (R7) and the domain names, and the
+  domain widths are the vectors' own sizes, so `domainBounds` goes (a Spark vector's
+  `size` is fixed per column; the "unrepresentative first row" it guarded cannot occur
+  for vectorizer output).
+Users with vector columns already skip it and pass `featuresCols` + `vocabularies`.
+
+Multi-domain is the DAG-gated engine's alone today (`OnlineLDA`, `OnlineHDP` and STM take
+one `featuresCol`); the prep stage is written so another engine could take the same
+multi-domain input later.
+
 ## What changes outside spark-vi
 
 - **The bundle** stores the attested node ids per document (two columns when R8 is
@@ -107,21 +137,27 @@ those references move to the charmpheno driver that sets the Params).
 - **The drivers** set `labelsCol` / the DAG instead of `frontierCol` / `gateParent`, and
   read node topics from the model (R5) instead of rebuilding a `DagLayout`.
 
-## Open questions
+## Decisions (maintainer, 2026-10-30)
 
-1. **Defaults (R10):** working configuration as defaults, or MLlib-like defaults plus a
-   documented preset?
-2. **Node id type:** accept mixed `str`/`int` and normalize to `str` internally, or require
-   one type per DAG?
-3. **Where Mondo pruning lives:** does the Mondo build need pruning before the estimator
-   (e.g. the conversion sidecar's code map is built on the pruned node set), or can the
-   sidecars follow the model's kept DAG?
-4. **Back-compat:** none is required (pre-release). The old Params (`gateParent` JSON of
-   engine ids, `frontierCol`) are removed, not aliased; existing run dirs stay readable
-   through the readout's own reconstruction (it reads the saved npz + bundle meta).
-5. **`frontier_from_coded` and `DagLayout` in the public `spark_vi.dag` API:** keep them
-   public for power users, or make the layout an internal of the model with only the
-   R5 accessors public?
+1. **Defaults (R10):** MLlib-like defaults, plus a documented preset for the working
+   configuration (`gateNBg` 200, `learningOffset` 64, `gateWarm` 2, balanced + leaf seeds).
+2. **Node ids:** mixed `str` and `int` accepted, kept as given (no normalization: `1`
+   and `"1"` are different nodes); outputs use the same values.
+3. **Where Mondo pruning lives:** open; it depends on the vocabulary question (R7) and
+   the sidecars. The conversion sidecar already records first attestations at the code
+   map's own (finer) Mondo nodes and maps them to readout nodes by ancestry
+   (`prevalence_check.sidecar_nodes_to_readout`), so it can follow a model's kept DAG;
+   what has to be checked is everything else keyed on the pruned node set (the bundle
+   key, the readout DAG). Decide in the plan.
+4. **Back-compat:** none. Old Params are removed, not aliased.
+5. **`DagLayout` / `frontier_from_coded`:** internal (not exported from `spark_vi.dag`);
+   the model's R5 accessors are the public surface.
+
+## Parked with this spec
+
+- **Where the readout lives.** The readout (`spark_vi.readout`, DagHeads) is generic
+  code; the maintainer may move it back to charmpheno given the framing results. To be
+  decided after the readout walkthrough; R6 is written so DagHeads works either way.
 
 ## Not in scope
 
