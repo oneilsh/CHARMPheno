@@ -67,8 +67,7 @@ def theta_topm_coverage(scored_df, K, *, ms=(64, 128, 256, 512),
     # `.rdd` is taken INSIDE the retried closure: on a DataFrame whose cached
     # transform has not materialized yet, the `javaToPython` conversion behind
     # `.rdd` can itself run Spark jobs — and this coverage pass is the FIRST
-    # action of the whole readout, so it is exactly where that happens. Exp
-    # 0104's 08-28 relaunch died right there, one line OUTSIDE the wrapper.
+    # action of the whole readout, so a preemption abort lands there first.
     sums, hist, n = retry_spark_action(
         lambda: scored_df.select(topic_col).rdd.mapPartitions(_local).treeAggregate(
             zero, _combine, _combine, depth=int(depth)),
@@ -112,8 +111,8 @@ def choose_topm_for_mass(coverage, q, *, K=None):
 
 def resolve_theta_topm_by_mass(scored_df, K, q, *, topic_col="topicDistribution",
                                depth=2, grid=None, excess=True):
-    """Resolve a MASS target to a top-m width on the train frame (spec
-    2026-10-07 §D4: truncate by mass, not by count).
+    """Resolve a MASS target to a top-m width on the train frame (truncate by
+    mass, not by count).
 
     `--readout-theta-topm 256` kept 84% of the topics at K=306 and 17% at K=1498;
     at a ribbon-scale K it would keep ~5%, and whether that is a cheap
@@ -128,7 +127,7 @@ def resolve_theta_topm_by_mass(scored_df, K, q, *, topic_col="topicDistribution"
     readout runs dense.
 
     The coverage is of the mass ABOVE THE PRIOR FLOOR (`excess=True`, the
-    default since 0135 launch 3): raw θ coverage on a wide gated layout is
+    default): raw θ coverage on a wide gated layout is
     dominated by α's floor over the allowed topics and resolved q=0.99 to full K
     (p10 0.117 at m=256) although the token assignments are concentrated. See
     `topm_coverage_kernel`."""
@@ -144,14 +143,14 @@ def masked_moments(scored_df, C, K, *, topic_col="topicDistribution",
                    topm=0):
     """One distributed pass for the per-node masked standardization moments.
 
-    Plan §1: the sklearn oracle standardizes each node's features on THAT node's
+    The sklearn oracle standardizes each node's features on THAT node's
     observed train rows, so the reparameterization needs (C,K) means and sds. This
     is the one-time aggregate that produces them; the result (~174 MB at C=K=3,300)
     is driver-side numpy and is then held fixed for the whole fit.
 
     Returns `(mu (C,K), sd (C,K), n_obs (C,), n_pos (C,))`. `n_obs`/`n_pos` come
     free from the same pass and are what the caller needs to identify the degenerate
-    (single-class observed set) nodes the plan's open question flags — they must get
+    (empty or single-class observed set) nodes — they must get
     the same constant-prediction fallback as `_lr_proba_per_label_masked`.
 
     `treeAggregate` (rather than `treeReduce`) so an empty corpus returns correctly
@@ -202,15 +201,15 @@ class SparkStatsFn:
     """Callable `stats_fn(W_std, b_std, node_mask=None)
     -> (loss_data (C,), gW_std (C,K), gb (C,))`.
 
-    The plan's per-pass seam: ONE `treeAggregate` returns all C heads' gradients, so
-    a batched L-BFGS iteration costs one data scan regardless of C — versus Spark
-    ML's C sequential jobs, "the wrong granularity" (plan §Design).
+    The per-pass seam: ONE `treeAggregate` returns all C heads' gradients, so a
+    batched L-BFGS iteration costs one data scan regardless of C — versus Spark ML's
+    C sequential jobs.
 
-    `node_mask` is the SECOND economy, and at whole-Mondo scale the bigger one. A
+    `node_mask` is the SECOND economy, and at C in the thousands the bigger one. A
     batched L-BFGS iteration is one pass only when every node accepts its first
     trial step; with C≈3,800 independent Armijo tests sharing the pass, some node
-    is nearly always still backtracking, and the exp 0104 smoke paid ~26 full
-    passes per iteration for it. The solver therefore names the nodes whose stats
+    is nearly always still backtracking (a run measured ~26 full passes per
+    iteration for it). The solver therefore names the nodes whose stats
     it does not already hold, and the kernels skip every other node's cells — so a
     deep straggler costs a pass over ITS rows, not over all 56M cells. Masked-out
     rows of the result are exactly zero (the contract: the caller owns merging
@@ -224,11 +223,11 @@ class SparkStatsFn:
         re-deriving it means re-scanning the scored DataFrame — which on the cluster
         is a Parquet/BigQuery read, not a cheap in-memory projection). A `count()`
         materializes it up front so the first pass measures the fit, not the read.
-      * A **fresh broadcast per call**, unpersisted (blocking) before returning. The
-        parameters change every L-BFGS pass, so a long-lived broadcast would only
-        pile up ~87 MB (C=K=3,300) of stale blocks per executor; the plan sizes this
-        broadcast as "same order as the existing λ broadcast" precisely once per pass.
-        The broadcast/unpersist pair lives INSIDE the retried closure
+      * A **fresh broadcast per call**, DESTROYED before returning. The parameters
+        change every L-BFGS pass, so a long-lived broadcast would only pile up ~87 MB
+        (C=K=3,300) of stale blocks per executor, and an unpersist-only lifecycle
+        leaks the driver's copy and pickled temp file every pass. The
+        broadcast/destroy pair lives INSIDE the retried closure
         (`retry_spark_action`), so a preemption-wave job abort costs one pass and a
         backoff sleep rather than the whole solve — see that helper for why the
         retry is idempotent rather than hopeful.
@@ -263,10 +262,20 @@ class SparkStatsFn:
         def _pack(rows, _cols=cols, _m=self._topm):
             return pack_rows(rows, *_cols, topm=_m)
 
-        self._rdd = scored_df.select(*cols).rdd.mapPartitions(_pack)
-        self._rdd = self._rdd.persist(
-            StorageLevel.MEMORY_AND_DISK if storage_level is None else storage_level)
-        self._rdd.count()                       # materialize before the first pass
+        level = StorageLevel.MEMORY_AND_DISK if storage_level is None else storage_level
+
+        def _project():
+            # `.rdd` inside the retried closure, as in `theta_topm_coverage`: on an
+            # unmaterialized frame `javaToPython` can run jobs of its own.
+            rdd = scored_df.select(*cols).rdd.mapPartitions(_pack).persist(level)
+            try:
+                rdd.count()                     # materialize before the first pass
+            except Exception:
+                rdd.unpersist()
+                raise
+            return rdd
+
+        self._rdd = retry_spark_action(_project, label="packed projection")
         self._closed = False
 
     def __call__(self, W_std, b_std, node_mask=None):
@@ -290,9 +299,8 @@ class SparkStatsFn:
         # any closure over ~1 MB — an internal broadcast no destroy() of ours ever
         # reaches, whose pickled temp file sits under the app's pyspark-* dir
         # until context shutdown. A dense zero here is ~108 MB of closure per
-        # pass: exp 0109's 2026-09-01 telemetry showed exactly one such file per
-        # pass accumulating (leak #2 in ADR 0047's addendum) while blockmgr-*
-        # stayed flat (periodicGC cleans the JVM half, nothing cleans the file).
+        # pass, one leaked temp file per pass (ADR 0047's addendum, leak #2):
+        # periodic GC cleans the JVM half, nothing cleans the file.
         def _combine(a, b):
             if a is None:
                 return b
@@ -332,19 +340,16 @@ class SparkStatsFn:
                 # copy AND the pickled temp file pyspark wrote under the Spark
                 # temp dir when the broadcast was created — and those survive
                 # until `destroy`. At one fresh ~117 MB broadcast per pass, an
-                # unpersist-only lifecycle leaks ~117 MB of MASTER-LOCAL disk per
-                # pass: exp 0104's 2026-08-29 solve died at iteration ~50 (449
-                # passes ≈ 53 GB of temp files) with `[Errno 28] No space left on
-                # device` from `sc.broadcast` itself — the healthiest solve of
-                # the week, killed by its own cleanup being one level too weak.
+                # unpersist-only lifecycle leaks ~117 MB of driver-local disk per
+                # pass (~53 GB over a 450-pass solve, enough to end it with ENOSPC
+                # from `sc.broadcast` itself).
                 # A destroyed broadcast is unusable afterwards, which is exactly
                 # the contract here: the next attempt/pass builds a fresh one.
                 destroy_broadcast(bcast)
 
         # THE hot seam: L-BFGS calls this once per line-search trial, so a
         # multi-hour solve is overwhelmingly likely to be inside this action when
-        # a preemption wave lands — which is exactly how exp 0104 lost 9,112s of
-        # solve on 2026-08-28.
+        # a preemption wave lands.
         out = retry_spark_action(
             _pass,
             label=f"stats pass ({'all' if keep is None else int(keep.sum())}/{C} "
@@ -361,8 +366,8 @@ class SparkStatsFn:
         """Unpersist the cached projection. Idempotent, and SAFE ON A DEAD CONTEXT.
 
         This runs on the error path too (`with` exit), and when the failure is the
-        SparkContext itself dying — YARN failing the whole application, as on exp
-        0104's 2026-08-29 run — the JVM-side unpersist NPEs, and an exception here
+        SparkContext itself dying — the cluster manager failing the whole
+        application — the JVM-side unpersist NPEs, and an exception here
         REPLACES the real one mid-propagation. Cleanup of a dead context's blocks
         is moot (the block managers died with it), so a failed unpersist is logged
         and swallowed, never raised.
