@@ -13,9 +13,9 @@ The features are any frozen per-row vector (topic proportions θ, raw-code prese
 ...), called θ below because that is the main use. Labels and masks are (C,) per
 row: node c's head is fit on the rows whose `mask[c]` is set.
 
-**Top-m sparse features (the width lever).** At whole-Mondo scale the cost of a data
+**Top-m sparse features (the width lever).** At C and K in the thousands the cost of a data
 pass is memory traffic, not flops: 56.2M observed cells × a K-wide dense dot product
-≈ 1.7 TB per pass (exp 0104, C=3,820, K=3,827). Per-row θ is a Dirichlet posterior
+≈ 1.7 TB per pass (C=3,820, K=3,827). Per-row θ is a Dirichlet posterior
 mean over thousands of topics and is concentrated, so keeping each row's largest `m`
 entries cuts that traffic by K/m. `topm_coverage_kernel` MEASURES the concentration
 (the mass a truncation drops is reported before any fit uses it), and the `topm=`
@@ -48,7 +48,7 @@ import numpy as np
 # unclipped branch-stable sigmoid instead: the two agree to ~1e-22 in `p` and in
 # every gradient, and can disagree in the reported LOSS only for a node driven
 # past |z| = 50 (where the clipped objective is the bounded log-loss). Metrics —
-# the plan's A/B equality gate — read `p`, so they are unaffected.
+# the A/B equality checks — read `p`, so they are unaffected.
 _SCORE_CLIP = 50.0
 
 
@@ -56,7 +56,7 @@ _SCORE_CLIP = 50.0
 # `V[obs] @ theta` costs |obs|·K flops PLUS a gather that
 # copies |obs|·K float64s out of V; the full `V @ theta` costs C·K flops with no
 # copy and runs in one BLAS call. Break-even is therefore around |obs| ≈ C/2 —
-# below it the gather wins (plan §1: closure-mask mode touches "tens" of cells per
+# below it the gather wins (closure-mask mode touches "tens" of cells per
 # doc out of C≈3,300, i.e. density ~0.01), above it the contiguous matvec wins.
 _DENSE_MASK_FRACTION = 0.5
 
@@ -220,7 +220,7 @@ def _row_scores(theta, obs, V, b_raw, C):
     """Raw-space scores `z = V[c]·θ + b_raw[c]` for one document's observed nodes.
 
     Split out because it is the single hot line of `stats_kernel`, and because the sparse-vs-dense choice (see
-    `_DENSE_MASK_FRACTION`) is the difference between the plan's cheap `closure`
+    `_DENSE_MASK_FRACTION`) is the difference between the cheap `closure`
     mask mode ("each doc touches only its observed cells (tens) → cheap") and its
     heavy `full` mode ("a (C,K)@(K,) matvec per doc"). Returns a length-`|obs|`
     array aligned with `obs`.
@@ -243,8 +243,7 @@ def stats_kernel(rows, V, b_raw, C, K, node_mask=None):
 
     `loss` is SUMMED (not averaged) over the node's observed cells because the
     sklearn oracle this must replicate uses `C=1` scaling: summed log-loss + ½‖w‖²
-    with an unpenalized intercept (plan §1, "Formulation must replicate the sklearn
-    oracle"). Averaging here would silently rescale the L2 the solver adds.
+    with an unpenalized intercept. Averaging here would silently rescale the L2 the solver adds.
 
     The loss is written as `logaddexp(0, z) − y·z` rather than `−y·log p −
     (1−y)·log(1−p)`: the latter evaluates `log(0)` as soon as σ saturates (which
@@ -315,7 +314,7 @@ def stats_kernel(rows, V, b_raw, C, K, node_mask=None):
 # `V[c][IDX[rows]]` — a 1-D gather out of ONE contiguous row that stays in L2 for
 # all of node c's docs — and turns the gradient into one `bincount` per node into a
 # 30 KB buffer. Same element count, and measured 2.5-9x faster across every shape
-# tried (whole-Mondo C=K=3,827 at m=256: 5.9x under a full mask, 2.5-2.6x under a
+# tried (C=K=3,827 at m=256: 5.9x under a full mask, 2.5-2.6x under a
 # closure mask; small-C fixtures: 3.5-9x). There is no measured regime where the
 # per-row form wins, so it is not kept as a branch.
 def topm_sparse(theta, topm):
@@ -431,7 +430,7 @@ def sparse_stats_kernel(packed, V, b_raw, C, K, chunk_rows=_TOPM_CHUNK_ROWS,
     """`stats_kernel` on truncated θ — the hot kernel the whole lever exists for.
 
     Per observed cell the score is `z = V[c, idx]·val + b_raw[c]`: m terms instead of
-    K, and (the part that actually matters at whole-Mondo) m float64s of V pulled
+    K, and (the part that actually matters at large K) m float64s of V pulled
     through cache instead of K. Everything else — the clip, the `logaddexp` loss
     form, the SUMMED (not averaged) reduction, the `(g_raw, s)` split the fold
     consumes — is identical to the dense kernel, because it must be: this is the same
@@ -608,7 +607,7 @@ def moments_to_mu_sd(sum_theta, sum_theta_sq, n_obs, *, eps=1e-12):
 
     ddof=0 because the oracle is `sklearn.preprocessing.StandardScaler`, which
     divides by n — using the sample std would put the distributed fit on a slightly
-    different objective than the driver readout it must equal at the plan's
+    different objective than the driver readout it must equal at the
     cardiovascular A/B gate.
 
     This is the driver-side reduction of `moments_kernel`'s sums, and it is the
@@ -713,12 +712,11 @@ def row_quads(rows, id_col, score_col, label_col, mask_col, topm=0):
 def pack_rows(rows, topic_col, label_col, mask_col, topm=0):
     """Spark Rows -> compact `(theta (K,), obs_idx (n,) int32, y_obs (n,))` tuples.
 
-    The form the REPEATED-pass path caches. The plan's fit-side wall is that dense
+    The form the REPEATED-pass path caches. The wall is that dense
     per-doc `label`/`labelMask` are ~53 KB/row at C≈3,300 while the closure mask
     observes only tens of cells; caching the dense C-vectors would re-import that
     wall into the readout's own persisted RDD. Storing `(obs_idx, y_obs)` makes the
-    cached row O(nnz) instead of O(C), which is the same economy plan §5 wants for
-    the corpus itself.
+    cached row O(nnz) instead of O(C).
 
     `topm > 0` switches the cached row to the truncated sparse form
     `(idx (m,) int32, val (m,), obs_idx, y_obs)` — a 4-tuple, so a consumer cannot
