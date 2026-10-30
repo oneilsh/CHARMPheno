@@ -96,15 +96,14 @@ class _DagGatedLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
     docConcentration = Param(
         Params._dummy(), "docConcentration",
         "Dirichlet concentration alpha on theta; scalar (symmetric) or length-K "
-        "vector. Unset = 1/K, which is razor-small at whole-Mondo K; the central "
-        "configuration sets 0.5.",
+        "vector. Unset = 1/K, which is razor-small when K is in the thousands "
+        "(0.5 is a sensible start there).",
         typeConverter=TypeConverters.toListFloat,
     )
     optimizeDocConcentration = Param(
         Params._dummy(), "optimizeDocConcentration",
-        "learn the per-node tied empirical-Bayes alpha (the gated Newton step, "
-        "insight 0059) from the static frontier histogram. Default False "
-        "(insight 0091: keep it off).",
+        "learn the per-node tied empirical-Bayes alpha (the gated Newton step) "
+        "from the static frontier histogram. Default False.",
         typeConverter=TypeConverters.toBoolean,
     )
     gammaShape = Param(
@@ -165,14 +164,14 @@ class _DagGatedLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         Params._dummy(), "gateSeedMode",
         "with gateWarm > 0: the open-time seed — 'balanced' (default; each child's "
         "subtree share equally plus the parent's own coded documents, descendants' "
-        "own codes removed via gateSeedOwnCodes; exp 0160) or 'subtree' (the word "
+        "own codes removed via gateSeedOwnCodes) or 'subtree' (the word "
         "counts of the documents a block admits).",
         typeConverter=TypeConverters.toString,
     )
     gateSeedLeaves = Param(
         Params._dummy(), "gateSeedLeaves",
         "with gateWarm > 0 and gateOpenSeed: also seed every LEAF block at iteration "
-        "0 from the word counts of its own documents (exp 0162). Default False.",
+        "0 from the word counts of its own documents. Default False.",
         typeConverter=TypeConverters.toBoolean,
     )
     gateSeedDomain = Param(
@@ -191,7 +190,8 @@ class _DagGatedLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
     gateSeedProfile = Param(
         Params._dummy(), "gateSeedProfile",
         "with gateWarm > 0: JSON {engine node id: {primary-domain vocab idx: weight}} "
-        "— an external phenotype profile (e.g. HPO) that REPLACES a profiled node's "
+        "— an external per-node profile (e.g. from a curated knowledge base) that "
+        "REPLACES a profiled node's "
         "primary-domain seed: leaves at iteration 0, later blocks when they open. "
         "Unprofiled nodes keep the histogram seed. Empty (default) = histogram only.",
         typeConverter=TypeConverters.toString,
@@ -521,7 +521,7 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator):
         rdd.count()  # materialize for VIRunner's strict cache precondition
 
         try:
-            # Leaves-first gate schedule (exp 0153/0154; report 2026-10-19).
+            # Leaves-first gate schedule.
             # Fit-only: nothing about the corpus or the bundle changes.
             gw = int(self.getOrDefault("gateWarm"))
             if gw > 0:
@@ -531,7 +531,7 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator):
                 print(f"[dag-gated-lda] leaves-first gate: {gw} iters/level over "
                       f"heights 0..{engine._gate_H} (full gate from iter "
                       f"{gw * engine._gate_H}); {summary}", flush=True)
-            # Per-node tied empirical-Bayes alpha (insight 0059): needs the static
+            # Per-node tied empirical-Bayes alpha: needs the static
             # frontier histogram, which only exists once the document RDD does.
             if bool(self.getOrDefault("optimizeDocConcentration")):
                 hist = {fr: int(n) for fr, n in

@@ -146,7 +146,7 @@ def _compute_doc_freqs(
 
     counts = bow_rdd.flatMap(_emit_terms).reduceByKey(lambda a, b: a + b).collectAsMap()
     # destroy, not unpersist: the collect has returned, and unpersist would leave
-    # the driver-side pickle behind (exp 0104 ENOSPC leak class).
+    # the driver-side pickle behind (the broadcast temp-file ENOSPC leak class).
     _destroy_broadcast(interest_b)
     return dict(counts)
 
@@ -172,7 +172,7 @@ def _compute_pair_freqs(
 
     counts = bow_rdd.flatMap(_emit_pairs).reduceByKey(lambda a, b: a + b).collectAsMap()
     # destroy, not unpersist: the collect has returned, and unpersist would leave
-    # the driver-side pickle behind (exp 0104 ENOSPC leak class).
+    # the driver-side pickle behind (the broadcast temp-file ENOSPC leak class).
     _destroy_broadcast(interest_b)
     return dict(counts)
 
@@ -208,13 +208,13 @@ def compute_npmi_coherence(
             first axis. When provided, only mask==True rows are scored.
             None (default) scores all rows. Use cases include selecting the
             top-K-used HDP topics via top_k_used_topics(u, v, k), filtering
-            out LDA's gracefully-unused tail (insight 0019), or restricting
+            out LDA's gracefully-unused tail, or restricting
             evaluation to a user-specified subset of topics.
         min_pair_count: skip pairs with joint count below this threshold
             in the reference corpus. Default 3 — pairs with counts in
             {0, 1, 2} contribute nothing to their topic mean (vs the
             pre-2026-05-12 behavior of flooring missing-pair NPMI at -1,
-            which biased rare-phenotype topics toward maximally
+            which biased rare-signature topics toward maximally
             incoherent scores; see docs/insights/0007).
 
     Returns:

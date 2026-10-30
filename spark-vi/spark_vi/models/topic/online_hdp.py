@@ -300,8 +300,8 @@ class OnlineHDP(VIModel):
         the model can discover; effective topic count is typically much
         smaller (the inactive corpus sticks shrink toward 0).
       K: doc-level truncation. Upper bound on topics per document.
-        Should be much smaller than T — clinical visits typically span
-        a handful of phenotypes, not hundreds.
+        Should be much smaller than T — a document typically spans a
+        handful of topics, not hundreds.
       vocab_size: V, number of distinct word IDs the model handles.
       alpha: doc-level stick concentration (paper's α0). Higher → more
         topics per doc.

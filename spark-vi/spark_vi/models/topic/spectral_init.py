@@ -17,15 +17,15 @@ co-occurrence matrix Q:
 This module adds a *block-aware* twist for gated STM (TopicBlockPartition).
 The background block is recovered globally on the pooled Q. Each group's
 foreground anchors are then found on that group's *within-group* Q — where a
-rare group's phenotype is undiluted by the majority — while *deflating*
+rare group's signature is undiluted by the majority — while *deflating*
 against the already-chosen background anchors (passed as ``seed_rows`` so the
 greedy search spans away from them but never returns them). This is the seam
-that lets a minority arm's foreground topic land its planted phenotype at
+that lets a minority group's foreground topic land its planted signature at
 init, before any EM. Non-gated fitting routes through an all-background
 partition (background_k = K, no groups), so step 1 alone reproduces a global
 single-pass anchor-word init — one code path, no special case.
 
-Domain-agnostic: integer token ids only, no OMOP/EHR vocabulary.
+Domain-agnostic: integer token ids only, no domain vocabulary.
 """
 from __future__ import annotations
 
@@ -130,9 +130,9 @@ def find_anchors(Q: np.ndarray, n: int, *, seed_rows=None,
     implementation restricts anchor *candidates* to words with enough document
     mass. Here a word may anchor only if its Q marginal (row sum) is at least
     ``min_marginal_frac`` times the mean nonzero marginal. The default of 1.0
-    (at least average frequency) cleanly separates real phenotype words
+    (at least average frequency) cleanly separates real signature words
     (above-average co-occurrence mass) from sub-promille noise words and is what
-    makes a minority group's foreground phenotype, not corpus noise, surface as
+    makes a minority group's foreground signature, not corpus noise, surface as
     its anchor. Words below the bar still get β rows recovered against the
     chosen anchors; they just cannot *be* anchors.
 
@@ -140,7 +140,7 @@ def find_anchors(Q: np.ndarray, n: int, *, seed_rows=None,
     rows WITHOUT returning them. This is the deflation seam: when finding a
     group's foreground anchors we seed with the background anchors so the search
     spans *away* from the shared background and toward the group-specific
-    phenotype rows. Seeds that are (near) linearly dependent on the existing
+    signature rows. Seeds that are (near) linearly dependent on the existing
     basis are skipped, never erroring.
 
     ``domain_bounds`` (optional cumulative column-offset sequence, e.g. a
@@ -157,12 +157,11 @@ def find_anchors(Q: np.ndarray, n: int, *, seed_rows=None,
     behavior returned FEWER anchors than asked for, with every column past the
     last bound permanently ineligible.
 
-    ``preferred`` (optional word ids) is the GUIDED-ANCHOR seam (spec
-    2026-10-05, HPO-guided spectral anchors): the same greedy search runs in two
+    ``preferred`` (optional word ids) is the GUIDED-ANCHOR seam: the same greedy search runs in two
     stages over ONE shared basis — stage 1 may pick only from ``preferred`` (∩
     the candidate floor), stage 2 fills whatever stage 1 could not from the full
     candidate pool. Why a set and not a weight: the point is to let an outside
-    source of meaning (a node's HPO profile) decide WHICH words may anchor its
+    source of meaning (e.g. a curated per-node profile) decide WHICH words may anchor its
     block, while the co-occurrence geometry still decides which of those are the
     vertices and the recovery still decides what the topic IS — a set changes
     the pool, never the criterion, so there is no strength to tune. ``None`` or
@@ -201,8 +200,8 @@ def greedy_anchors(Qbar, norms, stages, n, *, seed_rows=None, eps=_GREEDY_EPS):
 
     Why this form. The earlier form re-projected every candidate row against
     the whole basis at every step — O(n^2 V d) Python-level dots — which is
-    free for eight background anchors and does not finish in a day for the
-    1,200-topic shared background of exp 0134. This form never touches the
+    free for eight background anchors and does not finish in a day for a
+    1,200-topic shared background. This form never touches the
     (V, d) matrix beyond one GEMV per basis vector: the basis ``B`` (d, k) is
     the state, a row's residual is formed only when it is chosen
     (``r = q - B (B^T q)``, done twice for re-orthogonalization), and every
@@ -396,12 +395,12 @@ def spectral_init_beta(docs, partition, V: int, *, domain_bounds=None) -> np.nda
     # Deflation happens twice, both against bg_anchors:
     #   (a) selection — find_anchors(seed_rows=bg_anchors) spans the search away
     #       from the shared background so the chosen foreground anchors are the
-    #       group-specific phenotype words, not background.
+    #       group-specific signature words, not background.
     #   (b) recovery — recover_beta is run with the background anchors INCLUDED
     #       alongside the foreground anchors. Within a group's docs the foreground
     #       words still co-occur heavily with background words; letting the NNLS
     #       place that shared mass on the background anchor columns leaves the
-    #       foreground topic rows concentrated on the phenotype. We keep only the
+    #       foreground topic rows concentrated on the signature. We keep only the
     #       foreground rows (the trailing len(fg_anchors) of the recovered block).
     for g in partition.groups:
         fg_idx = partition.block_indices(g)

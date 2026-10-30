@@ -475,7 +475,7 @@ class OnlineSTM(VIModel):
         gamma_shape: float = 100.0,
         random_seed: int | None = None,
         topic_blocks=None,
-        reference_topic: bool = True,  # default-on (validated, insight 0030); pass False for the legacy full-K path
+        reference_topic: bool = True,  # default-on (validated); pass False for the legacy full-K path
         estimate_sigma_diagonal: bool = False,
         estimate_global_scale: bool = False,
         global_scale_step_cap: float = 1.2,
@@ -566,7 +566,7 @@ class OnlineSTM(VIModel):
         live when Gamma/Sigma are shared across docs. softmax(eta) is invariant
         to adding a constant to all coordinates; pinning one to 0 removes that
         translation degeneracy, which otherwise lets eta drift to the
-        softmax-saturation boundary and Sigma blow up (insight 0029).
+        softmax-saturation boundary and Sigma blow up.
         """
         return 0 if self.reference_topic else None
 
@@ -580,8 +580,8 @@ class OnlineSTM(VIModel):
         topic-word matrix (from spark_vi.models.topic.spectral_init), seed
         λ = spectral_beta * gamma_shape instead of random gamma. This makes the
         β posterior start at a deterministic, data-driven anchor-word estimate,
-        curing the sigma_init-dependent collapse/blow-up of random init
-        (insight 0029). Γ and Σ are untouched (Γ = 0, Σ = sigma_init).
+        curing the sigma_init-dependent collapse/blow-up of random init.
+        Γ and Σ are untouched (Γ = 0, Σ = sigma_init).
         """
         if data_summary is not None and "spectral_beta" in data_summary:
             beta0 = np.asarray(data_summary["spectral_beta"], dtype=np.float64)
@@ -775,7 +775,7 @@ class OnlineSTM(VIModel):
         estimator standardizes each supported pair's sample covariance to a
         correlation and pins Σ_ii = 1 exactly every M-step: this removes the
         per-topic variance degree of freedom that previously drove a softmax-
-        saturation runaway (insight 0033), and retires the maximum-determinant PD
+        saturation runaway, and retires the maximum-determinant PD
         completion (Dempster 1972 covariance selection) from the fit path — under
         single-label gating the E-step only ever inverts a fully-observed marginal
         Σ[bg ∪ one-group] (safe_inverse), so the cross-group block is never
@@ -841,7 +841,7 @@ class OnlineSTM(VIModel):
         # fully-observed marginal Σ[bg ∪ one-group] (safe_inverse), so nothing needs
         # the cross-group block completed; it stays at its 0 init and is never
         # inverted whole. Pinning Σ_ii = 1 removes the variance degree of freedom that
-        # drives the softmax-saturation runaway (insight 0033). min_pair_support is the
+        # drives the softmax-saturation runaway. min_pair_support is the
         # observed/lazy threshold; unsupported pairs (incl. cross-group, N=0) are
         # lazy-kept (ADR 0027), so an absent group's entries do not decay.
         S = target_stats["residual_outer_stat"]
@@ -868,7 +868,7 @@ class OnlineSTM(VIModel):
             # diagonal instead of pinning Σ_ii = 1. Off-diagonals reuse the same
             # clipped correlation, rescaled by the per-topic std, so the estimator
             # is a valid covariance by construction (|Σ_ij| = |R_ij|·std_i·std_j ≤
-            # std_i·std_j). Recovers the natural η-scale (insight 0030) that the
+            # std_i·std_j). Recovers the natural η-scale that the
             # unit-diagonal pin (ADR 0034) discards — needed for faithful generation.
             # Reference topic (η≡0) has zero residual → diag_var≈0 → std=1 (guarded),
             # so its diagonal blends toward 1, harmless (it is excluded from the
@@ -883,8 +883,7 @@ class OnlineSTM(VIModel):
             # topic whose η≡0 gives diag_var≈0). Pooling is runaway-safe: one
             # document-scarce topic's inflated variance is averaged against every other
             # topic's and cannot drag τ² — contrast estimate_sigma_diagonal, which gives
-            # each topic its own free dial and blew up on an ess≈15 topic (exp 0032,
-            # insight 0036). A damped (trust-region) update additionally caps the global
+            # each topic its own free dial and blew up on an ess≈15 topic. A damped (trust-region) update additionally caps the global
             # τ-β sharpening ratchet (τ↑ → docs inferred peakier → β sharper → η̂ modes
             # spread → τ↑); pooling alone does not break this loop because it is driven by
             # the whole corpus, not one topic. The cap is a heuristic stability guard
@@ -1023,9 +1022,9 @@ class OnlineSTM(VIModel):
             f"Σλ_k[min={lam_row_sums.min():.3g} max={lam_row_sums.max():.3g}]"
         )
         # Runaway attribution: name the highest-variance topic and its β coherence.
-        # A variance blowup (insight 0033) is a specific topic's; a LOW peak / HIGH
+        # A variance blowup is a specific topic's; a LOW peak / HIGH
         # effective support (β near the corpus marginal) marks it diffuse/unidentified
-        # — the init/identifiability signature — vs a coherent phenotype running away.
+        # — the init/identifiability signature — vs a coherent topic running away.
         kmax = int(np.argmax(sigma_var))
         brow = lam[kmax] / max(float(lam_row_sums[kmax]), 1e-300)
         peak = float(brow.max())

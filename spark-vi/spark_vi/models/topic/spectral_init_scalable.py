@@ -44,7 +44,7 @@ R is generated DETERMINISTICALLY PER ROW (no broadcast of a V×d matrix):
 the projected result reproducible regardless of how the corpus is partitioned —
 two executors that both touch word j regenerate the identical row.
 
-Domain-agnostic: integer token ids only, no OMOP/EHR vocabulary.
+Domain-agnostic: integer token ids only, no domain vocabulary.
 """
 from __future__ import annotations
 
@@ -265,7 +265,7 @@ def projected_cooccurrence_rdd(
     finally:
         # The treeReduce has returned, so nothing references the broadcast any
         # more: destroy (not unpersist) to also free the driver-side pickle —
-        # the exp 0104 ENOSPC leak class, once per node-level pass.
+        # the broadcast temp-file (ENOSPC) leak class, once per node-level pass.
         _destroy_broadcast(p_bcast)
 
 
@@ -307,7 +307,7 @@ def find_anchors_projected(QR: np.ndarray, p_w: np.ndarray, df_w: np.ndarray,
     Candidate floor (ADR 0032): a word may BE an anchor only if its absolute
     document frequency ``df_w[i] >= min_doc_freq``. This replaces the dense
     version's mean-relative ``min_marginal_frac`` floor, which over-excludes
-    rare-but-pure phenotype words (a minority arm's phenotype is below the corpus
+    rare-but-pure signature words (a minority group's signature is below the corpus
     mean marginal yet appears in plenty of that arm's docs). The dense
     ``norm > EPS`` guard is kept (a degenerate all-zero row is never an anchor).
 
@@ -324,7 +324,7 @@ def find_anchors_projected(QR: np.ndarray, p_w: np.ndarray, df_w: np.ndarray,
     norms = (Qbar * Qbar).sum(axis=1)            # squared row norms
     df = np.asarray(df_w)
     candidate = df >= min_doc_freq               # eligible to BE an anchor
-    # ``marginal_floor`` (exps 0125/0128, 2026-10-06): the df>=5 floor lets a
+    # ``marginal_floor``: the df>=5 floor lets a
     # word seen in five of a node's tens of thousands of documents be a hull
     # vertex, so the anchors are rare syndromic codes; a block's vertices then
     # sit in small odd strata, recovery hands whole strata to whichever vertex
@@ -357,7 +357,7 @@ def recover_beta_projected(QR: np.ndarray, p_w: np.ndarray, anchors,
                            rows=None) -> np.ndarray:
     """Per-word NNLS β recovery in projected space — analog of dense ``recover_beta``.
 
-    Driver-side loop (sufficient at the cancer scale V≈3691; a distributed
+    Driver-side loop (sufficient at V≈3,700; a distributed
     Spark-map version is a future enhancement). For each word w, solve
     ``min_{c >= 0} || A^T c − Qbar_proj[w] ||`` where ``A = Qbar_proj[anchors]``
     (the projected conditional anchor rows). NNLS is valid on arbitrary-sign A/b —
@@ -410,7 +410,7 @@ def scalable_spectral_init_beta(
 
     Step 2 (per group): for each group g, use that group's WITHIN-GROUP sketch
     (``group_QR[g]`` with within-group marginal ``group_p_w[g]`` /
-    ``group_df_w[g]``) — where a rare group's phenotype is undiluted by the
+    ``group_df_w[g]``) — where a rare group's signature is undiluted by the
     majority. Find ``len(block_indices(g))`` foreground anchors with the background
     anchors passed as ``seed_rows`` (deflation in selection), recover the combined
     background+foreground anchors against the within-group sketch (deflation in

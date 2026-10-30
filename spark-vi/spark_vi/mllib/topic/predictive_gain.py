@@ -1117,7 +1117,7 @@ def corpus_predictive_gain_gated_rdd(
     finally:
         # The treeReduce has returned, so nothing references these any more:
         # destroy (not unpersist) also frees the driver-side pickle of each —
-        # the exp 0104 ENOSPC leak class.
+        # the broadcast temp-file (ENOSPC) leak class.
         _destroy_broadcast(gp_bcast)
         _destroy_broadcast(p_bcast)
         _destroy_broadcast(marg_bcast)

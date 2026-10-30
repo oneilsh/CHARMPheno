@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 
 def _seed_reduce_depth(n_rows: int, V: int) -> int:
     """treeReduce depth for a (n_rows, V) float32 accumulator: the driver receives
-    about P^(1/depth) partials, so a whole-Mondo-sized array (hundreds of MB) needs a
-    deeper tree than a branch's few MB."""
+    about P^(1/depth) partials, so an array of hundreds of MB needs a deeper tree
+    than one of a few MB."""
     return 4 if n_rows * V * 4 > 50_000_000 else 2
 
 
@@ -41,9 +41,8 @@ def gate_open_seed_counts(rdd, lay, V: int, *, mode: str = "subtree",
     a None sentinel, and the broadcast is destroyed after the pass.
     `rdd` items carry `.indices`, `.counts`, `.frontier` (GatedBOWDocument).
 
-    `mode="balanced"` (exp 0160): a parent with one dominant child would otherwise
-    open looking like that child (exp 0154: intrinsic cardiomyopathy took HCM's
-    words). The row is instead the EQUAL-weight mean of each child's normalized
+    `mode="balanced"`: a parent with one dominant child would otherwise
+    open looking like that child (taking that child's words). The row is instead the EQUAL-weight mean of each child's normalized
     subtree word distribution plus one share for the documents coded at the parent
     itself (frontier contains it), so a word specific to one child weighs about
     1/(children + 1) and a word all children share keeps full weight. `own_idx`
@@ -53,13 +52,13 @@ def gate_open_seed_counts(rdd, lay, V: int, *, mode: str = "subtree",
     parent's row before normalization. This
     accumulates float32 (rows, V) arrays per partition — the late nodes' children and
     the late nodes only — with a deeper reduction tree when they are large, so a
-    whole-Mondo pass stays at about 200 MB a task and well under 1 GB on the driver.
+    pass at K≈3,800 stays at about 200 MB a task and well under 1 GB on the driver.
 
-    `leaves=True` (exp 0162) also fills the LEAF rows (height 0) with the word counts
-    of the documents each leaf's gate admits, its own patients, for the estimator to
+    `leaves=True` also fills the LEAF rows (height 0) with the word counts
+    of the documents each leaf's gate admits, its own documents, for the estimator to
     apply at iteration 0. With every node block seeded from its own documents, the
     spectral init has nothing left to do under the schedule (`init: random`), and its
-    per-node batched scans (hours at whole-Mondo) are skipped."""
+    per-node batched scans (hours at K in the thousands) are skipped."""
     if mode not in ("subtree", "balanced"):
         raise ValueError(f"unknown seed mode {mode!r}")
     if mode == "balanced":

@@ -363,12 +363,12 @@ def sweep_heldout(
 #
 # The frozen-beta primitives above (make_shared_beta ... sweep_heldout) plant
 # over a KNOWN beta and FREEZE it at truth during recovery, so they isolate
-# concentration inference from topic learning. That leaves one question open
-# (insight 0038 "What this does NOT claim"): when each model LEARNS its own
+# concentration inference from topic learning. That leaves one question open:
+# when each model LEARNS its own
 # beta from the documents, does LDA's Dirichlet document-sparsity pressure
 # carve a SHARPER, more document-specific beta -- raising per-document top_mass
-# (peakier patients) -- while STM's logistic-normal stays more blended? If so,
-# the real-data STM-vs-LDA peakiness gap (0038: STM 0.269 vs LDA 0.513) is a
+# (peakier documents) -- while STM's logistic-normal stays more blended? If so,
+# a real-data STM-vs-LDA peakiness gap (measured: STM 0.269 vs LDA 0.513) is a
 # beta-co-adaptation effect, not an alpha-inference artifact.
 #
 # The helpers below add full-batch (non-Spark) co-fitting of beta for both
@@ -574,8 +574,8 @@ def sweep_heldout_cofit(
     the standard leakage-free topic-model evaluation (document completion;
     Wallach, Murray, Salakhutdinov, Mimno 2009, "Evaluation methods for topic
     models", ICML; Asuncion, Welling, Smyth, Teh 2009). The argmax knob is the
-    held-out-LL-calibrated concentration -- the same gold standard insight 0038
-    validated on frozen beta, now applied with beta co-fit.
+    held-out-LL-calibrated concentration -- the same gold standard validated on
+    frozen beta, now applied with beta co-fit.
 
     method == "stm": knobs are Sigma scales c (stm_cofit_beta + stm_heldout_ll).
     method == "lda": knobs are Dirichlet alphas (lda_cofit_beta + lda_heldout_ll).
