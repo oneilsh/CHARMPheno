@@ -146,7 +146,8 @@ class DagHeadsModel(_DagHeadsParams, Model):
         M = None
         if stacked_col:
             from spark_vi.dag.ops import closure_matrix
-            M = closure_matrix(parent, self.numNodes).astype(np.float32)
+            from spark_vi.readout.stacked import closure_operator
+            M = closure_operator(closure_matrix(parent, self.numNodes))
         # Nothing array-shaped rides a closure (ADR 0047): one broadcast, whose
         # lifetime is the returned DataFrame's (the ContextCleaner reclaims it).
         bc = sc.broadcast({"V": self.V, "b": self.b_raw, "deg": self.degenerate,
