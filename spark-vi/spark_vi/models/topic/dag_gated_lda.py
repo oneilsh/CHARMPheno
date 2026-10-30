@@ -37,7 +37,6 @@ docs/superpowers/specs/2026-07-15-gated-svi-placement-engine-design.md.
 """
 from __future__ import annotations
 
-import hashlib
 from typing import Any, Iterable
 
 import numpy as np
@@ -46,7 +45,8 @@ from scipy.special import digamma
 from spark_vi.inference.concentration_optimization import gated_alpha_newton_step
 from spark_vi.dag import DagLayout
 from spark_vi.models.topic.domains import domains_to_bounds
-from spark_vi.models.topic.lda import OnlineLDA, _cavi_doc_inference, _dirichlet_kl
+from spark_vi.models.topic.lda import (OnlineLDA, _cavi_doc_inference, _dirichlet_kl,
+                                       _hashed_gamma_init)
 from spark_vi.models.topic.types import GatedBOWDocument
 
 
@@ -362,17 +362,8 @@ class DagGatedOnlineLDA(OnlineLDA):
                     size=len(allowed),
                 )
             else:
-                h = hashlib.blake2b(digest_size=8)
-                h.update(str(self.random_seed).encode("utf-8"))
-                h.update(np.ascontiguousarray(doc.indices, dtype=np.int32).tobytes())
-                h.update(np.ascontiguousarray(doc.counts, dtype=np.float64).tobytes())
-                doc_seed = int.from_bytes(h.digest(), "little")
-                doc_rng = np.random.default_rng(doc_seed)
-                gamma_init = doc_rng.gamma(
-                    shape=self.gamma_shape,
-                    scale=1.0 / self.gamma_shape,
-                    size=len(allowed),
-                )
+                gamma_init = _hashed_gamma_init(doc.indices, doc.counts, len(allowed),
+                                                self.gamma_shape, self.random_seed)
             # Slice the (allowed, doc words) submatrix once: the CAVI reads only the
             # doc's columns, and `expElogbeta[allowed]` would copy |allowed| x V
             # (~20 MB at 200 bg topics over 11k words) for every document.
@@ -437,7 +428,7 @@ class DagGatedOnlineLDA(OnlineLDA):
             new_lam = (1.0 - learning_rate) * lam + learning_rate * target_lam
         else:
             expElogbeta = self._assemble_expElogbeta(lam)
-            target = float(self.eta) + expElogbeta * target_stats["lambda_stats"]
+            target = eta + expElogbeta * target_stats["lambda_stats"]
             target_dict = self._split_to_domains(target)
             new_lam = {
                 m: (1.0 - learning_rate) * lam[m] + learning_rate * target_dict[m]
@@ -571,11 +562,8 @@ class DagGatedOnlineLDA(OnlineLDA):
         if self.domains is None:
             return super().infer_local(row, global_params)
         expElogbeta = self._assemble_expElogbeta(global_params["lambda"])
-        gamma_init = np.random.gamma(
-            shape=self.gamma_shape,
-            scale=1.0 / self.gamma_shape,
-            size=self.K,
-        )
+        gamma_init = _hashed_gamma_init(row.indices, row.counts, self.K,
+                                        self.gamma_shape, self.random_seed)
         gamma, _, _, _ = _cavi_doc_inference(
             indices=row.indices,
             counts=row.counts,

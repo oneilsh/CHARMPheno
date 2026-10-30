@@ -94,6 +94,21 @@ def _cavi_doc_inference(
     return gamma, expElogthetad, phi_norm, n_iter
 
 
+def _hashed_gamma_init(indices, counts, size, gamma_shape, random_seed=None):
+    """A document's starting gamma, Gamma(gamma_shape, 1/gamma_shape) per topic, drawn
+    from a seed hashed over its content (and `random_seed` when set): identical
+    documents get identical starts on every executor, partition and iteration, so a
+    distributed fit or transform is reproducible regardless of Spark ordering. With
+    `random_seed=None` the hash covers the content alone (the MLlib transforms)."""
+    h = hashlib.blake2b(digest_size=8)
+    if random_seed is not None:
+        h.update(str(random_seed).encode("utf-8"))
+    h.update(np.ascontiguousarray(indices, dtype=np.int32).tobytes())
+    h.update(np.ascontiguousarray(counts, dtype=np.float64).tobytes())
+    rng = np.random.default_rng(int.from_bytes(h.digest(), "little"))
+    return rng.gamma(shape=gamma_shape, scale=1.0 / gamma_shape, size=size)
+
+
 def _dirichlet_kl(q_alpha: np.ndarray, p_alpha: np.ndarray) -> float:
     """KL(Dirichlet(q_alpha) || Dirichlet(p_alpha)).
 
@@ -249,17 +264,8 @@ class OnlineLDA(VIModel):
                     size=self.K,
                 )
             else:
-                h = hashlib.blake2b(digest_size=8)
-                h.update(str(self.random_seed).encode("utf-8"))
-                h.update(np.ascontiguousarray(doc.indices, dtype=np.int32).tobytes())
-                h.update(np.ascontiguousarray(doc.counts, dtype=np.float64).tobytes())
-                doc_seed = int.from_bytes(h.digest(), "little")
-                doc_rng = np.random.default_rng(doc_seed)
-                gamma_init = doc_rng.gamma(
-                    shape=self.gamma_shape,
-                    scale=1.0 / self.gamma_shape,
-                    size=self.K,
-                )
+                gamma_init = _hashed_gamma_init(doc.indices, doc.counts, self.K,
+                                                self.gamma_shape, self.random_seed)
             gamma, expElogthetad, phi_norm, _ = _cavi_doc_inference(
                 indices=doc.indices,
                 counts=doc.counts,
@@ -409,7 +415,10 @@ class OnlineLDA(VIModel):
 
         doc_loglik_sum and doc_theta_kl_sum are aggregated across the
         partition by local_update; the global beta KL is computed here on
-        the driver from lambda alone.
+        the driver from lambda alone. In mini-batch mode the two document terms
+        are the MINIBATCH's sums while the global KL is the corpus's, so the trace
+        is a mixed-scale, noisy diagnostic, not the corpus ELBO (which is why
+        mini-batch fits never early-stop on it); in full-batch mode it is exact.
 
         η is read from global_params so an η-optimization update mid-fit
         feeds back into the global KL prior on the next ELBO computation.
@@ -432,19 +441,18 @@ class OnlineLDA(VIModel):
     def infer_local(self, row: BOWDocument, global_params: dict[str, np.ndarray]):
         """Single-document E-step under fixed global params.
 
-        Pure function of (row, global_params). Reads α from global_params so
-        a model trained with optimize_alpha=True transforms with the *trained*
-        α rather than the constructor's initial value.
+        Pure function of (row, global_params), as VIModel.infer_local requires:
+        the starting gamma is content-hashed (`_hashed_gamma_init`), never drawn
+        from the global RNG. Reads α from global_params so a model trained with
+        optimize_alpha=True transforms with the *trained* α rather than the
+        constructor's initial value.
         """
         lam = global_params["lambda"]
         alpha = global_params["alpha"]
 
         expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
-        gamma_init = np.random.gamma(
-            shape=self.gamma_shape,
-            scale=1.0 / self.gamma_shape,
-            size=self.K,
-        )
+        gamma_init = _hashed_gamma_init(row.indices, row.counts, self.K,
+                                        self.gamma_shape, self.random_seed)
         gamma, _, _, _ = _cavi_doc_inference(
             indices=row.indices,
             counts=row.counts,
