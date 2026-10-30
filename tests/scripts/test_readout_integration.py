@@ -2,7 +2,7 @@
 (Package C of `docs/superpowers/plans/2026-08-20-distributed-readout-plan.md`).
 
 `spark-vi/tests/test_readout_*.py` cover the readout's kernels, backends and heads
-in isolation and `analysis/pc/tests/test_batched_lr.py` covers the solver against
+in isolation and `spark-vi/tests/test_batched_lr.py` covers the solver against
 the sklearn oracle. What is left — and what this file pins — is the JOIN:
 `dag_gated_fit.readout_arm`, on BOTH engines (spark, local), must produce the same
 readout as `score_arm` (the sklearn path) when both are handed the SAME frozen θ, including the degenerate-node
