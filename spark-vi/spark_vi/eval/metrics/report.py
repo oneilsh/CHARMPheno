@@ -1,11 +1,10 @@
 """From per-key metrics to the readout's per-label records and macro averages: the
-skip rules and the macro (moved from `analysis/pc/evaluate.py` with ADR 0051 step 4;
-the metrics themselves now come from `core`, not scikit-learn).
+skip rules and the macro (the metrics themselves come from `core`).
 
 A column is dropped from the macro for exactly one of three reasons, counted
-separately and never summed (incident-eval spec §8): no positives or no negatives
-(`SKIP_DEGENERATE`), either class under `min_count` (`SKIP_SMALL`; on All of Us a
-count under 20 is not disclosable), or, when asked, a constant prediction over the
+separately and never summed: no positives or no negatives (`SKIP_DEGENERATE`),
+either class under `min_count` (`SKIP_SMALL`; e.g. a disclosure floor the caller
+must respect), or, when asked, a constant prediction over the
 scored rows (`SKIP_CONSTANT`: its AUC is exactly 0.5 by construction, a number that
 looks like a measurement and is not one).
 """

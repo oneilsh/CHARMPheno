@@ -329,8 +329,7 @@ def collect_lean_proba(scored_df, C, V=None, b_raw=None, *, degenerate=None,
     `theta_topm` must MATCH the fit that produced `(V, b_raw)`: the coefficients
     belong to the truncated design matrix. It is ignored on the `V is None` branch.
 
-    `id_col` names an int64 column unique per row (the clinical drivers synthesize
-    a doc key under that name)."""
+    `id_col` names an int64 column unique per row."""
     C = int(C)
     theta_topm = int(theta_topm)
     cols = (id_col, score_col, label_col, mask_col)

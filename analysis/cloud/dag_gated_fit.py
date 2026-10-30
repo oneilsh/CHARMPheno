@@ -82,7 +82,8 @@ def detection_readout(proba_DC, y_DC, recall_targets, *, doc_keys=None):
     column in the max can pin it and the AUC at exactly 0.5 (exp 0104)."""
     return _ev.detection(
         _array_blocks(proba_DC, y_DC, doc_keys=doc_keys), recall_targets,
-        unit_divisor=None if doc_keys is None else _dk.DOC_KEY_RADIX)
+        unit_divisor=None if doc_keys is None else _dk.DOC_KEY_RADIX,
+        unit_name="person")
 
 
 def readout_from_blocks(blocks, C, *, recall_targets, fdr_targets, min_count=0,
@@ -101,7 +102,7 @@ def readout_from_blocks(blocks, C, *, recall_targets, fdr_targets, min_count=0,
     return _ev.readout_metrics(
         blocks, C, recall_targets=recall_targets, fdr_targets=fdr_targets,
         min_count=min_count, skip_constant=skip_constant, score=score,
-        unit_divisor=_dk.DOC_KEY_RADIX if person_pool else None,
+        unit_divisor=_dk.DOC_KEY_RADIX if person_pool else None, unit_name="person",
         curve_columns=curve_columns)
 
 
@@ -214,10 +215,10 @@ def stacked_readout(blocks, parent_int, C, *, recall_targets, fdr_targets,
     try:
         readout = _ev.readout_metrics(
             sb, C, recall_targets=recall_targets, fdr_targets=fdr_targets,
-            min_count=min_count, score="stacked", unit_divisor=unit,
+            min_count=min_count, score="stacked", unit_divisor=unit, unit_name="person",
             curve_columns=curve_columns)
         root_det = _ev.detection(sb, recall_targets, columns="root",
-                                 unit_divisor=unit)
+                                 unit_divisor=unit, unit_name="person")
         _, depth = children_and_min_depth(parent_int, C)
         n_terms = M.sum(axis=1)
         # HSLDA's own read — per-node AUC over ALL test docs (y_c vs everyone, no

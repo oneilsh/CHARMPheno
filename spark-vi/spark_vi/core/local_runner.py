@@ -1,7 +1,6 @@
 """LocalRunner: the in-memory engine for the same VIModel contract (ADR 0051 §2).
 
-One patient corpus fits in a large machine's memory, and a cluster costs a spin-up
-per day; LocalRunner runs a `VIModel` over a Python sequence of rows with no Spark.
+A corpus often fits in a large machine's memory, and a cluster costs a spin-up; LocalRunner runs a `VIModel` over a Python sequence of rows with no Spark.
 It drives the exact loop VIRunner drives (`spark_vi.core.loop.run_svi_loop`: the
 Robbins-Monro schedule, corpus/batch pre-scaling, ELBO trace, diagnostics,
 checkpoint, resume), and its E-step calls the same `local_update` /

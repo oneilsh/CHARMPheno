@@ -42,7 +42,7 @@ def assert_persisted(target: RDD | DataFrame, name: str = "input") -> None:
       materializes the upstream cache via lineage anyway.
 
     `name` is included in the error message for actionable diagnostics
-    (e.g. "persist(omop): ...").
+    (e.g. "persist(corpus): ...").
     """
     if isinstance(target, RDD):
         _assert_rdd_persisted(target, name)

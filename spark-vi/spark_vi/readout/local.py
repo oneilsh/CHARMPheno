@@ -1,7 +1,7 @@
 """Local backend of the readout: the same kernels over rows held in memory.
 
-A readout pass on Spark is a scan of the whole scored frame (exp 0163: 22-65 s per
-pass, 700-900 passes per solve). When the split fits in one machine's memory --
+A readout pass on Spark is a scan of the whole scored frame (measured at 22-65 s
+per pass, 700-900 passes per solve at C and K in the thousands). When the split fits in one machine's memory --
 always for a top-m truncated θ, which is ~3 KB per row at m=256 -- `LocalReadoutData`
 holds it once and every pass is the same numpy kernel over that list
 (`readout.kernels`), so a local solve agrees with the Spark one up to floating-point
