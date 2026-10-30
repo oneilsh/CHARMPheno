@@ -1,20 +1,10 @@
 """Batched multi-head logistic regression: C independent per-node fits, one solver.
 
-The readout's solver (``spark_vi.readout``, ADR 0051; it lived in
-``models/topic/batched_lr.py`` until then), fit on FROZEN θ, or on any other
-frozen feature vector. It also served the co-fit head until ADR 0050 removed it
-(the carried-curvature ``state`` path below is that head's legacy and stays inert
-for the readout). Domain-agnostic by construction: pure numpy, no Spark import;
-the docstrings' ``analysis.pc.evaluate`` mentions name the sklearn oracle it
-reproduces (prose, not code). Both backends feed it: ``readout.spark``'s
-treeAggregate stats function and ``readout.local``'s in-memory one.
-
-This is Package A of the distributed readout
-(`docs/superpowers/plans/2026-08-20-distributed-readout-plan.md`, step 1): the
-pure-numpy, Spark-free half. It replaces the per-node sklearn loop in
-:func:`analysis.pc.evaluate._lr_proba_per_label_masked` — which is the ORACLE
-this module must reproduce numerically — with ONE optimization over all C heads
-that shares every pass over the data.
+The readout's solver, fit on FROZEN θ or on any other frozen feature vector. Pure
+numpy, no Spark import; both backends feed it (`readout.spark`'s treeAggregate stats
+function and `readout.local`'s in-memory one). Its numerical oracle is the per-node
+scikit-learn loop `analysis.pc.evaluate._lr_proba_per_label_masked`, which it must
+reproduce (tests: `analysis/pc/tests/test_batched_lr.py`, which need scikit-learn).
 
 **Why batch at all.** On frozen θ the C per-node readouts are independent convex
 (K+1)-dim problems that differ only in which rows they read (node c uses the rows
@@ -44,9 +34,8 @@ choices is load-bearing for A/B equality against the driver readout, so:
     aggregates are collected in RAW θ coordinates because that is what a
     distributed pass over θ can cheaply produce.
 
-**Why the solver is L-BFGS and not Newton.** The plan (§"Design (v2)") rules out
-the blockwise Newton of the co-fit head: an O(C·K²) Fisher block is 36 TB at
-K≈3,300, whereas L-BFGS keeps `m` history pairs of the SAME shape as the
+**Why the solver is L-BFGS and not Newton.** A blockwise Newton needs an O(C·K²)
+Fisher block, 36 TB at K≈3,300, whereas L-BFGS keeps `m` history pairs of the SAME shape as the
 parameters — O(m·C·K). The separability of the objective is what makes the
 batched version exact rather than a heuristic: a step-size VECTOR with a per-node
 Armijo test is identical to running C independent line searches, and freezing a
@@ -54,10 +43,10 @@ converged node is identical to having stopped its own solver.
 
 **Why the stats seam takes a `node_mask`.** Separability also means a data pass
 only has to touch the nodes whose answer the caller does not already hold. That
-is not a micro-optimization at whole-Mondo scale, it is the wall: with C≈3,800
+is not a micro-optimization at C in the thousands, it is the wall: with C≈3,800
 independent line searches sharing one pass, SOME node is still backtracking
-almost every trial, so the exp 0104 smoke spent ~26 full passes per iteration
-(vs ~1.5-6 at C=437) even though the median node accepted its first step. The
+almost every trial, so a run measured ~26 full passes per iteration (vs ~1.5-6 at
+C=437) even though the median node accepted its first step. The
 seam therefore accepts `stats_fn(W_std, b_std, node_mask=None)`, a (C,) bool
 array meaning "only these nodes' rows are being asked about"; masked-out rows
 come back zero and the CALLER merges them with what it already has. The solver
@@ -208,8 +197,8 @@ def fold_standardization(
     i.e. ``V[c] = W_std[c]/sd[c]`` and ``b_raw[c] = b_std[c] − sum(W_std[c]*mu[c]/sd[c])``.
 
     This identity is why the scaler never has to travel with the model: scoring
-    broadcasts `(V, b_raw)` and does one matvec against raw θ (plan step 2, "No
-    collect"), and it is also how the solver evaluates its own objective — every
+    broadcasts `(V, b_raw)` and does one matvec against raw θ (no
+    collect), and it is also how the solver evaluates its own objective — every
     score in this module goes through this function, so the fit and the eventual
     executor-side scoring cannot drift apart.
     """
@@ -313,7 +302,7 @@ def make_inmemory_stats_fn(
     aggregate `g_raw`/`s`, fold back. Scoring the standardized matrix directly
     would be shorter and slightly more accurate, and would test nothing — this
     function exists so the unit tests exercise EXACTLY the arithmetic path the
-    Spark treeAggregate will run (plan step 1), making it a usable A/B reference
+    Spark treeAggregate will run, making it a usable A/B reference
     for the distributed implementation rather than merely a correct one.
 
     Unobserved cells are zeroed in the residual before aggregation, so a masked
@@ -396,7 +385,7 @@ def _next_step(
     above the sufficient-decrease line, which itself sits above the tangent since
     `_ARMIJO_C1 < 1` and g·d < 0), so this is a well-posed model of the curvature
     the step just discovered rather than a fixed guess about it. On a badly scaled
-    node — the whole-Mondo regime, where a node's summed loss is O(n) and its
+    node — the large-C regime, where a node's summed loss is O(n) and its
     first trial can overshoot by orders of magnitude — halving needs one trial per
     factor of two while the quadratic reads the overshoot off in one, which is why
     the typical depth drops from ~26 to 2-4 with the same acceptance rule.
@@ -443,7 +432,6 @@ def solve_batched_lr(
     gtol: float = 1e-6,
     x0: tuple[np.ndarray, np.ndarray] | None = None,
     progress_fn: Callable[[dict[str, Any]], None] | None = None,
-    state: dict[str, Any] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """Solve C independent penalized logistic regressions with one batched L-BFGS.
 
@@ -504,7 +492,7 @@ def solve_batched_lr(
     reliably buys is the iterate at a fixed small budget — the same fixture at
     caps of 1-10 iterations lands ~2x closer to the converged answer warm than
     cold — which is exactly the regime the readout runs in (`max_iter` binds at
-    whole-Mondo scale, and CHARM_DEV caps it deliberately). Also note that
+    large C, and a development budget caps it deliberately). Also note that
     `gtol` is a bound on a SUMMED gradient, so a warm start is normally nowhere
     near it: at n rows a parameter perturbation of ε shows up as ~n·ε of
     gradient, which is why the iteration-0 freeze above fires for a re-fit of
@@ -523,7 +511,7 @@ def solve_batched_lr(
     a small dict (`iter`, `n_stats_calls`, `n_node_evals`, `n_active`,
     `n_converged`, `n_stalled`, `max_grad_inf_norm`) so a driver can heartbeat a
     long distributed solve — each stats call is a full cluster pass, so iterations
-    are minutes, not microseconds, at whole-Mondo scale. The payload also carries
+    are minutes, not microseconds, at large C. The payload also carries
     the CURRENT iterate as ``W_std`` (C,K) and ``b_std`` (C,), which is what lets
     a driver CHECKPOINT a multi-hour solve (`readout.heads.fit_heads` writes them
     every N iterations and feeds them back as `x0` after a
@@ -554,7 +542,7 @@ def solve_batched_lr(
     no-op on rows this solver never reads. Every accepted point is therefore
     evaluated by a pass that really did read that node's rows; what the mask
     removes is only the re-evaluation of answers already in hand, which at
-    whole-Mondo scale is nearly all of the work (one deep straggler used to drag
+    large C is nearly all of the work (one deep straggler used to drag
     3,000 settled nodes through 25 extra passes). Likewise FREEZING: once a node
     has stopped (full gradient inf-norm, data + ridge, <= `gtol`, or the numerical
     stall above) its direction is set to 0, so it contributes nothing further and is
@@ -625,23 +613,6 @@ def solve_batched_lr(
     rho_hist: list[np.ndarray] = []
     gamma = np.ones(C, dtype=np.float64)
     has_hist = np.zeros(C, dtype=bool)
-    # CARRIED CURVATURE (co-fit head only; `state=None` is the byte-identical readout
-    # path — nothing below runs). When the caller threads a `state` dict with a
-    # SHAPE-COMPATIBLE ((C, K+1)) history, seed the L-BFGS memory from the PREVIOUS
-    # solve so the amortized co-fit head does not rebuild curvature from scratch each
-    # outer SVI iter (plan D3, head_history_reset=False). This deliberately feeds the
-    # new θ's solve pairs sampled on the OLD θ's objective — the non-stationary-curvature
-    # trade the simulator gate weighs against a fresh (state-less) start. A shape
-    # mismatch (C or K changed) silently starts cold.
-    if state is not None and state.get("S_hist"):
-        Sh = state["S_hist"]
-        if Sh and np.asarray(Sh[0]).shape == (C, n):
-            S_hist = [np.asarray(s, dtype=np.float64).copy() for s in Sh]
-            Y_hist = [np.asarray(y, dtype=np.float64).copy() for y in state["Y_hist"]]
-            rho_hist = [np.asarray(r, dtype=np.float64).copy()
-                        for r in state["rho_hist"]]
-            gamma = np.asarray(state["gamma"], dtype=np.float64).copy()
-            has_hist = np.asarray(state["has_hist"], dtype=bool).copy()
 
     for it in range(1, max_iter + 1):
         active = ~frozen
@@ -816,16 +787,4 @@ def solve_batched_lr(
         "loss": F,
         "warm_started": warm_started,
     }
-    if state is not None:
-        # Hand the ending curvature back so the co-fit caller can carry it to the next
-        # outer iter (head_history_reset=False). Copies, since S_hist/… are the live
-        # arrays the loop mutates. Only populated when a state dict was threaded in, so
-        # the readout path (state=None) gets a byte-identical `info`.
-        info["state"] = {
-            "S_hist": [s.copy() for s in S_hist],
-            "Y_hist": [y.copy() for y in Y_hist],
-            "rho_hist": [r.copy() for r in rho_hist],
-            "gamma": gamma.copy(),
-            "has_hist": has_hist.copy(),
-        }
     return X[:, :K].copy(), X[:, K].copy(), info
