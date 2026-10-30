@@ -2,8 +2,8 @@
 
 Closure, descendants, depth, the transitive reduction of an order restricted to a
 kept node set, and where an attestation of a dropped node lands. The node ids are any
-hashables; nothing here knows what a node means (an ontology-specific builder, such
-as `charmpheno.mondo.native_dag`, calls these).
+hashables; nothing here knows what a node means (an ontology-specific builder in
+the consuming package calls these).
 """
 from __future__ import annotations
 
@@ -100,7 +100,7 @@ def transitive_reduction_parents(kept, parent_adj) -> dict:
     carries no information the path `p ... q -> c` does not.
 
     Multi-parenthood survives untouched wherever the parents are genuinely
-    incomparable (orthogonal axes of one ontology, common in disease ontologies):
+    incomparable (orthogonal axes of one ontology, common in real ontologies):
     only comparable pairs are reduced. Returns `{kept term: [kept parents]}`; a term with no kept
     ancestor gets `[]` and attaches to the synthetic root."""
     kept = set(kept)

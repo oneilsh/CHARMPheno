@@ -494,8 +494,7 @@ def assert_unique_ids(ids, *, where):
     if n != distinct:
         raise ValueError(
             f"row-id collision in {where}: {n} rows carry {distinct} distinct ids. "
-            "The id column must be unique per row (for the clinical corpora, the "
-            "synthesized doc key: check the per-person document cap).")
+            "The id column must be unique per row.")
 
 
 def moments_to_mu_sd(sum_theta, sum_theta_sq, n_obs, *, eps=1e-12):
@@ -503,8 +502,7 @@ def moments_to_mu_sd(sum_theta, sum_theta_sq, n_obs, *, eps=1e-12):
 
     ddof=0 because the oracle is `sklearn.preprocessing.StandardScaler`, which
     divides by n — using the sample std would put the distributed fit on a slightly
-    different objective than the driver readout it must equal at the
-    cardiovascular A/B gate.
+    different objective than the scikit-learn oracle it must equal.
 
     This is the driver-side reduction of `moments_kernel`'s sums, and it is the
     twin of `solver.standardization_moments`
@@ -585,8 +583,7 @@ def row_sparse(rows, topic_col, label_col, mask_col, topm):
 def row_quads(rows, id_col, score_col, label_col, mask_col, topm=0):
     """Stream `(row_id, score, label, mask)` off Spark Rows for `lean_eval_kernel`.
 
-    `id_col` names an int64 row-id column (the clinical drivers synthesize a doc
-    key and pass its name); `lean_eval_kernel` packs it into an int64 array, so a
+    `id_col` names an int64 row-id column; `lean_eval_kernel` packs it into an int64 array, so a
     string id raises there. `score_col` is θ or an already-computed probability vector
     depending on the caller; both arrive as Spark ML Vectors, so the same
     `to_array` serves.

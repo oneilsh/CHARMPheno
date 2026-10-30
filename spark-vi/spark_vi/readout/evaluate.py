@@ -83,19 +83,33 @@ class Blocks:
             return self.blocks.map(fn).treeReduce(combine)
         return functools.reduce(combine, (fn(b) for b in self.blocks))
 
-    def max_by_unit(self, fn):
-        """`{unit: (max score, max y)}` over the `(unit, score, y)` rows `fn(block)`
-        yields: pooling rows onto a coarser unit (documents onto persons)."""
+    def pooled_metrics(self, fn, key, **kw):
+        """`{key: metrics}` after pooling rows onto a coarser unit by max: `fn(block)`
+        yields `(unit, score, y)` rows; each unit keeps its max score and max y.
+
+        Distributed end to end on an RDD (a reduceByKey by unit, then the units'
+        pooled values are tallied where they land), so nothing unit-count sized
+        reaches the driver however many units there are."""
         def _mx(a, b):
             return (max(a[0], b[0]), max(a[1], b[1]))
         if self.is_rdd:
-            return dict(self.blocks.flatMap(fn).map(lambda r: (r[0], (r[1], r[2])))
-                        .reduceByKey(_mx).collect())
+            from spark_vi.eval.metrics import spark as mspark
+
+            def _piece(it, _k=key):
+                sy = [v for _u, v in it]
+                if sy:
+                    yield (_k, np.fromiter((v[0] for v in sy), dtype=np.float64),
+                           np.fromiter((v[1] for v in sy), dtype=np.float64))
+            pooled = (self.blocks.flatMap(fn).map(lambda r: (r[0], (r[1], r[2])))
+                      .reduceByKey(_mx).mapPartitions(_piece))
+            return mspark.per_key_metrics(pooled, **kw)
         out = {}
         for b in self.blocks:
             for u, s, y in fn(b):
                 out[u] = _mx(out[u], (s, y)) if u in out else (s, y)
-        return out
+        s = np.fromiter((v[0] for v in out.values()), dtype=np.float64)
+        y = np.fromiter((v[1] for v in out.values()), dtype=np.float64)
+        return mlocal.per_key_metrics([(key, s, y)], **kw)
 
 
 def _val(v):
@@ -157,13 +171,14 @@ def ranking_and_pr(per_col, C, *, recall_targets, fdr_targets, min_count=0,
 
 
 def detection(blocks, recall_targets, *, score="proba", columns="nonroot",
-              unit_divisor=None):
+              unit_divisor=None, unit_name="unit"):
     """Case vs background on one pooled column: per row the max over the
     INFORMATIVE non-root node columns (node 0 is the root; `columns="root"` uses the
     root column alone), the foreground indicator the root's label. Constant columns are
     excluded (a constant column in the max can pin it, and the AUC at 0.5). With
-    `unit_divisor`, rows pool onto units `ids // unit_divisor` by max (documents onto
-    persons), so a person with several documents is one case."""
+    `unit_divisor`, rows pool onto units `ids // unit_divisor` by max (several
+    documents of one entity become one case); `unit_name` names that grain in the
+    result."""
     def _range(b, _s=score):
         p = b[_s]
         if p.shape[0] == 0:
@@ -207,11 +222,8 @@ def detection(blocks, recall_targets, *, score="proba", columns="nonroot",
             s, y = _row(b)
             return zip((np.asarray(b["ids"], dtype=np.int64) // _div).tolist(),
                        s.tolist(), y.tolist())
-        pooled = blocks.max_by_unit(_units)
-        s = np.fromiter((v[0] for v in pooled.values()), dtype=np.float64)
-        y = np.fromiter((v[1] for v in pooled.values()), dtype=np.float64)
-        per = mlocal.per_key_metrics([("det", s, y)], recall_targets=recall_targets)
-        grain = "person"
+        per = blocks.pooled_metrics(_units, "det", recall_targets=recall_targets)
+        grain = str(unit_name)
     _destroy(binfo)
     m = per.get("det")
     if m is None or m["n_pos"] == 0 or m["n_neg"] == 0:
@@ -224,7 +236,8 @@ def detection(blocks, recall_targets, *, score="proba", columns="nonroot",
 
 
 def readout_metrics(blocks, C, *, recall_targets, fdr_targets, min_count=0,
-                    skip_constant=False, unit_divisor=None, score="proba",
+                    skip_constant=False, unit_divisor=None, unit_name="unit",
+                    score="proba",
                     curve_columns=(), max_points=300):
     """The readout block: `{ranking, pr, detection, per_node}` (the schema
     `results_readout*.json` has always carried), from `score` over each node's
@@ -238,7 +251,8 @@ def readout_metrics(blocks, C, *, recall_targets, fdr_targets, min_count=0,
     ranking, pr = ranking_and_pr(per_col, C, recall_targets=recall_targets,
                                  fdr_targets=fdr_targets, min_count=min_count,
                                  skip_constant=skip_constant)
-    det = detection(blocks, recall_targets, score=score, unit_divisor=unit_divisor)
+    det = detection(blocks, recall_targets, score=score, unit_divisor=unit_divisor,
+                    unit_name=unit_name)
     per_node = {}
     for c, rl in ranking["per_label"].items():
         if rl.get("skipped") is None and rl.get("auc") is not None:
@@ -259,7 +273,7 @@ def readout_metrics(blocks, C, *, recall_targets, fdr_targets, min_count=0,
 
 def calibration_by_group(blocks, groups, *, scores=("proba",), n_bins=10):
     """`{(score, group): ECE}` pooled over every row and every column of each group
-    (`groups` = `{name: [columns]}`): the marginal calibration, not a cohort's."""
+    (`groups` = `{name: [columns]}`): the marginal calibration, not a subgroup's."""
     g = {k: np.asarray(v, dtype=np.int64) for k, v in groups.items()}
     bg = blocks.broadcast(g)
 

@@ -50,7 +50,7 @@ def test_detection_pools_rows_onto_units_by_max():
     s = p[:, 1:5].max(axis=1).reshape(-1, 4).max(axis=1)
     yy = y[:, 0].reshape(-1, 4).max(axis=1)
     want = core.node_metrics(core.tally(s, yy))
-    assert det["grain"] == "person" and det["n_units"] == D // 4
+    assert det["grain"] == "unit" and det["n_units"] == D // 4
     assert det["auc"] == pytest.approx(want["auc"], abs=1e-12)
 
 
