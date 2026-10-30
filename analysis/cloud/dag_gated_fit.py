@@ -623,7 +623,7 @@ def readout_arm(train_scored, test_scored, C, K, *, recall_targets, fdr_targets,
                 max_iter=READOUT_MAX_ITER, history=6, warm_start=None, theta_topm=0,
                 checkpoint_dir=None, checkpoint_every=10,
                 topic_col="topicDistribution", label_col="label",
-                mask_col="labelMask", id_col="person_id", feature_mask=None,
+                mask_col="labelMask", id_col="person_id",
                 engine="spark", curve_columns=()):
     """Fit the per-node heads on the train split, score the test split, macro the
     metrics: `(readout, test score blocks, (V, b_raw))`. The blocks
@@ -665,7 +665,7 @@ def readout_arm(train_scored, test_scored, C, K, *, recall_targets, fdr_targets,
     V, b_raw, const, degenerate, info = fit_heads(
         data_tr, l2=l2, gtol=gtol, max_iter=max_iter, history=history, label=label,
         warm_start=warm_start, checkpoint_path=ckpt_path,
-        checkpoint_every=checkpoint_every, feature_mask=feature_mask)
+        checkpoint_every=checkpoint_every)
     if checkpoint_dir is not None:
         write_heads(checkpoint_dir, label, V, b_raw, const, degenerate, C, K,
                     theta_topm, W_std=info.get("W_std"))
