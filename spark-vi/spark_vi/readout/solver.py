@@ -4,7 +4,8 @@ The readout's solver, fit on FROZEN θ or on any other frozen feature vector. Pu
 numpy, no Spark import; both backends feed it (`readout.spark`'s treeAggregate stats
 function and `readout.local`'s in-memory one). Its numerical oracle is the per-node
 scikit-learn loop `analysis.pc.evaluate._lr_proba_per_label_masked`, which it must
-reproduce (tests: `analysis/pc/tests/test_batched_lr.py`, which need scikit-learn).
+reproduce (tests: `spark-vi/tests/test_batched_lr.py`; scikit-learn is a dev
+dependency, never a runtime one).
 
 **Why batch at all.** On frozen θ the C per-node readouts are independent convex
 (K+1)-dim problems that differ only in which rows they read (node c uses the rows

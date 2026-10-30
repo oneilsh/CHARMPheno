@@ -21,6 +21,9 @@ formula = ["formulaic"]
 pytest = ">=7.0"
 build = ">=1.0"
 pandas = ">=2.0"
+# Test oracle only (the readout solver and the exact metrics are checked against
+# scikit-learn); never imported by the package itself.
+scikit-learn = ">=1.3"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
