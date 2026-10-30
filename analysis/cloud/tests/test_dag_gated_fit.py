@@ -101,7 +101,7 @@ def test_detection_skips_when_every_disease_column_is_constant():
     y = np.array([[0., 0, 0], [1., 1, 0]])
     proba = np.array([[0.5, 0.4, 0.6], [0.5, 0.4, 0.6]])
     det = detection_readout(proba, y, [0.5])
-    assert det["skipped"] == "all disease-node scores are constant"
+    assert det["skipped"] == "all non-root node scores are constant"
     assert det["n_constant_nodes"] == 2
 
 
