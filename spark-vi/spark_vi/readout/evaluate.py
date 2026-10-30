@@ -111,9 +111,9 @@ def _destroy(v):
 def with_stacked(blocks, M, *, src="proba", dst="stacked"):
     """Blocks with `dst` = the closure product of `src` (`readout.stacked`), computed
     where each block lives. `M` is the (C, C) closure matrix."""
-    from spark_vi.readout.stacked import stacked_proba
+    from spark_vi.readout.stacked import closure_operator, stacked_proba
 
-    bM = blocks.broadcast(np.asarray(M, dtype=np.float32))
+    bM = blocks.broadcast(closure_operator(M))
 
     def _add(b, _bM=bM, _src=src, _dst=dst):
         return {**b, _dst: stacked_proba(b[_src], _val(_bM))}
