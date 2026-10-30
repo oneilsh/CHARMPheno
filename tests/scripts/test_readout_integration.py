@@ -58,9 +58,7 @@ os.environ["PYTHONPATH"] = os.pathsep.join(
 
 import dag_gated_fit as gpc  # noqa: E402
 from spark_vi.readout import SparkReadoutData, fit_heads  # noqa: E402
-from spark_vi.readout import heads as readout_heads  # noqa: E402
 from spark_vi.readout import kernels as readout_kernels  # noqa: E402
-from spark_vi.readout import spark as readout_spark  # noqa: E402
 import dag_gated_readout as gpr  # noqa: E402
 import run_experiment as rex  # noqa: E402
 
@@ -350,9 +348,9 @@ def test_theta_topm_on_concentrated_theta_keeps_the_readout(spark, caplog):
     truncation that keeps most of the mass should move per-node AUC by little. The
     tolerance here is DELIBERATELY loose and is not a correctness gate: exactness is
     pinned against the dense-on-truncated oracle in
-    `spark-vi/tests/test_readout_kernels.py`, and how much AUC a given m costs on a given corpus
-    is exactly what `theta_topm_coverage` exists to report before anyone sets the
-    flag. Assert tightly here and the test would be asserting on a Dirichlet draw.
+    `spark-vi/tests/test_readout_kernels.py`, and how much AUC a given m costs on a
+    given corpus is a property of that corpus. Assert tightly here and the test would
+    be asserting on a Dirichlet draw.
     """
     caplog.set_level("INFO", logger="spark_vi.readout")
     rng = np.random.default_rng(21)
@@ -373,10 +371,9 @@ def test_theta_topm_on_concentrated_theta_keeps_the_readout(spark, caplog):
     test_df = _make_df(spark, Pi_te, y_te, m_te, offset=10_000).cache()
     kw = dict(recall_targets=RECALL_TARGETS, fdr_targets=FDR_TARGETS, min_count=0)
 
-    # the measurement that justifies the setting, on the same frame
-    cov = readout_spark.theta_topm_coverage(train_df, K_wide, ms=(topm, K_wide))
-    assert cov[K_wide][0] == pytest.approx(1.0)
-    assert cov[topm][0] > 0.5, "fixture must actually be concentrated"
+    # the fixture must actually be concentrated: the top-m keep most of each row
+    kept = np.sort(Pi_tr, axis=1)[:, -topm:].sum(axis=1)
+    assert kept.mean() > 0.5
 
     full = gpc.readout_arm(train_df, test_df, C, K_wide, label="full", **kw)
     trunc = gpc.readout_arm(train_df, test_df, C, K_wide,
@@ -388,34 +385,6 @@ def test_theta_topm_on_concentrated_theta_keeps_the_readout(spark, caplog):
                           - full[0]["per_node"][c]["auc"]) for c in shared])
     assert d_auc.max() < 0.15, f"top-{topm} cost more AUC than the mass it dropped"
     train_df.unpersist(); test_df.unpersist()
-
-
-@pytest.mark.slow
-def test_coverage_line_is_logged_only_for_large_fits(spark, caplog, monkeypatch):
-    """The measurement is always on WHERE IT MATTERS and nowhere else.
-
-    Small fits (every cardiovascular-scale run) must not pay an extra data pass for a
-    diagnostic about a lever nobody is pulling; whole-Mondo-scale fits must print the
-    coverage whether or not `theta_topm` is set, so the run of record carries the
-    evidence for — or against — the setting it used.
-    """
-    caplog.set_level("INFO", logger="spark_vi.readout")
-    Pi_tr, y_tr, m_tr, _, _, _ = _make_arrays(seed=9)
-    train_df = _make_df(spark, Pi_tr, y_tr, m_tr).cache()
-    _fit(train_df, label="small", max_iter=2)
-    assert "theta top-m mass" not in caplog.text
-    caplog.clear()
-
-    monkeypatch.setattr(readout_heads, "_COVERAGE_MIN_FIT_BYTES", 0)
-    _fit(train_df, label="big", max_iter=2)
-    txt = caplog.text
-    assert "big: theta top-m mass:" in txt
-    line = next(ln for ln in txt.splitlines() if "theta top-m mass" in ln)
-    assert all(f"m={m}:" in line for m in (64, 128, 256, 512))
-    assert line.rstrip().endswith("(mean/p10)")
-    # K=10 here, so every m keeps all the mass — the identity end of the scale
-    assert "m=64:1.000/0.999" in line
-    train_df.unpersist()
 
 
 @pytest.mark.slow

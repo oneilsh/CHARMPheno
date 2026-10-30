@@ -88,14 +88,6 @@ def test_fit_heads_scores_and_applies_the_degenerate_fallback(tmp_path):
     np.testing.assert_array_equal(got[3], deg)
 
 
-def test_coverage_needs_untruncated_rows():
-    theta, y, mask = _data(5)
-    cov = LocalReadoutData.from_arrays(theta, y, mask).coverage(ms=(2, 4))
-    assert set(cov) == {2, 4} and cov[4][0] >= cov[2][0]
-    with pytest.raises(ValueError):
-        LocalReadoutData.from_arrays(theta, y, mask, topm=4).coverage(ms=(2,))
-
-
 def _frame(spark, theta, y, mask):
     from pyspark.ml.linalg import VectorUDT, Vectors
     from pyspark.sql.types import (ArrayType, DoubleType, LongType, StructField,
@@ -129,3 +121,15 @@ def test_local_and_spark_backends_fit_the_same_heads(spark, topm):
     pl, *_l, kl = lo.lean_proba(Vl, bl, degenerate=dl, const=cl)
     order_s, order_l = np.argsort(ks), np.argsort(kl)
     np.testing.assert_allclose(pl[order_l], ps[order_s], atol=1e-5)
+
+
+def test_score_blocks_carries_extra_columns_like_the_spark_backend():
+    theta, y, mask = _data(5)
+    data = LocalReadoutData.from_arrays(theta, y, mask)
+    C, K = y.shape[1], theta.shape[1]
+    V, b = np.zeros((C, K)), np.zeros(C)
+    names = [f"row{i}" for i in range(len(theta))]
+    blk = data.score_blocks(V, b, extra={"name": names})
+    assert blk.blocks[0]["name"] == names
+    with pytest.raises(ValueError):
+        data.score_blocks(V, b, extra={"name": names[:-1]})

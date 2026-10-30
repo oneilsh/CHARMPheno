@@ -26,7 +26,6 @@ class _FakeData:
     stats call."""
 
     topm = 0
-    can_measure_coverage = False
 
     def __init__(self, Pi, y, obs, fail_at=None):
         self.Pi, self.y, self.obs = Pi, y, obs

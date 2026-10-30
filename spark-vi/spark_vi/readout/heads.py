@@ -6,8 +6,7 @@ standardization moments, the degenerate-node fallback, the batched L-BFGS solve
 written once against a small data interface that `readout.spark.SparkReadoutData`
 and `readout.local.LocalReadoutData` both implement:
 
-    C, K, topm, can_measure_coverage
-    coverage()                          -> {m: (mean, p10)} θ-mass coverage
+    C, K, topm
     moments()                           -> (mu, sd, n_obs, n_pos)
     stats_fn(mu, sd, fold_standardization=, standardized_grad_from_raw=)
                                         -> context manager, callable as
@@ -44,14 +43,6 @@ READOUT_GTOL = 1e-4
 # because that makes a development loop affordable (60 iterations already give a
 # stable macro-AUC ranking).
 READOUT_MAX_ITER = 200
-
-# Fit size (C*K float64 parameter bytes) above which `fit_heads` pays for
-# the θ mass-coverage measurement. 64 MB is C=K≈2,900 — far above a few-hundred-node
-# fit (C=444: 1.6 MB) and below a C=K≈3,827 one (117 MB), which is exactly where the
-# top-m lever is a live question and one extra cheap pass is noise against a
-# multi-hour solve.
-_COVERAGE_MIN_FIT_BYTES = 64 * 1024 * 1024
-
 
 _CKPT_VERSION = "readout-ckpt-v2"
 
@@ -291,7 +282,7 @@ def fit_heads(data, *, l2=1.0, gtol=READOUT_GTOL, max_iter=READOUT_MAX_ITER,
 
     `data` is the TRAIN split on either backend -- `readout.spark.SparkReadoutData`
     or `readout.local.LocalReadoutData` -- which supplies `C`, `K`, the truncation
-    width `topm`, `coverage`, `moments` and `stats_fn`. Everything below is the same
+    width `topm`, `moments` and `stats_fn`. Everything below is the same
     for both; only where a data pass runs differs.
 
     Returns `(V (C,K), b_raw (C,), const (C,), degenerate (C,) bool, info)` — the
@@ -334,9 +325,7 @@ def fit_heads(data, *, l2=1.0, gtol=READOUT_GTOL, max_iter=READOUT_MAX_ITER,
     docstring). It changes the DESIGN MATRIX, not the procedure: the moments pass,
     every L-BFGS pass and — by the caller's obligation — the scoring pass all read
     the same truncated features, so what comes back is the exact readout of a
-    narrower model rather than an approximation of the wide one. The mass that
-    truncation drops is measured and logged BEFORE the fit (`theta_topm_coverage`),
-    because the whole premise is an empirical claim about θ's concentration.
+    narrower model rather than an approximation of the wide one.
 
     `checkpoint_path` turns the solve into a RESUMABLE one, which at C and K in the
     thousands is the difference between losing 15 minutes and losing an afternoon
@@ -363,19 +352,6 @@ def fit_heads(data, *, l2=1.0, gtol=READOUT_GTOL, max_iter=READOUT_MAX_ITER,
     """
     C, K, theta_topm = int(data.C), int(data.K), int(data.topm)
     tag = f"{label}: " if label else ""
-    if C * K * 8 > _COVERAGE_MIN_FIT_BYTES and data.can_measure_coverage:
-        # Only measured where truncation is on the table. Below ~64 MB of (C,K)
-        # parameters the dense fit is a couple of seconds a pass and the θ-width
-        # lever is not a decision anyone is making, so the extra pass would be pure
-        # cost. Above it, this is the number that says whether top-m is a cheap
-        # reparameterization or a lobotomy — reported on the TRAIN frame, before the
-        # moments pass, whether or not `theta_topm` is set, so the run of record
-        # carries the evidence for (or against) the setting it used.
-        cov = data.coverage()
-        log.info(f"{tag}theta top-m mass: "
-              + " ".join(f"m={m}:{mean:.3f}/{p10:.3f}"
-                         for m, (mean, p10) in sorted(cov.items()))
-              + " (mean/p10)")
     mu, sd, n_obs, n_pos = data.moments()
     # Same three cases as `_lr_proba_per_label_masked`'s `np.unique(yc).size < 2`:
     # nothing observed (-> 0.0), all-negative (-> 0.0), all-positive (-> 1.0).
