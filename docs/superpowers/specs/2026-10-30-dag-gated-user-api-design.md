@@ -145,6 +145,28 @@ and no shim Params. The redesign:
 - every write stays atomic (stage, then rename / commit), as `save_result` and the
   heads file already are locally.
 
+Two levels, built in this order (maintainer, 2026-10-30):
+- **Level 1, any Hadoop-filesystem URI.** One small I/O module (`spark_vi.io.fs`:
+  open for write / read, exists, rename, delete, list) dispatching on the URI scheme:
+  no scheme or `file://` -> plain Python I/O, exactly as today (so the gcsfuse-mounted
+  run dirs behave identically, and no Hadoop `LocalFileSystem` `.crc` sidecars appear);
+  `hdfs://`, `gs://`, `s3a://`, ... -> the running SparkContext's Hadoop `FileSystem`
+  through py4j (no new dependency; `gs://` through the cluster's GCS connector). Remote
+  reads load into memory (np.load needs a seekable file; the objects are driver-sized
+  anyway). On object stores a single object is never torn (it becomes visible only when
+  its upload completes), so atomicity is "write the manifest last", with no directory
+  renames (those are copies there). Callers: `save_result` / `load_result`, the readout
+  checkpoint and heads file, `DagHeadsModel.save` / `load`, the shims' `resumeFrom`
+  check. A run may then write straight to an in-boundary bucket instead of the fuse
+  mount (an option; the bucket is the maintainer's to name).
+- **Level 2, MLlib persistence.** Each model implements `MLWritable` / `MLReadable` with
+  a small `MLWriter` / `MLReader`: MLlib's standard params metadata
+  (`DefaultParamsWriter`) plus our own data files (npy / npz, through Level 1) under the
+  stage's directory. Then `Pipeline([DagGatedLDA, DagHeads]).fit(df).save(uri)` and
+  `PipelineModel.load(uri)` work like any built-in stage's (today fitting the pipeline
+  works but saving it does not: the models' `save(path)` is custom). Built once, on the
+  redesigned estimators.
+
 ## What changes outside spark-vi
 
 - **The bundle** stores the attested node ids per document (two columns when R8 is
