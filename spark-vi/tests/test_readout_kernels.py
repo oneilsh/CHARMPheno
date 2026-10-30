@@ -308,51 +308,6 @@ def test_dense_triples_roundtrips_packed_rows():
 # --------------------------------------------------------------------------- #
 # Top-m sparse θ: measurement, then exactness against the dense oracle.        #
 # --------------------------------------------------------------------------- #
-def test_topm_coverage_kernel_matches_direct_numpy():
-    """Mean coverage must be EXACT (it is a mean of exact per-doc ratios); the p10
-    comes out of a 1000-bin histogram, so it is pinned to the bin width — and to the
-    ROUNDING DIRECTION, since `coverage_from_accum` promises a floor (never an
-    optimistic estimate of what the worst decile keeps)."""
-    rng = np.random.default_rng(31)
-    D_big = 400
-    Pi = rng.dirichlet(np.full(K, 0.3), size=D_big)
-    ms = (1, 3, 5, K, K + 4)
-    sums, hist, n = kern.topm_coverage_kernel(iter(Pi), ms)
-    assert n == D_big
-    got = kern.coverage_from_accum(sums, hist, n, ms)
-    desc = -np.sort(-Pi, axis=1)
-    for m in ms:
-        cov = desc[:, :min(m, K)].sum(axis=1) / Pi.sum(axis=1)
-        mean, p10 = got[m]
-        assert abs(mean - cov.mean()) < 1e-12, m
-        # nearest-rank 10th percentile, the definition the histogram implements
-        nearest = np.sort(cov)[int(np.ceil(0.10 * D_big)) - 1]
-        assert -1e-12 <= nearest - p10 <= 1e-3 + 1e-12, (m, p10, nearest)
-    # a wider m can never keep less mass, and m>=K keeps all of it
-    assert got[1][0] < got[3][0] < got[5][0] < got[K][0]
-    assert got[K][0] == pytest.approx(1.0) and got[K + 4][0] == pytest.approx(1.0)
-
-
-def test_topm_coverage_accumulators_combine_by_addition():
-    """Partitions must be summable — that is what makes this one treeAggregate."""
-    rng = np.random.default_rng(32)
-    Pi = rng.dirichlet(np.full(K, 0.5), size=40)
-    ms = (2, 4)
-    whole = kern.topm_coverage_kernel(iter(Pi), ms)
-    a = kern.topm_coverage_kernel(iter(Pi[:13]), ms)
-    b = kern.topm_coverage_kernel(iter(Pi[13:]), ms)
-    merged = (a[0] + b[0], a[1] + b[1], a[2] + b[2])
-    assert np.allclose(merged[0], whole[0], atol=1e-12, rtol=0)
-    assert np.array_equal(merged[1], whole[1])
-    assert merged[2] == whole[2]
-    got, want = (kern.coverage_from_accum(*merged, ms),
-                 kern.coverage_from_accum(*whole, ms))
-    for m in ms:
-        # the mean re-associates across the split (fp), the binned p10 cannot
-        assert got[m][0] == pytest.approx(want[m][0], rel=1e-15)
-        assert got[m][1] == want[m][1]
-
-
 def test_topm_sparse_keeps_the_largest_entries_and_does_not_renormalize():
     """Truncated, NOT renormalized: kept entries are the ORIGINAL θ values, so the
     fold-standardization algebra keeps describing the same feature scale."""
@@ -805,20 +760,6 @@ class TestLocalSparkRoundTrip:
             with pytest.raises(ValueError):
                 stats_fn(W, b, node_mask=np.ones(C - 1, dtype=bool))
 
-
-    def test_theta_topm_coverage_matches_the_kernel(self, spark):
-        """The measurement's Spark shell: one treeAggregate, same numbers as the
-        in-memory accumulators (this is the line the fit prints before deciding
-        whether truncation is affordable)."""
-        Pi, y, mask = _make_data(seed=30)
-        df = _make_df(spark, Pi, y, mask)
-        ms = (2, 4, 8)
-        got = rspark.theta_topm_coverage(df, K, ms=ms)
-        want = kern.coverage_from_accum(*kern.topm_coverage_kernel(iter(Pi), ms), ms)
-        assert set(got) == set(want)
-        for m in ms:
-            assert got[m][0] == pytest.approx(want[m][0], abs=1e-12)
-            assert got[m][1] == pytest.approx(want[m][1], abs=1e-12)
 
     def test_masked_moments_topm_matches_the_sparse_kernel(self, spark):
         Pi, y, mask = _make_data(seed=31)

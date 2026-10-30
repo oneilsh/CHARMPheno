@@ -73,6 +73,12 @@ from run_dirs import resolve_run_dir
 # explicit --readout-max-iter 60, which is exactly the retyping the manifest field
 # removes for every fit written since.
 _LEGACY_READOUT_MAX_ITER = 200
+# Default top-m width of the readout's θ: each row keeps its 100 largest topic
+# proportions (truncated, not renormalized). LDA's θ is spiky, so 100 is far more
+# "phenotypes" per patient than the posterior carries, and a fixed width keeps the
+# kernels rectangular. Overridden by --readout-theta-topm or a manifest's recorded
+# readout_theta_topm; a width >= K means no truncation.
+DEFAULT_READOUT_THETA_TOPM = 100
 
 
 def _cprint(msg, **kw) -> None:
@@ -401,7 +407,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "tokens (all domains pooled) with the same solver, l2, readout "
                         "DAG and stacked arm; outputs tagged 'raw<N>'. With "
                         "--prev-history the whole-history prevalence check runs on "
-                        "those heads. Do not pass --readout-theta-mass.")
+                        "those heads. Do not pass --readout-theta-topm.")
     p.add_argument("--prev-history", action="store_true",
                    help="(--prevalence-check) exp 0145: add the WHOLE-HISTORY prior rule "
                         "from the E4 sidecar (first attestation before the index) beside "
@@ -536,22 +542,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="ROC/PR curves (thinned to ~300 points) of N sampled nodes, "
                         "flat and stacked arms, to readout_curves[_<tag>].json in the "
                         "run dir (workspace-internal: per-node). 0 = none.")
-    p.add_argument("--readout-theta-mass", type=float, default=None,
-                   help="OVERRIDE: resolve the top-m width from a theta-MASS target "
-                        "on the train frame (spec 2026-10-07 §D4; smallest m in "
-                        "{16,32,...,K} with p10 coverage >= target). Tags outputs "
-                        "mass<pct>. Default: the manifest's resolved "
-                        "readout_theta_topm; a fit-only manifest that recorded a "
-                        "readout_theta_mass but no resolved width re-resolves it.")
     p.add_argument("--readout-theta-topm", type=int, default=None,
-                   help="OVERRIDE the manifest's readout_theta_topm for this re-readout "
-                        "(0 forces full-K). Default: the manifest's value, which "
-                        "reproduces the fit's own design matrix. The override exists "
-                        "for exactly one job: PRICING truncation — re-read a full-K "
-                        "run (e.g. the 0103 cardiovascular record) with top-m forced "
-                        "on and compare per-node AUC against its recorded numbers, so "
-                        "the whole-Mondo enablement decision rests on a measured "
-                        "delta, not the mass-coverage heuristic alone.")
+                   help="Top-m width of the readout's theta: each row keeps its m "
+                        "largest topic proportions (0 = full K). Default: the "
+                        "manifest's recorded readout_theta_topm, else "
+                        f"{DEFAULT_READOUT_THETA_TOPM}. Any value given here tags the "
+                        "outputs topm<m>, so the record stays put.")
     p.add_argument("--readout-max-iter", type=int, default=None,
                    help="OVERRIDE the batched L-BFGS iteration cap for the "
                         "distributed re-readout. Default: the manifest's recorded "
@@ -932,7 +928,7 @@ def reconstruct_model(run_dir: Path, manifest: dict):
 def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targets,
                 min_count, out_dir=None, theta_topm=None, readout_max_iter=None,
                 readout_l2=None, mask_tag=None, stacked=False, parent_int=None,
-                theta_mass=None, C=None, warm_start=None, engine="spark",
+                C=None, warm_start=None, engine="spark",
                 curve_sample=0):
     """Fit and score the pc_topics_lr heads off two already-TRANSFORMED splits.
 
@@ -942,9 +938,9 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
     step 4), and `stacked=True` adds the closure-product block on those blocks. Taking DataFrames rather than a
     SparkSession + run dir keeps it callable on a local Spark fixture.
 
-    `theta_topm` / `theta_mass` / `readout_max_iter` / `readout_l2` are None-means-
-    ask-the-manifest, so a re-readout of an old fit reproduces its own design
-    (manifests written since the cleanup carry none of them; the CLI sets them).
+    `theta_topm` / `readout_max_iter` / `readout_l2` are None-means-ask-the-manifest,
+    so a re-readout of an old fit reproduces its own design; a manifest without a
+    recorded width gets `DEFAULT_READOUT_THETA_TOPM`.
     `out_dir` gets `results_readout[_<tag>].json` after each block lands, the solver
     checkpoint while it runs, and the heads sidecar after.
 
@@ -984,32 +980,16 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
             _dump_partial_results(Path(out_dir), results, name=results_name)
 
     results = {}
-    _mass = None
-    if theta_mass is not None and float(theta_mass) > 0:
-        _mass = float(theta_mass)
-        _cprint(f"[readout]   theta top-m by MASS target {_mass:g} (CLI)", flush=True)
-    elif theta_topm is None and not int(manifest.get("readout_theta_topm", 0) or 0) \
-            and float(manifest.get("readout_theta_mass", 0) or 0) > 0:
-        # An older fit-only manifest recorded the mass target, not the width.
-        _mass = float(manifest["readout_theta_mass"])
-        _cprint(f"[readout]   theta top-m by MASS target {_mass:g} (from the "
-              "manifest; width not yet resolved there)", flush=True)
-    if _mass is not None:
-        from spark_vi.readout.spark import resolve_theta_topm_by_mass
-        theta_topm, _cov = resolve_theta_topm_by_mass(
-            train_scored, K or None, _mass)
-        _cprint("[readout]   theta top-m by mass: "
-              + " ".join(f"m={m}:{mean:.3f}/{p10:.3f}"
-                         for m, (mean, p10) in sorted(_cov.items()))
-              + " (mean/p10) -> " + (f"m={theta_topm}" if theta_topm else
-                                     f"FULL K={K}"), flush=True)
-    elif theta_topm is None:
-        theta_topm = int(manifest.get("readout_theta_topm", 0) or 0)
-        if theta_topm:
-            _cprint(f"[readout]   theta top-m={theta_topm} (from manifest)", flush=True)
+    if theta_topm is not None:
+        theta_topm, _src = int(theta_topm), "CLI"
+    elif "readout_theta_topm" in manifest:
+        theta_topm, _src = int(manifest["readout_theta_topm"] or 0), "manifest"
     else:
-        theta_topm = int(theta_topm)
-        _cprint(f"[readout]   theta top-m={theta_topm} (CLI)", flush=True)
+        theta_topm, _src = DEFAULT_READOUT_THETA_TOPM, "default"
+    if theta_topm >= K:
+        theta_topm = 0                          # no truncation below full width
+    _cprint(f"[readout]   theta top-m={theta_topm or f'full K={K}'} (from {_src})",
+            flush=True)
     readout_max_iter, _mi_src = resolve_readout_max_iter(readout_max_iter, manifest)
     readout_l2, _l2_src = resolve_readout_l2(readout_l2, manifest)
     _cprint(f"[readout]   readout l2={readout_l2:g} (from {_l2_src})", flush=True)
@@ -1364,9 +1344,9 @@ def main(argv=None) -> int:
 
         _manifest_ro = manifest
         if args.raw_baseline:
-            if args.readout_theta_mass or args.readout_theta_topm:
+            if args.readout_theta_topm:
                 raise SystemExit("[readout] --raw-baseline: the features are binary "
-                                 "codes; drop --readout-theta-mass/--readout-theta-topm")
+                                 "codes; drop --readout-theta-topm")
             with _phase(f"raw-code baseline features (exp 0147, top {args.raw_baseline})"):
                 _fcols = raw_feature_cols(train_scored)
                 _sel = select_raw_codes(train_scored, args.raw_baseline, _fcols)
@@ -1420,8 +1400,7 @@ def main(argv=None) -> int:
                         f"{_tr_r.count()} test docs={_te_r.count()}", flush=True)
                 train_scored.unpersist(); test_scored.unpersist()
                 train_scored, test_scored = _tr_r, _te_r
-                _manifest_ro = dict(manifest, K=len(_sel), readout_theta_topm=0,
-                                    readout_theta_mass=0)
+                _manifest_ro = dict(manifest, K=len(_sel), readout_theta_topm=0)
                 (run_dir / _raw_tokens_name(args.raw_select)).write_text(json.dumps(
                     {"n": len(_sel), "feat_cols": _fcols, "select": args.raw_select,
                      "tokens": [[int(d), int(i)] for d, i in _sel]}))
@@ -1446,11 +1425,15 @@ def main(argv=None) -> int:
                 # tag its outputs so they never overwrite results_readout.json
                 # (or a mask run at the manifest's top-m).
                 _mtag = f"topm{int(args.readout_theta_topm)}"
-            if args.readout_theta_mass is not None and float(args.readout_theta_mass) > 0:
-                if args.readout_theta_topm is not None:
-                    raise SystemExit("[readout] --readout-theta-mass and "
-                                     "--readout-theta-topm are mutually exclusive")
-                _mtag = f"mass{int(round(float(args.readout_theta_mass) * 100))}"
+            elif ("readout_theta_topm" not in _manifest_ro
+                  and float(_manifest_ro.get("readout_theta_mass", 0) or 0) > 0):
+                # An older record resolved its width from a mass target (removed);
+                # the default width is not that record's design, so tag it.
+                _mtag = f"topm{DEFAULT_READOUT_THETA_TOPM}"
+                _cprint(f"[readout]   manifest recorded a theta MASS target (no "
+                        f"longer supported); reading at the default top-m="
+                        f"{DEFAULT_READOUT_THETA_TOPM}, outputs tagged {_mtag}",
+                        flush=True)
             if args.raw_baseline:
                 _mtag = ({"model": "rawm", "relevance": "rawr"}.get(args.raw_select, "raw")
                          + f"{int(args.raw_baseline)}" + (f"_{_mtag}" if _mtag else ""))
@@ -1499,7 +1482,7 @@ def main(argv=None) -> int:
                         readout_l2=args.readout_l2,
                         mask_tag=_mtag, stacked=bool(args.readout_stacked),
                         parent_int=_parent_ro,
-                        theta_mass=args.readout_theta_mass, C=_C_ro,
+                        C=_C_ro,
                         warm_start=_warm, engine=args.readout_engine,
                         curve_sample=args.readout_curves)
             _cprint(f"[readout]   arm results written to {run_dir / _rname}",

@@ -18,9 +18,9 @@ from __future__ import annotations
 import numpy as np
 
 from spark_vi.readout.kernels import (
-    _COVERAGE_BINS, coverage_from_accum, dense_triples, densify_lean_blocks,
-    lean_eval_kernel, moments_kernel, moments_to_mu_sd, sparse_moments_kernel,
-    sparse_stats_kernel, stats_kernel, to_array, topm_coverage_kernel, topm_sparse,
+    dense_triples, densify_lean_blocks, lean_eval_kernel, moments_kernel,
+    moments_to_mu_sd, sparse_moments_kernel, sparse_stats_kernel, stats_kernel,
+    to_array, topm_sparse,
 )
 
 # Rows per lean-eval block: bounds the transient (n, C) float32 a block holds.
@@ -92,12 +92,6 @@ class LocalReadoutData:
         self.rows = list(rows)
         self.C, self.K, self.topm = int(C), int(K), int(topm)
 
-    @property
-    def can_measure_coverage(self):
-        # Coverage is a property of the UNtruncated features; once rows are held
-        # truncated it is gone (measure it on Spark, or before truncating).
-        return self.topm == 0
-
     @classmethod
     def from_arrays(cls, theta, label, mask=None, ids=None, *, topm=0):
         """`theta (D,K)`, `label (D,C)`, `mask (D,C)` (None = all observed)."""
@@ -140,14 +134,6 @@ class LocalReadoutData:
             else:
                 yield (feats, obs, y_obs)
 
-    def coverage(self, ms=(64, 128, 256, 512), *, excess=False, q=0.10):
-        if not self.can_measure_coverage:
-            raise ValueError("coverage needs the untruncated features (topm=0)")
-        ms = tuple(int(m) for m in ms)
-        sums, hist, n = topm_coverage_kernel((r[1] for r in self.rows), ms,
-                                             _COVERAGE_BINS, excess=excess)
-        return coverage_from_accum(sums, hist, n, ms, q=q)
-
     def moments(self, *, eps=1e-12):
         if self.topm > 0:
             s1, s2, n_obs, n_pos = sparse_moments_kernel(self._packed(), self.C, self.K)
@@ -161,14 +147,26 @@ class LocalReadoutData:
         return LocalStatsFn(self, mu, sd, fold_standardization=fold_standardization,
                             standardized_grad_from_raw=standardized_grad_from_raw)
 
-    def score_blocks(self, V, b_raw, *, degenerate=None, const=None):
-        """The held rows scored, as one in-memory `readout.evaluate.Blocks` block."""
+    def score_blocks(self, V, b_raw, *, degenerate=None, const=None, extra=None):
+        """The held rows scored, as one in-memory `readout.evaluate.Blocks` block.
+
+        `extra` ({name: per-row values, in row order}) carries further columns into
+        the block, as `SparkReadoutData.score_blocks(extra_cols=)` carries Spark
+        columns: the held rows keep only the readout's own fields, so the values
+        come from the caller."""
         from spark_vi.readout.evaluate import Blocks
 
         proba, y, mask, ids = self.lean_proba(V, b_raw, degenerate=degenerate,
                                               const=const)
-        return Blocks([{"ids": np.asarray(ids, dtype=np.int64), "proba": proba,
-                        "y": y, "mask": mask}])
+        blk = {"ids": np.asarray(ids, dtype=np.int64), "proba": proba, "y": y,
+               "mask": mask}
+        for name, vals in (extra or {}).items():
+            vals = list(vals)
+            if len(vals) != len(self.rows):
+                raise ValueError(f"extra[{name!r}] has {len(vals)} values for "
+                                 f"{len(self.rows)} rows")
+            blk[name] = vals
+        return Blocks([blk])
 
     def lean_proba(self, V, b_raw, *, degenerate=None, const=None):
         """Score the held rows: `(proba (D,C) f32, y u8, mask u8, ids)`, the same

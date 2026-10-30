@@ -17,9 +17,8 @@ row: node c's head is fit on the rows whose `mask[c]` is set.
 pass is memory traffic, not flops: 56.2M observed cells × a K-wide dense dot product
 ≈ 1.7 TB per pass (C=3,820, K=3,827). Per-row θ is a Dirichlet posterior
 mean over thousands of topics and is concentrated, so keeping each row's largest `m`
-entries cuts that traffic by K/m. `topm_coverage_kernel` MEASURES the concentration
-(the mass a truncation drops is reported before any fit uses it), and the `topm=`
-argument on the row adapters applies it. Two properties make this a well-defined
+entries cuts that traffic by K/m; the `topm=` argument on the row adapters applies
+it (a plain width: LDA's θ is spiky, so ~100 kept topics per row is ample). Two properties make this a well-defined
 estimator rather than an approximation:
 
   * **Truncated, NOT renormalized.** Kept entries equal the original ones; the kept
@@ -69,112 +68,9 @@ _DENSE_MASK_FRACTION = 0.5
 _TOPM_CHUNK_ROWS = 4096
 
 
-# Histogram resolution for the θ mass-coverage p10. 1000 bins over [0,1] is a
-# 1e-3 quantile resolution for a diagnostic whose decision threshold ("is 0.95 of
-# the mass in the top 256?") lives at the second decimal — and it makes the
-# aggregate a fixed (len(ms), 1000) int64 accumulator instead of a collect.
-_COVERAGE_BINS = 1000
-
-
 # --------------------------------------------------------------------------- #
 # Pure numpy partition kernels (unit-tested; no SparkSession).                 #
 # --------------------------------------------------------------------------- #
-def topm_coverage_kernel(thetas, ms, n_bins=_COVERAGE_BINS, excess=False):
-    """Accumulate per-doc top-m θ MASS COVERAGE into (sums, histogram, n).
-
-    `thetas` is an iterable of (K,) arrays. For each doc and each `m`, coverage is
-    `sum(top-m entries) / sum(all entries)` — the fraction of that doc's θ mass a
-    top-m truncation KEEPS. It is the one number that decides whether the sparse-θ
-    path is a cheap reparameterization or a lobotomy, so it is measured, never
-    assumed.
-
-    Returns raw accumulators — `(sums (M,), hist (M, n_bins) int64, n int)` — so
-    partitions combine by plain addition and the driver reduces once
-    (`coverage_from_accum`). The histogram is how the 10th percentile comes back
-    from a distributed pass without collecting a per-doc value: a p10 needs an order
-    statistic, and a fixed-width histogram gives it to 1/n_bins in ONE pass and
-    O(M*n_bins) memory instead of O(D).
-
-    Cost is one O(K) `partition` at the largest m plus an O(m log m) sort of the
-    survivors — deliberately not a full O(K log K) sort per doc, because this runs
-    on every doc of the train split and is supposed to be noise next to the fit.
-
-    A doc with no mass at all (sum <= 0; θ is a posterior mean on the simplex, so
-    this does not occur in practice) counts as coverage 1.0 — vacuously all of
-    nothing is kept.
-
-    `excess=True` measures coverage of the mass ABOVE THE PRIOR FLOOR instead:
-    `e_k = max(θ_k - floor, 0)` with `floor` = the doc's smallest POSITIVE θ
-    entry. Why: θ_k = (α + n_k) / (Σ_allowed α + N), so every allowed topic
-    carries a floor of α/(Σα + N) whether or not a single token went to it. On a
-    wide gated layout (0135: α=0.5 over a 1,200-topic background, ~600 prior
-    pseudo-counts against docs of tens to hundreds of tokens) that floor IS most
-    of θ's mass, and raw coverage reads "diffuse" (p10 0.117 at m=256, launch 3)
-    for documents whose token assignments n_k are concentrated in a handful of
-    topics. The top-m SET is the same either way (θ and e rank identically); what
-    truncation discards is the floor on the dropped topics, a function of the
-    doc's length and allowed set only, which carries no topic information. So the
-    excess is the right denominator for "how much of the doc's own signal does a
-    width-m truncation keep". Gated-out topics are exactly 0 and never set the
-    floor; a doc whose positive entries are all equal has zero excess and counts
-    as fully covered.
-    """
-    ms = [int(m) for m in ms]
-    M = len(ms)
-    sums = np.zeros(M, dtype=np.float64)
-    hist = np.zeros((M, int(n_bins)), dtype=np.int64)
-    rows = np.arange(M)
-    n = 0
-    for theta in thetas:
-        t = np.asarray(theta, dtype=np.float64)
-        K = int(t.shape[0])
-        n += 1
-        if excess:
-            pos = t[t > 0.0]
-            if pos.size:
-                t = np.maximum(t - float(pos.min()), 0.0)
-        total = float(t.sum())
-        if total <= 0.0:
-            sums += 1.0
-            hist[rows, int(n_bins) - 1] += 1
-            continue
-        mmax = min(max(ms), K)
-        top = np.partition(t, K - mmax)[K - mmax:] if mmax < K else t.copy()
-        top.sort()                              # ascending, mmax entries
-        csum = np.cumsum(top[::-1])             # csum[j] = mass of the top j+1
-        cov = np.array([csum[min(m, K) - 1] / total for m in ms])
-        sums += cov
-        b = np.clip((cov * n_bins).astype(np.int64), 0, int(n_bins) - 1)
-        hist[rows, b] += 1
-    return sums, hist, n
-
-
-def coverage_from_accum(sums, hist, n, ms, *, q=0.10):
-    """Reduce `topm_coverage_kernel` accumulators to `{m: (mean, p_q)}`.
-
-    The quantile is NEAREST-RANK on the binned values — the smallest bin whose
-    cumulative count reaches `ceil(q*n)` — and the reported value is that bin's LEFT
-    edge, i.e. the estimate rounds DOWN. Rounding down is the right direction for a
-    coverage floor: the number is used to answer "how much mass does the WORST decile
-    of documents keep", and an optimistic p10 is the only way this diagnostic could
-    mislead. Accuracy is therefore `[p_q - 1/n_bins, p_q]`.
-    """
-    ms = [int(m) for m in ms]
-    sums = np.asarray(sums, dtype=np.float64)
-    hist = np.asarray(hist, dtype=np.int64)
-    n = int(n)
-    n_bins = int(hist.shape[1])
-    out = {}
-    for j, m in enumerate(ms):
-        if n <= 0:
-            out[m] = (float("nan"), float("nan"))
-            continue
-        target = int(np.ceil(q * n))
-        b = int(np.searchsorted(np.cumsum(hist[j]), max(target, 1)))
-        out[m] = (float(sums[j] / n), float(min(b, n_bins - 1) / n_bins))
-    return out
-
-
 def moments_kernel(rows, C, K):
     """Accumulate the per-node MASKED first/second θ moments + label counts.
 

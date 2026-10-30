@@ -23,10 +23,9 @@ import numpy as np
 from spark_vi.core.broadcast import destroy_broadcast
 from spark_vi.core.retry import _error_first_line, retry_spark_action
 from spark_vi.readout.kernels import (
-    _COVERAGE_BINS, coverage_from_accum, dense_triples, densify_lean_blocks,
-    lean_eval_kernel, moments_kernel, moments_to_mu_sd, pack_rows, row_quads,
-    row_sparse, row_triples, sparse_moments_kernel, sparse_stats_kernel,
-    stats_kernel, to_array, topm_coverage_kernel,
+    dense_triples, densify_lean_blocks, lean_eval_kernel, moments_kernel,
+    moments_to_mu_sd, pack_rows, row_quads, row_sparse, row_triples,
+    sparse_moments_kernel, sparse_stats_kernel, stats_kernel,
 )
 
 log = logging.getLogger(__name__)
@@ -35,109 +34,6 @@ log = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 # Spark wiring (cluster-covered; thin shells over the kernels above).         #
 # --------------------------------------------------------------------------- #
-def theta_topm_coverage(scored_df, K, *, ms=(64, 128, 256, 512),
-                        topic_col="topicDistribution", n_bins=_COVERAGE_BINS,
-                        depth=2, q=0.10, excess=False):
-    """One distributed pass measuring how much θ mass a top-m truncation keeps.
-    `excess=True` measures the mass above the per-doc prior floor
-    (`topm_coverage_kernel`).
-
-    Returns `{m: (mean_coverage, p10_coverage)}`. This is the MEASUREMENT that has
-    to precede any use of the sparse-θ path: the lever's entire premise is that a
-    Dirichlet(α=0.5) posterior mean over thousands of topics is concentrated, and a
-    premise about the data is not something a kernel can assume. The p10 is the
-    number that matters — a mean of 0.98 with a p10 of 0.4 means the truncation is
-    fine for the typical doc and destroys the tail, and the tail is what the rare
-    nodes are fit on.
-
-    Cheap by construction (see `topm_coverage_kernel`): one O(K) partition per doc
-    and a fixed `(len(ms), n_bins)` int64 accumulator per partition, so this costs a
-    fraction of one L-BFGS pass and nothing D-sized reaches the driver.
-    """
-    ms = tuple(int(m) for m in ms)
-
-    def _local(rows, _col=topic_col, _ms=ms, _nb=int(n_bins), _ex=bool(excess)):
-        return [topm_coverage_kernel((to_array(r[_col]) for r in rows), _ms, _nb,
-                                      excess=_ex)]
-
-    def _combine(a, b):
-        return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
-
-    zero = (np.zeros(len(ms)), np.zeros((len(ms), int(n_bins)), dtype=np.int64), 0)
-    # `.rdd` is taken INSIDE the retried closure: on a DataFrame whose cached
-    # transform has not materialized yet, the `javaToPython` conversion behind
-    # `.rdd` can itself run Spark jobs — and this coverage pass is the FIRST
-    # action of the whole readout, so a preemption abort lands there first.
-    sums, hist, n = retry_spark_action(
-        lambda: scored_df.select(topic_col).rdd.mapPartitions(_local).treeAggregate(
-            zero, _combine, _combine, depth=int(depth)),
-        label="theta top-m coverage")
-    return coverage_from_accum(sums, hist, n, ms, q=q)
-
-
-def mass_grid(K, *, start=16):
-    """The candidate truncation widths a mass target is resolved over: powers of
-    two from `start` up to (and excluding) K, then K itself — so the answer can be
-    "no truncation" when the mass target is not met below full width."""
-    K = int(K)
-    ms = []
-    m = int(start)
-    while m < K:
-        ms.append(m)
-        m *= 2
-    ms.append(K)
-    return tuple(ms)
-
-
-def choose_topm_for_mass(coverage, q, *, K=None):
-    """The smallest m whose p10 θ-mass coverage reaches `q`; `0` (= full K, no
-    truncation) when none does or when the only such m is K itself.
-
-    `coverage` is `theta_topm_coverage`'s `{m: (mean, p10)}`. The p10 is the
-    criterion, not the mean: a truncation is judged on the WORST decile of
-    documents — the tail the rare nodes are fit on — exactly as the coverage
-    pass's own docstring argues. Pure, so the rule is unit-tested against made-up
-    coverage tables; the Spark pass that produces the table is
-    `resolve_theta_topm_by_mass`."""
-    q = float(q)
-    ok = sorted(int(m) for m, (_mean, p10) in coverage.items() if float(p10) >= q)
-    if not ok:
-        return 0
-    m = ok[0]
-    if K is not None and m >= int(K):
-        return 0
-    return m
-
-
-def resolve_theta_topm_by_mass(scored_df, K, q, *, topic_col="topicDistribution",
-                               depth=2, grid=None, excess=True):
-    """Resolve a MASS target to a top-m width on the train frame (truncate by
-    mass, not by count).
-
-    `--readout-theta-topm 256` kept 84% of the topics at K=306 and 17% at K=1498;
-    at a ribbon-scale K it would keep ~5%, and whether that is a cheap
-    reparameterization or a lobotomy depends on the data, so a fixed count is the
-    wrong knob. This measures coverage over `mass_grid(K)` in ONE distributed pass
-    (`theta_topm_coverage`) and picks the smallest width whose p10 coverage meets
-    `q` (`choose_topm_for_mass`). The chosen m then flows through every existing
-    `theta_topm=` seam unchanged — the kernels stay rectangular (every doc keeps the
-    same m), which is what makes them exact.
-
-    Returns `(m, coverage)`; `m == 0` means no width below K met the target and the
-    readout runs dense.
-
-    The coverage is of the mass ABOVE THE PRIOR FLOOR (`excess=True`, the
-    default): raw θ coverage on a wide gated layout is
-    dominated by α's floor over the allowed topics and resolved q=0.99 to full K
-    (p10 0.117 at m=256) although the token assignments are concentrated. See
-    `topm_coverage_kernel`."""
-    K = int(K)
-    ms = tuple(grid) if grid is not None else mass_grid(K)
-    cov = theta_topm_coverage(scored_df, K, ms=ms, topic_col=topic_col, depth=depth,
-                              excess=excess)
-    return choose_topm_for_mass(cov, q, K=K), cov
-
-
 def masked_moments(scored_df, C, K, *, topic_col="topicDistribution",
                    label_col="label", mask_col="labelMask", eps=1e-12, depth=2,
                    topm=0):
@@ -183,8 +79,9 @@ def masked_moments(scored_df, C, K, *, topic_col="topicDistribution",
     # Retried: the moments pass is a pure sum over a lineage-recomputable
     # projection, and losing it to a preemption wave costs the whole fit (it is
     # the standardization every later pass is expressed in). `.rdd` is taken
-    # inside the closure — `javaToPython` can run jobs of its own on an
-    # unmaterialized frame (see theta_topm_coverage).
+    # inside the closure — on a DataFrame whose cached transform has not
+    # materialized yet, the `javaToPython` behind `.rdd` can run jobs of its own,
+    # so a preemption abort lands there first.
     out = retry_spark_action(
         lambda: scored_df.select(topic_col, label_col, mask_col)
         .rdd.mapPartitions(_local).treeAggregate(
@@ -265,7 +162,7 @@ class SparkStatsFn:
         level = StorageLevel.MEMORY_AND_DISK if storage_level is None else storage_level
 
         def _project():
-            # `.rdd` inside the retried closure, as in `theta_topm_coverage`: on an
+            # `.rdd` inside the retried closure, as in `masked_moments`: on an
             # unmaterialized frame `javaToPython` can run jobs of its own.
             rdd = scored_df.select(*cols).rdd.mapPartitions(_pack).persist(level)
             try:
@@ -472,9 +369,7 @@ class SparkReadoutData:
 
     Thin and lazy: nothing is persisted until `stats_fn` builds its packed
     projection (closed by the solve's `with` block). `topm` fixes the truncation
-    width every pass reads; `coverage` measures it on the untruncated features."""
-
-    can_measure_coverage = True
+    width every pass reads."""
 
     def __init__(self, df, C, K, *, topm=0, topic_col="topicDistribution",
                  label_col="label", mask_col="labelMask", id_col="doc_key",
@@ -487,11 +382,6 @@ class SparkReadoutData:
         # stats partial is (C,K) float64 x2 (loss/grad + moments).
         self.depth = (int(depth) if depth is not None
                       else 3 if 2 * self.C * self.K * 8 > 128 * 1024 * 1024 else 2)
-
-    def coverage(self, ms=(64, 128, 256, 512), *, excess=False):
-        return theta_topm_coverage(self.df, self.K, ms=ms,
-                                   topic_col=self.cols["topic_col"],
-                                   depth=self.depth, excess=excess)
 
     def moments(self, *, eps=1e-12):
         return masked_moments(self.df, self.C, self.K, eps=eps, depth=self.depth,
