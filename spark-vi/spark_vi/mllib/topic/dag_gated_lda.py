@@ -628,12 +628,11 @@ class DagGatedLDAModel(_DagGatedLDAParams, _PersistableModel, Model):
         return SparkSession.builder.getOrCreate().createDataFrame(rows, schema=schema)
 
     def _transform(self, dataset):
-        import hashlib
 
         from pyspark.ml.linalg import DenseVector, VectorUDT
         from pyspark.sql import functions as F
 
-        from spark_vi.models.topic.lda import _cavi_doc_inference
+        from spark_vi.models.topic.lda import _cavi_doc_inference, _hashed_gamma_init
 
         lam = self._result.global_params["lambda"]
         # Multi-domain: λ is a per-domain dict {m:(K,V_m)}; the CAVI reads the
@@ -662,11 +661,7 @@ class DagGatedLDAModel(_DagGatedLDAParams, _PersistableModel, Model):
             # Content-deterministic gamma_init: identical docs get identical init on
             # every run, so scoring is reproducible and independent of Spark
             # partition/executor order.
-            h = hashlib.blake2b(digest_size=8)
-            h.update(np.ascontiguousarray(indices, dtype=np.int32).tobytes())
-            h.update(np.ascontiguousarray(counts, dtype=np.float64).tobytes())
-            rng = np.random.default_rng(int.from_bytes(h.digest(), "little"))
-            gamma_init = rng.gamma(p["gamma_shape"], 1.0 / p["gamma_shape"], size=p["K"])
+            gamma_init = _hashed_gamma_init(indices, counts, p["K"], p["gamma_shape"])
             gamma, _, _, _ = _cavi_doc_inference(
                 indices=indices, counts=counts,
                 expElogbeta=p["expElogbeta"], alpha=p["alpha"],

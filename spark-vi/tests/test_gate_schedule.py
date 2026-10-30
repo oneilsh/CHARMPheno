@@ -192,3 +192,18 @@ def test_optimized_alpha_leaves_closed_blocks_alone_during_warm_rounds():
         np.testing.assert_allclose(gp["alpha"][inner], 0.5)
     assert not np.allclose(hist[2]["alpha"][leaf], 0.5)
     assert not np.allclose(hist[-1]["alpha"][inner], 0.5)
+
+
+def test_infer_local_is_a_pure_function_of_the_row_and_params():
+    """VIModel.infer_local's contract: no global-RNG draw, so the same row scores the
+    same every time, single- and multi-domain."""
+    lay = DagLayout(PARENT, n_bg=1, tpn=1)
+    doc = _docs()[1]
+    for domains in (None, [6, 6]):
+        m = DagGatedOnlineLDA(lay, vocab_size=12, random_seed=3, domains=domains)
+        gp = m.initialize_global(None)
+        np.random.seed(0)
+        a = m.infer_local(doc, gp)["theta"]
+        np.random.seed(1)
+        b = m.infer_local(doc, gp)["theta"]
+        np.testing.assert_array_equal(a, b)
