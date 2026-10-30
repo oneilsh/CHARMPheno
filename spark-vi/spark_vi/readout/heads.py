@@ -41,16 +41,15 @@ READOUT_GTOL = 1e-4
 # 200 of them (~1,200 distributed passes, ~30 min), so this is a real cap, not a
 # safety net: the returned point is "wherever 200 iterations got to" and every
 # iteration is a full pass over the train split. `--readout-max-iter` exposes it
-# because that makes the dev loop affordable (CHARM_DEV caps it at 60, where the
-# macro AUC RANKING is already stable — see run_experiment._apply_dev_profile);
-# the default keeps every production run exactly where it was.
+# because that makes a development loop affordable (60 iterations already give a
+# stable macro-AUC ranking).
 READOUT_MAX_ITER = 200
 
 # Fit size (C*K float64 parameter bytes) above which `fit_heads` pays for
-# the θ mass-coverage measurement. 64 MB is C=K≈2,900 — comfortably above every
-# cardiovascular-scale run (C=444: 1.6 MB) and comfortably below whole-Mondo
-# (C=K≈3,827: 117 MB), which is exactly the population where the top-m lever is a
-# live question and one extra cheap pass is noise against a multi-hour solve.
+# the θ mass-coverage measurement. 64 MB is C=K≈2,900 — far above a few-hundred-node
+# fit (C=444: 1.6 MB) and below a C=K≈3,827 one (117 MB), which is exactly where the
+# top-m lever is a live question and one extra cheap pass is noise against a
+# multi-hour solve.
 _COVERAGE_MIN_FIT_BYTES = 64 * 1024 * 1024
 
 
@@ -68,13 +67,10 @@ def ckpt_fingerprint(C, K, n_obs, n_pos, theta_topm=0):
     `n_pos`), a different corpus/split (`n_obs`), or a different degenerate mask.
 
     What is deliberately NOT hashed: the standardization moments `(mu, sd)`.
-    v1 hashed their bytes on the theory that the moments pass is deterministic —
-    and it is, in VALUE, but not in BITS: `treeAggregate` combines partials in
+    The moments pass is deterministic in VALUE but not in BITS: `treeAggregate` combines partials in
     task-completion order, float addition is not associative, and the low-order
-    bits differ on every run. In production that made every cross-run
-    fingerprint a mismatch, which silently disabled the entire resume feature
-    (exp 0104, 2026-08-29: an iter-50 checkpoint from the identical solve was
-    rejected and 100 minutes were re-paid). The residual risk of not pinning the
+    bits differ on every run, so a fingerprint over them rejects every cross-run
+    checkpoint of the identical solve and silently disables resume. The residual risk of not pinning the
     basis is bounded by the solver's own contract: `x0` changes the PATH, never
     the answer — a warm start whose basis drifted by float noise costs at most a
     few extra iterations, while a byte-exact check costs the whole feature.
@@ -92,14 +88,13 @@ def ckpt_fingerprint(C, K, n_obs, n_pos, theta_topm=0):
 def write_ckpt(path, W_std, b_std, it, fingerprint):
     """Atomically write the solver checkpoint to `path` (tmp + replace).
 
-    Same discipline as `_dump_partial_results`, and for a sharper reason: the run
-    dir is gcsfuse, where a write is an object mutation and a process death
-    mid-write leaves a TORN file — which here would be worse than no checkpoint
-    at all, since the thing that reads it is a recovery run. Write to a sibling
+    A process death mid-write must not leave a TORN file (on an object-store
+    mount such as gcsfuse a write is an object mutation), which would be worse
+    than no checkpoint at all, since the thing that reads it is a recovery run. Write to a sibling
     tmp then rename, so the visible file is always a complete one.
 
     Failures are swallowed and reported: a checkpoint is insurance, and a full
-    disk or a gcsfuse hiccup must not kill a solve that is otherwise healthy.
+    disk or a storage hiccup must not kill a solve that is otherwise healthy.
     Returns True on success.
     """
     path = Path(path)
@@ -160,10 +155,9 @@ def read_ckpt(path, fingerprint):
 # Distinct from the SOLVER checkpoint above: the checkpoint is a mid-solve
 # resume point that is DELETED once the solve lands, whereas this is the
 # COMPLETED fit's raw-θ scoring params, kept beside the run's other record files.
-# It exists so a later scoring-only consumer (conversion_analysis --deciles on)
-# can turn each doc's θ into per-node proba with ONE mapPartitions, instead of
-# re-running the whole batched readout solve just to get per-doc scores — the
-# re-fit that filled the worker local disks and cascaded ~12 nodes dead on 0110.
+# It exists so a later scoring-only consumer (`DagHeadsModel.load`, the framings'
+# saved-heads engines) can turn each doc's θ into per-node proba with ONE
+# mapPartitions, instead of re-running the whole batched readout solve.
 _HEADS_VERSION = "readout-heads-v1"
 
 
@@ -200,21 +194,12 @@ def write_heads(run_dir, label, V, b_raw, const, degenerate, C, K,
     Everything a scoring pass needs to turn a doc's θ into per-node proba —
     `(V, b_raw)` (raw-θ, so no scaler travels), plus the `degenerate`/`const`
     oracle fallback and the truncation width `theta_topm` the coefficients belong
-    to. Written as a small npz (~60 MB at 0110 scale: C×K×8) beside the fit's
-    other record files, once the solve has RETURNED.
-
-    Additive: it changes no existing number. Written only when the arm has a
-    durable run dir (the driver's `checkpoint_dir`), which is exactly
-    the fit driver's readout path and `dag_gated_readout`'s recovery path — never
-    the row-SAMPLED A/B fit or the calibration sub-fit, which have no business
-    owning this file. Atomic (tmp + replace) for the same gcsfuse torn-file reason
-    as `write_ckpt`; failures are swallowed and reported, because the
-    fit's own results are the record and a missing sidecar only means
-    `conversion_analysis --deciles on` asks for a one-time re-readout. Returns
-    True on success.
-
-    NOTE: pre-existing fits (e.g. 0110's) predate this file and lack it until a
-    readout is re-run under this code — `make dag-gated-readout ID=<n>` once.
+    to. Written as a small npz (C×K×8 bytes, ~60 MB at C=K≈2,700) beside the fit's
+    other record files, once the solve has RETURNED, and only when the arm has a
+    durable run dir (the driver's `checkpoint_dir`). Atomic (tmp + replace), as
+    `write_ckpt`; failures are swallowed and reported, because the fit's own results
+    are the record and a missing heads file only means a later scoring pass asks for
+    a one-time re-readout. Returns True on success.
 
     `W_std` (optional, (C,K)): the solve's STANDARDIZED weights, stored beside V
     so the off-cluster loadings read (`inspect_topics`) has an honest importance
@@ -244,11 +229,11 @@ def write_heads(run_dir, label, V, b_raw, const, degenerate, C, K,
         tmp.replace(path)
         log.info(f"wrote readout heads {path.name} "
               f"(C={int(C)} K={int(K)} topm={int(theta_topm)}) — "
-              "conversion_analysis --deciles on scores from this, no re-fit")
+              "later scoring passes read this, no re-fit")
         return True
     except Exception as exc:                         # pragma: no cover - I/O failure
         log.info(f"readout heads write FAILED ({exc}); the fit is "
-              "unaffected, but conversion_analysis --deciles on will need a "
+              "unaffected, but a later scoring pass will need a "
               "re-readout to persist them")
         try:
             tmp.unlink(missing_ok=True)
@@ -299,34 +284,9 @@ def read_heads(run_dir, label, *, C=None, K=None, theta_topm=None):
     return V, b_raw, const, degenerate, gC, gK, gm
 
 
-def apply_feature_mask(stats_fn, feature_mask):
-    """Wrap a batched-LR `stats_fn` so the DATA gradient is zero outside a (C,K)
-    boolean `feature_mask` — the driver-side seam for a per-node FEATURE ABLATION
-    (own block only / drop own block / background only ...).
-
-    Why zeroing the gradient is a correct projected solve, not a hack: the
-    solver minimizes F_c = loss_c(w) + 0.5·l2·‖w‖² per node by L-BFGS from
-    w = 0. On a coordinate whose data gradient is always 0, the ridge gradient
-    l2·w is also 0 while w stays 0, so the full gradient is 0 there; the two-loop
-    direction is a linear combination of gradients and of past steps, both of
-    which are 0 on that coordinate, so the step is 0 there, so w stays exactly
-    0 — by induction, for every iteration and every trial point of the line
-    search. The unmasked coordinates therefore solve exactly the reduced problem
-    over the kept features (same objective, restricted to the subspace), which is
-    what an ablation means. No closure payload: the mask lives on the driver and
-    is applied to the returned (C,K) gradient; `node_mask` passes straight
-    through as in `_fittable_stats`."""
-    fm = np.ascontiguousarray(np.asarray(feature_mask, dtype=bool))
-
-    def _masked(W_std, b_std, node_mask=None, _f=stats_fn, _fm=fm):
-        loss, gW, gb = _f(W_std, b_std, node_mask=node_mask)
-        return loss, np.where(_fm, gW, 0.0), gb
-    return _masked
-
-
 def fit_heads(data, *, l2=1.0, gtol=READOUT_GTOL, max_iter=READOUT_MAX_ITER,
               history=6, label="", warm_start=None, checkpoint_path=None,
-              checkpoint_every=10, feature_mask=None):
+              checkpoint_every=10):
     """Fit all C per-node readout heads with ONE batched L-BFGS.
 
     `data` is the TRAIN split on either backend -- `readout.spark.SparkReadoutData`
@@ -334,19 +294,11 @@ def fit_heads(data, *, l2=1.0, gtol=READOUT_GTOL, max_iter=READOUT_MAX_ITER,
     width `topm`, `coverage`, `moments` and `stats_fn`. Everything below is the same
     for both; only where a data pass runs differs.
 
-    `feature_mask` (optional, (C,K) bool): per-node FEATURE ABLATION — the head
-    of node c may load only on the topics where `feature_mask[c]` is True (see
-    `apply_feature_mask` for why gradient masking is an exact reduced solve).
-    Folded into the checkpoint fingerprint, so an ablation solve never resumes a
-    full-feature checkpoint of the same problem, and applied to any warm start /
-    resumed point. The standardization moments are unaffected (a masked feature
-    simply carries w = 0, which folds to V = 0).
-
     Returns `(V (C,K), b_raw (C,), const (C,), degenerate (C,) bool, info)` — the
     raw-θ scoring parameters, so nothing but `(V, b_raw)` has to travel to score a
-    split (plan §1: the standardization is folded away, "scoring needs no scaler").
+    split (the standardization is folded away; scoring needs no scaler).
 
-    Three driver-side steps, each doing exactly what the plan's §1 prescribes:
+    Three driver-side steps:
 
       1. `masked_moments` — one pass for the per-node masked mean/sd (the sklearn
          oracle standardizes on each node's OWN observed train rows) plus the
@@ -362,9 +314,8 @@ def fit_heads(data, *, l2=1.0, gtol=READOUT_GTOL, max_iter=READOUT_MAX_ITER,
          intercept unpenalized — then fold back to raw-θ coordinates.
 
     `warm_start=(V, b_raw)` starts the solve from ANOTHER fit's raw-θ scoring
-    params — used for the two solves that are perturbations of the arm's main fit
-    (the 75/25 calibration split, the A/B harness's row sample) rather than new
-    problems. It travels in RAW coordinates by necessity: standardized params
+    params (`dag_gated_readout --readout-warm-from`): a re-readout whose problem is
+    a perturbation of an earlier fit's (another split, another theta width). It travels in RAW coordinates by necessity: standardized params
     only mean something next to the `(mu, sd)` that produced them, and this fit's
     moments come from ITS rows, so the start is unfolded here through the moments
     computed in step 1. Two things it must not do, both handled below:
@@ -387,21 +338,21 @@ def fit_heads(data, *, l2=1.0, gtol=READOUT_GTOL, max_iter=READOUT_MAX_ITER,
     truncation drops is measured and logged BEFORE the fit (`theta_topm_coverage`),
     because the whole premise is an empirical claim about θ's concentration.
 
-    `checkpoint_path` turns the solve into a RESUMABLE one, which at whole-Mondo
-    scale is the difference between losing 15 minutes and losing an afternoon:
-    exp 0104's 2026-08-28 recovery died 9,112s into the solve (a spot-preemption
-    wave starved the scheduler and Spark aborted the job) with nothing saved.
-    Every `checkpoint_every` iterations the progress hook writes the current
-    standardized iterate — the solver's entire resumable state, since `x0` takes
-    a POINT — atomically, next to a FINGERPRINT of `(C, K, mu, sd, n_obs, n_pos)`
-    that a resume must match. On the next run a matching fingerprint is fed back
+    `checkpoint_path` turns the solve into a RESUMABLE one, which at C and K in the
+    thousands is the difference between losing 15 minutes and losing an afternoon
+    (a solve can run for hours, and each pass is a cluster job). Every
+    `checkpoint_every` iterations the progress hook writes the current standardized
+    iterate — the solver's entire resumable state, since `x0` takes a POINT —
+    atomically, next to a FINGERPRINT of `(C, K, theta_topm, n_obs, n_pos)` that a
+    resume must match (`ckpt_fingerprint`: integer counts only, never the moments'
+    float bits). On the next run a matching fingerprint is fed back
     as `x0` (with the degenerate rows re-zeroed, exactly as the `warm_start` path
     does, or the bare ridge would spend real distributed passes walking them back
     to zero); a mismatch warns and starts cold. What a resume does NOT carry is
     the L-BFGS curvature history, so its first iterations re-learn the scaling
     and are slower than the ones that preceded the crash — expected, logged, and
-    still overwhelmingly cheaper than restarting at iteration 0 (insight 0074: a
-    warm start supplies a point, not curvature). The file is deleted once the
+    still overwhelmingly cheaper than restarting at iteration 0 (a warm start
+    supplies a point, not curvature). The file is deleted once the
     solve returns: the fit results are the record, and a checkpoint that outlives
     its solve is only a way to confuse a later run (which the fingerprint would
     catch, but a deleted file cannot even raise the question).
@@ -431,21 +382,10 @@ def fit_heads(data, *, l2=1.0, gtol=READOUT_GTOL, max_iter=READOUT_MAX_ITER,
     degenerate = (n_obs <= 0) | (n_pos <= 0) | (n_pos >= n_obs)
     const = np.where((n_obs > 0) & (n_pos >= n_obs), 1.0, 0.0)
     keep = ~degenerate
-    fmask = None
-    if feature_mask is not None:
-        fmask = np.ascontiguousarray(np.asarray(feature_mask, dtype=bool))
-        if fmask.shape != (C, K):
-            raise ValueError(f"feature_mask shape {fmask.shape} != ({C}, {K})")
-        log.info(f"{tag}FEATURE ABLATION: heads restricted to a per-node "
-              f"topic mask (mean {fmask.mean() * K:.1f} of {K} topics per node)")
-
-    def _proj(W):
-        # Pin masked coordinates at exactly 0 on any externally supplied point.
-        return W if fmask is None else np.where(fmask, W, 0.0)
     x0 = None
     if warm_start is not None:
         W0, b0 = unfold_standardization(warm_start[0], warm_start[1], mu, sd)
-        x0 = (_proj(np.where(keep[:, None], W0, 0.0)), np.where(keep, b0, 0.0))
+        x0 = (np.where(keep[:, None], W0, 0.0), np.where(keep, b0, 0.0))
     ckpt_path = Path(checkpoint_path) if checkpoint_path is not None else None
     fingerprint = None
     if ckpt_path is not None:
@@ -453,12 +393,6 @@ def fit_heads(data, *, l2=1.0, gtol=READOUT_GTOL, max_iter=READOUT_MAX_ITER,
         # exact-integer sums, the reproducible identity of this arm's problem
         # (see ckpt_fingerprint for why mu/sd bytes are NOT hashed).
         fingerprint = ckpt_fingerprint(C, K, n_obs, n_pos, theta_topm)
-        if fmask is not None:
-            # An ablation is a different problem on the same rows: fold the mask
-            # so a masked solve never resumes (or is resumed by) the full one.
-            _h = hashlib.sha256((fingerprint + "|feature_mask|").encode())
-            _h.update(fmask.tobytes())
-            fingerprint = _h.hexdigest()
         resumed = read_ckpt(ckpt_path, fingerprint)
         if resumed is not None:
             W_ck, b_ck, ck_iter = resumed
@@ -468,8 +402,7 @@ def fit_heads(data, *, l2=1.0, gtol=READOUT_GTOL, max_iter=READOUT_MAX_ITER,
             # distributed passes. (A checkpoint written by THIS problem already has
             # them at zero — the fingerprint pins the degenerate mask — so this is
             # a belt-and-braces restatement of the contract, not a fixup.)
-            x0 = (_proj(np.where(keep[:, None], W_ck, 0.0)),
-                  np.where(keep, b_ck, 0.0))
+            x0 = (np.where(keep[:, None], W_ck, 0.0), np.where(keep, b_ck, 0.0))
             log.info(f"{tag}resuming batched solve from checkpoint "
                   f"(iter {ck_iter} recorded); curvature history is not carried, "
                   "early iterations re-learn it")
@@ -481,9 +414,7 @@ def fit_heads(data, *, l2=1.0, gtol=READOUT_GTOL, max_iter=READOUT_MAX_ITER,
 
     with data.stats_fn(
             mu, sd, fold_standardization=fold_standardization,
-            standardized_grad_from_raw=standardized_grad_from_raw) as _raw_stats_fn:
-        stats_fn = (apply_feature_mask(_raw_stats_fn, fmask)
-                    if fmask is not None else _raw_stats_fn)
+            standardized_grad_from_raw=standardized_grad_from_raw) as stats_fn:
 
         def _fittable_stats(W_std, b_std, node_mask=None, _f=stats_fn, _keep=keep):
             # `node_mask` passes STRAIGHT THROUGH to the pass (the solver uses it
@@ -498,7 +429,7 @@ def fit_heads(data, *, l2=1.0, gtol=READOUT_GTOL, max_iter=READOUT_MAX_ITER,
                     np.where(_keep, gb, 0.0))
 
         # Heartbeat: each stats call is a full treeAggregate over the train
-        # split, so a whole-Mondo solve is minutes/iteration and looks hung
+        # split, so a large-C solve is minutes/iteration and looks hung
         # without it. Log every iteration for the first few (the cold-start
         # steps are the slow, uncertain ones), then every 5th, then the finish
         # line from the summary print below.
