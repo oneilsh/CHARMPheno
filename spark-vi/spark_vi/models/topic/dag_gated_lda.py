@@ -373,10 +373,13 @@ class DagGatedOnlineLDA(OnlineLDA):
                     scale=1.0 / self.gamma_shape,
                     size=len(allowed),
                 )
+            # Slice the (allowed, doc words) submatrix once: the CAVI reads only the
+            # doc's columns, and `expElogbeta[allowed]` would copy |allowed| x V
+            # (~20 MB at 200 bg topics over 11k words) for every document.
             gamma, expElogthetad, phi_norm, _ = _cavi_doc_inference(
-                indices=doc.indices,
+                indices=np.arange(len(doc.indices)),
                 counts=doc.counts,
-                expElogbeta=expElogbeta[allowed],
+                expElogbeta=expElogbeta[np.ix_(allowed, doc.indices)],
                 alpha=alpha[allowed],
                 gamma_init=gamma_init,
                 max_iter=self.cavi_max_iter,
