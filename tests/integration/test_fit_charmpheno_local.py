@@ -44,7 +44,11 @@ def test_fit_charmpheno_local_smoke_runs(tmp_path):
     # Artifact exists and can be loaded back.
     from spark_vi.io import load_result
     result = load_result(out_dir)
-    assert result.n_iterations == 3
-    assert len(result.elbo_trace) == 3
+    # Full batch takes rho = 1, so CountingModel (conjugate) lands on its exact
+    # posterior in one step; the second iteration repeats the ELBO and the fit
+    # stops as converged.
+    assert result.n_iterations == 2
+    assert len(result.elbo_trace) == 2
+    assert result.converged
     # CountingModel's posterior counts should have moved past the prior.
     assert float(result.global_params["alpha"]) > 2.0
