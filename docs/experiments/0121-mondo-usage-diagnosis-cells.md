@@ -1,7 +1,7 @@
 ---
 id: 121
 slug: mondo-usage-diagnosis-cells
-status: pending
+status: complete
 model_class: mondo_usage
 cohort: population_rare_priority
 source_table: condition_occurrence
@@ -44,4 +44,9 @@ make -C analysis/cloud exp ID=121
 
 ## Run log
 
-_(pending)_
+- **2026-11-02 — OK.** Both payloads pass `assert_cells_safe`. Routing matches 0120 (persons
+  climbed 322,454; steps 1: 5,073 · 2: 13,595 · 4: 44,521; 44,504 climbed entries with a SNOMED
+  chain). Mondo: 63,189 published cells (37,275 at 10); 4,822 used terms, 2,882 with at least one
+  exact cell, 1,940 with only 1–20 codes; root roll-up 16,512,215 diagnoses (named 11,355,325 ·
+  climbed 5,156,890). HPO: 4,885 cells (2,600 at 10); 1,347 used terms. Payloads 14.0 MB + 1.5 MB.
+  Example: capillary hemangioma = 21 + 10 = 31.
