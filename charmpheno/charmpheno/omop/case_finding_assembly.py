@@ -25,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from charmpheno.omop.condition_dag import _nearest_surviving_ancestors
-from spark_vi.dag import frontier_from_coded
+from spark_vi.dag.layout import frontier_from_coded
 
 # Fixed salt for the deterministic train/test split. Hashing person_id with a
 # constant salt makes the split reproducible + resume-stable across runs (Spark's
@@ -371,7 +371,7 @@ def assemble_from_events(events_df, before_dag, *, doc_spec, min_n,
     from pyspark.sql import functions as F
     from charmpheno.omop.condition_dag import prune_by_attestation, pruning_ledger
     from charmpheno.omop.topic_prep import to_bow_dataframe
-    from spark_vi.dag import DagLayout
+    from spark_vi.dag.layout import DagLayout
 
     node_cids = before_dag.nodes()
     # 1) split PATIENTS first (events carry person_id); nothing downstream sees

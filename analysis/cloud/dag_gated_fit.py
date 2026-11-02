@@ -956,7 +956,7 @@ def _attach_gate_ever(spark, bundle, *, provider, before_dag, cdr, billing,
     Why the future may gate a TRAIN document: the gate shapes topics on the train
     split only; test documents are folded in ungated, so no test outcome reaches
     them (spec 2026-10-13, Why)."""
-    from spark_vi.dag import DagLayout
+    from spark_vi.dag.layout import DagLayout
     from charmpheno.omop.case_finding_assembly import attach_frontiers
 
     keep = set(bundle.cid2int)
@@ -1251,7 +1251,7 @@ def parse_args(argv=None):
 
 
 def main() -> int:
-    from spark_vi.dag import DagLayout
+    from spark_vi.dag.layout import DagLayout
 
     args = parse_args()
     configure_logging()

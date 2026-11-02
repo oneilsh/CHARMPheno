@@ -318,7 +318,7 @@ def test_resolve_code_terms_maps_one_code_to_several_exact_terms():
 # --------------------------------------------------------------------------- #
 def _diamond_layout():
     """Engine-id diamond: 0=root, 1=B, 2=C, 3=D(under both), 4=E(under C)."""
-    from spark_vi.dag import DagLayout
+    from spark_vi.dag.layout import DagLayout
     return DagLayout({1: [0], 2: [0], 3: [1, 2], 4: [2]}, n_bg=2, tpn=1)
 
 

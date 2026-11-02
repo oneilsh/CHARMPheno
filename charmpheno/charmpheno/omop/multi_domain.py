@@ -210,7 +210,7 @@ def assemble_multidomain_from_events(cond_events, extra_events, before_dag, *,
     from charmpheno.omop.case_finding_assembly import (
         _SPLIT_SALT, split_train_test, doc_attested_nodes, node_patient_counts,
         attach_frontiers, most_specific_cids, strip_test_features, attach_labels)
-    from spark_vi.dag import DagLayout
+    from spark_vi.dag.layout import DagLayout
 
     if split_salt is None:
         split_salt = _SPLIT_SALT

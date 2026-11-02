@@ -53,7 +53,7 @@ from scipy.special import digamma
 
 from spark_vi.core.row_sparse import RowSparseStats, add_row_sparse, as_dense
 from spark_vi.inference.concentration_optimization import gated_alpha_newton_step
-from spark_vi.dag import DagLayout
+from spark_vi.dag.layout import DagLayout
 from spark_vi.models.topic.domains import domains_to_bounds
 from spark_vi.models.topic.lda import (OnlineLDA, _cavi_doc_inference, _dirichlet_kl,
                                        _hashed_gamma_init)

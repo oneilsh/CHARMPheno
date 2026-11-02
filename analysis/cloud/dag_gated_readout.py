@@ -1199,7 +1199,7 @@ def main(argv=None) -> int:
             # Exp 0159: gated NPMI from the saved topics + the bundle's documents;
             # no transform, no heads.
             with _phase("gated NPMI"):
-                from spark_vi.dag import DagLayout
+                from spark_vi.dag.layout import DagLayout
                 from topic_npmi import run_npmi
                 _npz = np.load(run_dir / "gated_pc_result.npz")
                 _lk = sorted((k for k in _npz.files if k.startswith("lambda_")),
@@ -1359,7 +1359,7 @@ def main(argv=None) -> int:
                             f"in the frequency top {args.raw_baseline}", flush=True)
                 elif args.raw_select == "relevance":
                     import inspect_topics as _it
-                    from spark_vi.dag import DagLayout
+                    from spark_vi.dag.layout import DagLayout
                     from spark_vi.eval.topic.gated_npmi import own_code_exclusions
                     _freq = set(_sel)
                     _quota = {}

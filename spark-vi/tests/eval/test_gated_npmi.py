@@ -3,7 +3,7 @@ floor, the own-code exclusions."""
 import numpy as np
 import pytest
 
-from spark_vi.dag import DagLayout
+from spark_vi.dag.layout import DagLayout
 from spark_vi.eval.topic import gated_npmi as gn
 
 PARENT = {1: 0, 2: 1, 3: 1}          # 1 -> {2, 3}

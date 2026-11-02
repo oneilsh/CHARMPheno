@@ -88,9 +88,16 @@ _SNOMED_BASE = dict(
 # `children_and_min_depth`, generic docstrings): the native key moved again.
 # And once more (commit 15bbe7c7 reworded two `ops.py` docstrings without
 # re-pinning; re-pinned in the following commit): 14e647862c6f1301.
-_SNOMED_KEY = "c90bbd9e8a763d48"
-_SNOMED_LABELED_KEY = "08ad48499f5b3541"          # emit_labels + closure mask
-_SNOMED_LOOKBACK_KEY = "4144be6f22528291"         # lookback windowing + strip both
+#
+# RE-PINNED by WP4 of the DAG-gated user-API plan (2026-11-02, spec decision 5):
+# `DagLayout` / `frontier_from_coded` are no longer exported from `spark_vi.dag`, so
+# `case_finding_assembly.py` (folded into EVERY key as `assembly_src`) and
+# `multi_domain.py` (`multi_domain_src`) import them from `spark_vi.dag.layout`. All
+# four hashes moved at once; `spark_vi/dag/{layout,ops}.py` themselves are untouched.
+# Announced full drop; these are the post-drop values.
+_SNOMED_KEY = "7ae90c671efc1b0a"
+_SNOMED_LABELED_KEY = "867b7b9b4c7373e0"          # emit_labels + closure mask
+_SNOMED_LOOKBACK_KEY = "dcfbbc2052b41078"         # lookback windowing + strip both
 
 
 def test_existing_snomed_keys_are_byte_identical():
@@ -125,8 +132,9 @@ _MD_BASE = dict(_SNOMED_BASE, multidomain=True, extra_domains=("drug",),
 # key (exp 0104/0109), folding `analysis/cloud/mondo_dag.py`; the anchor flavour,
 # the exp-0109 `dag_collapse` option, the DisMech `label_set` and E1's
 # `preindex_closure` fold were removed with it (the driver had refused them since
-# the 2026-10 cleanup). Post-drop value.
-_MONDO_NATIVE_KEY = "14e647862c6f1301"
+# the 2026-10 cleanup). Post-drop value; re-pinned by WP4 (2026-11-02, the
+# `spark_vi.dag.layout` import move in `case_finding_assembly` / `multi_domain`).
+_MONDO_NATIVE_KEY = "b7e1f8c795568d57"
 
 
 def test_the_native_mondo_key_is_byte_identical():

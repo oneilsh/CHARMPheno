@@ -15,7 +15,7 @@ co-occurrence, the mean over the top-N word pairs with a joint document count >=
 `min_pair_count`) with its own reference size as N.
 
 One pass for every topic: an inverted index from each top word to its (topic,
-position) entries rides a broadcast with the layout (`spark_vi.dag.DagLayout`), so a
+position) entries rides a broadcast with the layout (`spark_vi.dag.layout.DagLayout`), so a
 document touches only the topics whose top words it holds. Per-partition
 accumulators are allocated executor-side; the reduction identity is a None sentinel;
 broadcasts are destroyed after the pass (ADR 0047).

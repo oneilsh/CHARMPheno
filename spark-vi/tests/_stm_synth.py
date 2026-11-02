@@ -581,7 +581,7 @@ def dag_placement_corpus(*, parent, node_prev, V, doc_len, seed):
     block plus a single exact 'node code'; an item at node v emits a shared common pool + the
     signature blocks along closure(v). Returns (docs, labels, node_codes)."""
     import numpy as np
-    from spark_vi.dag import DagLayout
+    from spark_vi.dag.layout import DagLayout
     rng = np.random.default_rng(seed)
     lay = DagLayout(parent, n_bg=2, tpn=1)
     nodes = lay.nodes
@@ -709,7 +709,7 @@ def two_domain_dag_corpus(*, parent, node_prev, V_a, V_b, doc_len, seed,
       - node_codes: {node id -> exact domain-0 marker token id}, mirrors
         dag_placement_corpus, for strip_dag_node_codes at eval.
     """
-    from spark_vi.dag import DagLayout
+    from spark_vi.dag.layout import DagLayout
     rng = np.random.default_rng(seed)
     lay = DagLayout(parent, n_bg=2, tpn=1)
     nodes = lay.nodes
@@ -797,7 +797,7 @@ def dag_placement_corpus_multi(*, parent, leaf_prev, comorbid_rate, V, doc_len, 
     signature blocks along the union of its frontier's closures. Labels are frozensets (the frontier
     truth). Returns (docs, labels, node_codes)."""
     import numpy as np
-    from spark_vi.dag import DagLayout
+    from spark_vi.dag.layout import DagLayout
     rng = np.random.default_rng(seed)
     lay = DagLayout(parent, n_bg=2, tpn=1)
     nodes = lay.nodes

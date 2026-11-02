@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from spark_vi.dag import DagLayout, frontier_from_coded
+from spark_vi.dag.layout import DagLayout, frontier_from_coded
 from _gibbs_oracle import fit_gated, profile
 
 PARENT = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}   # root 0 -> families 1,2 -> subtypes
@@ -117,7 +117,7 @@ def test_dag_placement_corpus_multi_shapes():
 
 
 def test_daglayout_descendants_is_proper_and_mirrors_closure():
-    from spark_vi.dag import DagLayout
+    from spark_vi.dag.layout import DagLayout
     # DAG: 1 -> 2 -> 4, 1 -> 3, and 4 also a child of 3 (multi-parent diamond)
     lay = DagLayout({2: 1, 3: 1, 4: 2}, n_bg=1, tpn=1)
     lay.parents.setdefault(4, [])
@@ -141,7 +141,7 @@ def test_daglayout_descendants_is_proper_and_mirrors_closure():
 
 def test_cost_report_reports_k_fanout_and_lambda_size():
     """Pre-flight size profile: K, DAG fan-out and the lambda size."""
-    from spark_vi.dag import DagLayout
+    from spark_vi.dag.layout import DagLayout
     deep = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}
     lay = DagLayout(deep, n_bg=2, tpn=1)                    # K = 2 + 6 = 8
     d, s = lay.cost_report(vocab_size=100)

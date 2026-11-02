@@ -114,7 +114,7 @@ def test_chunking_does_not_change_the_fit():
 def test_gate_schedule_advances_through_global_params():
     """The leaves-first gate's counter rides global_params on this engine too."""
     from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
-    from spark_vi.dag import DagLayout
+    from spark_vi.dag.layout import DagLayout
     from spark_vi.models.topic.types import GatedBOWDocument
 
     lay = DagLayout({1: 0, 2: 0, 3: 1}, n_bg=1, tpn=1)
@@ -141,7 +141,7 @@ def test_rejects_empty_corpus_and_non_model():
 def test_broadcast_params_ship_expelogbeta_and_give_identical_stats():
     """The topic models ship exp(E[log beta]) instead of lambda; the E-step's
     statistics are identical either way."""
-    from spark_vi.dag import DagLayout
+    from spark_vi.dag.layout import DagLayout
     from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
     from spark_vi.models.topic.lda import OnlineLDA
     from spark_vi.models.topic.types import BOWDocument, GatedBOWDocument
