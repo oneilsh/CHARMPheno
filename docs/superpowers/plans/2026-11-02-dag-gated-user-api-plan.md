@@ -4,6 +4,7 @@
 **Spec:** [2026-10-30-dag-gated-user-api-design.md](../specs/2026-10-30-dag-gated-user-api-design.md)
 (R1-R13, decisions 1-5).
 **Branch:** `claude/dismech-ribbon`. No backward compatibility (maintainer, 2026-11-02).
+**Handoff notes:** [reports/2026-11-02-walkthrough-and-redesign-handoff.md](../../reports/2026-11-02-walkthrough-and-redesign-handoff.md).
 **Out of scope:** pooled multi-domain normalization (a modeling change, its own
 experiment); the readout's home (decided after this work).
 
