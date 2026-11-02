@@ -335,6 +335,33 @@ def nearest_mapped_standard_ancestors(edges) -> dict[int, list[int]]:
     return {d: sorted(anc) for d, (lv, anc) in best.items()}
 
 
+def shortest_climb_chain(start: int, target: int, dist: int,
+                         parents_of: "dict[int, list[int]]",
+                         lev_to_target: "dict[int, int]") -> "tuple[list[int] | None, bool]":
+    """One shortest SNOMED ``Is a`` chain from a climbed standard concept to the mapped
+    ancestor it rolled up to, for the dashboard's mapping-path hover.
+
+    ``dist`` is OMOP ``concept_ancestor.min_levels_of_separation`` (start -> target);
+    ``lev_to_target[x]`` is the same quantity for x -> target (target itself is 0).
+    Walking up ``Is a`` edges, a parent lies on SOME shortest chain iff its remaining
+    distance is exactly one less, so at each hop we keep only those parents and take the
+    lowest concept id (deterministic). ``ambiguous`` reports whether any hop had a choice
+    (the hover then says "one of several equally short paths"). Returns ``(None, False)``
+    when the edges don't realise the distance (vocabulary inconsistency). Pure."""
+    chain, cur, ambiguous = [int(start)], int(start), False
+    for remaining in range(int(dist), 0, -1):
+        want = remaining - 1
+        cands = sorted(p for p in parents_of.get(cur, [])
+                       if (0 if p == target else lev_to_target.get(p, -1)) == want
+                       and (want > 0 or p == target))
+        if not cands:
+            return None, False
+        ambiguous = ambiguous or len(cands) > 1
+        cur = cands[0]
+        chain.append(cur)
+    return (chain, ambiguous) if cur == target else (None, False)
+
+
 def reduce_tie_map(pairs, parents_of):
     """Reduce each climb tie-set to its MOST-SPECIFIC members in the Mondo DAG.
 

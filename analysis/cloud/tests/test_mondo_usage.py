@@ -752,3 +752,23 @@ def test_split_outcomes_never_narrow_a_small_part_bruteforce():
             sr = {N - a for a in avals if N - a <= 20}
             assert sn in (set(), small_named), (N, key, sorted(sn))
             assert sr in (set(), small_rolled), (N, key, sorted(sr))
+
+
+# --- SNOMED climb-chain reconstruction ------------------------------------------------
+def test_chain_linear():
+    assert m.shortest_climb_chain(1, 3, 2, {1: [2], 2: [3]}, {2: 1, 3: 0}) == ([1, 2, 3], False)
+
+
+def test_chain_diamond_is_ambiguous_and_deterministic():
+    parents = {1: [3, 2], 2: [4], 3: [4]}
+    assert m.shortest_climb_chain(1, 4, 2, parents, {2: 1, 3: 1}) == ([1, 2, 4], True)
+
+
+def test_chain_missing_returns_none():
+    assert m.shortest_climb_chain(1, 9, 2, {1: [2]}, {2: 1}) == (None, False)
+
+
+def test_chain_ignores_off_shortest_parent():
+    # 1 -> 5 is a parent but sits 2 levels from the target (a longer route); skip it
+    parents = {1: [5, 2], 2: [3], 5: [6], 6: [3]}
+    assert m.shortest_climb_chain(1, 3, 2, parents, {2: 1, 5: 2, 6: 1}) == ([1, 2, 3], False)
