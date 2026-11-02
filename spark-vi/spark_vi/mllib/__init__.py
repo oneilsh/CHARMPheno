@@ -11,6 +11,8 @@ pyspark.ml import cost. Per ADR 0009.
 """
 from spark_vi.mllib.readout import DagHeadsEstimator, DagHeadsModel
 from spark_vi.mllib.topic import (
+    DagGatedFeaturizer,
+    DagGatedFeaturizerModel,
     DagGatedLDAEstimator,
     DagGatedLDAModel,
     OnlineHDPEstimator,
@@ -20,6 +22,8 @@ from spark_vi.mllib.topic import (
 )
 
 __all__ = [
+    "DagGatedFeaturizer",
+    "DagGatedFeaturizerModel",
     "DagHeadsEstimator",
     "DagHeadsModel",
     "DagGatedLDAEstimator",
