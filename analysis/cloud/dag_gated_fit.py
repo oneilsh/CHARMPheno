@@ -1,19 +1,22 @@
-"""Cloud fit driver for the DAG-gated LDA on the Mondo label DAG (model_class gated_pc).
+"""Cloud fit driver for the DAG-gated LDA on the Mondo label subgraph (model_class gated_pc).
 
-Assembles (or reloads from cache) the multi-domain native-Mondo corpus, fits
-`DagGatedLDAEstimator` (ADR 0050: one estimator, named for its DAG gate; the
-supervised head and the DAG spectral init were removed), and saves the fit:
-`<run>/gated_pc_result.npz` (lambda / lambda_0.., alpha) + `manifest.json`. The fit
-ends at that save; every readout and evaluation is `dag_gated_readout.py` against
-it. Renamed from `gated_pc_cloud.py` by ADR 0051 step 6; the names it WRITES into a
-run dir (`gated_pc_result.npz`, `model_class: "gated_pc"` in the manifest, the
-`readout_heads_gated_pc*` files and `gated_pc` results keys) are kept, so every
-existing run reads unchanged. Experiment front matter says `model_class: dag_gated`
-(or the old `gated_pc`).
+Assembles (or reloads from cache) the multi-domain native-Mondo corpus — per
+document its features and the Mondo terms it attests (`labels`; with
+`--gate-attestation ever` also `gate_labels`), plus the label subgraph the code
+ladder reaches — and fits `DagGatedLDAEstimator` on it (spec 2026-10-30): the DAG
+(`setDag`), the gate's labels column, `minDocsPerNode` (default 100, counted on the
+training split), the per-domain feature columns and vocabularies, and the balanced
+seed's node -> attesting codes, all in Mondo curies and concept ids. The fit
+knobs start from the estimator's recommended preset; a driver flag overrides one.
 
-The per-node (label, labelMask) the readout scores against is emitted by the
-Step-A adapter (case_finding_assembly.emit_labels): label[c]=1 iff node c is in the
-is-a closure of the doc's frontier; C = len(int2cid).
+The fitted model is the run's node set of record: it is saved MLlib-style to
+`<run>/model`, with `<run>/label_dag.json` (the DAG given, the node set learned),
+`<run>/bundle_meta.json` and the manifest's `corpus_manifest.int2cid` (the integer
+bridge the run dir's readers key by, DERIVED from the model) and `<run>/code_map.tsv`
+(the code ladder landed on the kept nodes). The λ / α also go to
+`<run>/gated_pc_result.npz` for the readers that take the arrays. The fit ends at
+that save; every readout and evaluation is `dag_gated_readout.py` against it.
+Experiment front matter says `model_class: dag_gated` (or the old `gated_pc`).
 
 CANNOT RUN HERE: every fact table is read from the workspace CDR via the
 spark-bigquery connector, so main() only executes inside the All-of-Us Dataproc
@@ -577,22 +580,34 @@ def _doc_key_column(df, person_col="person_id"):
         .alias("doc_key"))
 
 
-def write_bundle_meta(run_dir, bundle, name="bundle_meta.json"):
-    """`<run>/bundle_meta.json`: the bundle's cache meta (DAG bridge, names,
-    vocab maps, ledger — ids and ontology/concept names only, no patient data).
-    The HDFS cache dies with the cluster; the run dir does not, so
-    `inspect-topics` reads this first and never needs the bundle rebuilt to
-    render words, depths or own codes."""
+def write_bundle_meta(run_dir, bundle, model, name="bundle_meta.json"):
+    """`<run>/bundle_meta.json`: what a reader needs to interpret the run without the
+    bundle — the FITTED node set as the integer bridge (`node_bridge`: `parent_int`,
+    `int2cid`, `cid2int`, `name_by_id`, from the model, never rebuilt from the
+    bundle), the bundle's vocab maps and ledger, and the DAG the fit was given
+    (`label_dag`, user ids). Ids, ontology/concept names and counts only, no patient
+    data. The HDFS cache dies with the cluster; the run dir does not, so
+    `inspect-topics` reads this first and never needs the bundle rebuilt."""
     from _case_finding_cache import _meta_dict
+    meta = _meta_dict(bundle)
+    br = node_bridge(model, bundle.name_by_id)
+    out = {"parent_int": {str(c): list(ps) for c, ps in br["parent_int"].items()},
+           "int2cid": {str(e): c for e, c in br["int2cid"].items()},
+           "cid2int": {str(c): e for c, e in br["cid2int"].items()},
+           "name_by_id": {str(c): n for c, n in br["name_by_id"].items()},
+           "ledger": meta["ledger"], "label_dag": meta["dag"]}
+    for k in ("vocab_maps", "vocab_map"):
+        if k in meta:
+            out[k] = meta[k]
     p = Path(run_dir) / name
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(_meta_dict(bundle)))
+    p.write_text(json.dumps(out))
     return p
 
 
 def write_code_map(run_dir, pairs, name="code_map.tsv"):
-    """`<run>/code_map.tsv`: `std_cid\tnode_cid` rows of the native attestation
-    map (WP-C'). Ids only — no patient data."""
+    """`<run>/code_map.tsv`: `std_cid\tnode_cid` rows of the attestation map on the
+    FITTED node set (`landed_code_map`; WP-C'). Ids only — no patient data."""
     p = Path(run_dir) / name
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "w") as fh:
@@ -600,6 +615,178 @@ def write_code_map(run_dir, pairs, name="code_map.tsv"):
         for a, b in pairs:
             fh.write(f"{int(a)}\t{int(b)}\n")
     return p
+
+
+# --------------------------------------------------------------------------- #
+# The fitted node set, as the run dir's readers see it (spec 2026-10-30).      #
+# --------------------------------------------------------------------------- #
+# The fit learns the node set (which label-DAG nodes got a topic block) from the
+# TRAINING documents; everything downstream reads it from the fitted model, never
+# from the bundle. The model is saved MLlib-style to <run>/model (MLWritable, any
+# Hadoop URI); the readers that predate it (inspect_topics, voi_tables, framings,
+# topic_npmi, readout_dag) keep their integer bridge — engine id -> node cid,
+# `parent_int` over engine ids — now DERIVED from the model (`node_bridge`) and
+# written to <run>/bundle_meta.json and the manifest's corpus_manifest.int2cid.
+MODEL_DIR = "model"
+LABEL_DAG_FILE = "label_dag.json"
+# The integer id of the synthetic root in the bridge (engine id 0), the
+# `MONDO_NATIVE_ROOT_CID` / `_FOREST_ROOT_CID` convention.
+BRIDGE_ROOT_CID = -1
+
+
+def node_cid(node) -> int:
+    """A user node id as the bridge's integer: a Mondo curie's numeric part
+    (`mondo_cid`), an int concept id as itself."""
+    if isinstance(node, str):
+        from charmpheno.mondo.native_dag import mondo_cid
+        return mondo_cid(node)
+    return int(node)
+
+
+def node_bridge(model, names=None) -> dict:
+    """The fitted node set as the integer bridge the run dir's readers take:
+    `{parent_int, int2cid, cid2int, name_by_id}`.
+
+    Engine id 0 is the synthetic root (cid `BRIDGE_ROOT_CID`), 1..N the kept nodes in
+    the model's engine order (the order of their topic blocks and of the readout's
+    heads, `spark_vi.readout.labels`). `parent_int` is `{engine child: [engine
+    parents]}`, the root omitted as a key (the `DagLayout` map). `names` is the
+    bundle's `{node id: name}`."""
+    ns = model._ns()
+    names = names or {}
+    int2cid = {0: BRIDGE_ROOT_CID}
+    name_by_id = {BRIDGE_ROOT_CID: "root"}
+    for e, u in enumerate(ns.user_ids[1:], start=1):
+        c = node_cid(u)
+        int2cid[e] = c
+        name_by_id[c] = str(names.get(u, u))
+    return {"parent_int": {int(c): [int(p) for p in ps]
+                           for c, ps in ns.engine_parents.items()},
+            "int2cid": int2cid, "cid2int": {c: e for e, c in int2cid.items()},
+            "name_by_id": name_by_id}
+
+
+def node_set_counts(model, n_given) -> dict:
+    """The fitted node set's receipt: counts of nodes only (egress-safe)."""
+    ns = model._ns()
+    return {"n_given": int(n_given), "n_kept": len(ns.nodes),
+            "n_pruned": len(ns.pruned), "n_spliced": len(ns.spliced),
+            "min_docs_per_node": int(ns.min_docs_per_node),
+            "n_train_docs": int(ns.n_docs)}
+
+
+def landed_code_map(model, code_map, int2cid) -> list:
+    """The bundle's code ladder `(std_cid, node id)` landed on the FITTED node set:
+    `(std_cid, node cid)` rows, each code on the kept node its term is (or the
+    nearest kept ancestors of a pruned / spliced term, the fit's own landing). A
+    term the fit never saw lands nowhere and is dropped. The 'own codes' of a kept
+    node, for the census, the relevance selector and the framings."""
+    landing = model._ns().frontier.landing
+    rows = set()
+    for std, term in code_map:
+        for e in landing.get(term, ()):
+            rows.add((int(std), int(int2cid[int(e)])))
+    return sorted(rows)
+
+
+def save_fitted_model(model, run_dir) -> str:
+    """Save the fitted DagGatedLDAModel to `<run>/model` (MLWritable, overwrite).
+    The run dir is a local (workspace-mounted) path, so it is written as a
+    `file://` URI: a bare path would resolve against fs.defaultFS (HDFS on a
+    cluster)."""
+    uri = (Path(run_dir) / MODEL_DIR).resolve().as_uri()
+    model.write().overwrite().save(uri)
+    return uri
+
+
+def load_fitted_model(run_dir):
+    """The fitted DagGatedLDAModel saved by the fit (`<run>/model`)."""
+    from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAModel
+    p = Path(run_dir) / MODEL_DIR
+    if not (p / "metadata").exists():
+        raise FileNotFoundError(
+            f"{p} holds no saved DagGatedLDAModel: this run predates the node-set "
+            "redesign (spec 2026-10-30) or its fit did not finish; re-fit it")
+    return DagGatedLDAModel.load(p.resolve().as_uri())
+
+
+def write_label_dag(run_dir, dag, model, *, labels_col, name=LABEL_DAG_FILE):
+    """`<run>/label_dag.json`: the DAG the fit was given (`dag`: the bundle's,
+    `[[child, parent | null], ...]` in user ids), the gate's labels column, and the
+    node set the fit learned (`NodeSet.to_dict`: kept nodes in engine order, kept
+    DAG, pruned -> landing, spliced, support). Node ids and counts only."""
+    from charmpheno.omop.case_finding_assembly import dag_edges
+    p = Path(run_dir) / name
+    p.write_text(json.dumps({"dag": dag_edges(dag), "labels_col": labels_col,
+                             "node_set": model._ns().to_dict()}))
+    return p
+
+
+def attach_heads_targets(df, model, labels_col, *, mask_mode="full",
+                         label_col="label", mask_col="labelMask"):
+    """Append the readout heads' dense targets, built from a labels column on the
+    FITTED model's node set (spec 2026-10-30 R6, R8): `label_col` / `mask_col`,
+    `array<double>` of length C = kept nodes + 1, index 0 the root and index e the
+    model's engine node e (`spark_vi.readout.labels.NodeLabeler`: label = closure of
+    the landed labels; `mask_mode` 'full' or 'closure'). Labels the node set does not
+    know are ignored (the label year may attest a node the training documents never
+    reached; it lands on its kept ancestors like any pruned one, and a node outside
+    the given DAG cannot occur: the bundle's labels are DAG nodes).
+
+    The labeler rides a broadcast (ADR 0047); the row function closes over the
+    handle only and calls spark_vi code, so the executors need only the spark-vi
+    zip."""
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import ArrayType, DoubleType, StructField, StructType
+    from spark_vi.readout.labels import NodeLabeler
+
+    lab = NodeLabeler.from_node_set(model._ns(), mask_mode=mask_mode,
+                                    unknown_labels="ignore")
+    bc = df.sparkSession.sparkContext.broadcast(lab)
+
+    def _targets(labels, _bc=bc):
+        lb = _bc.value
+        act, obs = lb(labels)
+        C = lb.C
+        y = [0.0] * C
+        for i in act:
+            y[i] = 1.0
+        if obs is None:
+            m = [1.0] * C
+        else:
+            m = [0.0] * C
+            for i in obs:
+                m[i] = 1.0
+        return (y, m)
+
+    schema = StructType([StructField("y", ArrayType(DoubleType(), False), False),
+                         StructField("m", ArrayType(DoubleType(), False), False)])
+    tmp = "__heads_targets"
+    return (df.withColumn(tmp, F.udf(_targets, schema)(F.col(labels_col)))
+            .withColumn(label_col, F.col(f"{tmp}.y"))
+            .withColumn(mask_col, F.col(f"{tmp}.m"))
+            .drop(tmp))
+
+
+def attach_engine_frontier(df, model, labels_col, *, out_col="frontier"):
+    """Append the gate's view of a labels column on the fitted node set: `out_col`,
+    the engine-id frontier (`array<bigint>`, the model's own `FrontierFn`: landing,
+    then the most-specific landed nodes) — what the fit's gate admitted for these
+    documents. For the gated NPMI, which scores a node block on the documents its
+    gate admits. Broadcast, as `attach_heads_targets`."""
+    import dataclasses
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import ArrayType, LongType
+
+    fn = dataclasses.replace(model._frontier_fn(), unknown_labels="ignore")
+    bc = df.sparkSession.sparkContext.broadcast(fn)
+
+    def _frontier(labels, _bc=bc):
+        return sorted(int(e) for e in _bc.value(labels))
+
+    return df.withColumn(out_col, F.udf(_frontier, ArrayType(LongType()))(
+        F.col(labels_col)))
 
 
 def _collect_lean_proba(scored_df, C, V=None, b_raw=None, *, degenerate=None,
@@ -718,45 +905,97 @@ def format_per_node_domain_mass(mass_by_node, domain_names, int2cid, name_by_id)
     return "\n".join(lines)
 
 
+# Driver flag -> estimator Param, for the fit knobs the recommended preset sets
+# (`DagGatedLDAEstimator.recommended`, RECOMMENDED_PARAMS). A flag left unset (None)
+# keeps the preset's value; a flag given overrides it.
+_FLAG_TO_PARAM = (
+    ("n_bg", "gateNBg", int), ("tpn", "gateTpn", int),
+    ("max_iter", "maxIter", int), ("tau0", "learningOffset", float),
+    ("kappa", "learningDecay", float), ("subsampling_rate", "subsamplingRate", float),
+    ("gamma_shape", "gammaShape", float), ("cavi_max_iter", "caviMaxIter", int),
+    ("cavi_tol", "caviTol", float),
+    ("optimize_doc_concentration", "optimizeDocConcentration", bool),
+    ("gate_warm", "gateWarm", int), ("gate_seed_mode", "gateSeedMode", str),
+    ("gate_seed_leaves", "gateSeedLeaves", bool),
+    ("gate_open_seed", "gateOpenSeed", bool),
+)
+# The clinical driver's node-set threshold: a node gets a topic block when at least
+# this many TRAINING documents' label closures reach it (>= the egress floor, so a
+# per-node table built on a kept node clears it). Spec 2026-10-30.
+DEFAULT_MIN_DOCS_PER_NODE = 100
+
+
 def _build_estimator(args):
-    """Construct the DagGatedLDAEstimator for the fit (ADR 0050). The gate (the
-    run's label DAG, `args._parent_int`) is set post-construction, since the Param
-    is a JSON string; K comes from the layout (n_bg + nodes * tpn)."""
+    """The DagGatedLDAEstimator for the fit: the recommended preset
+    (`DagGatedLDAEstimator.recommended`) with the driver's flags on top, the label DAG
+    and labels column, the node-set threshold (`minDocsPerNode`), the per-domain
+    feature columns and vocabularies, and the balanced seed's node -> attesting
+    terms (`nodeTerms`) and the profile seed, both keyed by node id and term id.
+
+    Reads, from `args`: the CLI flags (`_FLAG_TO_PARAM`, `doc_concentration`,
+    `min_docs_per_node`, `seed`) and the corpus-derived `_dag`, `_labels_col`,
+    `_domain_cols`, `_vocabularies`, `_node_terms`, `_gate_seed_profile` (each
+    optional)."""
     from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
 
-    est = DagGatedLDAEstimator(
-        featuresCol="features", frontierCol="frontier",
-        maxIter=args.max_iter, seed=args.seed,
-        subsamplingRate=args.subsampling_rate,
-        learningOffset=args.tau0, learningDecay=args.kappa,
-        gammaShape=args.gamma_shape, caviMaxIter=args.cavi_max_iter,
-        caviTol=args.cavi_tol,
-        optimizeDocConcentration=bool(args.optimize_doc_concentration),
-        gateNBg=args.n_bg, gateTpn=args.tpn,
-        # Leaves-first gate schedule (report 2026-10-19; exp 0153/0154): 0 = the
-        # single-round gate. Fit-only — no cache key moves.
-        gateWarm=int(getattr(args, "gate_warm", 0) or 0),
-        gateOpenSeed=True,
-        gateSeedMode=str(getattr(args, "gate_seed_mode", "subtree")),
-        gateSeedLeaves=bool(getattr(args, "gate_seed_leaves", False)),
-    )
-    # Multi-domain: per-domain feature columns (features_0..) so the engine carries
-    # a per-domain lambda. Domain widths are read from the first row.
+    over = {}
+    for flag, param, cast in _FLAG_TO_PARAM:
+        v = getattr(args, flag, None)
+        if v is not None:
+            over[param] = cast(v)
+    dc = getattr(args, "doc_concentration", None)
+    if dc is not None:
+        if not dc > 0:
+            raise ValueError(f"--doc-concentration must be > 0; got {dc}")
+        over["docConcentration"] = [float(dc)]
+    if getattr(args, "seed", None) is not None:
+        over["seed"] = int(args.seed)
+    mdn = getattr(args, "min_docs_per_node", None)
+    over["minDocsPerNode"] = int(DEFAULT_MIN_DOCS_PER_NODE if mdn is None else mdn)
+    over["labelsCol"] = str(getattr(args, "_labels_col", None) or "labels")
     dom_cols = getattr(args, "_domain_cols", None)
     if dom_cols:
-        est._set(featuresCols=dom_cols)
-    dc = getattr(args, "doc_concentration", None)
-    if dc is not None and dc > 0:
-        # Scalar Dirichlet alpha for the gated doc-topic prior; the default 1/K is
-        # razor-small at whole-Mondo K.
-        est._set(docConcentration=[float(dc)])
-    est.setGateParent(args._parent_int)      # JSON-encodes the DAG map
+        over["featuresCols"] = list(dom_cols)
+    est = DagGatedLDAEstimator.recommended(**over)
+    dag = getattr(args, "_dag", None)
+    if dag is not None:
+        est.setDag(dag)
+    vocabs = getattr(args, "_vocabularies", None)
+    if vocabs:
+        est.setVocabularies(vocabs)
+    nt = getattr(args, "_node_terms", None)
+    if nt:
+        est.setNodeTerms(nt)
     gsp = getattr(args, "_gate_seed_profile", None)
     if gsp:
         est.setGateSeedProfile(gsp)
-    if str(getattr(args, "gate_seed_mode", "subtree")) == "balanced":
-        est.setGateSeedOwnCodes(getattr(args, "_gate_seed_own", None) or {})
     return est
+
+
+def vocabularies_of(vocab_maps) -> list:
+    """The per-domain vocab maps `{term: index}` as the estimator's `vocabularies`:
+    one list of term ids per feature column, in index order."""
+    out = []
+    for vm in vocab_maps:
+        terms = [None] * len(vm)
+        for t, i in vm.items():
+            terms[int(i)] = t
+        out.append(terms)
+    return out
+
+
+def node_terms_of(code_map, vocab_map0, column="features_0") -> dict:
+    """The code ladder `(std_cid, node id)` as the estimator's `nodeTerms`:
+    `{node: [(column, std_cid)]}` over the codes in the condition vocabulary.
+    Keyed by the most-specific term each code resolves to; the estimator drops the
+    entries of nodes it does not keep. Terms are qualified with the feature column,
+    so a condition concept id that is also a token of another domain stays
+    unambiguous."""
+    out: dict = {}
+    for std, node in code_map:
+        if int(std) in vocab_map0:
+            out.setdefault(node, set()).add((column, int(std)))
+    return {n: sorted(ts) for n, ts in out.items()}
 
 
 # --------------------------------------------------------------------------- #
@@ -772,15 +1011,18 @@ _MONDO_DAG_SOURCES = ("mondo", "mondo_native")
 # One derivation, two callers, so a re-readout's cache key cannot drift from the
 # key the fit stored the bundle under.
 #
+# Not here since spec 2026-10-30 (not bundle inputs any more): the node-set
+# threshold (`min_n`, `min_positives`), the topic layout (`n_bg`, `tpn`) and the
+# readout's `label_mask_mode` / `emit_labels`.
+#
 # `doc_spec` is a corpus-identity field that is NOT in this tuple, on purpose:
 # every name here is forwarded to the assembler, and neither assembler accepts a
 # doc-spec argument (both hard-code `PatientCohortDocSpec` internally). It is a
 # key-only input and travels in `key_extra` instead — see `doc_spec_identity`.
 _SPEC_ASSEMBLY_KEYS = (
-    "disease", "cdr", "billing", "person_mod", "min_n", "holdout_frac",
-    "vocab_size", "min_df", "min_patient_count", "n_bg", "tpn", "doc_min_length",
-    "strip_mode", "lookback_days", "label_window_days", "label_mask_mode",
-    "index_mode",
+    "disease", "cdr", "billing", "person_mod", "holdout_frac",
+    "vocab_size", "min_df", "min_patient_count", "doc_min_length",
+    "strip_mode", "lookback_days", "label_window_days", "index_mode",
 )
 
 
@@ -788,20 +1030,11 @@ def doc_spec_identity() -> str:
     """The DOC-UNIT identity token this driver's corpora are assembled under.
 
     Read off the class rather than written down, so that swapping the driver's
-    doc spec (the `EpisodeDocSpec` of exp 0111, say) moves the token — and
-    therefore the bundle cache key — without anyone having to remember to. That
-    is the whole content of the fix: `doc_spec` is hard-coded in two places
-    (`multi_domain.py:408`, and the provider construction in `mondo_assemble_fn`
-    below) and was absent from every cache key, so a driver-side doc-unit change
-    would have produced a DIFFERENT corpus under a BYTE-IDENTICAL key — silent
-    cache poisoning, not a rebuild cost (audit seam 4; spec R5.3, which requires
-    this closed before any doc-unit work starts).
-
-    `min_doc_length`, the spec's only other identity-bearing parameter, is
-    already folded into the key as `doc_min_length`, so the class name is the
-    whole remaining identity. `compute_bundle_cache_key` folds this only when it
-    differs from `DEFAULT_DOC_SPEC`, which is why closing the hole moves no
-    existing key."""
+    doc spec moves the token — and therefore the bundle cache key — without anyone
+    having to remember to (audit seam 4; spec R5.3). `min_doc_length`, the spec's
+    only other identity-bearing parameter, is already folded into the key as
+    `doc_min_length`. `compute_bundle_cache_key` folds this only when it differs
+    from `DEFAULT_DOC_SPEC`."""
     from charmpheno.omop.doc_spec import PatientCohortDocSpec
     return PatientCohortDocSpec().name
 
@@ -811,12 +1044,10 @@ def multidomain_corpus_spec(args, extra_domains) -> dict:
 
     Everything the bundle's cache key needs AND everything re-assembling it from
     scratch needs, in one dict — including `billing` and the Mondo build inputs,
-    which a post-hoc rebuild cannot invent. `min_n` is 0 and `index_mode` is
-    `population` (the DAG arrives already powered; there is no single disease).
-
-    The removed options keep their OFF values in the spec (`dag_collapse`,
-    `label_set`, `preindex_closure`), so a new spec has the same shape — and the
-    same cache key — as every native spec written before the 2026-10 cleanup."""
+    which a post-hoc rebuild cannot invent. `index_mode` is `population` (there is
+    no single disease). The removed options keep their OFF values (`dag_collapse`,
+    `label_set`, `preindex_closure`) so `_refuse_removed_spec_options` reads one
+    shape."""
     return {
         "dag_source": args.dag_source,
         "disease": args.disease, "cdr": args.cdr, "billing": args.billing,
@@ -826,24 +1057,20 @@ def multidomain_corpus_spec(args, extra_domains) -> dict:
         "person_mod": args.person_mod, "vocab_size": args.vocab_size,
         "min_df": args.min_df, "min_patient_count": args.min_patient_count,
         "doc_min_length": args.doc_min_length,
-        "min_n": 0,
-        "holdout_frac": args.holdout_frac, "n_bg": args.n_bg, "tpn": args.tpn,
+        "holdout_frac": args.holdout_frac,
         "strip_mode": args.strip_mode, "lookback_days": args.lookback_days,
         "label_window_days": args.label_window_days,
-        "label_mask_mode": args.label_mask_mode, "emit_labels": True,
         "window_mode": args.window_mode,
         "prior_obs_days": args.prior_obs_days, "window_days": args.window_days,
         "mondo_version": args.mondo_version,
         "mondo_branch": args.mondo_branch or "",
-        "min_positives": args.min_positives,
         "mondo_cache_dir": args.mondo_cache_dir,
         "label_set": "", "label_set_path": "",
         "dag_collapse": False,
         # The doc unit (R5.3), a cache-key input.
         "doc_spec": doc_spec_identity(),
-        # Label redesign R2 (exp 0146): the topic GATE read from all-ever
-        # attestation. Present ONLY when asked, so a label-year bundle keys
-        # byte-identically to before.
+        # Label redesign R2 (exp 0146): the bundle's TRAIN split also carries the
+        # all-ever attestation (`gate_labels`). Present ONLY when asked.
         **({"gate_attestation": "ever"}
            if str(getattr(args, "gate_attestation", "label")) == "ever" else {}),
         "preindex_closure": False,
@@ -879,18 +1106,13 @@ def _multidomain_params(spec):
     _refuse_removed_spec_options(spec)
     assembly = {k: spec[k] for k in _SPEC_ASSEMBLY_KEYS}
     assembly["extra_domains"] = tuple(spec.get("extra_domains") or ())
-    assembly["emit_labels"] = True
-    # `doc_spec` is a key-only identity (the assembler builds its own spec and
-    # takes no such kwarg), so it rides key_extra.
     key_extra = {"multidomain": True,
                  "doc_spec": str(spec.get("doc_spec") or doc_spec_identity())}
-    # Label redesign R2: the all-ever train gate, folded only when on.
     if spec.get("gate_attestation") and str(spec["gate_attestation"]) != "label":
         key_extra["gate_attestation"] = str(spec["gate_attestation"])
     from charmpheno.mondo.native_dag import MONDO_NATIVE_VERSION
     key_extra.update(mondo=True, mondo_version=spec["mondo_version"],
-                     mondo_branch=spec.get("mondo_branch") or "",
-                     min_positives=spec["min_positives"])
+                     mondo_branch=spec.get("mondo_branch") or "")
     key_extra.update(mondo_native=True, mondo_native_version=MONDO_NATIVE_VERSION)
     return assembly, key_extra
 
@@ -910,57 +1132,56 @@ def _gate_ever_attested(docs, events, provider):
     `docs` = the bundle frame (`person_id`, `doc_id`); `events` = the full-history
     condition frame (`person_id`, `concept_id`, ...). Each event inherits its
     person's doc(s) — `source_cohort` is the first `:` component of the population
-    doc_id (`PatientCohortDocSpec`) — and goes through the SAME `provider` the label
-    used (same code map, same most-specific reduction on the flat ribbon), so gate
-    and label differ only in WHEN, never in HOW a code becomes a node. A doc whose
-    person attests nothing keeps a present, empty set."""
+    doc_id (`PatientCohortDocSpec`) — and goes through the SAME `provider` the labels
+    used (same code ladder), so the two columns differ only in WHEN, never in HOW a
+    code becomes a node. Returns `(person_id, doc_id, gate_labels)`; a doc whose
+    person attests nothing keeps a present, empty array."""
     from pyspark.sql import functions as F
+    from charmpheno.omop.case_finding_assembly import GATE_LABELS_COL, LABELS_COL
     roster = docs.select("person_id", "doc_id").distinct().withColumn(
         "source_cohort", F.element_at(F.split(F.col("doc_id"), ":"), 1))
     ev = events.select("person_id", "concept_id").join(
         roster.select("person_id", "source_cohort").distinct(), "person_id")
-    att = provider(ev).select("doc_id", "attested_cids")
-    return (roster.join(att, "doc_id", "left")
-            .withColumn("attested_cids", F.coalesce(
-                F.col("attested_cids"), F.array().cast("array<bigint>"))))
+    att = provider(ev)
+    dt = att.schema[LABELS_COL].dataType.simpleString()
+    att = att.select("doc_id", F.col(LABELS_COL).alias(GATE_LABELS_COL))
+    return (roster.select("person_id", "doc_id").join(att, "doc_id", "left")
+            .withColumn(GATE_LABELS_COL, F.coalesce(
+                F.col(GATE_LABELS_COL), F.array().cast(dt))))
 
 
-def _gate_count_receipt(before, after):
-    """Pooled R2.3 receipt: gated (doc, node) cells and gated docs, label vs ever,
-    and the median per-node ratio of gated train docs."""
+def _gate_count_receipt(df, label_col, gate_col):
+    """Pooled R2.3 receipt: attested (doc, node) cells and attested docs, label year
+    vs all-ever, and the median per-node ratio of attesting train docs. Counts only."""
     from pyspark.sql import functions as F
 
-    def per_node(df):
-        return {int(r["n"]): int(r["c"]) for r in
-                df.select(F.explode("frontier").alias("n")).groupBy("n")
+    def per_node(col):
+        return {r["n"]: int(r["c"]) for r in
+                df.select(F.explode(col).alias("n")).groupBy("n")
                   .agg(F.count("*").alias("c")).collect()}
-    b, a = per_node(before), per_node(after)
+    b, a = per_node(label_col), per_node(gate_col)
     ratios = sorted(a.get(n, 0) / c for n, c in b.items() if c > 0)
     return {"cells_label": sum(b.values()), "cells_ever": sum(a.values()),
-            "docs_gated_label": before.where(F.size("frontier") > 0).count(),
-            "docs_gated_ever": after.where(F.size("frontier") > 0).count(),
+            "docs_gated_label": df.where(F.size(label_col) > 0).count(),
+            "docs_gated_ever": df.where(F.size(gate_col) > 0).count(),
             "median_node_ratio": (ratios[len(ratios) // 2] if ratios else float("nan")),
             "n_nodes": len(b)}
 
 
-def _attach_gate_ever(spark, bundle, *, provider, before_dag, cdr, billing,
-                      person_mod, n_bg, tpn, _events=None):
-    """Label redesign R2 (spec 2026-10-13): overwrite each TRAIN document's `frontier`
-    with the roll-up of its person's ALL-EVER attestations; label/labelMask and the
-    test split untouched. MISS-only, inside the assemble closure, for the reason
-    `_attach_gate_frontier` gives (`before_dag` exists only there). One full-history
-    `condition_era` read (the sidecar's load; ~70 s on 0137's corpus). The roll-up
-    and the join integrity are `attach_frontiers` and `_overwrite_frontier`, called
-    as-is.
+def _attach_gate_ever(spark, bundle, *, provider, cdr, billing, person_mod,
+                      _events=None):
+    """Label redesign R2 (spec 2026-10-13; R8 of spec 2026-10-30): add `gate_labels`
+    to each TRAIN document — its person's ALL-EVER attestations through the same
+    code ladder — beside the label-year `labels`, which stay untouched (they are
+    the readout's); the test split is untouched (the test transform is ungated).
+    The fit's gate reads `gate_labels` (`labelsCol`). MISS-only, inside the
+    assemble closure, where the provider exists. One full-history `condition_era`
+    read (the sidecar's load; ~70 s on 0137's corpus).
 
     Why the future may gate a TRAIN document: the gate shapes topics on the train
     split only; test documents are folded in ungated, so no test outcome reaches
     them (spec 2026-10-13, Why)."""
-    from spark_vi.dag.layout import DagLayout
-    from charmpheno.omop.case_finding_assembly import attach_frontiers
-
-    keep = set(bundle.cid2int)
-    lay = DagLayout(bundle.parent_int, n_bg=n_bg, tpn=tpn)
+    from charmpheno.omop.case_finding_assembly import GATE_LABELS_COL, LABELS_COL
     events = _events
     if events is None:
         from charmpheno.omop import load_omop_bigquery
@@ -969,85 +1190,75 @@ def _attach_gate_ever(spark, bundle, *, provider, before_dag, cdr, billing,
                                     person_sample_mod=person_mod,
                                     source_table="condition_era")
     before = bundle.train_df
-    attested = _gate_ever_attested(before, events, provider)
-    gate_fr = attach_frontiers(attested, before_dag, keep, bundle.cid2int, lay)
-    after = _overwrite_frontier(before, gate_fr).cache()
-    rec = _gate_count_receipt(before, after)
-    print(f"[gate-ever] train gate, label year -> ever: gated (doc, node) cells "
-          f"{rec['cells_label']:,} -> {rec['cells_ever']:,}; docs with any gate "
+    gate = _gate_ever_attested(before, events, provider)
+    after = _attach_gate_column(before, gate, GATE_LABELS_COL).cache()
+    rec = _gate_count_receipt(after, LABELS_COL, GATE_LABELS_COL)
+    print(f"[gate-ever] train gate, label year -> ever: attested (doc, node) cells "
+          f"{rec['cells_label']:,} -> {rec['cells_ever']:,}; docs with any label "
           f"{rec['docs_gated_label']:,} -> {rec['docs_gated_ever']:,}; median "
-          f"per-node ratio of gated docs {rec['median_node_ratio']:.2f} over "
+          f"per-node ratio of attesting docs {rec['median_node_ratio']:.2f} over "
           f"{rec['n_nodes']} nodes", flush=True)
     bundle.train_df = after
     bundle.gate_ever_receipt = rec
     return bundle
 
 
-def _overwrite_frontier(df, gate_frontier):
-    """Overwrite `df`'s `frontier` with `gate_frontier`'s, joined on the doc key,
-    refusing a missing / duplicate / mismatched join LOUDLY (WP-D3 join integrity).
+def _attach_gate_column(df, gate, col):
+    """`df` with `col` joined from `gate` on the doc key, refusing a missing /
+    duplicate / mismatched join LOUDLY (WP-D3 join integrity).
 
-    `gate_frontier` carries `(person_id, doc_id, frontier)`, one row per document.
-    The guards, in order: (1) the gate frame must be UNIQUE on (person_id, doc_id) —
-    an ambiguous frontier is a raise, never a silent pick; (2) a LEFT join must not
-    change the document count — a duplicate gate key that inflated it is a raise;
-    (3) NO document may come back without a gate — a missing join surfaces as a NULL
-    (distinct from an EMPTY gate's present `[]`) and is a hard error, never an
-    empty-/stale-frontier fallback. Only `frontier` is replaced; every other column
-    (`label`/`labelMask`/`features`/`episode_no`/…) rides through untouched."""
+    `gate` carries `(person_id, doc_id, col)`, one row per document. The guards, in
+    order: (1) the gate frame must be UNIQUE on (person_id, doc_id) — an ambiguous
+    gate is a raise, never a silent pick; (2) a LEFT join must not change the
+    document count; (3) NO document may come back without a gate — a missing join
+    surfaces as a NULL (distinct from an EMPTY gate's present `[]`) and is a hard
+    error, never an empty-gate fallback. Every other column rides through."""
     from pyspark.sql import functions as F
 
-    gate = gate_frontier.select(
-        "person_id", "doc_id",
-        F.col("frontier").alias("_gate_frontier")).cache()
+    tmp = f"_gate_{col}"
+    g = gate.select("person_id", "doc_id", F.col(col).alias(tmp)).cache()
     try:
-        n_gate = gate.count()
-        n_keys = gate.select("person_id", "doc_id").distinct().count()
+        n_gate = g.count()
+        n_keys = g.select("person_id", "doc_id").distinct().count()
         if n_gate != n_keys:
             raise ValueError(
-                f"exp 0111 D13 gate: {n_gate - n_keys} duplicate (person_id, "
-                "doc_id) rows in the gate frame — refusing an ambiguous frontier "
-                "overwrite (one frontier per document is required).")
+                f"gate join: {n_gate - n_keys} duplicate (person_id, doc_id) rows "
+                f"in the {col!r} frame — refusing an ambiguous gate (one per "
+                "document is required).")
         n_before = df.count()
-        joined = (df.drop("frontier")
-                  .join(gate, on=["person_id", "doc_id"], how="left"))
+        base = df.drop(col) if col in df.columns else df
+        joined = base.join(g, on=["person_id", "doc_id"], how="left")
         n_after = joined.count()
         if n_after != n_before:
             raise ValueError(
-                f"exp 0111 D13 gate: the gate join changed the document count "
+                f"gate join: the {col!r} join changed the document count "
                 f"({n_before} -> {n_after}) — a duplicate gate key inflated the "
                 "bundle; refusing.")
-        n_missing = joined.where(F.col("_gate_frontier").isNull()).count()
+        n_missing = joined.where(F.col(tmp).isNull()).count()
         if n_missing:
             raise ValueError(
-                f"exp 0111 D13 gate: {n_missing} bundle document(s) received no "
-                "gate frontier — a missing join is a hard error, never an "
-                "empty-frontier fallback.")
-        return (joined.withColumn("frontier", F.col("_gate_frontier"))
-                .drop("_gate_frontier"))
+                f"gate join: {n_missing} bundle document(s) received no {col!r} — "
+                "a missing join is a hard error, never an empty-gate fallback.")
+        return joined.withColumn(col, F.col(tmp)).drop(tmp)
     finally:
-        gate.unpersist()
+        g.unpersist()
 
 
 def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=None,
                       cache_uri=None):
-    """A MISS-ONLY assembler for the native Mondo corpus: build the DAG, THEN assemble.
+    """A MISS-ONLY assembler for the native Mondo corpus: build the code ladder and
+    the label subgraph, THEN assemble.
 
-    The native label DAG costs a whole-Mondo -> OMOP mapping, closure-support
-    powering and a code climb — minutes of BigQuery — and the fit consumes NONE of
-    it directly: the DagLayout comes from `bundle.parent_int`, and the frontier is
-    baked into the cached `frontier`/`label` columns. So the build lives inside the
-    assemble seam, where `load_or_build_case_finding_bundle` reaches it only after
-    `try_load` has missed. A HIT pays for none of it.
+    The build costs a whole-Mondo -> OMOP mapping and a code climb — minutes of
+    BigQuery — and the fit consumes it only through the bundle (its `dag`, its
+    `labels`, its `native_code_map`). So the build lives inside the assemble seam,
+    where `load_or_build_case_finding_bundle` reaches it only after `try_load` has
+    missed. A HIT pays for none of it.
 
-    `charmpheno.mondo.native_dag` builds the label DAG out of Mondo's own is-a graph (closure-
-    support powering, induced Hasse, splice) and hands back a per-code attestation
-    map; the assembler takes it through the `before_dag` / `attested_provider` pair.
-    `spec["gate_attestation"] == "ever"` (exp 0146) then overwrites each TRAIN
-    document's gate with its person's all-ever attestations.
+    `spec["gate_attestation"] == "ever"` (exp 0146) then adds each TRAIN
+    document's all-ever attestations as `gate_labels`.
 
-    `on_inputs(count_of=..., terminal_cids=..., reduced=...)` hands back the build
-    by-products; it is NOT called on a HIT.
+    `on_inputs(stats=...)` hands back the build receipt; it is NOT called on a HIT.
 
     The anchor-Mondo / SNOMED fronts, the episode index, the pre-index closure and
     the fit-time label set were removed in the 2026-10 cleanup (commit fff7bf4067
@@ -1059,48 +1270,40 @@ def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=Non
             assemble_multidomain_case_finding_corpus)
         from charmpheno.mondo.native_dag import (
             build_mondo_native_fit_inputs, format_native_build_report,
-            format_native_powering_report, make_mondo_native_attested_provider)
+            format_native_mapping_report, make_mondo_native_attested_provider)
         build = _build_inputs or build_mondo_native_fit_inputs
         assemble = _assemble or assemble_multidomain_case_finding_corpus
         branch = spec.get("mondo_branch") or ""
-        with _phase(f"build native Mondo label DAG (branch={branch or 'ALL'})"):
-            before_dag, code_map_sdf, kept_cids, support_of, stats = build(
+        with _phase(f"build the Mondo code ladder + label subgraph "
+                    f"(branch={branch or 'ALL'})"):
+            inputs = build(
                 spark, cdr=spec["cdr"], billing=spec["billing"],
                 mondo_version=spec["mondo_version"],
                 mondo_cache_dir=spec.get("mondo_cache_dir") or "data/mondo",
-                min_positives=spec["min_positives"],
-                branch_root=(branch or None),
-                label_set=None, label_set_name="")
+                branch_root=(branch or None))
             provider = make_mondo_native_attested_provider(
-                code_map_sdf, doc_spec=PatientCohortDocSpec(),
-                ancestor_pairs=stats.get("flat_ancestor_pairs"))
-            # BOTH lines before any fit: C and K are measured here, not guessed.
-            print(format_native_powering_report(stats), flush=True)
-            print(format_native_build_report(stats), flush=True)
+                inputs.code_map_sdf, doc_spec=PatientCohortDocSpec())
+            # BOTH lines before any fit: the subgraph's size is measured here.
+            print(format_native_mapping_report(inputs.stats), flush=True)
+            print(format_native_build_report(inputs.stats), flush=True)
             if on_inputs is not None:
-                # `count_of` is the per-node CLOSURE support, `terminal_cids` the
-                # final node set.
-                on_inputs(count_of=support_of, terminal_cids=kept_cids,
-                          reduced={"n_classes": stats["n_final_nodes"]
-                                   - stats["n_coded_kept"], "native": stats})
-        bundle = assemble(spark, before_dag=before_dag,
+                on_inputs(stats=inputs.stats)
+        bundle = assemble(spark, label_dag=inputs.dag, names=inputs.names,
                           attested_provider=provider, index_df=None,
                           doc_spec=None, **assembly_params)
         if spec.get("gate_attestation") == "ever":
-            with _phase("label redesign R2: all-ever topic gate (train, MISS-only)"):
+            with _phase("label redesign R2: all-ever gate labels (train, MISS-only)"):
                 bundle = _attach_gate_ever(
-                    spark, bundle, provider=provider, before_dag=before_dag,
+                    spark, bundle, provider=provider,
                     cdr=spec["cdr"], billing=spec["billing"],
-                    person_mod=assembly_params["person_mod"],
-                    n_bg=int(assembly_params["n_bg"]), tpn=int(assembly_params["tpn"]))
-        # WP-C' (exp 0136): the `(std_cid, node_cid)` attestation map rides the
-        # bundle as an ATTRIBUTE, is persisted in the cache meta, and is written to
-        # the run dir by the driver (the census's own-code criterion). Ontology ids
-        # and standard concept ids only; small (one row per attesting code).
-        _collect = getattr(code_map_sdf, "collect", None)   # a test stub has none
+                    person_mod=assembly_params["person_mod"])
+        # WP-C' (exp 0136): the `(std_cid, Mondo term)` code ladder rides the bundle
+        # as an ATTRIBUTE, is persisted in the cache meta, and is landed on the
+        # fitted node set by the driver (`landed_code_map` -> <run>/code_map.tsv).
+        _collect = getattr(inputs.code_map_sdf, "collect", None)  # a stub has none
         if _collect is not None:
             bundle.native_code_map = sorted(
-                (int(r["std_cid"]), int(r["node_cid"])) for r in _collect())
+                (int(r["std_cid"]), str(r["node_id"])) for r in _collect())
         return bundle
 
     return _assemble_mondo_native
@@ -1129,8 +1332,11 @@ def parse_args(argv=None):
     # allow_abbrev=False: a removed flag must fail loudly, not prefix-match a
     # surviving one (`--k 4` would otherwise parse as `--kappa 4`).
     p = argparse.ArgumentParser(
-        description="Gated-LDA fit on the Mondo label DAG; ends at the saved fit "
-                    "(every readout is dag_gated_readout.py).", allow_abbrev=False)
+        description="DAG-gated LDA fit on the Mondo label subgraph; ends at the saved "
+                    "fit (every readout is dag_gated_readout.py). The fit knobs "
+                    "default to the estimator's recommended preset "
+                    "(DagGatedLDAEstimator.recommended); a flag given overrides it.",
+        allow_abbrev=False)
     p.add_argument("--cdr", required=True)
     p.add_argument("--billing", required=True)
     p.add_argument("--source-table", default="condition_era")
@@ -1144,92 +1350,96 @@ def parse_args(argv=None):
     p.add_argument("--window-mode", choices=["forward", "lookback"], default="forward")
     p.add_argument("--lookback-days", type=int, default=365)
     p.add_argument("--label-window-days", type=int, default=365)
-    # assembly / DAG. `disease` selects the foreground cohort AND the label-DAG
-    # anchors (cohorts.disease_anchors); rare6 = the six-anchor rare-disease forest.
     p.add_argument("--disease", default="rare6")
     p.add_argument("--extra-domains", default="",
-                   help="comma-separated non-condition domains (drug, procedure) for "
-                        "a MULTI-DOMAIN gated-PC fit (MixEHR-style per-domain vocab; "
-                        "domain 0 is always conditions). Empty (default) = single "
-                        "fused condition vocabulary. Requires --window-mode lookback. "
-                        "The per-domain lambda is inspected per node in the readout.")
+                   help="comma-separated non-condition domains (drug, procedure, "
+                        "measurement) for a MULTI-DOMAIN fit (MixEHR-style per-domain "
+                        "vocab; domain 0 is always conditions). Requires "
+                        "--window-mode lookback.")
     p.add_argument("--holdout-frac", type=float, default=0.2)
     p.add_argument("--strip-mode", choices=["test_only", "both"], default="test_only")
     p.add_argument("--label-mask-mode", choices=["full", "closure"], default="full",
-                   help="per-node observation policy for the PC label (Step-A "
-                        "adapter): 'full' (ones(C); background is a true negative "
-                        "everywhere) or 'closure' (observe the active closure + DAG "
-                        "siblings only).")
-    # gate topic-block layout (topics per node); K is emergent = n_bg + nodes*tpn.
-    p.add_argument("--n-bg", type=int, default=2)
-    p.add_argument("--tpn", type=int, default=1)
+                   help="the readout's per-node observation policy, recorded in the "
+                        "manifest for dag_gated_readout (the heads' labelMaskMode): "
+                        "'full' (background is a true negative everywhere) or "
+                        "'closure' (observe the active closure + DAG siblings only). "
+                        "Not a bundle input.")
     p.add_argument("--dag-source", choices=["mondo_native"], default="mondo_native",
-                   help="the label space: exp 0110's NATIVE Mondo terms, powered by "
-                        "is-a CLOSURE support, the DAG Mondo's own hierarchy "
-                        "transitively reduced over the kept set (the only source "
-                        "since the 2026-10 cleanup).")
+                   help="the label space: Mondo terms reached by the code ladder and "
+                        "their Mondo ancestors (the only source since the 2026-10 "
+                        "cleanup).")
     p.add_argument("--mondo-branch", default="",
-                   help="mondo: restrict to one body-system Mondo subtree (e.g. "
-                        "MONDO:0004995 = cardiovascular disorder) — the Step-A template. "
-                        "'' = whole Mondo.")
-    p.add_argument("--min-positives", type=int, default=100,
-                   help="mondo: keep anchors with >= this many whole-pop patients "
-                        "(the K dial; exp 0088 used 100).")
+                   help="restrict the label subgraph to one body-system Mondo subtree "
+                        "(e.g. MONDO:0004995 = cardiovascular disorder); '' = whole "
+                        "Mondo.")
+    p.add_argument("--min-docs-per-node", type=int, default=DEFAULT_MIN_DOCS_PER_NODE,
+                   help="the estimator's minDocsPerNode: a node gets a topic block "
+                        "only when at least this many TRAINING documents' label "
+                        "closures reach it (>= the egress floor). Default "
+                        f"{DEFAULT_MIN_DOCS_PER_NODE}. Fit-only: the bundle does not "
+                        "depend on it.")
     p.add_argument("--mondo-version", default="2026-06-02")
     p.add_argument("--mondo-cache-dir", default="data/mondo")
-    # exp 0111 (WP-D3 / D13): separate the estimator's GATE from the outcome LABEL.
-    # When > 0 (and an --index-arm is set) each document's `frontier` gate is swapped
-    # to its [index, index+N-day) PRESENTATION window while `label`/`labelMask` stay
-    # the full 365-day frame the assembler baked — the D13 separation. A MISS-only
-    # driver post-pass; the gate mode (`gateNd`) folds into the bundle cache key, so
-    # a gated bundle is a distinct artifact from the un-gated one. 0 (default) keeps
-    # the 365-day frontier as the gate, so every existing key stays byte-identical.
-    p.add_argument("--gate-warm", type=int, default=0, metavar="N",
-                   help="Leaves-first gate schedule: fit in rounds by node height, N "
-                        "iterations per level (leaves first), then the full gate. 0 "
-                        "(default) = single round. Each block is seeded when it opens "
-                        "(see --gate-no-open-seed). Fit-only: bundle/corpus caches "
-                        "unaffected. Report 2026-10-19-leaves-first-gate-sim.")
-    p.add_argument("--gate-seed-mode", choices=("subtree", "balanced"),
-                   default="subtree",
-                   help="With --gate-warm: the open-time seed. 'subtree' (default) = "
-                        "the word counts of the documents a block admits; 'balanced' = "
-                        "each child's subtree share equally plus the parent's own coded "
-                        "documents, descendants' own codes removed (exp 0160).")
-    p.add_argument("--gate-seed-leaves", action="store_true",
-                   help="With --gate-warm: seed every leaf block at iteration 0 from "
-                        "its own documents' word counts (exp 0162).")
+    # The fit knobs. Default None = the recommended preset's value
+    # (RECOMMENDED_PARAMS); a value given overrides it. Fit-only: no cache key moves.
+    p.add_argument("--n-bg", type=int, default=None,
+                   help="gateNBg: shared background topics (preset 200).")
+    p.add_argument("--tpn", type=int, default=None,
+                   help="gateTpn: topics per kept node (preset 1); K = n_bg + "
+                        "kept nodes * tpn.")
+    p.add_argument("--gate-warm", type=int, default=None, metavar="N",
+                   help="gateWarm: leaves-first gate schedule, N iterations per "
+                        "level (leaves first), then the full gate; 0 = single round "
+                        "(preset 2). Report 2026-10-19-leaves-first-gate-sim.")
+    p.add_argument("--gate-seed-mode", choices=("subtree", "balanced"), default=None,
+                   help="gateSeedMode, the open-time seed: 'subtree' = the word counts "
+                        "of the documents a block admits; 'balanced' = each child's "
+                        "subtree share equally plus the parent's own coded documents, "
+                        "descendants' own codes removed (exp 0160; preset).")
+    p.add_argument("--gate-seed-leaves", action=argparse.BooleanOptionalAction,
+                   default=None,
+                   help="gateSeedLeaves: seed every leaf block at iteration 0 from its "
+                        "own documents' word counts (exp 0162; preset on).")
+    p.add_argument("--gate-open-seed", action=argparse.BooleanOptionalAction,
+                   default=None,
+                   help="gateOpenSeed: seed each block when it opens (preset on).")
     p.add_argument("--gate-seed-profile", default="", metavar="TSV",
-                   help="With --gate-warm: an external phenotype profile table "
+                   help="With gateWarm > 0: an external phenotype profile table "
                         "(mondo_id, concept_id, neg; e.g. hpo_profile_marks.py output) "
-                        "that REPLACES a profiled node's primary-domain seed (leaves "
+                        "that REPLACES a profiled node's condition-domain seed (leaves "
                         "at iteration 0, later blocks at opening); unprofiled nodes "
-                        "keep the histogram seed. Fit-only.")
+                        "keep the count seed. Fit-only.")
     p.add_argument("--gate-attestation", choices=("label", "ever"), default="label",
                    help="Label redesign R2 (spec 2026-10-13): which attestations GATE a "
-                        "TRAIN document's topic blocks. 'label' (default, unchanged): X "
-                        "coded in the label window. 'ever': X coded anywhere in the "
-                        "person's record (full-history condition_era through the same "
-                        "code map and provider). label/labelMask and the TEST frontier "
-                        "are untouched. Native-Mondo population path only; a distinct "
-                        "bundle key.")
-    p.add_argument("--optimize-doc-concentration", action="store_true")
-    p.add_argument("--max-iter", type=int, default=100)
-    p.add_argument("--subsampling-rate", type=float, default=0.05)
-    p.add_argument("--tau0", type=float, default=64.0,
-                   help="Robbins-Monro offset. On smaller cohorts try ~10-64 so the "
-                        "head actually moves.")
-    p.add_argument("--kappa", type=float, default=0.51)
-    p.add_argument("--gamma-shape", type=float, default=100.0)
-    p.add_argument("--cavi-max-iter", type=int, default=100)
-    p.add_argument("--cavi-tol", type=float, default=1e-3)
+                        "TRAIN document's topic blocks. 'label' (default): the label "
+                        "year's (`labels`). 'ever': anywhere in the person's record "
+                        "(`gate_labels`, full-history condition_era through the same "
+                        "code ladder). The readout always reads the label year. A "
+                        "distinct bundle key.")
+    p.add_argument("--optimize-doc-concentration",
+                   action=argparse.BooleanOptionalAction, default=None,
+                   help="optimizeDocConcentration (preset off).")
+    p.add_argument("--max-iter", type=int, default=None, help="maxIter (preset 60).")
+    p.add_argument("--subsampling-rate", type=float, default=None,
+                   help="subsamplingRate (preset 0.1).")
+    p.add_argument("--tau0", type=float, default=None,
+                   help="learningOffset, the Robbins-Monro offset (preset 64).")
+    p.add_argument("--kappa", type=float, default=None,
+                   help="learningDecay (preset 0.51).")
+    p.add_argument("--gamma-shape", type=float, default=None,
+                   help="gammaShape (preset 100).")
+    p.add_argument("--cavi-max-iter", type=int, default=None,
+                   help="caviMaxIter (preset 100).")
+    p.add_argument("--cavi-tol", type=float, default=None, help="caviTol (preset 1e-3).")
+    p.add_argument("--doc-concentration", type=float, default=None,
+                   help="docConcentration, a scalar Dirichlet alpha (preset 0.5).")
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--fit-save-interval", type=int, default=0,
                    help="checkpoint the fit every N SVI iters (0 = off) to "
                         "<out>/fit_ckpt; re-running the same command resumes from it, "
-                        "finishing --max-iter in total. Writes are atomic; each costs "
-                        "a lambda dump, so keep N modest (e.g. 10). fit_ckpt is "
-                        "removed once the finished fit is saved.")
+                        "finishing the iteration budget in total. Writes are atomic; "
+                        "each costs a lambda dump, so keep N modest (e.g. 10). "
+                        "fit_ckpt is removed once the finished fit is saved.")
     p.add_argument("--fresh-fit", action="store_true",
                    help="discard an existing <out>/fit_ckpt and fit from scratch "
                         "(otherwise a matching checkpoint is resumed, and a "
@@ -1238,40 +1448,44 @@ def parse_args(argv=None):
                    help="repartition the corpus to this many partitions before "
                         "fitting (0 = leave as-is). Few parquet part-files pin the "
                         "job to ~2 executors under dynamic allocation; set this ≈ "
-                        "total cluster executor cores to spread the per-doc autograd "
-                        "and demand more executors. Pair with "
+                        "total cluster executor cores. Pair with "
                         "CHARM_SPARK_CONF='spark.locality.wait=0s'.")
-    p.add_argument("--doc-concentration", type=float, default=None,
-                   help="scalar Dirichlet alpha for the gated doc-topic prior (default "
-                        "1/K, razor-small at whole-Mondo K ~0.0022; the central "
-                        "configuration sets 0.5).")
     p.add_argument("--cache-uri", default=None)
     p.add_argument("--out-dir", required=True)
     return p.parse_args(argv)
 
 
-def main() -> int:
-    from spark_vi.dag.layout import DagLayout
+def _profile_seed(path, dag, vocab_map0, column="features_0"):
+    """`--gate-seed-profile` -> the estimator's `gateSeedProfile` `{node: {(column,
+    concept_id): weight}}` (`profile_eta.build_profile_seed`, keyed by Mondo curie and
+    condition concept id; nodes outside the label subgraph are not seeded; the
+    estimator drops the unkept ones). Returns `(profile, stats)`; stats are counts."""
+    import pandas as pd
+    from profile_eta import build_profile_seed
+    gs_df = pd.read_csv(path, sep="\t")
+    by_node = {str(m): str(m) for m in gs_df["mondo_id"].astype(str).unique()
+               if str(m) in dag}
+    seed, stats = build_profile_seed(
+        gs_df, eid_by_mondo=by_node,
+        vocab_index_by_concept={int(c): int(c) for c in vocab_map0})
+    return ({n: {(column, int(c)): w for c, w in tw.items()}
+             for n, tw in seed.items()}, stats)
 
+
+def main() -> int:
     args = parse_args()
     configure_logging()
     # The run dir exists from minute zero and every [driver] line is teed to a
     # durable, sanitized driver_log.md inside it — open-append-close per line,
     # so results survive wrapper death, cluster timeout, and summary.md
-    # truncation (exp 0103's smoke lost 4h of readout output to exactly that;
-    # `gated_pc_report --summary <run>/driver_log.md` digests this file too).
+    # truncation (exp 0103's smoke lost 4h of readout output to exactly that).
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     from _driver_common import install_stdout_tee
     install_stdout_tee(out / "driver_log.md")
     extra_domains = tuple(d for d in args.extra_domains.split(",") if d)
-    corpus_spec = None
     with make_spark_session(app_name="dag-gated-fit") as spark:
-        # Driver-disk telemetry, IN-BAND (see disk_telemetry's docstring): the
-        # fit phase is the other half of the ~100 GB that ADR 0047's destroy
-        # fixes do not account for, and a watcher writing to the master's local
-        # disk dies with the cluster. Printing from the driver puts the disk
-        # history in the persisted job log and in driver_log.md.
+        # Driver-disk telemetry, IN-BAND (see disk_telemetry's docstring).
         start_disk_telemetry(
             extra_dirs=[d for d in spark.sparkContext.getConf()
                         .get("spark.local.dir", "").split(",") if d],
@@ -1281,69 +1495,44 @@ def main() -> int:
                 f"--dag-source {args.dag_source!r}: the gated fit runs on the native "
                 "Mondo label space only (the SNOMED and anchor-Mondo paths were "
                 "removed in the 2026-10 cleanup; last at commit fff7bf4067)")
-        # The multi-domain native-Mondo corpus (per-domain vocabularies,
-        # features_0..N-1), cached through one seam; the DAG build and the code
-        # climb live inside the assemble closure, so a cache HIT skips them.
         if args.window_mode != "lookback":
             raise ValueError(
                 f"--dag-source {args.dag_source} / --extra-domains requires "
                 f"--window-mode lookback (got {args.window_mode})")
         corpus_spec = multidomain_corpus_spec(args, extra_domains)
 
-        def _stash_mondo_inputs(*, count_of, terminal_cids, reduced):
-            # Only reached on a cache MISS; the diag-only probe degrades
-            # gracefully without these.
-            args._count_of = count_of
-
         with _phase(f"assemble MONDO_NATIVE corpus (cached, cond + "
                     f"{list(extra_domains)})"):
-            bundle = multidomain_load_or_build(
-                spark, corpus_spec, cache_uri=args.cache_uri,
-                on_inputs=_stash_mondo_inputs)
+            bundle = multidomain_load_or_build(spark, corpus_spec,
+                                               cache_uri=args.cache_uri)
             vocab_maps = bundle.vocab_maps
             args._domain_cols = [f"features_{i}" for i in range(len(vocab_maps))]
             args._domain_names = ["condition", *extra_domains]
         _cprint(f"[driver]   ledger: {json.dumps(bundle.ledger)}", flush=True)
-        _bmp = write_bundle_meta(out, bundle)
-        _cprint(f"[driver]   wrote bundle meta -> {_bmp}", flush=True)
-        _ncm = getattr(bundle, "native_code_map", None)
-        if _ncm:
-            # WP-C': <run>/code_map.tsv (std concept id -> Mondo node cid), the
-            # census's own-code identity criterion. Present on every native
-            # bundle built or reloaded from here on; older cache entries lack it.
-            _cmp = write_code_map(out, _ncm)
-            _cprint(f"[driver]   wrote native code map: {len(_ncm)} (code, node) "
-                  f"pairs over {len({n for _, n in _ncm})} nodes -> {_cmp}",
-                  flush=True)
-        lay = DagLayout(bundle.parent_int, n_bg=args.n_bg, tpn=args.tpn)
-        C = len(bundle.int2cid)               # label heads = engine nodes incl. root
-        # Stash on args so the estimator builder can reach them without re-threading.
-        args._C = C
-        args._parent_int = bundle.parent_int
-
-        # Profile seed for the leaves-first schedule (exp 0157/0158): an external
-        # phenotype profile (the marks TSV from hpo_profile_marks.py) replaces a
-        # profiled node's primary-domain seed (domain 0, the condition vocabulary
-        # here). Fit-only; counts-only stats.
+        # The estimator's inputs, all from the bundle, in user ids (spec 2026-10-30):
+        # the label subgraph, the labels column (the gate's: label year, or all-ever
+        # with --gate-attestation ever), the per-domain vocabularies, and the code
+        # ladder as the balanced seed's node -> attesting terms.
+        from charmpheno.omop.case_finding_assembly import GATE_LABELS_COL, LABELS_COL
+        args._dag = bundle.dag
+        args._labels_col = (GATE_LABELS_COL if args.gate_attestation == "ever"
+                            else LABELS_COL)
+        if args._labels_col not in bundle.train_df.columns:
+            raise ValueError(f"the bundle's train split has no {args._labels_col!r} "
+                             f"column (columns: {bundle.train_df.columns})")
+        args._vocabularies = vocabularies_of(vocab_maps)
+        code_map = getattr(bundle, "native_code_map", None) or []
+        args._node_terms = node_terms_of(code_map, vocab_maps[0])
+        _cprint(f"[driver]   label DAG: {len(bundle.dag)} node(s) given; gate labels "
+                f"{args._labels_col!r}; nodeTerms for {len(args._node_terms)} node(s) "
+                f"({sum(len(v) for v in args._node_terms.values())} condition codes)",
+                flush=True)
         args._gate_seed_profile = None
-        if getattr(args, "gate_seed_profile", ""):
-            if int(getattr(args, "gate_warm", 0) or 0) <= 0:
-                raise ValueError("--gate-seed-profile requires --gate-warm > 0")
+        args._gate_seed_profile_stats = {}
+        if args.gate_seed_profile:
             with _phase("build the profile seed (driver-side)"):
-                import pandas as pd
-                from charmpheno.mondo.native_dag import mondo_cid
-                from profile_eta import build_profile_seed
-                gs_df = pd.read_csv(args.gate_seed_profile, sep="\t")
-                gs_eid = {}
-                for mid in gs_df["mondo_id"].astype(str).unique():
-                    try:
-                        eid = bundle.cid2int.get(mondo_cid(mid))
-                    except ValueError:
-                        eid = None
-                    if eid is not None:
-                        gs_eid[str(mid)] = int(eid)
-                gs, gs_stats = build_profile_seed(
-                    gs_df, eid_by_mondo=gs_eid, vocab_index_by_concept=vocab_maps[0])
+                gs, gs_stats = _profile_seed(args.gate_seed_profile, bundle.dag,
+                                             vocab_maps[0])
                 if not gs:
                     raise ValueError("--gate-seed-profile seeded NO node (none of the "
                                      "profiled nodes has a specific profile concept "
@@ -1351,45 +1540,12 @@ def main() -> int:
                 args._gate_seed_profile = gs
                 args._gate_seed_profile_stats = gs_stats
                 _cprint(f"[driver]   profile seed: {json.dumps(gs_stats)}", flush=True)
-        # Balanced open-time seed (exp 0160): each node's own attesting codes in the
-        # condition vocab, removed from its ancestors' seeds. From the native code
-        # map (std_cid, node_cid) pairs; ids only.
-        args._gate_seed_own = None
-        if str(getattr(args, "gate_seed_mode", "subtree")) == "balanced":
-            if int(getattr(args, "gate_warm", 0) or 0) <= 0:
-                raise ValueError("--gate-seed-mode balanced requires --gate-warm > 0")
-            _ncm = getattr(bundle, "native_code_map", None) or []
-            _vm0 = vocab_maps[0]
-            own = {}
-            for std, node in _ncm:
-                eid = bundle.cid2int.get(int(node))
-                vi = _vm0.get(int(std), _vm0.get(str(int(std))))
-                if eid is not None and vi is not None:
-                    own.setdefault(int(eid), set()).add(int(vi))
-            args._gate_seed_own = {k: sorted(v) for k, v in own.items()}
-            _cprint(f"[driver]   balanced seed: own codes in the condition vocab for "
-                    f"{len(own)} node(s) ({sum(len(v) for v in own.values())} codes)",
-                    flush=True)
         v_desc = " + ".join(f"{n}:{len(vm)}"
                             for n, vm in zip(args._domain_names, vocab_maps))
-        _cprint(f"[driver]   corpus: V=({v_desc}) vocab, "
-              f"K={lay.K} gated topics ({args.n_bg} bg + {len(lay.nodes)} nodes x "
-              f"{args.tpn} tpn), C={C} label heads", flush=True)
-        # PRE-FLIGHT size profile at the data-build boundary (K, fan-out, lambda
-        # size), so a big fit's shape is visible BEFORE compute is committed.
-        _v_total = sum(len(vm) for vm in vocab_maps)
-        _, _prof = lay.cost_report(vocab_size=_v_total)
-        print("\n".join("[cost] " + ln for ln in _prof.splitlines()), flush=True)
-        # Parallelism: the cached bundle parquet has few partitions (~8 part-files),
-        # and with dynamic allocation Spark sizes the executor pool to PENDING TASKS
-        # (n_partitions / executor.cores) — so 8 partitions pins the job to ~2
-        # executors while the rest of the cluster sits idle, and the heavy per-doc
-        # differentiable-CAVI autograd serializes onto 8 slots. Repartition UP so the
-        # fit demands (and spreads across) more executors. Set --num-partitions ≈ the
-        # cluster's total executor cores (a bit over is fine; too many = task
-        # overhead). Pair with CHARM_SPARK_CONF='spark.locality.wait=0s' so
-        # executors added mid-job aren't starved by cache-locality. 0 = leave as-is.
+        _cprint(f"[driver]   corpus: V=({v_desc}) vocab", flush=True)
         if args.num_partitions and args.num_partitions > 0:
+            # Repartition UP so the fit demands (and spreads across) more executors
+            # than the cached parquet's few part-files would.
             before = bundle.train_df.rdd.getNumPartitions()
             bundle.train_df = bundle.train_df.repartition(args.num_partitions).cache()
             bundle.test_df = bundle.test_df.repartition(args.num_partitions).cache()
@@ -1397,104 +1553,25 @@ def main() -> int:
             _cprint(f"[driver]   repartitioned corpus {before} -> "
                   f"{args.num_partitions} partitions (train+test cached)", flush=True)
 
-        # Every manifest field the FIT determines, built once and reused by both
-        # saves below — the early fit-only write and the final authoritative one.
-        # Keeping it in one dict is what makes "the same manifest, plus results"
-        # true by construction rather than by two lists staying in sync.
-        manifest_fields = {
-            "model_class": "gated_pc",
-            "disease": args.disease, "min_n": 0,
-            "strip_mode": args.strip_mode, "label_mask_mode": args.label_mask_mode,
-            "window_mode": args.window_mode, "lookback_days": args.lookback_days,
-            "label_window_days": args.label_window_days,
-            "n_bg": args.n_bg, "tpn": args.tpn, "K": lay.K, "C": C,
-            "subsampling_rate": args.subsampling_rate, "tau0": args.tau0,
-            "kappa": args.kappa, "max_iter": args.max_iter,
-            "dag_source": args.dag_source,
-            "extra_domains": list(extra_domains),
-            "domain_names": args._domain_names,
-            "domain_vocab_sizes": [len(vm) for vm in vocab_maps],
-            "ledger": bundle.ledger,
-            # Corpus params — ALL of the bundle cache-key inputs, so a post-hoc
-            # dag_gated_readout can recompute the exact key + reload the bundle
-            # (doc_min_length + emit_labels are required by the key; recording
-            # them here removes the lr_readout-style fragility). On the
-            # multi-domain / Mondo paths this block is the corpus SPEC verbatim —
-            # the same dict `multidomain_load_or_build` was called with, including
-            # `billing` and the Mondo build inputs — so the re-readout can not only
-            # recompute the key but REBUILD the bundle from it when the cache is
-            # cold (a fresh cluster, a cleared bucket). `min_n`/`index_mode` are the
-            # EFFECTIVE assembly values, which on the Mondo path differ from the
-            # top-level CLI ones (min_n=0: that DAG is already powered).
-            "corpus_manifest": {
-                "cdr": args.cdr, "billing": args.billing,
-                "cache_uri": args.cache_uri, "source_table": args.source_table,
-                "person_mod": args.person_mod, "vocab_size": args.vocab_size,
-                "min_df": args.min_df, "min_patient_count": args.min_patient_count,
-                "doc_min_length": args.doc_min_length,
-                "prior_obs_days": args.prior_obs_days, "window_days": args.window_days,
-                "holdout_frac": args.holdout_frac, "emit_labels": True,
-                "dag_source": args.dag_source,
-                "extra_domains": list(extra_domains),
-                "index_mode": (corpus_spec or {}).get("index_mode", "disease"),
-                "min_n": corpus_spec["min_n"],
-                "disease": args.disease, "n_bg": args.n_bg, "tpn": args.tpn,
-                "strip_mode": args.strip_mode, "window_mode": args.window_mode,
-                "lookback_days": args.lookback_days,
-                "label_window_days": args.label_window_days,
-                "label_mask_mode": args.label_mask_mode,
-                "mondo_version": (corpus_spec or {}).get("mondo_version", ""),
-                "mondo_branch": (corpus_spec or {}).get("mondo_branch", ""),
-                "min_positives": (corpus_spec or {}).get("min_positives", 0),
-                "mondo_cache_dir": (corpus_spec or {}).get("mondo_cache_dir", ""),
-                "dag_collapse": (corpus_spec or {}).get("dag_collapse", False),
-                # Spec 2026-10-07 §D1: the ribbon identity (a key input) and the
-                # TSV path (a rebuild input); '' on every non-ribbon run.
-                "label_set": (corpus_spec or {}).get("label_set", ""),
-                "label_set_path": (corpus_spec or {}).get("label_set_path", ""),
-                # The doc unit (R5.3). Recorded on BOTH paths — the single-domain
-                # assembler hard-codes the same spec — so a re-readout of either
-                # recomputes the fit's own key.
-                "doc_spec": ((corpus_spec or {}).get("doc_spec")
-                             or doc_spec_identity()),
-                # E1: whether this run's corpus carries the pre-index closure
-                # column. A cache-key input, so a re-readout that reads it back
-                # lands on the fit's own bundle — and the WITNESS the census and
-                # every incident readout check before touching the column.
-                "preindex_closure": (corpus_spec or {}).get(
-                    "preindex_closure", False),
-                "domain_vocab_sizes": [len(vm) for vm in vocab_maps],
-                "int2cid": {str(i): c for i, c in bundle.int2cid.items()},
-                "name_by_id": {str(c): n for c, n in bundle.name_by_id.items()}},
-        }
-        if int(getattr(args, "gate_warm", 0) or 0) > 0:
-            # Fit parameter; added only when set (byte-identical manifests otherwise).
-            manifest_fields["gate_schedule"] = {
-                "warm": int(args.gate_warm),
-                "open_seed": True}
-            manifest_fields["gate_schedule"]["seed_mode"] = str(
-                getattr(args, "gate_seed_mode", "subtree"))
-            manifest_fields["gate_schedule"]["seed_leaves"] = bool(
-                getattr(args, "gate_seed_leaves", False))
-            if getattr(args, "_gate_seed_profile", None):
-                manifest_fields["gate_schedule"]["seed_profile"] = {
-                    "path": args.gate_seed_profile,
-                    **getattr(args, "_gate_seed_profile_stats", {})}
-
-        with _phase(f"gated_pc fit (DagGatedLDAEstimator, K={lay.K})"):
-            pc_est = _build_estimator(args)
+        pc_est = _build_estimator(args)
+        g = pc_est.getOrDefault
+        if args._gate_seed_profile and int(g("gateWarm")) <= 0:
+            raise ValueError("--gate-seed-profile requires gateWarm > 0")
+        n_bg, tpn, max_iter = int(g("gateNBg")), int(g("gateTpn")), int(g("maxIter"))
+        with _phase(f"gated_pc fit (DagGatedLDAEstimator: the node set is learned "
+                    f"from the train split, minDocsPerNode={g('minDocsPerNode')})"):
             # Resume (the engine's own checkpoint, <out>/fit_ckpt): a re-run of the
             # same command continues an interrupted fit when the checkpoint's
             # identity (bundle key + every estimator Param but the budget) matches.
             ckpt = out / FIT_CKPT_DIR
             identity = fit_identity(pc_est, multidomain_cache_key(corpus_spec))
-            action, n_done = plan_fit_resume(ckpt, identity, args.max_iter,
+            action, n_done = plan_fit_resume(ckpt, identity, max_iter,
                                              fresh=bool(args.fresh_fit))
             if action == "resume":
                 pc_est.setResumeFrom(str(ckpt))
-                pc_est.setMaxIter(int(args.max_iter) - n_done)
+                pc_est.setMaxIter(max_iter - n_done)
                 _cprint(f"[driver]   RESUMING the fit from {ckpt} at iteration "
-                        f"{n_done}; {args.max_iter - n_done} to go", flush=True)
+                        f"{n_done}; {max_iter - n_done} to go", flush=True)
             if args.fit_save_interval > 0:
                 ckpt.mkdir(parents=True, exist_ok=True)
                 (ckpt / FIT_IDENTITY_FILE).write_text(json.dumps(identity, indent=1))
@@ -1502,28 +1579,98 @@ def main() -> int:
                 pc_est.setSaveInterval(int(args.fit_save_interval))
             if action == "done":
                 # The checkpoint already holds the whole budget (the driver died
-                # after the last checkpoint but before the save below).
+                # after the last checkpoint but before the save below). Its node set
+                # rides the VIResult; the Params are the estimator's.
                 from spark_vi.io.export import load_result
                 from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAModel
-                pc_model = DagGatedLDAModel(load_result(ckpt))
+                pc_model = pc_est._copyValues(DagGatedLDAModel(load_result(ckpt)))
                 _cprint(f"[driver]   fit checkpoint {ckpt} is already at "
-                        f"{n_done}/{args.max_iter} iterations; not refitting",
-                        flush=True)
+                        f"{n_done}/{max_iter} iterations; not refitting", flush=True)
             else:
                 pc_model = pc_est.fit(bundle.train_df)
-            # EARLY SAVE, before any readout work touches the cluster: the fit is
-            # the hours-long unrepeatable half and the readout is where runs die,
-            # so the model reaches durable storage the moment it exists. The final
-            # save overwrites these same two paths with the full record; until it
-            # does, `partial="fit-only"` says so and `dag_gated_readout` can score
-            # this run from the npz alone.
+                if action == "resume":
+                    pc_model.setMaxIter(max_iter)
+
+            lay = pc_model._layout()
+            br = node_bridge(pc_model, bundle.name_by_id)
+            C = len(br["int2cid"])           # readout heads = kept nodes + root
+            counts = node_set_counts(pc_model, len(bundle.dag))
+            _cprint(f"[driver]   node set: {counts['n_given']} given / "
+                    f"{counts['n_kept']} kept / {counts['n_pruned']} pruned / "
+                    f"{counts['n_spliced']} spliced (minDocsPerNode="
+                    f"{counts['min_docs_per_node']}, counted on "
+                    f"{counts['n_train_docs']} train docs); K={lay.K} ({n_bg} bg + "
+                    f"{len(lay.nodes)} nodes x {tpn}), C={C} heads", flush=True)
+            _v_total = sum(len(vm) for vm in vocab_maps)
+            _, _prof = lay.cost_report(vocab_size=_v_total)
+            print("\n".join("[cost] " + ln for ln in _prof.splitlines()), flush=True)
+
+            # The fitted model is the run's node set of record: everything after the
+            # fit (readout, framings, inspect-topics) reads it from here.
+            muri = save_fitted_model(pc_model, out)
+            _cprint(f"[driver]   saved the fitted model -> {muri}", flush=True)
+            write_label_dag(out, bundle.dag, pc_model, labels_col=args._labels_col)
+            write_bundle_meta(out, bundle, pc_model)
+            if code_map:
+                # WP-C': <run>/code_map.tsv, the code ladder landed on the FITTED
+                # node set (std concept id -> kept node cid): the census's own codes.
+                _lcm = landed_code_map(pc_model, code_map, br["int2cid"])
+                write_code_map(out, _lcm)
+                _cprint(f"[driver]   wrote the code map on the fitted node set: "
+                        f"{len(_lcm)} (code, node) pairs over "
+                        f"{len({n for _, n in _lcm})} nodes", flush=True)
+
+            # Every manifest field the FIT determines.
+            manifest_fields = {
+                "model_class": "gated_pc",
+                "model_path": MODEL_DIR,
+                "disease": args.disease,
+                "strip_mode": args.strip_mode, "label_mask_mode": args.label_mask_mode,
+                "window_mode": args.window_mode, "lookback_days": args.lookback_days,
+                "label_window_days": args.label_window_days,
+                "n_bg": n_bg, "tpn": tpn, "K": lay.K, "C": C,
+                "subsampling_rate": float(g("subsamplingRate")),
+                "tau0": float(g("learningOffset")),
+                "kappa": float(g("learningDecay")), "max_iter": max_iter,
+                "estimator_params": {
+                    p.name: g(p) for p in pc_est.params
+                    if p.name not in ("dagEdges", "vocabularies", "nodeTerms",
+                                      "gateSeedProfile")
+                    and (pc_est.isSet(p) or pc_est.hasDefault(p))},
+                "labels_col": args._labels_col,
+                "node_set": counts,
+                "dag_source": args.dag_source,
+                "extra_domains": list(extra_domains),
+                "domain_names": args._domain_names,
+                "domain_vocab_sizes": [len(vm) for vm in vocab_maps],
+                "ledger": bundle.ledger,
+                # The corpus SPEC verbatim (every bundle cache-key input and every
+                # rebuild input), so a post-hoc dag_gated_readout recomputes the exact
+                # key and can REBUILD the bundle when the cache is cold; plus the
+                # fitted node set's bridge (int2cid / name_by_id), which the readers
+                # of a run dir key their per-node tables by.
+                "corpus_manifest": {
+                    **corpus_spec, "cache_uri": args.cache_uri,
+                    "domain_vocab_sizes": [len(vm) for vm in vocab_maps],
+                    "int2cid": {str(e): c for e, c in br["int2cid"].items()},
+                    "name_by_id": {str(c): n for c, n in br["name_by_id"].items()}},
+            }
+            if int(g("gateWarm")) > 0:
+                manifest_fields["gate_schedule"] = {
+                    "warm": int(g("gateWarm")), "open_seed": bool(g("gateOpenSeed")),
+                    "seed_mode": str(g("gateSeedMode")),
+                    "seed_leaves": bool(g("gateSeedLeaves"))}
+                if args._gate_seed_profile:
+                    manifest_fields["gate_schedule"]["seed_profile"] = {
+                        "path": args.gate_seed_profile,
+                        **args._gate_seed_profile_stats}
             _save_fit(out, pc_model.result.global_params, C, manifest_fields,
                       partial="fit-only")
             _cprint(f"[driver]   saved FIT-ONLY result to {out} (readout pending; "
-                  "re-scoreable with dag_gated_readout)", flush=True)
+                    "re-scoreable with dag_gated_readout)", flush=True)
             if ckpt.exists():
-                # The finished fit is durable in the npz; the resume checkpoint has
-                # done its job (and is another lambda-sized copy on disk).
+                # The finished fit is durable in <run>/model; the resume checkpoint
+                # has done its job (and is another lambda-sized copy on disk).
                 import shutil
                 shutil.rmtree(ckpt, ignore_errors=True)
             # The fit ends here (cleanup 2026-10): every readout and evaluation is
@@ -1533,7 +1680,7 @@ def main() -> int:
             if extra_domains and isinstance(gp["lambda"], dict):
                 print(format_per_node_domain_mass(
                     per_node_domain_mass(gp["lambda"], lay, args._domain_names),
-                    args._domain_names, bundle.int2cid, bundle.name_by_id), flush=True)
+                    args._domain_names, br["int2cid"], br["name_by_id"]), flush=True)
     return 0
 
 

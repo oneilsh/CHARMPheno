@@ -29,7 +29,9 @@ def run_npmi(train_df, test_df, run_dir, *, lay, lams, n_bg, int2cid, names,
              split="train", top_n=10, domains=(0,), tag=None, min_pair_count=3,
              exclude=None):
     """Score every topic of a saved fit; write npmi[_<tag>].json (per topic,
-    workspace-internal) and .md (pooled)."""
+    workspace-internal) and .md (pooled). The frames carry the gate's engine-id
+    `frontier` (the readout driver attaches it from the fitted model,
+    `dag_gated_fit.attach_engine_frontier`); `lay` / `int2cid` are the model's."""
     run_dir = Path(run_dir)
     df = train_df if split == "train" else test_df
     df = df.cache()
@@ -113,9 +115,14 @@ def run_local(run_dir, parquet_dir, *, top_n=10, domains=(0,), tag=None,
               exclude_own=False, min_pair_count=3):
     """The same NPMI without Spark: the bundle's TRAIN parquet copied to local disk
     (`hdfs dfs -get`, an HDFS client read, no YARN), streamed with pyarrow. Layout,
-    vocab maps and names from `<run>/bundle_meta.json`; own codes from
-    `<run>/code_map.tsv`."""
+    vocab maps and names from `<run>/bundle_meta.json` (the fitted node set's
+    bridge); each document's gate from its labels column through the fit's own
+    landing and frontier reduction (`<run>/label_dag.json`'s node set); own codes
+    from `<run>/code_map.tsv`."""
+    import dataclasses
+
     from spark_vi.dag.layout import DagLayout
+    from spark_vi.dag.nodeset import NodeSet
     run_dir = Path(run_dir)
     manifest = json.loads((run_dir / "manifest.json").read_text())
     meta = json.loads((run_dir / "bundle_meta.json").read_text())
@@ -128,6 +135,10 @@ def run_local(run_dir, parquet_dir, *, top_n=10, domains=(0,), tag=None,
                     n_bg=n_bg, tpn=int(manifest["tpn"]))
     int2cid = {int(k): int(v) for k, v in meta["int2cid"].items()}
     names = {int(k): v for k, v in (meta.get("name_by_id") or {}).items()}
+    ld = json.loads((run_dir / "label_dag.json").read_text())
+    frontier_of = dataclasses.replace(NodeSet.from_dict(ld["node_set"]).frontier,
+                                      unknown_labels="ignore")
+    gate_col = str(ld.get("labels_col") or "labels")
     exclude = None
     if exclude_own:
         vm0 = {int(k): int(v) for k, v in meta["vocab_maps"][0].items()}
@@ -154,9 +165,11 @@ def run_local(run_dir, parquet_dir, *, top_n=10, domains=(0,), tag=None,
         K, N = tops.shape
         index = build_index(tops, range(K))
         acc, n = new_acc(), 0
-        for batch in pf.to_batches(columns=[col, "frontier"], batch_size=20000):
-            for v, fr in zip(batch.column(0).to_pylist(), batch.column(1).to_pylist()):
-                accumulate(acc, _vec_words(v), fr or (), index, lay, n_bg, N)
+        for batch in pf.to_batches(columns=[col, gate_col], batch_size=20000):
+            for v, labs in zip(batch.column(0).to_pylist(),
+                               batch.column(1).to_pylist()):
+                fr = sorted(frontier_of(labs or ()))
+                accumulate(acc, _vec_words(v), fr, index, lay, n_bg, N)
                 n += 1
             print(f"[npmi-local]   domain {d}: {n:,} documents", flush=True)
         gated, every = finish_counts(acc, K, N)

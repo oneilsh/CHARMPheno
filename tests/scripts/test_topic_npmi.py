@@ -38,11 +38,22 @@ def test_compare_pairs_by_mondo_id(tmp_path, capsys):
 
 @pytest.mark.slow
 def test_local_mode_matches_the_spark_pass(spark, tmp_path):
+    """The local pass reads the bundle's TRAIN parquet as it is (features and the
+    `labels` column in user ids) and gates each document through the fit's own
+    node set (`<run>/label_dag.json`): engine ids 1, 2, 3 = nodes 101, 102, 103."""
     from pyspark.ml.linalg import Vectors
+    from spark_vi.dag.nodeset import fit_node_set
     lay = DagLayout(PARENT, n_bg=1, tpn=1)
-    rows = [(Vectors.sparse(8, [4, 5], [1.0, 1.0]), [2]) for _ in range(30)]
+    dag = {101: [], 102: [101], 103: [101]}
+    ns = fit_node_set(dag, [[102]] * 30 + [[103]])
+    assert ns.engine_id == {101: 1, 102: 2, 103: 3}
+    rows = [(Vectors.sparse(8, [4, 5], [1.0, 1.0]), [102]) for _ in range(30)]
     rows += [(Vectors.sparse(8, [0, 1], [1.0, 1.0]), []) for _ in range(10)]
-    df = spark.createDataFrame(rows, ["features_0", "frontier"])
+    from pyspark.ml.linalg import VectorUDT
+    from pyspark.sql.types import ArrayType, LongType, StructField, StructType
+    df = spark.createDataFrame(rows, StructType([
+        StructField("features_0", VectorUDT()),
+        StructField("labels", ArrayType(LongType()))]))
     df.write.parquet(str(tmp_path / "train.parquet"))
     lam = np.full((4, 8), 0.01)
     lam[0, [0, 1]] = 5; lam[1, [2, 3]] = 5; lam[2, [4, 5]] = 5; lam[3, [6, 7]] = 5
@@ -56,6 +67,9 @@ def test_local_mode_matches_the_spark_pass(spark, tmp_path):
         "name_by_id": {"102": "node two"},
         "vocab_maps": [{str(500 + i): i for i in range(8)}]}))
     (run / "code_map.tsv").write_text("std_cid\tnode_cid\n504\t102\n")
+    (run / "label_dag.json").write_text(json.dumps(
+        {"dag": [[101, None], [102, 101], [103, 101]], "labels_col": "labels",
+         "node_set": ns.to_dict()}))
     tn.run_local(run, tmp_path / "train.parquet", top_n=2, tag="t")
     out = json.loads((run / "npmi_t.json").read_text())["rows"]
     two = next(r for r in out if r["node"] == 2)

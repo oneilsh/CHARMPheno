@@ -424,8 +424,8 @@ def _format_workup(w, window):
 
 
 def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
-                     results_name="results_readout_stacked_mass99.json",
-                     heads_tag="stacked_mass99", max_patients=600, max_train=2000,
+                     results_name=None,
+                     heads_tag="stacked", max_patients=600, max_train=2000,
                      thin_frac=0.1, own_top=5, rel_lambda=0.6, seed=0, tag=None,
                      crossfit=False, sidecar_uri=None, max_members=None,
                      incident=False, groups_like=None, member_rule="auto",
@@ -442,6 +442,13 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
     Writes `differential[_<tag>].md/.json` (pooled only), and with `max_members` the
     survey table `<tag>_survey.md`.
 
+    `test_df` / `train_df` carry the fit-width per-node `label` the heads read (the
+    readout driver attaches it from the fitted model's node set,
+    `dag_gated_fit.attach_heads_targets`). `heads_tag` names the heads and, unless
+    `results_name` is given, their results file (`results_readout_<heads_tag>.json`;
+    'stacked' is what `--readout-stacked` writes at the default top-m, runs read before
+    the node-set redesign used 'stacked_mass99').
+
     (The presence-subtype and gated-likelihood engines E1/E4, ever-coded training
     members, multi-positive soft targets and the hidden-record next-question
     protocol were removed in the 2026-10-29 cleanup; last at commit 29556f3d.)"""
@@ -451,6 +458,8 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
     import voi_tables as vt
     from spark_vi.readout import closure_matrix
     run_dir = Path(run_dir)
+    if results_name is None:
+        results_name = f"results_readout_{heads_tag}.json"
     bm, cm = run_dir / "bundle_meta.json", run_dir / "code_map.tsv"
     names_csv = run_dir / "concept_names.csv"
     ctx = vt.load_voi_context(
@@ -840,7 +849,7 @@ def _whole_history_prior(test_scored, run_dir, *, readout_int2cid, parent_adj,
 
 
 def run_prevalence_check(test_scored, run_dir, *, C, parent_int,
-                         heads_tag="stacked_mass99", tag=None, top=15,
+                         heads_tag="stacked", tag=None, top=15,
                          history=None, node_subset=None):
     """How much of the case-finding AUC is prevalent recall? (insight 0100;
     `prevalence_check.py`). Scores the test split with the saved heads (no solve), flags

@@ -17,24 +17,35 @@ disagree, and a change to a rule updates this page in the same commit.
    tokens) is read from the lookback window before the index
    (`multi_domain.lookback_feature_frames`, `lookback_days`). Post-index drugs and
    measurements never enter the bundle.
-3. **Labels are the label year.** A node is positive when the person is attested at
-   it, or below it (the is-a closure of the attested frontier), in
-   `[index, index + label_window_days)`, conditions only (`attach_frontiers`,
-   `attach_labels`; the native Mondo code ladder places codes on nodes,
-   `native_dag.make_mondo_native_attested_provider`). `label_mask_mode="full"`: every
-   node is observed for every row.
+3. **Labels are the label year.** The bundle stores, per document, the label-DAG
+   nodes its condition codes in `[index, index + label_window_days)` attest
+   (`labels`; the native Mondo code ladder places each code on its most-specific
+   Mondo terms, `native_dag.make_mondo_native_attested_provider`; conditions only).
+   A node is positive when the person is attested at it, or below it (the is-a
+   closure of the landed labels), on the FITTED model's node set: the readout
+   builds the per-node targets from `labels` and the model
+   (`dag_gated_fit.attach_heads_targets`, `spark_vi.readout.labels`; spec
+   2026-10-30 R6). `label_mask_mode="full"`: every node is observed for every row.
 4. **The split is by person, first.** One salted hash of `person_id` splits every
-   domain and the labels, so a person is on one side only; vocabularies and the DAG
-   pruning are fit on train and frozen for test.
+   domain and the labels, so a person is on one side only; vocabularies are fit on
+   train and frozen for test, and the node set (which nodes get a topic block:
+   `minDocsPerNode`, landing, splice) is learned by the estimator from the training
+   split it is given (`DagGatedLDAEstimator.fit`), so the test split never shapes it.
 5. **Attesting codes are stripped from test features.** A node's own marker codes are
    removed from test documents (`strip_mode="test_only"`; `"both"` also strips train),
-   so a test row is not scored on the code that defines its label.
+   so a test row is not scored on the code that defines its label. The strip removes
+   the vocabulary terms that ARE label-DAG node ids: on the SNOMED path the node
+   concepts; on the native Mondo path the nodes are Mondo curies, which are in no
+   vocabulary, so the strip removes nothing (before spec 2026-10-30 it removed the
+   OMOP concepts whose ids coincided with a kept Mondo term's number, an accident).
+   Attestation leakage there is handled by the incident rule (8).
 
 ## The fit and the readout
 
 6. **The gate is train-only.** The fit admits node u's topic block on a training
-   document only when u is in the closure of its frontier (the label-year frontier by
-   default; all-ever attestation with `gate_attestation: ever`, exp 0146). The test
+   document only when u is in the closure of its landed labels (the label year's
+   `labels` by default; the all-ever `gate_labels`, added to the train split only,
+   with `gate_attestation: ever`, exp 0146; the estimator's `labelsCol`). The test
    transform is the deployment fold-in: ungated, full-K CAVI over every block
    (`DagGatedLDAModel._transform`), because at deployment the label is unknown.
 7. **Heads train on all positives.** The per-node readout heads (`spark_vi.readout`)

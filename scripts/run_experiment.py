@@ -674,7 +674,17 @@ def build_dag_gated_args(
     """Build argv for analysis/cloud/dag_gated_fit.py (Gated-PC case-finding).
 
     The DAG-gated LDA fit on the cached case-finding bundle; K is emergent
-    (n_bg + nodes*tpn). `resume_from` is not used: with `fit_save_interval` > 0
+    (n_bg + kept nodes*tpn). The driver starts from the estimator's recommended
+    preset (`DagGatedLDAEstimator.recommended`); every fit knob the front matter
+    sets is passed as a flag and overrides it, and an optional knob the front
+    matter does not set (gate_warm, gate_seed_mode, gate_seed_leaves,
+    doc_concentration, optimize_doc_concentration, gamma_shape) is left to the
+    preset. The node-set threshold is `min_docs_per_node` (counted on training
+    documents by the estimator); a front matter that predates it gives
+    `min_positives`, the Mondo build's old powering threshold, whose number is
+    passed on (spec 2026-10-30: the threshold moved into the estimator).
+
+    `resume_from` is not used: with `fit_save_interval` > 0
     the driver checkpoints to <out>/fit_ckpt and a re-run resumes from it by
     itself (refusing a checkpoint made for another corpus or configuration);
     `fresh_fit: true` in the spec discards it instead.
@@ -718,16 +728,23 @@ def build_dag_gated_args(
         args.extend(["--seed", str(effective["seed"])])
     if effective.get("cache_uri"):
         args.extend(["--cache-uri", str(effective["cache_uri"])])
-    if effective.get("optimize_doc_concentration"):
-        args.append("--optimize-doc-concentration")
+    if effective.get("optimize_doc_concentration") is not None:
+        args.append("--optimize-doc-concentration"
+                    if effective["optimize_doc_concentration"]
+                    else "--no-optimize-doc-concentration")
+    if effective.get("gamma_shape") is not None:
+        args.extend(["--gamma-shape", str(effective["gamma_shape"])])
     if effective.get("doc_concentration") is not None:
         args.extend(["--doc-concentration", str(effective["doc_concentration"])])
     if effective.get("dag_source"):
         args.extend(["--dag-source", str(effective["dag_source"])])
     if effective.get("mondo_branch"):
         args.extend(["--mondo-branch", str(effective["mondo_branch"])])
-    if effective.get("min_positives") is not None:
-        args.extend(["--min-positives", str(effective["min_positives"])])
+    mdn = effective.get("min_docs_per_node")
+    if mdn is None:
+        mdn = effective.get("min_positives")
+    if mdn is not None:
+        args.extend(["--min-docs-per-node", str(int(mdn))])
     if effective.get("mondo_version"):
         args.extend(["--mondo-version", str(effective["mondo_version"])])
     if effective.get("mondo_cache_dir"):
@@ -736,16 +753,17 @@ def build_dag_gated_args(
     # every bundle key byte-identical.
     if effective.get("gate_attestation") and str(effective["gate_attestation"]) != "label":
         args.extend(["--gate-attestation", str(effective["gate_attestation"])])
-    # Leaves-first gate schedule (exp 0153/0154). Emitted only when set, so every
-    # existing arg string stays byte-identical.
-    if int(effective.get("gate_warm", 0) or 0) > 0:
+    # Leaves-first gate schedule (exp 0153/0154). Each knob is emitted only when
+    # the front matter sets it; an unset one is the recommended preset's.
+    if effective.get("gate_warm") is not None:
         args.extend(["--gate-warm", str(int(effective["gate_warm"]))])
-        if effective.get("gate_seed_leaves"):
-            args.append("--gate-seed-leaves")
-        if str(effective.get("gate_seed_mode", "subtree")) != "subtree":
-            args.extend(["--gate-seed-mode", str(effective["gate_seed_mode"])])
-        if effective.get("gate_seed_profile"):
-            args.extend(["--gate-seed-profile", str(effective["gate_seed_profile"])])
+    if effective.get("gate_seed_leaves") is not None:
+        args.append("--gate-seed-leaves" if effective["gate_seed_leaves"]
+                    else "--no-gate-seed-leaves")
+    if effective.get("gate_seed_mode") is not None:
+        args.extend(["--gate-seed-mode", str(effective["gate_seed_mode"])])
+    if effective.get("gate_seed_profile"):
+        args.extend(["--gate-seed-profile", str(effective["gate_seed_profile"])])
     return args
 
 

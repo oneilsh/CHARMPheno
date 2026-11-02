@@ -114,7 +114,8 @@ help:
 	@echo "  summary-tail ID=N       Print only the most-recent ## section of summary.md."
 	@echo "  inspect-topics ID=N      OFF-CLUSTER topics view (sharpness + readout loadings)"
 	@echo "                           from the saved fit; no Spark/YARN, safe mid-fit."
-	@echo "                           Bundle key auto-discovered (override INSPECT_KEY=<hash>,"
+	@echo "                           Reads <run>/bundle_meta.json (the fitted node set; the"
+	@echo "                           fit writes it, or dag-gated-readout DGR_ARGS=--bundle-only;"
 	@echo "                           skip with NO_META=1); RESOLVE_NAMES=1 names the words"
 	@echo "                           (off-YARN bq lookup); COMPARE=M / CREDITED=1 slice the"
 	@echo "                           --readout-auc report. INSPECT_ARGS=--profile-census"
@@ -355,9 +356,11 @@ exp: zip cluster-overlay $(WORKSPACE_ENV)
 
 # Post-hoc case-finding readout on a FINISHED gated_pc run (no re-fit):
 # pc_topics_lr + precision@recall / recall@FDR / detection for the gated_pc arm.
-# Reconstructs the model from the run's saved globals, reloads the cached bundle
-# (recomputing the key from manifest.json), re-transforms, and prints the full
-# readout. PYTHONPATH=REPO_ROOT so the driver imports analysis.pc (the scorer),
+# Loads the fitted model (<run>/model: λ, α and the node set the fit learned),
+# reloads the cached bundle (recomputing the key from manifest.json), re-transforms,
+# builds the heads' targets from the bundle's label-year `labels` on the model's
+# node set, and prints the full readout. A run fitted before the node-set redesign
+# (spec 2026-10-30; no <run>/model) cannot be read: re-fit it. PYTHONPATH=REPO_ROOT so the driver imports analysis.pc (the scorer),
 # which is not in any --py-files zip (client mode: the master has the repo).
 #
 # It also PERSISTS the fitted readout heads to
@@ -366,8 +369,8 @@ exp: zip cluster-overlay $(WORKSPACE_ENV)
 # once on a pre-existing fit (e.g. 0110) to write that sidecar.
 #
 # The bundle cache-uri and (for OLDER runs whose manifest omits it) doc-min-length
-# are overridable; a run whose manifest already records doc_min_length + emit_labels
-# (current driver) needs neither. If the key still misses, pass DGR_ARGS="--bundle-path
+# are overridable; a run whose manifest already records doc_min_length (current
+# driver) needs neither. If the key still misses, pass DGR_ARGS="--bundle-path
 # <cache_uri>/<key>".
 #
 # The readout kernels ship in the spark-vi zip (spark_vi.readout, ADR 0051).
@@ -447,13 +450,13 @@ dag-gated-readout: zip cluster-overlay $(WORKSPACE_ENV)
 # inspect-topics: OFF-CLUSTER topics/readout inspector (pure numpy, NO Spark, NO
 # YARN). Renders per-node topic SHARPNESS + readout LOADINGS from the saved fit
 # (gated_pc_result.npz + the readout heads/ckpt sidecars), so it runs on the
-# MASTER while a fit is still going without touching executors. Add topic WORDS +
-# node DEPTH by pointing --bundle-meta at the bundle's `meta` text file, fetched
-# with a plain `hdfs dfs -cat` -- an HDFS CLIENT read that requests ZERO YARN
-# containers, safe to run mid-fit. The bundle key is AUTO-DISCOVERED (newest
-# bundle dir in the cache; the report flags a shape mismatch if it's the wrong
-# one) — override with INSPECT_KEY=<hash>, provide INSPECT_META=<path> if you
-# fetched the meta yourself, or NO_META=1 to skip meta entirely.
+# MASTER while a fit is still going without touching executors. Topic WORDS +
+# node DEPTH come from <run>/bundle_meta.json, the fitted node set's bridge (the
+# fit writes it; `make dag-gated-readout ID=N DGR_ARGS="--bundle-only"` rewrites
+# it). The HDFS fallback below (newest bundle dir's `meta`, an `hdfs dfs -cat`
+# client read) only serves runs fitted before spec 2026-10-30: a cache meta of the
+# current layout carries the label DAG, not the fitted node set, and is ignored.
+# Override with INSPECT_META=<path>, or NO_META=1 to skip meta entirely.
 # Conveniences:
 #   COMPARE=113    paired per-node AUC deltas vs run 0113 (--readout-auc)
 #   CREDITED=1     credited/uncredited split from the default profile-eta TSV

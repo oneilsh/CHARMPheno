@@ -1,10 +1,11 @@
 """The HPO profile seed for the leaves-first gate schedule (exp 0157/0158; ADR 0049).
 
 `build_profile_seed` turns a phenotype-marks table (``hpo_profile_marks.py``
-output: mondo_id, concept_id, neg) into {engine node id: {vocab idx: weight}} for
-the estimator's `gateSeedProfile`. DRIVER-SIDE ONLY: the mapping needs the bundle
-meta (concept -> vocab index, mondo curie -> engine node id) that only the fit
-driver holds. Pure logic, no Spark; unit-tested in tests/scripts/test_profile_seed.py.
+output: mondo_id, concept_id, neg) into {node: {term: weight}} for the estimator's
+`gateSeedProfile`. Node and term keys are whatever the two maps give (since spec
+2026-10-30 the fit driver passes Mondo curie -> curie and concept id -> concept id,
+the estimator's user ids; it used to be engine ids and vocab indices). DRIVER-SIDE
+ONLY: the maps come from the bundle the fit driver holds. Pure logic, no Spark; unit-tested in tests/scripts/test_profile_seed.py.
 
 The profile-eta word-side prior and the guided-anchor candidates that used to be
 built here were removed by ADR 0050 (the module keeps its name for the run logs
@@ -34,9 +35,10 @@ def _neg_flags(values) -> np.ndarray:
 
 
 def build_profile_seed(marks_df, *, eid_by_mondo, vocab_index_by_concept):
-    """The leaves-first schedule's PROFILE seed (exp 0157/0158; ADR 0049): {engine
-    node id: {primary-domain vocab idx: weight}} for every node of this run with
-    an external phenotype profile (HPO) in the vocabulary. The estimator seeds the
+    """The leaves-first schedule's PROFILE seed (exp 0157/0158; ADR 0049): {node:
+    {primary-domain term: weight}} for every node of this run with an external
+    phenotype profile (HPO) in the vocabulary, keyed by `eid_by_mondo`'s values and
+    `vocab_index_by_concept`'s values (kept as given). The estimator seeds the
     node's primary-domain start from it (leaves at iteration 0, later blocks when
     they open); unprofiled nodes keep the histogram seed.
 
@@ -63,7 +65,7 @@ def build_profile_seed(marks_df, *, eid_by_mondo, vocab_index_by_concept):
         if idx is None:
             n_unmapped += 1
             continue
-        (neg if ng else pos).setdefault(int(eid), set()).add(int(idx))
+        (neg if ng else pos).setdefault(eid, set()).add(idx)
     sets = {e: s - neg.get(e, set()) for e, s in pos.items()}
     sets = {e: s for e, s in sets.items() if s}
     N = len(sets)

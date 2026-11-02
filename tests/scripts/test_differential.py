@@ -63,7 +63,9 @@ def test_run_differential_end_to_end_on_a_tiny_run(tmp_path, monkeypatch):
         "name_by_id": {str(1000 + e): f"node{e}" for e in range(4)},
         "pos_sources": [[0], [1], [2], [3]]}))
     Vh = np.zeros((C, K)); Vh[1, 1] = 30.0; Vh[2, 4] = 30.0; Vh[2, 5] = 30.0
-    np.savez(tmp_path / "readout_heads_gated_pc_stacked_mass99.npz", V=Vh,
+    # the default heads tag is `stacked`, what --readout-stacked writes at the default
+    # top-m (runs read before the node-set redesign used stacked_mass99)
+    np.savez(tmp_path / "readout_heads_gated_pc_stacked.npz", V=Vh,
              b_raw=np.array([5.0, -2.0, -2.0, -2.0]), degenerate=np.zeros(C, bool),
              const=np.zeros(C), theta_topm=0, C=C, K=K)
     (tmp_path / "bundle_meta.json").write_text(json.dumps({

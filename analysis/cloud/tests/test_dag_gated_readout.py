@@ -1,5 +1,5 @@
 """Tests for the gated_pc post-hoc readout: pure helpers (parser, key recompute,
-model reconstruction). The end-to-end reload+transform is the cluster smoke."""
+the saved model's reload). The end-to-end reload+transform is the cluster smoke."""
 
 import numpy as np
 import pytest
@@ -7,7 +7,7 @@ import pytest
 
 def _manifest(**over):
     m = {
-        "model_class": "gated_pc", "disease": "rare6", "min_n": 20,
+        "model_class": "gated_pc", "disease": "rare6",
         "strip_mode": "both", "label_mask_mode": "full", "window_mode": "lookback",
         "lookback_days": 365, "label_window_days": 365, "n_bg": 40, "tpn": 5,
         "K": 170, "C": 27, "weight_y": 50.0, "max_iter": 200, "min_label_count": 20,
@@ -15,7 +15,7 @@ def _manifest(**over):
             "cdr": "p.d", "source_table": "condition_era", "person_mod": 1,
             "vocab_size": 5000, "min_df": 20, "min_patient_count": 20,
             "prior_obs_days": 0, "window_days": 365, "holdout_frac": 0.2,
-            "doc_min_length": 10, "emit_labels": True},
+            "doc_min_length": 10},
     }
     m.update(over)
     return m
@@ -58,14 +58,17 @@ def test_bundle_key_from_manifest_matches_direct_key():
     from _case_finding_cache import compute_bundle_cache_key
     m = _manifest()
     key = bundle_key_from_manifest(m)
-    # Must equal the key the driver would have used at fit time (emit_labels=True).
+    # Must equal the key the driver would have used at fit time; the fit's layout
+    # (n_bg / tpn) and the readout's mask are not bundle inputs.
     direct = compute_bundle_cache_key(
         source_table="condition_era", person_mod=1, vocab_size=5000, min_df=20,
         min_patient_count=20, doc_min_length=10, prior_obs_days=0, window_days=365,
-        disease="rare6", min_n=20, holdout_frac=0.2, n_bg=40, tpn=5, cdr="p.d",
+        disease="rare6", holdout_frac=0.2, cdr="p.d",
         strip_mode="both", window_mode="lookback", lookback_days=365,
-        label_window_days=365, emit_labels=True, label_mask_mode="full")
+        label_window_days=365)
     assert key == direct
+    assert bundle_key_from_manifest(_manifest(n_bg=200, tpn=1,
+                                              label_mask_mode="closure")) == key
 
 
 def test_bundle_key_doc_min_length_override_for_old_manifest():
@@ -79,33 +82,43 @@ def test_bundle_key_doc_min_length_override_for_old_manifest():
         bundle_key_from_manifest(_manifest())
 
 
-def test_reconstruct_model_from_npz(tmp_path):
-    """A saved fit rebuilds as a DagGatedLDAModel. A pre-ADR-0050 npz still
-    carries the co-fit head (w_CK, b_CK); it is ignored, so old run dirs stay
-    readable."""
-    from dag_gated_readout import reconstruct_model
+def test_load_fitted_model_refuses_a_run_without_one(tmp_path):
+    """A run dir from before the node-set redesign has only the npz: the readout
+    cannot know its node set, so it is refused by name rather than guessed."""
+    from dag_gated_fit import load_fitted_model
+    np.savez(tmp_path / "gated_pc_result.npz", alpha=np.ones(3))
+    with pytest.raises(FileNotFoundError, match="no saved DagGatedLDAModel"):
+        load_fitted_model(tmp_path)
+
+
+def test_fitted_model_round_trips_through_the_run_dir(spark, tmp_path):
+    """The fit saves the model MLlib-style to <run>/model; the readout loads it with
+    its node set, Params (the per-domain feature columns) and λ intact."""
+    from dag_gated_fit import load_fitted_model, node_bridge, save_fitted_model
+    from spark_vi.core.result import VIResult
+    from spark_vi.dag.nodeset import fit_node_set
     from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAModel
-    K, V, C = 170, 5000, 27
-    lam = np.abs(np.random.default_rng(0).normal(size=(K, V))) + 1e-3
-    np.savez(tmp_path / "gated_pc_result.npz",
-             **{"lambda": lam, "alpha": np.full(K, 1.0 / K),
-                "w_CK": np.zeros((C, K)), "b_CK": np.zeros(C)})
-    model = reconstruct_model(tmp_path, _manifest())
-    assert isinstance(model, DagGatedLDAModel)
-    assert model.vocabSize() == V
-    assert set(model.result.global_params) == {"lambda", "alpha"}
-    assert model.getOrDefault("topicDistributionCol") == "topicDistribution"
-
-
-def test_reconstruct_model_multi_domain_reads_the_per_domain_columns(tmp_path):
-    from dag_gated_readout import reconstruct_model
-    K = 6
-    np.savez(tmp_path / "gated_pc_result.npz",
-             lambda_0=np.ones((K, 4)), lambda_1=np.ones((K, 3)),
-             alpha=np.full(K, 0.5))
-    model = reconstruct_model(tmp_path, _manifest())
-    assert model.vocabSize() == 7
-    assert model.getOrDefault("featuresCols") == ["features_0", "features_1"]
+    dag = {"MONDO:0000001": [], "MONDO:0000002": ["MONDO:0000001"],
+           "MONDO:0000003": ["MONDO:0000001"]}
+    ns = fit_node_set(dag, [["MONDO:0000002"], ["MONDO:0000003"]])
+    K = 2 + len(ns.nodes)
+    res = VIResult(global_params={"lambda": {0: np.ones((K, 4)), 1: np.ones((K, 3))},
+                                  "alpha": np.full(K, 0.5)},
+                   elbo_trace=[], n_iterations=1, converged=True,
+                   metadata={"model_class": "DagGatedOnlineLDA",
+                             "dag_node_set": {**ns.to_dict(), "n_bg": 2, "tpn": 1}})
+    m = DagGatedLDAModel(res)
+    m.setFeaturesCols(["features_0", "features_1"])
+    m.setDag(dag)
+    save_fitted_model(m, tmp_path)
+    got = load_fitted_model(tmp_path)
+    assert got.vocabSize() == 7
+    assert got.getOrDefault("featuresCols") == ["features_0", "features_1"]
+    assert got.dag() == m.dag() and got.getDag() == dag
+    br = node_bridge(got, {"MONDO:0000002": "b"})
+    assert br["int2cid"][0] == -1 and sorted(br["int2cid"].values()) == [-1, 1, 2, 3]
+    assert br["name_by_id"][2] == "b"
+    assert br["parent_int"][br["cid2int"][2]] == [br["cid2int"][1]]
 
 
 class TestResolveReadoutMaxIter:

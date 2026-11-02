@@ -1,9 +1,12 @@
 """Standalone post-hoc case-finding readout on a FINISHED gated_pc run (no re-fit).
 
-Loads a completed run's saved globals (gated_pc_result.npz: lambda/alpha) +
-manifest.json, reconstructs the DagGatedLDAModel, reloads the cached
-CaseFindingBundle the run was fit against, re-transforms train+test, and prints
-the FULL case-finding readout for the gated_pc arm:
+Loads a completed run's fitted model (`<run>/model`, the MLlib-saved
+DagGatedLDAModel: its λ / α and the node set the fit learned) + manifest.json,
+reloads the cached bundle the run was fit against, re-transforms train+test, builds
+the heads' per-node targets from the bundle's label-year `labels` on the MODEL's
+node set (spec 2026-10-30 R6, R8: `dag_gated_fit.attach_heads_targets`, the
+`spark_vi.readout.labels` labeler DagHeads uses), and prints the FULL
+case-finding readout for the gated_pc arm:
 
   - pc_topics_lr:   ranking AUC/AP + per-node precision@recall / recall@FDR +
                     case-vs-background detection (AUC/AP + precision@recall).
@@ -26,8 +29,8 @@ and `--bundle-path` still short-circuits the key recompute entirely.
 Rebuilding re-runs the assembly, which is deterministic in practice but not
 guaranteed to be (the CDR moves; assembly source changes), so a rebuilt corpus is
 CHECKED against the saved fit before anything is scored: per-domain vocabulary
-sizes against the saved λ's own V dimensions, and the rebuilt engine-id -> concept
-map against the one the manifest recorded. A mismatch aborts with the drift named,
+sizes against the saved λ's own V dimensions, and the rebuilt label DAG against the
+one the model was fit with. A mismatch aborts with the drift named,
 rather than reporting numbers for a model scored on a corpus it was not fit on.
 
 The heads are fit by `spark_vi.readout` (ADR 0051) on either engine:
@@ -38,7 +41,7 @@ The kernels ship in the spark-vi zip, so a hand-rolled spark-submit needs only t
 source zips on --py-files.
 
 Cluster-covered (Spark + live cache); the pure helpers (build_parser,
-bundle_key_from_manifest, reconstruct_model) are unit-tested and the scoring body
+bundle_key_from_manifest, bundle_drift_report) are unit-tested and the scoring body
 (run_readout) is covered against the driver path on a local-Spark fixture in
 tests/scripts/test_readout_integration.py.
 """
@@ -57,10 +60,10 @@ from _driver_common import (_phase, configure_logging, hard_exit,
 from disk_telemetry import start_disk_telemetry
 from spark_vi.readout import read_heads
 from dag_gated_fit import (
-    _MONDO_DAG_SOURCES, _dump_partial_results,
-    format_arm_readout, readout_arm,
-    format_stacked_readout, multidomain_cache_key, multidomain_load_or_build,
-    stacked_readout,
+    _MONDO_DAG_SOURCES, _dump_partial_results, attach_engine_frontier,
+    attach_heads_targets, format_arm_readout, landed_code_map, load_fitted_model,
+    node_bridge, readout_arm, format_stacked_readout, multidomain_cache_key,
+    multidomain_load_or_build, stacked_readout, write_bundle_meta, write_code_map,
 )
 # The three clinician framings (differential, workup, new diagnoses) live in
 # framings.py; this driver dispatches to them.
@@ -484,8 +487,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--acq-adhoc", action="store_true",
                    help="(--acquisition) REGEX picks label nodes as ONE set")
     p.add_argument("--acq-tag", default=None)
-    p.add_argument("--acq-heads", default="stacked_mass99",
-                   help="(--acq-engine model) readout_heads_gated_pc_<TAG>.npz")
+    p.add_argument("--acq-heads", default="stacked",
+                   help="(--differential / --prevalence-check) the heads to read: "
+                        "readout_heads_gated_pc_<TAG>.npz and "
+                        "results_readout_<TAG>.json. Default 'stacked', what "
+                        "--readout-stacked writes at the default top-m (runs read "
+                        "before the node-set redesign used stacked_mass99).")
     p.add_argument("--bundle-only", action="store_true",
                    help="Load (or rebuild) the bundle, write <run>/bundle_meta.json "
                         "and <run>/code_map.tsv, and stop: no transform, no solve. "
@@ -522,8 +529,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--mondo-branch", default=None,
                    help="mondo runs: the fit's --mondo-branch, '' = whole Mondo "
                         "(default: manifest).")
-    p.add_argument("--min-positives", type=int, default=None,
-                   help="mondo runs: the fit's --min-positives (default: manifest).")
     p.add_argument("--mondo-cache-dir", default=None,
                    help="mondo runs: local Mondo OBO cache dir for a rebuild "
                         "(default: the manifest's, else data/mondo).")
@@ -610,15 +615,15 @@ def build_parser() -> argparse.ArgumentParser:
 # key-only, and is passed explicitly at each of the two sites that need it.
 _SNOMED_KEY_KEYS = (
     "source_table", "person_mod", "vocab_size", "min_df", "min_patient_count",
-    "doc_min_length", "prior_obs_days", "window_days", "disease", "min_n",
-    "holdout_frac", "n_bg", "tpn", "cdr", "strip_mode", "window_mode",
-    "lookback_days", "label_window_days", "emit_labels", "label_mask_mode",
+    "doc_min_length", "prior_obs_days", "window_days", "disease",
+    "holdout_frac", "cdr", "strip_mode", "window_mode",
+    "lookback_days", "label_window_days",
 )
 
 
 def corpus_spec_from_manifest(manifest: dict, *, doc_min_length=None, billing=None,
                               dag_source=None, mondo_version=None, mondo_branch=None,
-                              min_positives=None, mondo_cache_dir=None,
+                              mondo_cache_dir=None,
                               dag_collapse=None, preindex_closure=None,
                               label_set_path=None) -> dict:
     """The corpus SPEC a gated_pc manifest describes — key inputs + rebuild inputs.
@@ -656,18 +661,14 @@ def corpus_spec_from_manifest(manifest: dict, *, doc_min_length=None, billing=No
     dag_source = str(dag_source if dag_source is not None
                      else _pick("dag_source", "snomed"))
     # Both Mondo flavours (exp 0088/0104's anchor hierarchy and exp 0110's native
-    # label space) share the population index, min_n=0 and the Mondo build inputs.
+    # label space) share the population index and the Mondo build inputs.
     mondo = dag_source in _MONDO_DAG_SOURCES
     extra_domains = list(_pick("extra_domains", []) or [])
     spec = {
         "dag_source": dag_source,
         "extra_domains": extra_domains,
-        # The Mondo fit indexes the whole POPULATION and passes min_n=0 (its DAG is
-        # already powered); both are defaults here so a manifest written before
-        # corpus_manifest carried them still recomputes the fit's own key.
+        # The Mondo fit indexes the whole POPULATION.
         "index_mode": _pick("index_mode", "population" if mondo else "disease"),
-        "min_n": (cm["min_n"] if "min_n" in cm
-                  else (0 if mondo else manifest["min_n"])),
         "disease": _pick("disease"),
         "cdr": _pick("cdr", None),
         "billing": billing if billing is not None else _pick("billing", None),
@@ -678,18 +679,13 @@ def corpus_spec_from_manifest(manifest: dict, *, doc_min_length=None, billing=No
         "prior_obs_days": _pick("prior_obs_days", 0),
         "window_days": _pick("window_days", 0),
         "holdout_frac": _pick("holdout_frac"),
-        "n_bg": _pick("n_bg"), "tpn": _pick("tpn"),
         "strip_mode": _pick("strip_mode"), "window_mode": _pick("window_mode"),
         "lookback_days": _pick("lookback_days"),
         "label_window_days": _pick("label_window_days"),
-        "label_mask_mode": _pick("label_mask_mode", "full"),
-        "emit_labels": True,               # a gated_pc corpus always carries labels
         "mondo_version": (mondo_version if mondo_version is not None
                           else _pick("mondo_version", "")),
         "mondo_branch": (mondo_branch if mondo_branch is not None
                          else _pick("mondo_branch", "")),
-        "min_positives": (min_positives if min_positives is not None
-                          else _pick("min_positives", 0)),
         "mondo_cache_dir": (mondo_cache_dir if mondo_cache_dir is not None
                             else _pick("mondo_cache_dir", "data/mondo")),
         # exp 0109. Defaults to False, which is what EVERY manifest written before
@@ -840,18 +836,16 @@ def lambda_vocab_sizes(global_params) -> list:
     return [int(lam.shape[1])]
 
 
-def bundle_drift_report(bundle, manifest, fit_vocab_sizes) -> list:
+def bundle_drift_report(bundle, manifest, fit_vocab_sizes, model=None) -> list:
     """Reasons the corpus in hand cannot be scored against the saved fit (empty = ok).
 
     Re-assembly is deterministic in practice but nothing guarantees it: the CDR
     advances, an assembly-source edit changes the split or the vocabulary fit, a
-    Mondo release re-parents a branch. The λ that comes back from the npz is
-    (K, V_m) per domain and the per-node head is (C, K) over engine ids, so the two
-    things that MUST still line up are each domain's vocabulary width and the
-    engine-id -> concept-id map. Both are recorded — the widths implicitly in λ, the
-    map explicitly in the manifest — so drift is detectable before a single number
-    is computed, and reporting AUCs for a model scored on a corpus it was not fit on
-    is not a failure mode this tool has to have."""
+    Mondo release re-parents a branch. The λ that comes back is (K, V_m) per domain
+    and the heads are indexed by the fitted node set, so the two things that MUST
+    still line up are each domain's vocabulary width and the label DAG the model
+    was fit with (`model.getDag()`, the bundle's `dag` at fit time); the node set
+    itself is the model's, so it cannot drift."""
     problems = []
     vocab_maps = getattr(bundle, "vocab_maps", None)
     if vocab_maps is None:
@@ -868,61 +862,23 @@ def bundle_drift_report(bundle, manifest, fit_vocab_sizes) -> list:
                 problems.append(
                     f"domain {i}: the fit's lambda is V={v_fit} wide, the corpus "
                     f"vocabulary has {v_corpus} concepts")
-    got = {int(i): int(c) for i, c in bundle.int2cid.items()}
-    C = manifest.get("C")
-    if C is not None and len(got) != int(C):
-        problems.append(
-            f"the fit has C={int(C)} label heads, the corpus DAG has {len(got)} nodes")
-    saved = (manifest.get("corpus_manifest") or {}).get("int2cid")
-    if saved:
-        want = {int(i): int(c) for i, c in saved.items()}
-        if got != want:
-            diff = sorted(i for i in set(got) | set(want)
-                          if got.get(i) != want.get(i))
+    if model is not None:
+        want = {n: sorted(ps) for n, ps in model.getDag().items()}
+        got = {n: sorted(ps) for n, ps in (bundle.dag or {}).items()}
+        if want and got != want:
+            diff = sorted((str(n) for n in set(got) ^ set(want)))
+            moved = sorted(str(n) for n in set(got) & set(want) if got[n] != want[n])
             problems.append(
-                f"the engine-id -> concept-id map differs at {len(diff)} node(s) "
-                f"(first: {diff[:5]}); the label DAG is not the one the head was "
-                f"fit against")
+                f"the corpus label DAG is not the one the model was fit with: "
+                f"{len(diff)} node(s) in one and not the other (first: {diff[:5]}), "
+                f"{len(moved)} with other parents (first: {moved[:5]})")
+    C = manifest.get("C")
+    if model is not None and C is not None:
+        n = len(model._ns().user_ids)
+        if n != int(C):
+            problems.append(f"the manifest has C={int(C)} heads, the model's node "
+                            f"set {n}")
     return problems
-
-
-def reconstruct_model(run_dir: Path, manifest: dict):
-    """Rebuild a scoreable DagGatedLDAModel from the saved gated_pc_result.npz.
-
-    The driver saves raw globals (lambda/alpha), not a persisted model, so we wrap
-    them in a VIResult and a DagGatedLDAModel; `transform` appends
-    topicDistribution (θ) by the same ungated full-K CAVI the fit's model uses.
-    The CAVI read-out knobs (gammaShape/caviMaxIter/caviTol) come from the model
-    defaults, which match the fit's defaults for this experiment family. Runs
-    saved before ADR 0050 also carry the co-fit head (`w_CK`, `b_CK`); it is
-    ignored (every readout head is fit post hoc).
-
-    MULTI-DOMAIN (the Mondo path): `np.savez` cannot store a dict, so `_save_fit`
-    writes a per-domain λ as `lambda_0, lambda_1, ...`; it is reassembled here into
-    the `{domain: (K, V_m)}` dict `_transform` fuses, and `featuresCols` is set to
-    the matching `features_0..` so the transform reads the per-domain BOW columns
-    instead of a `features` column the multi-domain corpus does not have."""
-    from spark_vi.core.result import VIResult
-    from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAModel
-
-    npz = np.load(run_dir / "gated_pc_result.npz")
-    files = set(npz.files)
-    if "lambda" in files:
-        lam = npz["lambda"]
-    else:
-        dom = sorted(int(f.split("_", 1)[1]) for f in files
-                     if f.startswith("lambda_"))
-        if not dom:
-            raise KeyError(
-                f"{run_dir}/gated_pc_result.npz has no lambda: found {sorted(files)}")
-        lam = {m: npz[f"lambda_{m}"] for m in dom}
-    gp = {"lambda": lam, "alpha": npz["alpha"]}
-    result = VIResult(global_params=gp, elbo_trace=[],
-                      n_iterations=int(manifest.get("max_iter", 0)), converged=True)
-    model = DagGatedLDAModel(result)
-    if isinstance(lam, dict):
-        model._set(featuresCols=[f"features_{i}" for i in range(len(lam))])
-    return model
 
 
 def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targets,
@@ -1066,8 +1022,11 @@ def main(argv=None) -> int:
     spec_over = dict(billing=args.billing, dag_source=args.dag_source,
                      mondo_version=args.mondo_version,
                      mondo_branch=args.mondo_branch,
-                     min_positives=args.min_positives,
                      mondo_cache_dir=args.mondo_cache_dir)
+    # The heads' observation policy (the bundle no longer carries a mask).
+    mask_mode = str(manifest.get("label_mask_mode")
+                    or (manifest.get("corpus_manifest") or {}).get("label_mask_mode")
+                    or "full")
     # The fit records the cache root it used, so a recovery command need not
     # remember it; an explicit --cache-uri still wins.
     cm = manifest.get("corpus_manifest") or {}
@@ -1086,6 +1045,16 @@ def main(argv=None) -> int:
             log=lambda msg: _cprint(f"[readout] {msg}", flush=True))
 
         from _case_finding_cache import try_load
+        from charmpheno.omop.case_finding_assembly import LABELS_COL
+
+        with _phase("load the fitted model"):
+            # The run's node set of record (spec 2026-10-30): the heads, the readout
+            # DAG, the own codes and every per-node table read it from here.
+            model = load_fitted_model(run_dir)
+            _ns = model._ns()
+            _cprint(f"[readout]   fitted model loaded: {len(_ns.nodes)} kept node(s), "
+                    f"{len(_ns.pruned)} pruned, {len(_ns.spliced)} spliced "
+                    f"(minDocsPerNode={_ns.min_docs_per_node}); C={C}", flush=True)
 
         with _phase("reload cached bundle"):
             spec = None
@@ -1166,11 +1135,8 @@ def main(argv=None) -> int:
                             return 2
                 _cprint(f"[readout]   corpus: dag_source={spec['dag_source']} "
                       f"extra_domains={spec['extra_domains']} "
-                      f"index_mode={spec['index_mode']} min_n={spec['min_n']} "
-                      f"mondo_branch={spec['mondo_branch'] or 'ALL'} "
-                      f"min_positives={spec['min_positives']} "
-                      f"dag_collapse={spec['dag_collapse']} "
-                      f"preindex_closure={spec['preindex_closure']}", flush=True)
+                      f"index_mode={spec['index_mode']} "
+                      f"mondo_branch={spec['mondo_branch'] or 'ALL'}", flush=True)
                 bundle = rebuild_bundle(
                     spark, spec,
                     cache_uri=(cache_uri if args.cache_write == "on" else None))
@@ -1182,37 +1148,38 @@ def main(argv=None) -> int:
             else:
                 _cprint(f"[readout]   bundle loaded ({cache_uri}/{key}); C={C}",
                       flush=True)
-            from dag_gated_fit import write_bundle_meta
-            _bmp = write_bundle_meta(run_dir, bundle)
+            # The bridge (engine id -> node cid, parent_int) is the MODEL's node
+            # set; the bundle contributes vocabularies, names and the code ladder.
+            _br = node_bridge(model, bundle.name_by_id)
+            _bmp = write_bundle_meta(run_dir, bundle, model)
             _cprint(f"[readout]   wrote bundle meta -> {_bmp}", flush=True)
             _ncm = getattr(bundle, "native_code_map", None)
             if _ncm and (args.bundle_only or not (run_dir / "code_map.tsv").exists()):
-                # WP-C': a fit from before the code map rode the bundle gets it
-                # on its first re-readout, so `--profile-census --own-codes`
-                # works on 0135 without a refit.
-                from dag_gated_fit import write_code_map
-                _cmp = write_code_map(run_dir, _ncm)
-                _cprint(f"[readout]   wrote native code map ({len(_ncm)} pairs) -> "
-                      f"{_cmp}", flush=True)
+                _lcm = landed_code_map(model, _ncm, _br["int2cid"])
+                _cmp = write_code_map(run_dir, _lcm)
+                _cprint(f"[readout]   wrote the code map on the fitted node set "
+                        f"({len(_lcm)} pairs) -> {_cmp}", flush=True)
 
         if args.npmi:
             # Exp 0159: gated NPMI from the saved topics + the bundle's documents;
             # no transform, no heads.
             with _phase("gated NPMI"):
-                from spark_vi.dag.layout import DagLayout
                 from topic_npmi import run_npmi
                 _npz = np.load(run_dir / "gated_pc_result.npz")
                 _lk = sorted((k for k in _npz.files if k.startswith("lambda_")),
                              key=lambda k: int(k.split("_", 1)[1]))
                 _lams = [_npz[k] for k in _lk] if _lk else [_npz["lambda"]]
-                _cm = manifest.get("corpus_manifest") or {}
-                _lay = DagLayout({int(c): [int(p) for p in ps] for c, ps in
-                                  bundle.parent_int.items()},
-                                 n_bg=int(manifest["n_bg"]), tpn=int(manifest["tpn"]))
-                run_npmi(bundle.train_df, bundle.test_df, run_dir, lay=_lay, lams=_lams,
-                         n_bg=int(manifest["n_bg"]),
-                         int2cid={int(k): int(v) for k, v in _cm.get("int2cid", {}).items()},
-                         names={int(k): v for k, v in _cm.get("name_by_id", {}).items()},
+                # The documents each block's gate admitted: the fit's own frontier
+                # of the gate's labels column (the model's FrontierFn).
+                _gcol = str(manifest.get("labels_col") or LABELS_COL)
+                _fr = {sp: (attach_engine_frontier(df, model, _gcol)
+                            if _gcol in df.columns else
+                            attach_engine_frontier(df, model, LABELS_COL))
+                       for sp, df in (("train", bundle.train_df),
+                                      ("test", bundle.test_df))}
+                run_npmi(_fr["train"], _fr["test"], run_dir, lay=model._layout(),
+                         lams=_lams, n_bg=int(manifest["n_bg"]),
+                         int2cid=_br["int2cid"], names=_br["name_by_id"],
                          split=args.npmi_split, top_n=args.npmi_top,
                          domains=[int(x) for x in str(args.npmi_domains).split(",")],
                          tag=args.acq_tag)
@@ -1220,8 +1187,14 @@ def main(argv=None) -> int:
 
         if args.differential:
             with _phase("differential with reasons (framing 1)"):
+                # The members' label cells: the label-year targets on the fitted
+                # node set (fit-width, engine-id index), as the heads read them.
                 run_differential(
-                    bundle.test_df, bundle.train_df, run_dir, args.differential,
+                    attach_heads_targets(bundle.test_df, model, LABELS_COL,
+                                         mask_mode=mask_mode),
+                    attach_heads_targets(bundle.train_df, model, LABELS_COL,
+                                         mask_mode=mask_mode),
+                    run_dir, args.differential,
                     adhoc=args.acq_adhoc, heads_tag=args.acq_heads,
                     max_patients=args.diff_max_patients,
                     max_train=args.diff_max_train, tag=args.acq_tag,
@@ -1244,14 +1217,12 @@ def main(argv=None) -> int:
                   "stopping before the transform", flush=True)
             return 0
 
-        with _phase("reconstruct model + transform"):
-            # The theta collect (driver mode) now happens inside run_readout, so the
-            # distributed mode can skip it entirely rather than paying for it here.
-            model = reconstruct_model(run_dir, manifest)
+        with _phase("transform + the heads' targets"):
             # DRIFT GATE, before a single number is computed: the corpus in hand
-            # (cached or rebuilt) must be the one this λ/head was fit against.
+            # (cached or rebuilt) must be the one this λ / node set was fit against.
             drift = bundle_drift_report(
-                bundle, manifest, lambda_vocab_sizes(model.result.global_params))
+                bundle, manifest, lambda_vocab_sizes(model.result.global_params),
+                model)
             if drift:
                 _cprint("[readout] ERROR: the corpus does not match the saved fit — "
                       "it has DRIFTED since the fit (a data refresh, or an "
@@ -1263,11 +1234,19 @@ def main(argv=None) -> int:
                 return 3
             if args.raw_baseline:
                 # Exp 0147: no θ needed — the baseline reads the bundle's own BOW.
-                train_scored = bundle.train_df.cache()
-                test_scored = bundle.test_df.cache()
+                train_scored, test_scored = bundle.train_df, bundle.test_df
             else:
-                train_scored = model.transform(bundle.train_df).cache()
-                test_scored = model.transform(bundle.test_df).cache()
+                train_scored = model.transform(bundle.train_df)
+                test_scored = model.transform(bundle.test_df)
+            # The heads' per-node targets (spec 2026-10-30 R6, R8): the label year's
+            # attested nodes (`labels`, whatever gated the fit) landed on the MODEL's
+            # node set; index 0 the root, index e the model's engine node e.
+            train_scored = attach_heads_targets(
+                train_scored, model, LABELS_COL, mask_mode=mask_mode).cache()
+            test_scored = attach_heads_targets(
+                test_scored, model, LABELS_COL, mask_mode=mask_mode).cache()
+            _cprint(f"[readout]   heads' targets: {LABELS_COL!r} on the fitted node "
+                    f"set, labelMaskMode={mask_mode}", flush=True)
 
         # WP-B (spec 2026-10-07 §D1/§D4): a label-set fit is FLAT, and the
         # bundle's closure mask on a flat forest is a full mask (insight 0096:
@@ -1277,7 +1256,7 @@ def main(argv=None) -> int:
         # cache or a hashed module moves; the manifest's C stays the fit's.
         _rdag = None
         _C_ro = C
-        _parent_ro = getattr(bundle, "parent_int", None)
+        _parent_ro = _br["parent_int"]
         _cm = manifest.get("corpus_manifest") or {}
         from readout_dag import resolve_readout_hierarchy
         if resolve_readout_hierarchy(args.readout_hierarchy, manifest):
@@ -1293,12 +1272,11 @@ def main(argv=None) -> int:
                                      "Mondo version (manifest corpus_manifest."
                                      "mondo_version or --mondo-version)")
                 _padj, _mnames = load_mondo_parent_adj(_mv, _mcd)
-                _rdag = build_readout_dag(bundle.int2cid, _padj, names=_mnames)
+                _rdag = build_readout_dag(_br["int2cid"], _padj, names=_mnames)
                 _cprint(format_readout_dag_report(_rdag), flush=True)
                 _rp = write_readout_dag(run_dir, _rdag)
                 _cprint(f"[readout]   wrote {_rp}", flush=True)
-                _mm = str(_cm.get("label_mask_mode") or
-                          manifest.get("label_mask_mode") or "full")
+                _mm = mask_mode
                 _tr_w = widen_labels_to_readout(train_scored, _rdag, mask_mode=_mm).cache()
                 _te_w = widen_labels_to_readout(test_scored, _rdag, mask_mode=_mm).cache()
                 # Materialize the widened frames off the cached transforms, then
@@ -1359,22 +1337,18 @@ def main(argv=None) -> int:
                             f"in the frequency top {args.raw_baseline}", flush=True)
                 elif args.raw_select == "relevance":
                     import inspect_topics as _it
-                    from spark_vi.dag.layout import DagLayout
                     from spark_vi.eval.topic.gated_npmi import own_code_exclusions
                     _freq = set(_sel)
                     _quota = {}
                     for d, _i in _sel:
                         _quota[d] = _quota.get(d, 0) + 1
-                    _lay = DagLayout({int(c): [int(q) for q in ps] for c, ps in
-                                      bundle.parent_int.items()},
-                                     n_bg=int(manifest["n_bg"]),
-                                     tpn=int(manifest["tpn"]))
+                    _lay = model._layout()
                     _vm0 = bundle.vocab_maps[0]
                     if _vm0 and isinstance(next(iter(_vm0)), str):
                         _vm0 = {int(k): v for k, v in _vm0.items()}
                     _own = _it.own_code_vocab_idx(
                         _it.load_code_map(run_dir / "code_map.tsv"),
-                        bundle.int2cid, _vm0)
+                        _br["int2cid"], _vm0)
                     _excl = own_code_exclusions(_lay, _own)
                     if not _excl:
                         raise SystemExit("[readout] --raw-select relevance: no own codes "

@@ -40,16 +40,17 @@ node = sorted(non-root engine ids)[(t - n_bg) // tpn], which int2cid/name_by_id
 name. With tpn=1 this is one dedicated topic per Mondo node -- "inspect the
 topics" is "inspect each node's topic."
 
-NOT in the artifacts: the vocab map {concept_id -> vocab index} that would name a
+NOT in those two: the vocab map {concept_id -> vocab index} that would name a
 topic's WORDS, and the `parent_int` map that would give each node's DEPTH. Both
-live in the bundle, but NOT in a Spark parquet -- in the bundle's `meta` text
-file (`_case_finding_cache.save`: `{cache_uri}/{key}/meta/part-*`, one line of
-JSON with `vocab_maps`, `parent_int`, `int2cid`, `name_by_id`). That file is
-fetchable with a plain `hdfs dfs -cat` (or `gsutil cat`) -- an HDFS/GCS CLIENT
-read that requests NO YARN containers, so it never contends with a running fit
-and needs no second Spark job. Pass it here as `--bundle-meta meta.json` and the
-report gains topic WORDS and a DEPTH column (the deep-node starvation view). For
-readable names of measurement/drug vocab features not on the label DAG, add
+are in `<run>/bundle_meta.json` (`dag_gated_fit.write_bundle_meta`: one line of
+JSON with `vocab_maps`, `parent_int`, `int2cid`, `name_by_id` — since spec
+2026-10-30 the bridge is the FITTED model's node set, written by the fit and by
+`dag_gated_readout --bundle-only`). Pass it here as `--bundle-meta` and the report
+gains topic WORDS and a DEPTH column (the deep-node starvation view). (Runs fitted
+before that spec also had this bridge in the bundle's HDFS `meta` text file,
+`{cache_uri}/{key}/meta/part-*`, fetchable off-YARN with `hdfs dfs -cat`; a current
+cache meta carries the label DAG instead and is not readable here.) For readable
+names of measurement/drug vocab features not on the label DAG, add
 `--concept-names cid,name.csv`.
 
   hdfs dfs -cat <cache_uri>/<key>/meta/part-* > meta.json   # off-YARN, safe mid-fit
@@ -269,12 +270,14 @@ def node_depths(parent_int):
 
 
 def load_bundle_meta(path):
-    """Parse a bundle `meta` file (the `hdfs dfs -cat .../meta/part-*` output).
+    """Parse a run's `bundle_meta.json` (`dag_gated_fit.write_bundle_meta`).
 
     Accepts the raw one-line JSON, or a file with that line among others (takes
     the first line that parses to a dict with `int2cid`). Returns the dict with
-    `vocab_maps`, `parent_int`, `name_by_id`, `int2cid` (as written by
-    _case_finding_cache._meta_dict), or None on any failure.
+    `vocab_maps`, `parent_int`, `name_by_id`, `int2cid` — the FITTED model's node
+    set as the integer bridge, since spec 2026-10-30 (the HDFS cache meta carries
+    the label DAG in node ids, not this bridge, and is not read here) — or None on
+    any failure.
     """
     text = Path(path).read_text()
     for line in [text] + text.splitlines():

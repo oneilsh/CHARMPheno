@@ -109,13 +109,16 @@ def test_config_round_trips_frontmatter_to_the_estimator(monkeypatch):
         sys.path.insert(0, cloud)
     import dag_gated_fit
     parsed = dag_gated_fit.parse_args(args)
-    parsed._parent_int = {1: [0], 2: [0]}
+    parsed._dag = {"MONDO:0000001": [], "MONDO:0000002": ["MONDO:0000001"]}
     est = dag_gated_fit._build_estimator(parsed)
     assert est.getOrDefault("docConcentration") == [0.5]
     assert est.getOrDefault("gateWarm") == 2
     assert est.getOrDefault("gateSeedMode") == "balanced"
     assert est.getOrDefault("gateSeedLeaves") is True
     assert est.getOrDefault("maxIter") == 100
+    assert est.getOrDefault("gateNBg") == 2 and est.getOrDefault("gateTpn") == 1
+    assert est.getOrDefault("minDocsPerNode") == 100
+    assert est.getDag() == parsed._dag
 
 
 def test_mondo_native_dag_source_threads_end_to_end(monkeypatch):
@@ -130,6 +133,11 @@ def test_mondo_native_dag_source_threads_end_to_end(monkeypatch):
            "label_mask_mode": "closure", "localize_head": True}
     args = mod.build_dag_gated_args(eff, "/out")
     assert args[args.index("--dag-source") + 1] == "mondo_native"
+    # the old powering threshold's number becomes the estimator's minDocsPerNode
+    assert args[args.index("--min-docs-per-node") + 1] == "100"
+    assert "--min-positives" not in args
+    assert mod.build_dag_gated_args({**eff, "min_docs_per_node": 150}, "/out")[
+        args.index("--min-docs-per-node") + 1] == "150"
 
     cloud = str(Path(mod.__file__).resolve().parent.parent / "analysis" / "cloud")
     if cloud not in sys.path:
@@ -137,10 +145,13 @@ def test_mondo_native_dag_source_threads_end_to_end(monkeypatch):
     import dag_gated_fit
     parsed = dag_gated_fit.parse_args(args)
     assert parsed.dag_source == "mondo_native"
+    assert parsed.min_docs_per_node == 100
     spec = dag_gated_fit.multidomain_corpus_spec(parsed, ("drug",))
     assert spec["dag_source"] == "mondo_native"
-    assert spec["index_mode"] == "population" and spec["min_n"] == 0
-    assert spec["min_positives"] == 100 and spec["mondo_version"] == "2026-06-02"
+    assert spec["index_mode"] == "population"
+    assert spec["mondo_version"] == "2026-06-02"
+    for gone in ("min_n", "min_positives", "n_bg", "tpn", "label_mask_mode"):
+        assert gone not in spec                # not bundle inputs (spec 2026-10-30)
     assert spec["dag_collapse"] is False
 
     with pytest.raises(SystemExit):            # the flag is gone (2026-10 cleanup)
@@ -159,37 +170,29 @@ def test_mondo_native_selects_the_native_assembler(monkeypatch):
 
     seen = {}
 
-    def _fake_assemble(spark, *, before_dag, attested_provider, **kw):
-        seen["dag"] = before_dag
+    def _fake_assemble(spark, *, label_dag, names, attested_provider, **kw):
+        seen["dag"] = label_dag
         return "bundle"
 
-    class _Dag:
-        names = {-1: "root"}
-
-        def nodes(self):
-            return {-1, 4995}
-
     def _fake_native_build(spark, **kw):
+        from charmpheno.mondo.native_dag import MondoLabelInputs
         seen["native_kw"] = kw
-        return (_Dag(), None, {4995}, {4995: 400},
-                {"version": "native-mondo-v1", "n_kept": 1, "n_coded_kept": 1,
-                 "n_hasse_nodes": 1, "n_hasse_multi_parent": 0,
-                 "n_final_nodes": 1, "n_final_multi_parent": 0,
-                 "min_positives": 100, "n_codes_resolved": 2, "n_coded_terms": 1,
-                 "n_terms_with_any_support": 3, "n_powered": 1,
-                 "min_support_kept": 400, "n_codes_attesting": 2, "branch": "",
-                 "collapse": {"spliced": 0, "dropped_childless": 0, "passes": 0,
-                              "predicted_degenerate": 1}})
+        return MondoLabelInputs(
+            dag={"MONDO:0004995": []}, code_map_sdf=None,
+            node_ids=["MONDO:0004995"], names={"MONDO:0004995": "cvd"},
+            stats={"version": "native-mondo-v7", "n_coded_terms": 1, "n_nodes": 1,
+                   "n_multi_parent": 0, "n_top": 1, "branch": "",
+                   "n_codes_resolved": 2, "n_codes_outside_branch": 0})
 
     spec = {"dag_source": "mondo_native", "cdr": "p.d", "billing": "bp",
             "mondo_version": "2026-06-02", "mondo_cache_dir": "data/mondo",
-            "min_positives": 100, "mondo_branch": ""}
+            "mondo_branch": ""}
     fn = dag_gated_fit.mondo_assemble_fn(
         spec, _build_inputs=_fake_native_build, _assemble=_fake_assemble)
     assert fn(None) == "bundle"
-    assert seen["native_kw"]["min_positives"] == 100
+    assert "min_positives" not in seen["native_kw"]
     assert seen["native_kw"]["branch_root"] is None
-    assert 4995 in seen["dag"].nodes()          # Mondo term ids, not OMOP cids
+    assert seen["dag"] == {"MONDO:0004995": []}   # Mondo curies, not OMOP cids
 
 
 def test_the_0110_front_matter_asks_for_the_preindex_column():

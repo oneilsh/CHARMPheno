@@ -156,34 +156,71 @@ def test_readout_tool_parses_the_hierarchy_flag():
     assert a.readout_hierarchy == "flat"
 
 
-def test_code_map_rides_the_cache_meta_and_the_run_dir(tmp_path):
+def _two_node_model():
+    """A DagGatedLDAModel whose node set is {MONDO:0005021 (DCM), its parent
+    MONDO:0004995}, learned from two documents; no fit."""
+    import numpy as np
+    from spark_vi.core.result import VIResult
+    from spark_vi.dag.nodeset import fit_node_set
+    from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAModel
+    dag = {"MONDO:0004995": [], "MONDO:0005021": ["MONDO:0004995"],
+           "MONDO:0007915": ["MONDO:0004995"]}
+    ns = fit_node_set(dag, [["MONDO:0005021"], ["MONDO:0004995"]])
+    K = 1 + len(ns.nodes)
+    res = VIResult(global_params={"lambda": np.ones((K, 2)), "alpha": np.ones(K)},
+                   elbo_trace=[], n_iterations=1, converged=True,
+                   metadata={"model_class": "DagGatedOnlineLDA",
+                             "dag_node_set": {**ns.to_dict(), "n_bg": 1, "tpn": 1}})
+    return dag, DagGatedLDAModel(res)
+
+
+def test_code_map_rides_the_cache_meta_and_lands_on_the_fitted_nodes(tmp_path):
+    """The bundle carries the code ladder `(std_cid, most-specific term)`; the run
+    dir's code_map.tsv is that ladder landed on the FITTED node set (a term the
+    fit pruned lands on its kept ancestor), in the bridge's node cids."""
     import _case_finding_cache as cfc
     import dag_gated_fit as gpc
 
+    dag, model = _two_node_model()          # MONDO:0007915 had no document: pruned
+
     class B:
-        parent_int = {0: [], 1: [0]}; int2cid = {0: -1, 1: 5021}; cid2int = {-1: 0, 5021: 1}
-        name_by_id = {5021: "DCM"}; ledger = {}; vocab_maps = [{101: 0}]
+        name_by_id = {"MONDO:0005021": "DCM"}; ledger = {}; vocab_maps = [{101: 0}]
     b = B()
-    assert "native_code_map" not in cfc._meta_dict(b)          # absent -> byte-identical meta
-    b.native_code_map = [(101, 5021), (102, 5021)]
+    b.dag = dag
+    assert "native_code_map" not in cfc._meta_dict(b)          # absent -> no field
+    b.native_code_map = [(101, "MONDO:0005021"), (102, "MONDO:0007915")]
     meta = json.loads(json.dumps(cfc._meta_dict(b)))
-    assert cfc._restore_meta(meta)["native_code_map"] == [(101, 5021), (102, 5021)]
-    p = gpc.write_code_map(tmp_path, b.native_code_map)
-    assert p.read_text() == "std_cid\tnode_cid\n101\t5021\n102\t5021\n"
+    assert cfc._restore_meta(meta)["native_code_map"] == b.native_code_map
+    br = gpc.node_bridge(model, b.name_by_id)
+    rows = gpc.landed_code_map(model, b.native_code_map, br["int2cid"])
+    assert rows == [(101, 5021), (102, 4995)]  # 7915 pruned -> its parent 4995
+    p = gpc.write_code_map(tmp_path, rows)
+    assert p.read_text() == "std_cid\tnode_cid\n101\t5021\n102\t4995\n"
 
 
 def test_bundle_meta_lands_in_the_run_dir_and_the_readout_has_bundle_only(tmp_path):
-    import _case_finding_cache as cfc
+    """<run>/bundle_meta.json: the FITTED node set's integer bridge (not rebuilt from
+    the bundle), the bundle's vocab maps, ledger and the DAG the fit was given."""
     import dag_gated_fit as gpc
     import dag_gated_readout as gpr
+    import inspect_topics as it
+
+    dag, model = _two_node_model()
 
     class B:
-        parent_int = {0: [], 1: [0]}; int2cid = {0: -1, 1: 5021}; cid2int = {-1: 0, 5021: 1}
-        name_by_id = {5021: "DCM"}; ledger = {"k": 1}; vocab_maps = [{101: 0}, {202: 0}]
-    p = gpc.write_bundle_meta(tmp_path, B())
+        name_by_id = {"MONDO:0005021": "DCM"}; ledger = {"k": 1}
+        vocab_maps = [{101: 0}, {202: 0}]
+    b = B()
+    b.dag = dag
+    p = gpc.write_bundle_meta(tmp_path, b, model)
     meta = json.loads(p.read_text())
-    assert meta == json.loads(json.dumps(cfc._meta_dict(B())))
-    assert meta["vocab_maps"][0] == {"101": 0}
+    assert meta["vocab_maps"][0] == {"101": 0} and meta["ledger"] == {"k": 1}
+    assert meta["int2cid"]["0"] == -1
+    assert sorted(meta["int2cid"].values()) == [-1, 4995, 5021]   # 7915 pruned
+    assert meta["name_by_id"]["5021"] == "DCM"
+    assert len(meta["parent_int"]) == 2                   # the two kept nodes
+    assert ["MONDO:0007915", "MONDO:0004995"] in meta["label_dag"]
+    assert it.load_bundle_meta(str(p))["int2cid"] == meta["int2cid"]
     a = gpr.build_parser().parse_args(["--run-dir", "/tmp/run", "--bundle-only"])
     assert a.bundle_only
 
