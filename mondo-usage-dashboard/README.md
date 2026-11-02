@@ -26,10 +26,10 @@ the detail panel docked beside it.
 
 The payload is produced on the AoU cluster (BigQuery + Spark) by
 [`analysis/cloud/mondo_usage_cloud.py`](../analysis/cloud/mondo_usage_cloud.py),
-currently run as experiment **0120** (`source_climb`, `--with-hpo`, HPO release pinned):
+currently run as experiment **0121** (`source_climb`, `--with-hpo`, HPO release pinned):
 
 ```bash
-make -C analysis/cloud exp ID=120
+make -C analysis/cloud exp ID=121
 # writes <run-dir>/mondo_usage.json + hpo_usage.json  (+ *_nodes.tsv)
 ```
 
@@ -95,18 +95,14 @@ diseases (they flag e.g. prostate cancer), so those are deliberately excluded.
 A ✦ also marks **rare-disease** terms.
 The detail drawer lists each term's source codes and its subtree roll-up.
 
-Each node shows **`direct of rolled (±unc)`**, e.g. `20k of 664k ±123`: the term's own
-patient count, then its subtree roll-up. The roll-up spans the term's **full DAG descendant
-closure** (every term reachable below it, each counted once even with several parents) and
-is the **sum of those terms' own counts**: a count of **diagnoses** (patient-term pairs),
-not distinct patients. A patient counts once per term they touch, so a code that maps to two
-terms, or two conditions in one branch, counts twice, by design. It is built only from the
-published per-term figures (no extra number is exported). Its uncertainty comes only from
-masked (`≤20`) and range-published terms: each contributes `[lo, hi]`, the shown value is
-the midpoint, and `±` is half the summed width, so `est ± unc` spans exactly
-`[floor, ceiling]`. (Earlier exports split shared diagnoses 1/m via a published `frac`; that
-figure leaked code overlaps and masked counts and was removed, see exp 0120.) The
-**Per-term / Rolled up** toggle picks which number **drives node size and is bolded**.
+**Counting (exp 0121+).** Every count is of **diagnoses**: a participant with a given source
+code, counted once however often it was recorded. Each (term, source code) pair is a *cell*,
+published exactly above 20 and as **10** (shown `10*`) for 1–20. Everything else is a sum of
+published cells: a term's count adds its codes' cells, its named / climbed-only split adds the
+cells of each kind, and a subtree **roll-up** adds the cells of every term beneath it, counting
+each source code once even when it reaches several of those terms. No separately computed total
+is published, so every figure on the page is reproducible from the cells. Each node shows
+**`direct of rolled`**; the **Per-term / Rolled up** toggle picks which one drives node size.
 
 **Mapping provenance (exp 0120+).** Each source code in a term's drawer is marked by the
 ladder step that placed it: `≡` **same-as** (the source code is a Mondo cross-reference),
@@ -120,20 +116,12 @@ term to Monarch), e.g.
 (one of several equally short chains is flagged as such). Concept names are never exported;
 ICD/HCPCS names resolve from NIH Clinical Tables and SNOMED codes link to Athena.
 
-**Count toggle (All / Exclude climbed / Climbed only).** Each term's patients split into
-**named** (at least one code that names the term: steps 1–3) and **climbed only** (reached
-only by climbing). A code reaching a term directly on some rows and by climbing on others
+**Count toggle (All / Exclude climbed / Climbed only).** Each term's diagnoses split into
+**named** (codes that name the term: steps 1–3) and **climbed** (codes reached only by
+climbing: step 4). A code reaching a term directly on some rows and by climbing on others
 counts as named. The toggle recounts every term and drives sizes, colours, the hide-unused
 filter, the code list and its band chips. Terms where the climbed-only share is large are
 where a direct Mondo mapping is most needed.
-
-**Small-cell protection.** Every publish/withhold decision is made from already-public
-information only, so a decision itself never leaks. Totals are exact unless an exact figure
-could narrow a masked (`≤20`) source code, in which case they show as a 1-2-5 band
-(`21–50`, `51–100`, `101–200`, …). Split parts are exact, ranged (`≤20` plus
-`N-20–N-1`), mirrored (one part has no codes, so it is 0) or withheld (`—`). The driver's
-`assert_diff_safe` re-checks every published combination, from above and below, before
-writing.
 
 ## Method (why no roll-up)
 
