@@ -623,3 +623,132 @@ def test_assert_diff_safe_rejects_unsafe_frac():
     with pytest.raises(AssertionError):                          # range top below T
         m.assert_diff_safe([dict(base, frac=None, frac_range=[101, 110])])
     m.assert_diff_safe([dict(base, frac=None, frac_range=[1, 130])])
+
+
+# --- named / rolled-up-only split -----------------------------------------------------
+def _rep(N):
+    return {"state": "reported", "count": N, "display": str(N)}
+
+
+S1 = [{"band": "≤20", "codes": 1}]
+
+
+def test_split_withholds_small_totals():
+    # total 22 = 21 + 1 and 38 = 19 + 19: any published form would reveal or box a part
+    for nn, nr in [(21, 1), (19, 19)]:
+        s = m.split_parts(_rep(nn + nr), n_total=nn + nr, n_named=nn,
+                          named_bands=[{"band": "≤20", "codes": 2}], rolled_bands=S1)
+        assert s["status"] == "withheld"
+        assert s["named"]["count"] is None and s["rolled"]["display"] == "—"
+
+
+def test_split_hypothesis_consistent_leak_is_withheld():
+    # 105 = 100 named + 5 rolled; named caps at 100, so publishing "rolled ≤20" forces it >= 5
+    s = m.split_parts(_rep(105), n_total=105, n_named=100,
+                      named_bands=[{"band": "21–100", "codes": 1}], rolled_bands=S1)
+    assert s["status"] == "withheld"
+
+
+def test_split_hypothesis_impossible_does_not_overwithhold():
+    # rolled has a single ≤20 code, so it can never be the large part; only the possible
+    # hypothesis (rolled small) is checked, and it is safe.
+    s = m.split_parts(_rep(5000), n_total=5000, n_named=4990,
+                      named_bands=[{"band": "1k–10k", "codes": 1}, {"band": "≤20", "codes": 1}],
+                      rolled_bands=S1)
+    assert s["status"] == "ranged"
+    assert s["rolled"]["display"] == "≤20" and s["rolled"]["range"] == [1, 20]
+    assert s["named"]["range"] == [4980, 4999] and s["named"]["count"] is None
+
+
+def test_split_exact_and_mirror():
+    s = m.split_parts(_rep(5000), n_total=5000, n_named=4000,
+                      named_bands=[{"band": "1k–10k", "codes": 1}],
+                      rolled_bands=[{"band": "101–1k", "codes": 1}])
+    assert s["status"] == "exact" and s["named"]["count"] == 4000 and s["rolled"]["count"] == 1000
+    banded = {"state": "reported", "count": None, "display": "21–100",
+              "count_range": [21, 100], "total_banded": True}
+    s = m.split_parts(banded, n_total=60, n_named=60,
+                      named_bands=[{"band": "≤20", "codes": 4}], rolled_bands=[])
+    assert s["status"] == "mirror" and s["named"]["display"] == "21–100"
+    assert s["named"]["range"] == [21, 100] and s["rolled"]["count"] == 0
+    small = {"state": "used_small", "count": None, "display": "≤20"}
+    assert m.split_parts(small, n_total=9, n_named=4, named_bands=S1,
+                         rolled_bands=S1)["status"] == "withheld"
+    s = m.split_parts(small, n_total=9, n_named=9, named_bands=S1, rolled_bands=[])
+    assert s["status"] == "mirror" and s["named"]["range"] == [1, 20]
+    unused = {"state": "unused", "count": 0, "display": "0"}
+    assert m.split_parts(unused, n_total=0, n_named=0, named_bands=[],
+                         rolled_bands=[])["status"] == "exact"
+
+
+def test_assemble_payload_emits_split_and_tripwire_passes():
+    rows = [{"mondo_id": "MONDO:T", "label": "t", "is_internal": False, "parents": [],
+             "std_concepts": [1], "n_persons": 5000, "collision_siblings": [],
+             "source_bands": [{"band": "1k–10k", "codes": 1}, {"band": "101–1k", "codes": 1}],
+             "n_named": 4000, "named_bands": [{"band": "1k–10k", "codes": 1}],
+             "rolled_bands": [{"band": "101–1k", "codes": 1}]},
+            {"mondo_id": "MONDO:U", "label": "u", "is_internal": False, "parents": [],
+             "std_concepts": [2], "n_persons": 0, "collision_siblings": []}]
+    by = {n["id"]: n for n in m.assemble_payload(meta={}, term_rows=rows)["nodes"]}
+    assert by["MONDO:T"]["split"]["status"] == "exact"
+    assert by["MONDO:T"]["split"]["rolled_bands"] == [{"band": "101–1k", "codes": 1}]
+    assert "split" not in by["MONDO:U"]                 # no n_named supplied -> no split
+
+
+def test_assert_diff_safe_rejects_unsafe_splits():
+    import pytest
+    nb = [{"band": "21–100", "codes": 1}]
+    def node(split, count=105):
+        return {"id": "X", "state": "reported", "count": count,
+                "source_bands": nb + S1, "split": split}
+    part = lambda c, d, r: {"count": c, "display": d, "range": r}
+    exact_small = {"status": "exact", "named": part(100, "100", [100, 100]),
+                   "rolled": part(5, "5", [5, 5]), "named_bands": nb, "rolled_bands": S1}
+    with pytest.raises(AssertionError):
+        m.assert_diff_safe([node(exact_small)])
+    boxed = {"status": "ranged", "named": part(None, "85–104", [85, 104]),
+             "rolled": part(None, "≤20", [1, 20]), "named_bands": nb, "rolled_bands": S1}
+    with pytest.raises(AssertionError):
+        m.assert_diff_safe([node(boxed)])
+    bad_sum = {"status": "exact", "named": part(4000, "4000", [4000, 4000]),
+               "rolled": part(900, "900", [900, 900]),
+               "named_bands": [{"band": "1k–10k", "codes": 1}],
+               "rolled_bands": [{"band": "101–1k", "codes": 1}]}
+    with pytest.raises(AssertionError):
+        m.assert_diff_safe([{"id": "Y", "state": "reported", "count": 5000,
+                             "source_bands": [{"band": "1k–10k", "codes": 1},
+                                              {"band": "101–1k", "codes": 1}],
+                             "split": bad_sum}])
+
+
+def test_split_outcomes_never_narrow_a_small_part_bruteforce():
+    """Selection-freeness, by enumeration: for each public setup (N, bands), group every
+    hidden split consistent with the bands by its published outcome. Within one outcome,
+    the values a part can take inside 1..20 must be ALL the publicly-feasible ones (or
+    none) — an outcome that singles out a strict subset would be a leak."""
+    setups = [
+        (105, [{"band": "21–100", "codes": 1}], S1),
+        (105, [{"band": "21–100", "codes": 1}, {"band": "≤20", "codes": 1}], S1),
+        (60, [{"band": "≤20", "codes": 3}], [{"band": "≤20", "codes": 2}]),
+        (5000, [{"band": "1k–10k", "codes": 1}, {"band": "≤20", "codes": 1}], S1),
+        (300, [{"band": "101–1k", "codes": 1}, {"band": "≤20", "codes": 2}],
+         [{"band": "21–100", "codes": 1}, {"band": "≤20", "codes": 2}]),
+    ]
+    for N, nb, rb in setups:
+        lo_n = max(m._max_lo(nb), 1); hi_n = min(m._caps(nb, N), N - 1)
+        feas = [a for a in range(lo_n, hi_n + 1)
+                if m._max_lo(rb) <= N - a <= m._caps(rb, N)]
+        groups = {}
+        for a in feas:
+            s = m.split_parts(_rep(N), n_total=N, n_named=a, named_bands=nb, rolled_bands=rb)
+            key = (s["status"], s["named"]["display"], s["rolled"]["display"])
+            groups.setdefault(key, []).append(a)
+        small_named = {a for a in feas if a <= 20}
+        small_rolled = {N - a for a in feas if N - a <= 20}
+        for key, avals in groups.items():
+            if key[0] == "exact":
+                continue                                  # exact parts are > 20 by construction
+            sn = {a for a in avals if a <= 20}
+            sr = {N - a for a in avals if N - a <= 20}
+            assert sn in (set(), small_named), (N, key, sorted(sn))
+            assert sr in (set(), small_rolled), (N, key, sorted(sr))

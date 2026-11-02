@@ -629,6 +629,139 @@ def safe_frac(frac, source_bands, min_cell: int = _MIN_CELL, grid: int = 10):
     return None, f"{blo}–{bhi}", [blo, bhi]
 
 
+# --- named / rolled-up-only split of a term's count ------------------------------------
+# A term's patients partition into NAMED (>= 1 attribution through a code whose step for
+# this term is 1-3: same-as, via SNOMED, or HPO) and ROLLED-UP ONLY (every attribution is
+# through codes that only CLIMBED to it, step 4). Two parts that sum to a published total
+# leave one differencing channel (part = total - other) plus the per-code bands of each
+# part, and every publish/withhold choice must itself be decided from public information
+# or the choice leaks. So eligibility is checked over EVERY hypothesis about the hidden
+# parts that is consistent with the public bands, and the term is withheld unless all of
+# them would publish safely. Spec: docs/superpowers/specs/2026-11-02-mondo-usage-mapping-
+# provenance-design.md (D3/D4), plan Task A3 (normative).
+def _caps(bands, N, min_cell: int = _MIN_CELL) -> int:
+    """Largest a part can be given its codes' bands (a union is <= the sum of its parts)."""
+    tot = 0
+    for b in bands:
+        _, hi = _band_bounds(b["band"], min_cell)
+        tot += int(min(hi, N)) * int(b["codes"])
+    return tot
+
+
+def _max_lo(bands, min_cell: int = _MIN_CELL) -> int:
+    """Smallest a part can be: at least its largest code's band floor (union >= max)."""
+    return max((int(_band_bounds(b["band"], min_cell)[0]) for b in bands), default=0)
+
+
+def _hyp_large_safe(N, large_bands, small_bands, min_cell: int = _MIN_CELL):
+    """(consistent, safe) for 'the other part is ≤floor, this part is large'.
+    Publishing it shows small = '≤floor' and large in [N-floor, N-1]."""
+    caps_l = _caps(large_bands, N, min_cell)
+    consistent = caps_l >= N - min_cell and _max_lo(small_bands, min_cell) <= min_cell
+    if not consistent:
+        return False, True
+    if N - caps_l > 1:                              # would force the small part >= 2
+        return True, False
+    lo = max(N - min_cell, _max_lo(large_bands, min_cell))
+    hi = min(N - 1, caps_l)
+    return True, _forced_lower(lo, hi, large_bands, min_cell) < 2
+
+
+def split_parts(node, *, n_total, n_named, named_bands, rolled_bands,
+                min_cell: int = _MIN_CELL) -> dict:
+    """Publishable form of a term's named / rolled-up-only split. ``node`` is the
+    already-suppressed term node (its displayed total); ``n_total`` the true total.
+
+    Returns ``{"status", "named", "rolled", "named_bands", "rolled_bands"}`` with each
+    part ``{"count", "display", "range"}``. Status:
+      * ``exact``    — both parts exact (both 0 or > floor, all consistent hypotheses safe)
+      * ``ranged``   — one part ``≤floor`` ([1, floor]), the other [N-floor, N-1]
+      * ``mirror``   — one part is 0, so the other IS the total: copy its display
+      * ``withheld`` — total not exact, total <= 2·floor, or some consistent hypothesis
+                       would narrow a ≤floor cell. Revealing 'withheld' leaks nothing,
+                       because the condition depends only on public information.
+    Pure."""
+    N, a = int(n_total), int(n_named)
+    b = N - a
+    P = lambda c, d, r: {"count": c, "display": d, "range": r}
+    out = lambda st, nm, rl: {"status": st, "named": nm, "rolled": rl,
+                              "named_bands": list(named_bands),
+                              "rolled_bands": list(rolled_bands)}
+    zero, hidden = P(0, "0", [0, 0]), P(None, "—", None)
+    if N == 0:
+        return out("exact", zero, zero)
+    if a == 0 or b == 0:                            # the non-zero part IS the total
+        cnt = node.get("count")
+        rng = node.get("count_range")
+        if rng is None:
+            rng = [cnt, cnt] if cnt is not None else [1, min_cell]
+        full = P(cnt, node.get("display"), list(rng))
+        return out("mirror", zero if a == 0 else full, full if a == 0 else zero)
+    if node.get("count") is None or node.get("state") != "reported" or N <= 2 * min_cell:
+        return out("withheld", hidden, hidden)
+    # every hypothesis consistent with the public bands must publish safely
+    caps_n, caps_r = _caps(named_bands, N, min_cell), _caps(rolled_bands, N, min_cell)
+    ok = True
+    if caps_n > min_cell and caps_r > min_cell:     # (i) both parts > floor
+        for bands, caps in ((named_bands, caps_n), (rolled_bands, caps_r)):
+            hi = min(N - min_cell - 1, caps)
+            if hi >= min_cell + 1 and _max_forced_exact(min_cell + 1, hi, bands, min_cell) >= 2:
+                ok = False
+    for large, small in ((rolled_bands, named_bands), (named_bands, rolled_bands)):
+        _cons, safe = _hyp_large_safe(N, large, small, min_cell)   # (ii) / (iii)
+        ok = ok and safe
+    if not ok:
+        return out("withheld", hidden, hidden)
+    if a > min_cell and b > min_cell:
+        return out("exact", P(a, str(a), [a, a]), P(b, str(b), [b, b]))
+    small, big = P(None, f"≤{min_cell}", [1, min_cell]), \
+        P(None, f"{N - min_cell}–{N - 1}", [N - min_cell, N - 1])
+    return out("ranged", small if a <= min_cell else big, big if a <= min_cell else small)
+
+
+def _check_split(nd, min_cell: int = _MIN_CELL) -> None:
+    """Tripwire for one node's split, written independently of `split_parts`."""
+    sp = nd.get("split")
+    if not sp:
+        return
+    st, nm, rl = sp["status"], sp["named"], sp["rolled"]
+    nb, rb = sp.get("named_bands") or [], sp.get("rolled_bands") or []
+    fail = lambda why: (_ for _ in ()).throw(
+        AssertionError(f"diff-unsafe split on {nd.get('id')}: {why}"))
+    if st == "withheld":
+        if nm["count"] is not None or rl["count"] is not None or nm["range"] or rl["range"]:
+            fail("withheld split carries values")
+    elif st == "mirror":
+        if 0 not in (nm["count"], rl["count"]):
+            fail("mirror split without a zero part")
+    elif st == "exact":
+        N = nd.get("count")
+        if nm["count"] is None or rl["count"] is None:
+            fail("exact split with a missing part")
+        if N is not None and nm["count"] + rl["count"] != N:
+            fail("exact parts do not sum to the total")
+        for c, bands in ((nm["count"], nb), (rl["count"], rb)):
+            if 0 < c <= min_cell:
+                fail(f"exact part {c} inside 1..{min_cell}")
+            if c and _forced_lower(c, c, bands, min_cell) >= 2:
+                fail("exact part boxes a ≤floor code")
+    elif st == "ranged":
+        N = nd.get("count")
+        if N is None:
+            fail("ranged split beside a non-exact total")
+        small, big, big_bands = ((nm, rl, rb) if nm["range"] == [1, min_cell] else (rl, nm, nb))
+        if small["range"] != [1, min_cell] or big["range"] != [N - min_cell, N - 1]:
+            fail("ranged parts not in canonical [1,floor] / [N-floor, N-1] form")
+        caps = _caps(big_bands, N, min_cell)
+        if N - caps > 1:
+            fail(f"large part caps at {caps}, forcing the ≤floor part >= {N - caps}")
+        lo = max(N - min_cell, _max_lo(big_bands, min_cell))
+        if _forced_lower(lo, min(N - 1, caps), big_bands, min_cell) >= 2:
+            fail("large part's range boxes a ≤floor code")
+    else:
+        fail(f"unknown status {st!r}")
+
+
 def complementary_suppress(nodes, min_cell: int = _MIN_CELL) -> int:
     """Band the total of any reported node whose exact total + per-code bands would
     box a ≤floor code into the suppressed interior. Mutates nodes in place (count ->
@@ -677,6 +810,8 @@ def assert_diff_safe(nodes, min_cell: int = _MIN_CELL) -> None:
             raise AssertionError(
                 f"diff-unsafe term {nd.get('id')}: a ≤{min_cell} source code is boxed "
                 f"to >= {f} (within-term roll-up narrowing not suppressed)")
+    for nd in nodes:                                 # named / rolled-up-only split
+        _check_split(nd, min_cell)
     for nd in nodes:                                 # frac: the UPPER-bound channel
         if nd.get("kind") == "root" or "frac_range" not in nd:
             continue
@@ -1014,6 +1149,15 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
     # by `complementary_suppress`); category/state/stats are unaffected (banded terms are
     # still reported & used — only their exact number becomes a standard band).
     n_total_banded = complementary_suppress(nodes, min_cell)
+
+    # named / rolled-up-only split, decided against the SUPPRESSED total (what is public).
+    for r, nd in zip(term_rows, nodes):
+        if r.get("n_named") is None:
+            continue
+        nd["split"] = split_parts(
+            nd, n_total=int(r["n_persons"]), n_named=int(r["n_named"]),
+            named_bands=r.get("named_bands") or [], rolled_bands=r.get("rolled_bands") or [],
+            min_cell=min_cell)
 
     n_terms = len(term_rows)
     n_used = counts["used_small"] + counts["reported"]
