@@ -1,7 +1,7 @@
 # The DAG-gated estimators take a DAG and labelled documents; the rest is internal
 
 **Date:** 2026-10-30
-**Status:** draft; maintainer decisions of 2026-10-30 recorded below (open: Mondo pruning)
+**Status:** accepted 2026-11-02 (decisions below); plan: docs/superpowers/plans/2026-11-02-dag-gated-user-api-plan.md
 **Touches:** `spark_vi.mllib.topic.dag_gated_lda`, `spark_vi.mllib.readout` (DagHeads),
 `charmpheno.omop` assembler (bundle columns), `charmpheno.mondo.native_dag` (pruning),
 the fit and readout drivers.
@@ -50,13 +50,29 @@ allowed. Empty or null = a background document. The estimator computes the gate 
 it (the frontier reduction is internal; `allowed_set(frontier)` equals
 `allowed_set(labels)` because an ancestor's closure is inside its descendant's).
 
-**R3. Pruning is a fit-time step** (like `StringIndexer` learning its vocabulary):
-`minDocsPerNode` (default 0 = keep every node). A node attested, in its closure, by
-fewer training documents than that is dropped; the kept DAG is the transitive
-reduction of the order restricted to kept nodes (`spark_vi.dag.ops.
-transitive_reduction_parents`), and a dropped node's labels land on its nearest kept
-ancestors (`nearest_kept_ancestors`). One extra pass over the labels column counts the
-support.
+**R3. The node set is learned at fit time** (like `StringIndexer` learning its
+vocabulary), from the DataFrame passed to `fit` and nothing else. In order:
+1. **Validate**: acyclic (refuse); self-loops and duplicate edges dropped; every
+   parentless node hangs from a synthetic root; a label not in the DAG is refused by
+   name (`unknownLabels="error"`, default) or dropped (`"ignore"`).
+2. **Support**: one pass; a node's support is the number of documents whose labels'
+   closure contains it.
+3. **Prune**: drop nodes with support < `minDocsPerNode` (default 1, so a node no
+   document reaches never gets a topic block).
+4. **Land labels**: a dropped node's labels move to its nearest kept ancestors
+   (`nearest_kept_ancestors`); with none, the document is background.
+5. **Reduce**: the transitive reduction over the kept nodes
+   (`transitive_reduction_parents`).
+6. **Splice chains** (to a fixpoint): remove a kept node with exactly one kept child and
+   no documents labelled at the node itself; it admits exactly its child's documents,
+   so the two blocks would be trained on identical data. (Generic, data-driven; it
+   subsumes the Mondo build's `collapse` splice.)
+The model reports `prunedNodes()` (dropped id -> landing ids) and `splicedNodes()`.
+
+**No train/test notion in the shims.** As in MLlib, `fit(df)` learns from what it is
+given and the caller splits (`randomSplit`); support is therefore counted on the
+training data by construction. The split, the test-feature strip, the incident rule and
+the per-node evaluation stay in the consuming package (`LABEL_RULES.md`).
 
 **R4. Engine ids are internal.** The fitted model holds the mapping (user id <-> engine
 id) and the kept DAG, both persisted with it.
@@ -173,9 +189,15 @@ Two levels, built in this order (maintainer, 2026-10-30):
   used: gate attestation and label-year attestation) instead of `frontier` + dense
   `label` / `labelMask`. An assembler edit: one announced cache drop. The readout
   reads the label vectors from DagHeads (R6), not from the bundle.
-- **`charmpheno.mondo.native_dag`** keeps building the Mondo DAG and the code ladder
-  (codes -> nodes); its support pruning moves into the estimator (R3), or stays as an
-  optional pre-step if the Mondo build needs it for its own reasons (open question 3).
+- **`charmpheno.mondo.native_dag`** keeps building the Mondo graph and the code ladder
+  (codes -> Mondo terms) and hands over the relevant subgraph (every coded term and its
+  ancestors, within `branch_root` when set) with labels at the most specific terms; its
+  powering (`min_positives`) and `collapse` splice move into the estimator (R3). The
+  bundle no longer depends on the threshold. The readout DAG, the framings' member
+  lists, the own codes and the sidecar mappings read the node set from the fitted
+  model. The clinical driver sets `minDocsPerNode=100` (>= the egress floor; now
+  counted on training documents only, so the node set shifts slightly from 0163's and
+  validation compares over the shared nodes).
 - **The drivers** set `labelsCol` / the DAG instead of `frontierCol` / `gateParent`, and
   read node topics from the model (R5) instead of rebuilding a `DagLayout`.
 
@@ -185,12 +207,10 @@ Two levels, built in this order (maintainer, 2026-10-30):
    configuration (`gateNBg` 200, `learningOffset` 64, `gateWarm` 2, balanced + leaf seeds).
 2. **Node ids:** mixed `str` and `int` accepted, kept as given (no normalization: `1`
    and `"1"` are different nodes); outputs use the same values.
-3. **Where Mondo pruning lives:** open; it depends on the vocabulary question (R7) and
-   the sidecars. The conversion sidecar already records first attestations at the code
-   map's own (finer) Mondo nodes and maps them to readout nodes by ancestry
-   (`prevalence_check.sidecar_nodes_to_readout`), so it can follow a model's kept DAG;
-   what has to be checked is everything else keyed on the pruned node set (the bundle
-   key, the readout DAG). Decide in the plan.
+3. **Where Mondo pruning lives:** in the estimator (option (b), 2026-11-02): R3's
+   generic validate / support / prune / land / reduce / splice. `minDocsPerNode`
+   defaults to 1; unknown labels are refused by default (`unknownLabels="ignore"` to
+   drop them). The shims carry no train/test notion.
 4. **Back-compat:** none. Old Params are removed, not aliased.
 5. **`DagLayout` / `frontier_from_coded`:** internal (not exported from `spark_vi.dag`);
    the model's R5 accessors are the public surface.
