@@ -12,7 +12,7 @@ from scipy.special import digamma
 
 from spark_vi.core import LocalRunner, VIConfig, VIModel
 from spark_vi.core.row_sparse import RowSparseStats, add_row_sparse, as_dense
-from spark_vi.dag import DagLayout
+from spark_vi.dag.layout import DagLayout
 from spark_vi.models.topic.dag_gated_lda import (DagGatedOnlineLDA,
                                                  expElogbeta_from_lambda)
 from spark_vi.models.topic.lda import (_cavi_doc_inference, _dirichlet_kl,
