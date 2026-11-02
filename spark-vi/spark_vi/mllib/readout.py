@@ -27,8 +27,11 @@ index. ``transform`` appends ``probabilityCol`` (a length N+1 vector) and, when
 are predicted as a constant and reported by ``degenerateNodes()``.
 
 Persistence (R13): ``saveDir`` / ``saveInterval`` / ``resumeFrom`` as in the topic
-shims, on any Hadoop-filesystem URI (`spark_vi.io.fs`); ``DagHeadsModel.save`` /
-``load`` keep the heads and the node set.
+shims, on any Hadoop-filesystem URI (`spark_vi.io.fs`). Both stages are MLlib
+``MLWritable`` / ``MLReadable`` (``save`` / ``write().overwrite().save`` / ``load``,
+and inside a ``Pipeline`` / ``PipelineModel``): Params metadata plus data files, the
+metadata written last. The model keeps the heads and the node set; the estimator
+keeps its Params and, when it holds one (``setTopicModel``), the topic model.
 """
 from __future__ import annotations
 
@@ -44,7 +47,8 @@ from pyspark.ml.param.shared import HasFeaturesCol, HasMaxIter
 from spark_vi.dag.nodeset import (ROOT, UNKNOWN_LABEL_POLICIES, LabelIndex, NodeSet,
                                   SupportCounts, _finish, _partition_support,
                                   count_support_spark, learn_node_set)
-from spark_vi.mllib._common import _PersistenceParams
+from spark_vi.mllib._common import (_PersistenceParams, _StagePersistence,
+                                    save_stage_in_place)
 from spark_vi.mllib.topic.dag_gated_lda import (_decode_dag, _encode_dag,
                                                 check_labels_column)
 from spark_vi.readout.heads import READOUT_GTOL, READOUT_MAX_ITER
@@ -124,7 +128,8 @@ class _DagHeadsParams(HasFeaturesCol, HasMaxIter, _PersistenceParams):
     saveDir = Param(
         Params._dummy(), "saveDir",
         "directory or Hadoop-filesystem URI the fitted model is saved to at the end "
-        "of fit (DagHeadsModel.load reads it); also where saveInterval checkpoints "
+        "of fit (DagHeadsModel.load reads it; written in place: other files there "
+        "are kept, an earlier model replaced); also where saveInterval checkpoints "
         "go. Empty (default) = nothing written.",
         typeConverter=TypeConverters.toString)
     resumeFrom = Param(
@@ -199,14 +204,23 @@ def _with_targets(dataset, labeler, labels_col, label_col, mask_col):
             .drop(tmp))
 
 
-class DagHeadsEstimator(_DagHeadsParams, Estimator):
+class DagHeadsEstimator(_DagHeadsParams, _StagePersistence, Estimator):
     """Fit the per-node heads; returns a `DagHeadsModel`.
 
     Needs ``labelsCol`` and ``featuresCol`` on the fit DataFrame, and either a DAG
     (``setDag``) or a fitted ``DagGatedLDAModel`` (``setTopicModel``), not both. In a
     ``Pipeline`` after a ``DagGatedLDAEstimator`` the stage cannot see the fitted
     topic model, so it is given the same DAG (and ``minDocsPerNode``): on the same
-    labels that learns the same node set."""
+    labels that learns the same node set.
+
+    Persistence layout (``save`` / ``load``)::
+
+        <path>/topicModel/   the held DagGatedLDAModel (its own layout), only when
+                             setTopicModel was called
+        <path>/metadata/     Params; extra field hasTopicModel; written last
+
+    The topic model is not a Param (it is a fitted stage), so it is saved beside the
+    Params rather than dropped: a loaded estimator fits exactly as the saved one."""
 
     @keyword_only
     def __init__(self, *, featuresCol="topicDistribution", labelsCol="labels",
@@ -241,6 +255,25 @@ class DagHeadsEstimator(_DagHeadsParams, Estimator):
 
     def getTopicModel(self):
         return self._topic_model
+
+    # ---- persistence (_StagePersistence hooks) ----------------------------------
+
+    def _save_data(self, path: str) -> None:
+        from spark_vi.io import fs
+        if self._topic_model is not None:
+            self._topic_model.write().save(fs.join(path, "topicModel"))
+
+    def _extra_metadata(self):
+        return {"hasTopicModel": self._topic_model is not None}
+
+    @classmethod
+    def _load_data(cls, path: str, metadata: dict) -> "DagHeadsEstimator":
+        from spark_vi.io import fs
+        from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAModel
+        est = cls()
+        if metadata.get("hasTopicModel"):
+            est._topic_model = DagGatedLDAModel.load(fs.join(path, "topicModel"))
+        return est
 
     def _node_set(self, dataset, labels_col, policy):
         """`(NodeSet, n_docs, source line)` from the topic model or the DAG."""
@@ -296,7 +329,7 @@ class DagHeadsEstimator(_DagHeadsParams, Estimator):
         rc = fs.join(resume_from, _CKPT_NAME)
         if fs.exists(rc):
             return ckpt, every, rc, None
-        if fs.exists(fs.join(resume_from, "params.json")):
+        if fs.exists(fs.join(resume_from, "metadata")):
             prev = DagHeadsModel.load(resume_from)
             if prev.nodes() != list(ns.nodes):
                 raise ValueError(f"resumeFrom={resume_from!r} holds heads for other "
@@ -357,14 +390,26 @@ class DagHeadsEstimator(_DagHeadsParams, Estimator):
         print(f"{_LOG} {len(deg)} degenerate node(s) predicted as a constant "
               f"(observed training rows empty or single-class)", flush=True)
         if g("saveDir"):
-            model.save(str(g("saveDir")))
+            # Into saveDir in place: it may be a run directory holding other files,
+            # and an earlier model there is replaced, nothing else.
+            save_stage_in_place(model, str(g("saveDir")))
         return model
 
 
-class DagHeadsModel(_DagHeadsParams, Model):
+class DagHeadsModel(_DagHeadsParams, _StagePersistence, Model):
     """The fitted heads: raw-feature coefficients `V (C, K)`, `b_raw (C,)`, the
     constant fallback of nodes whose observed training rows were single-class, and
-    the node set they are indexed by (index 0 the root, 1..N `nodes()`)."""
+    the node set they are indexed by (index 0 the root, 1..N `nodes()`).
+
+    Persistence layout (``save`` / ``load``)::
+
+        <path>/readout_heads_model.npz   V, b_raw, const, degenerate, theta_topm
+                                         (+ W_std): `readout.heads.write_heads`, the
+                                         file the drivers' scoring passes read
+        <path>/node_set.json             the node set (NodeSet.to_dict; user ids
+                                         with their str / int types)
+        <path>/metadata/                 Params, written last
+    """
 
     def __init__(self, node_set, V, b_raw, const, degenerate, *, theta_topm=0,
                  info=None):
@@ -482,14 +527,12 @@ class DagHeadsModel(_DagHeadsParams, Model):
                 F.col(g("probabilityCol"))))
         return out
 
-    def save(self, path):
-        """Write the heads (`readout.heads.write_heads`), the node set and the
-        Params under `path` (a local path or any Hadoop-filesystem URI). The Params
-        file is written last: it is what `load` and `resumeFrom` look for."""
+    # ---- persistence (_StagePersistence hooks) ----------------------------------
+
+    def _save_data(self, path: str) -> None:
         from spark_vi.io import fs
         from spark_vi.readout.heads import write_heads
 
-        path = str(path)
         C, K = self.V.shape
         if not write_heads(path, _HEADS_LABEL, self.V, self.b_raw, self.const,
                            self.degenerate, C, K, self.theta_topm,
@@ -497,26 +540,15 @@ class DagHeadsModel(_DagHeadsParams, Model):
             raise OSError(f"could not write the heads to {path}")
         fs.write_text(fs.join(path, "node_set.json"),
                       json.dumps(self._node_set.to_dict(), sort_keys=True))
-        params = {p.name: self.getOrDefault(p) for p in self.params
-                  if self.hasDefault(p) or self.isSet(p)}
-        fs.write_text(fs.join(path, "params.json"), json.dumps(
-            {"model_class": "DagHeadsModel", "params": params}, sort_keys=True))
 
     @classmethod
-    def load(cls, path):
+    def _load_data(cls, path: str, metadata: dict) -> "DagHeadsModel":
         from spark_vi.io import fs
         from spark_vi.readout.heads import read_heads
 
-        path = str(path)
-        meta = json.loads(fs.read_text(fs.join(path, "params.json")))
-        if meta.get("model_class") != "DagHeadsModel":
-            raise ValueError(f"{path} holds a {meta.get('model_class')!r}, not a "
-                             "DagHeadsModel")
         got = read_heads(path, _HEADS_LABEL)
         if got is None:
             raise ValueError(f"no readable heads in {path}")
         V, b_raw, const, degenerate, _C, _K, topm = got
         ns = NodeSet.from_dict(json.loads(fs.read_text(fs.join(path, "node_set.json"))))
-        model = cls(ns, V, b_raw, const, degenerate, theta_topm=topm)
-        model._set(**meta["params"])
-        return model
+        return cls(ns, V, b_raw, const, degenerate, theta_topm=topm)

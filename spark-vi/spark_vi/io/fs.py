@@ -30,8 +30,9 @@ import io
 import os
 from urllib.parse import urlparse
 
-__all__ = ["is_local", "local_path", "join", "exists", "makedirs", "write_bytes",
-           "read_bytes", "write_text", "read_text", "remove", "listdir"]
+__all__ = ["is_local", "local_path", "qualify", "join", "exists", "makedirs",
+           "write_bytes", "read_bytes", "write_text", "read_text", "remove",
+           "remove_tree", "listdir"]
 
 _CHUNK = 16 * 1024 * 1024
 
@@ -39,7 +40,8 @@ _CHUNK = 16 * 1024 * 1024
 def _scheme(uri) -> str:
     s = str(uri)
     if "://" not in s:
-        return ""
+        # Hadoop's qualified local form is `file:/x` (one slash; see `qualify`).
+        return "file" if s.startswith("file:/") else ""
     return urlparse(s).scheme.lower()
 
 
@@ -49,9 +51,31 @@ def is_local(uri) -> bool:
 
 
 def local_path(uri) -> str:
-    """The filesystem path of a local URI (`file:///x` -> `/x`)."""
+    """The filesystem path of a local URI (`file:///x` and `file:/x` -> `/x`)."""
     s = str(uri)
     return urlparse(s).path if _scheme(s) == "file" else s
+
+
+def qualify(uri) -> str:
+    """`uri` as Hadoop resolves it, for writers that mix Spark / Hadoop I/O with ours.
+
+    A path with no scheme means different things to the two: to the functions here
+    it is local, to Spark (``saveAsTextFile``, ``DataFrameWriter``, MLlib's
+    ``DefaultParamsWriter``) it resolves against ``fs.defaultFS``, which is HDFS on a
+    cluster. A writer that does both (MLlib persistence: Params metadata through
+    Spark, data files through here) qualifies the path once with this, MLlib's rule,
+    and hands the result to both: ``/x`` -> ``file:/x`` locally, ``hdfs://nn/x`` on
+    a cluster. A URI with a scheme, or no active SparkContext, comes back as is."""
+    s = str(uri)
+    if _scheme(s):
+        return s
+    from pyspark import SparkContext
+    sc = SparkContext._active_spark_context
+    if sc is None:
+        return s
+    path = sc._jvm.org.apache.hadoop.fs.Path(s)
+    fsys = path.getFileSystem(sc._jsc.hadoopConfiguration())
+    return str(fsys.makeQualified(path).toString())
 
 
 def join(base, *parts) -> str:
@@ -163,6 +187,17 @@ def remove(uri) -> None:
     fs, path = _hadoop(uri)
     if fs.exists(path):
         fs.delete(path, False)
+
+
+def remove_tree(uri) -> None:
+    """Delete a directory and everything under it, if present (no-op when absent)."""
+    if is_local(uri):
+        import shutil
+        shutil.rmtree(local_path(uri), ignore_errors=True)
+        return
+    fs, path = _hadoop(uri)
+    if fs.exists(path):
+        fs.delete(path, True)
 
 
 def listdir(uri) -> list:

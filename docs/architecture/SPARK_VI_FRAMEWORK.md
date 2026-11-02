@@ -536,6 +536,29 @@ Loaded `VIResult`s can be passed straight to `VIRunner.fit(rdd, resume_from=path
 to continue training, or consumed downstream by analysis code that operates on
 NumPy arrays directly without Spark.
 
+**MLlib persistence of the stages (spec 2026-10-30 R13 Level 2).** The DAG-gated
+stages (`DagGatedFeaturizer[Model]`, `DagGatedLDAEstimator` / `DagGatedLDAModel`,
+`DagHeadsEstimator` / `DagHeadsModel`) are `MLWritable` / `MLReadable`, so
+`Pipeline([...]).fit(df).save(uri)` and `PipelineModel.load(uri)` work as for a built-in
+stage, on any Hadoop-filesystem URI. Each stage's directory holds MLlib's standard Params
+metadata (`metadata/`, `DefaultParamsWriter`, written LAST so an object-store reader
+never finds it before the data it names) plus the stage's own data files, written through
+`spark_vi.io.fs` (the shared writer is `spark_vi.mllib._common._StagePersistence`; the
+path is qualified once, MLlib's rule, so a bare path lands on `fs.defaultFS` for both):
+
+| stage | data files beside `metadata/` |
+|---|---|
+| `DagGatedLDAEstimator`, `DagGatedFeaturizer` | none (Params only; the DAG and the other structured Params are JSON strings, so str / int ids survive) |
+| `DagGatedLDAModel` | `result/`: the VIResult in the format above (the fit checkpoints' format; the node set rides its metadata) |
+| `DagHeadsModel` | `readout_heads_model.npz` (the heads), `node_set.json` |
+| `DagHeadsEstimator` | `topicModel/` (a `DagGatedLDAModel` directory) when one is held via `setTopicModel` |
+| `DagGatedFeaturizerModel` | `data/`: the vocabularies (parquet) |
+
+`save` refuses an existing path; `write().overwrite().save` replaces it. A fit checkpoint
+(`saveDir`) is a bare VIResult: `DagGatedLDAModel(load_result(dir))` wraps it.
+`OnlineLDAModel` / `OnlineHDPModel` (`_PersistableModel`: `save` / `load` are the bare
+VIResult, so a `saveDir` loads as a model) and `STMModel` keep their own formats.
+
 ---
 
 ## Notebook Diagnostics and Output

@@ -6,7 +6,8 @@ land, reduce, splice) is learned at fit and the model answers in user ids. Also:
 fit/transform, a content-seeded (so deterministic) transform, mini-batch SVI, the
 per-iteration callback, the empirical-Bayes alpha, the leaves-first schedule and the
 seed extras in user / term ids, multi-domain features with vocabularies, and
-persistence (save/load keeps the node set, class-tag rejection, resume).
+persistence (save/load keeps the node set, resume; MLlib persistence in
+test_mllib_dag_persistence.py).
 """
 from __future__ import annotations
 
@@ -497,7 +498,8 @@ def test_transform_matches_the_engine_cavi(spark):
 
 
 # --------------------------------------------------------------------------- #
-# Persistence: save/load keeps the node set, class-tag rejection, resume.      #
+# Persistence: save/load keeps the node set, resume (MLlib persistence: the   #
+# persistence suite test_mllib_dag_persistence.py).                          #
 # --------------------------------------------------------------------------- #
 
 def test_model_save_load_round_trip_keeps_the_node_set(tmp_path, spark):
@@ -524,19 +526,6 @@ def test_model_save_load_int_ids_and_transform(tmp_path, spark):
     loaded = DagGatedLDAModel.load(str(tmp_path / "m"))
     assert loaded.dag() == model.dag() and 3 in loaded.dag()
     assert "topicDistribution" in loaded.transform(df).columns
-
-
-def test_model_load_rejects_another_model_class(tmp_path):
-    from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAModel
-    d = tmp_path / "lda"
-    (d / "params").mkdir(parents=True)
-    np.save(d / "params" / "lambda.npy", np.zeros((2, 3)))
-    (d / "manifest.json").write_text(json.dumps({
-        "format_version": 1, "elbo_trace": [], "n_iterations": 0,
-        "converged": False, "metadata": {"model_class": "OnlineLDA", "K": 2, "V": 3},
-        "param_names": ["lambda"], "diagnostic_traces": {}}))
-    with pytest.raises(ValueError, match="DagGatedOnlineLDA"):
-        DagGatedLDAModel.load(str(d))
 
 
 def test_resume_continues_the_iteration_counter(tmp_path, spark):

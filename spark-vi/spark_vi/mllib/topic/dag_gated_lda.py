@@ -34,7 +34,8 @@ all K topics (labels are unknown at scoring time) and appends
 The fitted model answers in user ids (R5): ``dag()``, ``prunedNodes()``,
 ``splicedNodes()``, ``nodeSupport()``, ``nodeTopics(node)``, ``backgroundTopics()``,
 ``describeNodes()`` (with the term ids when ``vocabularies`` are set). The node set
-rides the VIResult's metadata (``dag_node_set``), so ``save`` / ``load`` keep it, and
+rides the VIResult's metadata (``dag_node_set``), so ``save`` / ``load`` (MLlib
+persistence: Params metadata + the VIResult, any Hadoop URI, ``Pipeline`` too) keep it, and
 ``resumeFrom`` refuses a checkpoint whose node set differs from the one learned from
 the data it is given.
 
@@ -65,9 +66,11 @@ from spark_vi.dag.nodeset import (
     node_sort_key,
     parse_dag,
 )
+from pyspark.ml.util import DefaultParamsReadable, DefaultParamsWritable
+
 from spark_vi.mllib._common import (
-    _PersistableModel,
     _PersistenceParams,
+    _StagePersistence,
     apply_persistence_params,
 )
 from spark_vi.mllib.topic._common import _concat_domain_features, _vector_to_bow_document
@@ -656,7 +659,8 @@ class _TermIndex:
         return self.by_col[cols[0]][ref]
 
 
-class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator):
+class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator, DefaultParamsReadable,
+                           DefaultParamsWritable):
     """MLlib-shaped Estimator wrapping ``DagGatedOnlineLDA``.
 
     Required: a DAG (``setDag``) and, on the fit DataFrame, ``labelsCol`` plus the
@@ -688,7 +692,12 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator):
 
     ``resumeFrom`` continues a checkpoint only when the node set learned from the
     given DataFrame is the checkpoint's (same kept nodes, kept DAG and layout);
-    otherwise ``fit`` refuses before training, naming the difference."""
+    otherwise ``fit`` refuses before training, naming the difference.
+
+    Persistence: ``save`` / ``load`` (MLlib's ``DefaultParamsWritable`` /
+    ``DefaultParamsReadable``) keep every Param, the structured ones (the DAG,
+    vocabularies, nodeTerms, gateSeedProfile) as the JSON they are stored as, so
+    str / int ids survive; the ``setOnIteration`` callback is not persisted."""
 
     @classmethod
     def recommended(cls, **overrides) -> "DagGatedLDAEstimator":
@@ -1073,16 +1082,27 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator):
         return out_model
 
 
-class DagGatedLDAModel(_DagGatedLDAParams, _PersistableModel, Model):
+class DagGatedLDAModel(_DagGatedLDAParams, _StagePersistence, Model):
     """MLlib-shaped Model wrapping a trained DagGatedOnlineLDA VIResult.
 
     ``transform`` appends ``topicDistributionCol`` (theta) by folding each
     document in UNGATED over all K topics with the same CAVI the engine uses at
     train time. The node-keyed accessors (``dag``, ``prunedNodes``, ``splicedNodes``,
     ``nodeSupport``, ``nodeTopics``, ``backgroundTopics``, ``describeNodes``) answer
-    in the user's node ids; engine ids stay internal. Persistable via
-    ``_PersistableModel`` (the node set rides the VIResult metadata); ``load``
-    rejects a checkpoint stamped with any other model class."""
+    in the user's node ids; engine ids stay internal.
+
+    Persistence (MLlib's, spec R13): ``save`` / ``write().overwrite().save`` /
+    ``load`` and inside a ``PipelineModel``, on any Hadoop-filesystem URI. Layout::
+
+        <path>/metadata/   Params (DefaultParamsWriter), written last
+        <path>/result/     the VIResult, in the fit checkpoints' format
+                           (spark_vi.io.export.save_result: manifest.json,
+                           params/*.npy, traces/*.npy); the node set rides its
+                           metadata (dag_node_set)
+
+    ``load`` refuses a result stamped with another model class. A fit checkpoint
+    (``saveDir``) holds only the VIResult: ``DagGatedLDAModel(load_result(saveDir))``
+    wraps it (Params at their defaults)."""
 
     _expected_model_class = "DagGatedOnlineLDA"
 
@@ -1100,6 +1120,24 @@ class DagGatedLDAModel(_DagGatedLDAParams, _PersistableModel, Model):
     def result(self):
         """The trained VIResult (global_params, elbo_trace, n_iterations, ...)."""
         return self._result
+
+    # ---- persistence (_StagePersistence hooks) ----------------------------------
+
+    def _save_data(self, path: str) -> None:
+        from spark_vi.io import fs
+        from spark_vi.io.export import save_result
+        save_result(self._result, fs.join(path, "result"))
+
+    @classmethod
+    def _load_data(cls, path: str, metadata: dict) -> "DagGatedLDAModel":
+        from spark_vi.io import fs
+        from spark_vi.io.export import load_result
+        result = load_result(fs.join(path, "result"))
+        saved = (result.metadata or {}).get("model_class")
+        if saved != cls._expected_model_class:
+            raise ValueError(f"{path}: the saved result is a {saved!r}, not a "
+                             f"{cls._expected_model_class!r}")
+        return cls(result)
 
     # ---- node-keyed outputs (R5), user ids throughout ---------------------------
 

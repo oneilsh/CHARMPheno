@@ -1,8 +1,9 @@
 """Shared generic helpers for the MLlib shims.
 
-Persistence Params, the apply_persistence_params splice, and the
-_PersistableModel mixin live here because they apply to any shim
-(topic-model or otherwise). Topic-specific helpers like the
+Persistence Params, the apply_persistence_params splice, the
+_PersistableModel mixin (the custom VIResult save/load OnlineLDA / OnlineHDP still
+use) and _StagePersistence (MLlib persistence: Params metadata + our data files, spec
+R13 Level 2) live here because they apply to any shim (topic-model or otherwise). Topic-specific helpers like the
 SparseVector → BOWDocument converter live under
 spark_vi.mllib.topic._common so this module stays free of topic content.
 """
@@ -11,6 +12,8 @@ from __future__ import annotations
 import dataclasses
 
 from pyspark.ml.param import Param, Params, TypeConverters
+from pyspark.ml.util import (DefaultParamsReader, DefaultParamsWriter, MLReadable,
+                             MLReader, MLWritable, MLWriter)
 
 
 class _PersistenceParams(Params):
@@ -196,3 +199,113 @@ class _PersistableModel:
         # (No Param round-trip — Pipeline.save persistence is deferred per
         # ADRs 0009 / 0012.)
         return cls(result)
+
+
+# --------------------------------------------------------------------------- #
+# MLlib persistence (spec R13 Level 2): Params metadata + our own data files.  #
+# --------------------------------------------------------------------------- #
+class _StagePersistence(MLWritable, MLReadable):
+    """``MLWritable`` / ``MLReadable`` for a stage whose state is Params plus data.
+
+    On-disk layout under the stage's directory (any local path or Hadoop URI):
+
+    - ``metadata/``: MLlib's standard Params metadata (``DefaultParamsWriter``: class,
+      uid, Spark version, ``paramMap``, ``defaultParamMap``, plus the stage's
+      ``_extra_metadata()``), written LAST: on an object store a reader that finds it
+      finds every data file it names already complete;
+    - the stage's own data files (``_save_data``; npy / npz / json through
+      ``spark_vi.io.fs``).
+
+    The path is qualified once (``fs.qualify``: MLlib's rule, a path with no scheme
+    resolves against ``fs.defaultFS``) and the same URI goes to Spark's metadata
+    writer and to our data writer, so the two never land on different filesystems.
+    ``save`` refuses an existing path unless ``write().overwrite()`` (MLlib's rule;
+    the overwrite itself is MLlib's ``FileSystemOverwrite``). ``load`` checks the
+    saved class name.
+
+    A subclass defines ``_save_data(path)``, ``_load_data(cls, path, metadata)``
+    (returns the instance, before its uid and Params are restored) and optionally
+    ``_extra_metadata()``. ``save(path)`` / ``load(path)`` are MLlib's
+    ``write().save`` / ``read().load``, so a ``Pipeline`` / ``PipelineModel`` holding
+    the stage saves and loads like one of built-in stages."""
+
+    def _save_data(self, path: str) -> None:
+        raise NotImplementedError
+
+    def _extra_metadata(self):
+        return None
+
+    @classmethod
+    def _load_data(cls, path: str, metadata: dict):
+        raise NotImplementedError
+
+    def write(self):
+        return _StageWriter(self)
+
+    def save(self, path: str) -> None:
+        """Save this stage to ``path`` (``write().save(path)``; refuses an existing
+        path: use ``write().overwrite().save(path)`` to replace it)."""
+        self.write().save(path)
+
+    @classmethod
+    def read(cls):
+        return _StageReader(cls)
+
+    @classmethod
+    def load(cls, path: str):
+        """Load a stage saved by ``save`` / ``write().save`` (``read().load(path)``)."""
+        return cls.read().load(path)
+
+
+def _class_name(cls) -> str:
+    return f"{cls.__module__}.{cls.__name__}"
+
+
+class _StageWriter(MLWriter):
+    def __init__(self, instance):
+        super().__init__()
+        self.instance = instance
+        self._in_place = False
+
+    def saveImpl(self, path: str) -> None:
+        from spark_vi.io import fs
+        uri = fs.qualify(path)
+        if self._in_place:
+            # Replace only this stage's files in a directory that may hold others:
+            # the old metadata goes first, so a reader never pairs it with new data.
+            fs.remove_tree(fs.join(uri, "metadata"))
+        elif fs.exists(uri):
+            raise FileExistsError(f"Path {path} already exists. To overwrite it, use "
+                                  f"write().overwrite().save(path)")
+        self.instance._save_data(uri)
+        # Metadata last: it is what a reader looks for (object-store atomicity).
+        DefaultParamsWriter.saveMetadata(self.instance, uri, self.sc,
+                                         extraMetadata=self.instance._extra_metadata())
+
+
+def save_stage_in_place(stage, path: str) -> None:
+    """Save ``stage`` (a ``_StagePersistence``) into ``path`` even when that directory
+    exists and holds other files (a fit's ``saveDir``): the stage's own files are
+    replaced, nothing else is touched (``write().overwrite()`` would delete the whole
+    directory)."""
+    writer = stage.write()
+    writer._in_place = True
+    writer.save(path)
+
+
+class _StageReader(MLReader):
+    def __init__(self, cls):
+        super().__init__()
+        self.cls = cls
+
+    def load(self, path: str):
+        from spark_vi.io import fs
+        uri = fs.qualify(path)
+        metadata = DefaultParamsReader.loadMetadata(uri, self.sc)
+        if metadata["class"] != _class_name(self.cls):
+            raise ValueError(f"{path} holds a {metadata['class']}, not a "
+                             f"{_class_name(self.cls)}")
+        instance = self.cls._load_data(uri, metadata)
+        instance._resetUid(metadata["uid"])
+        DefaultParamsReader.getAndSetParams(instance, metadata)
+        return instance

@@ -14,6 +14,33 @@ def test_scheme_dispatch_and_join():
     assert not fs.is_local("gs://b/x") and not fs.is_local("hdfs://nn/x")
     assert fs.local_path("file:///tmp/x") == "/tmp/x"
     assert fs.join("gs://b/run", "params", "a.npy") == "gs://b/run/params/a.npy"
+    # Hadoop's qualified local form (one slash) is local too
+    assert fs.is_local("file:/tmp/x") and fs.local_path("file:/tmp/x") == "/tmp/x"
+
+
+def test_qualify_without_spark_leaves_the_uri():
+    from pyspark import SparkContext
+    if SparkContext._active_spark_context is not None:
+        pytest.skip("a SparkContext is active")
+    assert fs.qualify("/tmp/x") == "/tmp/x"
+    assert fs.qualify("gs://b/x") == "gs://b/x"
+
+
+def test_qualify_resolves_against_the_default_fs(spark, tmp_path):
+    """A path with no scheme resolves as Spark resolves it (fs.defaultFS, file: on
+    local Spark), and the result is still handled by the local branch."""
+    q = fs.qualify(str(tmp_path / "a"))
+    assert q == f"file:{tmp_path}/a" and fs.is_local(q)
+    assert fs.qualify("gs://b/x") == "gs://b/x"
+    assert fs.qualify("file:///tmp/x") == "file:///tmp/x"
+
+
+def test_remove_tree(tmp_path):
+    (tmp_path / "d" / "e").mkdir(parents=True)
+    (tmp_path / "d" / "e" / "f").write_text("x")
+    fs.remove_tree("file://" + str(tmp_path / "d"))
+    assert not (tmp_path / "d").exists()
+    fs.remove_tree(str(tmp_path / "d"))          # absent: a no-op
 
 
 def test_local_roundtrip_is_atomic_and_leaves_no_tmp(tmp_path):
@@ -32,6 +59,13 @@ def test_local_roundtrip_is_atomic_and_leaves_no_tmp(tmp_path):
 def hadoop_branch(monkeypatch):
     """Route every URI through the Hadoop backend."""
     monkeypatch.setattr(fs, "is_local", lambda uri: False)
+
+
+def test_hadoop_branch_remove_tree(spark, tmp_path, hadoop_branch):
+    (tmp_path / "d" / "e").mkdir(parents=True)
+    (tmp_path / "d" / "e" / "f").write_text("x")
+    fs.remove_tree("file://" + str(tmp_path / "d"))
+    assert not (tmp_path / "d").exists()
 
 
 def test_hadoop_branch_roundtrip(spark, tmp_path, hadoop_branch):
