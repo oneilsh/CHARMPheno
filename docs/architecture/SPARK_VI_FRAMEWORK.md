@@ -749,9 +749,13 @@ spark_vi/
 │   ├── config.py           # VIConfig
 │   ├── result.py           # VIResult
 │   ├── broadcast.py        # destroy_broadcast (ADR 0047 lifecycle)
-│   └── retry.py            # retry_spark_action: idempotent actions across preemption
+│   ├── retry.py            # retry_spark_action: idempotent actions across preemption
+│   └── row_sparse.py       # RowSparseStats: touched-rows-only partition statistics
 ├── dag/                    # generic label-DAG mechanics (ADR 0051)
 │   ├── layout.py           # DagLayout (topic blocks over a DAG, the gate), frontier_from_coded
+│   │                       #   (internal: import from spark_vi.dag.layout; ADR 0052)
+│   ├── nodeset.py          # fit-time node-set learning: parse a user DAG, support, prune,
+│   │                       #   land, reduce, splice; user ids <-> engine ids (ADR 0052)
 │   └── ops.py              # closure, descendants, depth, transitive reduction, closure matrix
 ├── models/topic/           # LDA, HDP, STM, DAG-gated LDA; flat spectral init (STM);
 │                           #   gate seeds
@@ -761,6 +765,7 @@ spark_vi/
 │   ├── heads.py            # fit_heads: the backend-agnostic fit, checkpoints, heads npz
 │   ├── spark.py            # SparkReadoutData: a pass = one treeAggregate
 │   ├── local.py            # LocalReadoutData: a pass = numpy over rows held once
+│   ├── labels.py           # NodeLabeler: per-node targets / masks from user labels
 │   ├── stacked.py          # closure product over a label DAG
 │   └── evaluate.py         # the readout's metrics from score blocks (no collect)
 ├── eval/topic/             # coherence, gated NPMI (gated_npmi.py), concentration
@@ -768,10 +773,12 @@ spark_vi/
 │   ├── core.py             #   from mergeable score tallies (pure numpy)
 │   ├── spark.py, local.py  #   per-key metrics: merged in the shuffle / in memory
 │   └── report.py           #   skip rules and macros
-├── mllib/topic/            # Estimator/Model shims: LDA, HDP, STM, DagGatedLDA
+├── mllib/topic/            # Estimator/Model shims: LDA, HDP, STM, DagGatedLDA, and the
+│                           #   DagGatedFeaturizer prep stage (featurizer.py)
 ├── mllib/readout.py        # DagHeadsEstimator/Model: the per-node heads as a stage, so
 │                           #   Pipeline([DagGatedLDA, DagHeads]) is the case-finding model
 ├── inference/              # concentration (α/η) optimization
+├── io/fs.py                # any-URI file I/O (local paths plain Python, else Hadoop FS)
 ├── io/export.py            # save_result / load_result
 └── diagnostics/persist.py  # the cached-input precondition
 ```
