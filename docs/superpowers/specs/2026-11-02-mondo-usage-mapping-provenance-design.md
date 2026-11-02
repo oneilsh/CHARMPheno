@@ -139,13 +139,17 @@ For each term (Mondo axis) publish two parts that **add up to the existing total
 "Exclude climbed" shows *named*; "Climbed only" shows *rolled-up only*. A patient with both
 kinds of code counts as *named*. The user confirmed this framing.
 
-**No frac split** *(planning revision, my call)*. Working the rules through showed that any
-adaptive publish/withhold decision on a frac value leaks through the decision itself, and that
-frac parts can bound person parts from above. In the split modes the rolled-up subtree view uses
-the person-count bracket over the published parts instead. `frac` itself (All mode) follows the
-Phase 0 two-sided rule in the plan (exact only on terms with no `≤20` code; otherwise a
-10-wide bucket whose upper end is floored at the value that keeps every `≤20` code able to
-reach 20 — a threshold computed from public bands only).
+**No frac at all** *(user decision after the second review, 2026-11-02)*. Any published
+frac leaks: its upper end caps ≤20 codes, its lower end forces them up, and `frac − N`
+bounds the patients holding 2+ of a term's codes. Making it safe withheld it on almost every
+multi-code term, and the user prefers informative roll-ups anyway: the rolled-up view
+becomes the **sum of the published per-term counts** (patient-term diagnoses — a patient
+counts once per term they touch, so multi-mapping and comorbidity both count, by design),
+computed client-side with zero new disclosure; uncertainty comes only from masked/banded
+terms. To keep that informative, banded totals use a finer **1-2-5 ladder** (21–50, 51–100,
+101–200, …) under the same selection-free rule. A true distinct-patients-per-subtree count
+is a possible follow-up needing its own disclosure design (a subtree total beside exact child
+totals is a new differencing channel).
 
 **Governing rule for all disclosure decisions** *(planning revision)*: every exact / banded /
 withheld choice is a function of already-published information (bands, identities, the displayed
