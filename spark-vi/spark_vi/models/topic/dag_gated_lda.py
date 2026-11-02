@@ -136,6 +136,10 @@ class DagGatedOnlineLDA(OnlineLDA):
         self._topic_height = None
         self._open_seed = None
         self._init_seed = None
+        # Caller-owned, JSON-ready extras merged into `get_metadata` (so they ride
+        # every checkpoint and the final VIResult), e.g. the MLlib shim's learned
+        # node set. Driver-only: `__getstate__` drops them.
+        self.extra_metadata: dict = {}
 
     def set_gate_schedule(self, warm: int, open_seed: np.ndarray | None = None,
                           init_seed: np.ndarray | None = None) -> None:
@@ -316,6 +320,7 @@ class DagGatedOnlineLDA(OnlineLDA):
         state = dict(self.__dict__)
         state["_open_seed"] = None
         state["_init_seed"] = None
+        state["extra_metadata"] = {}
         return state
 
     def broadcast_params(self, global_params):
@@ -668,8 +673,10 @@ class DagGatedOnlineLDA(OnlineLDA):
         """Shape constants plus, in multi-domain mode, `domains`: the per-domain
         vocabulary widths that slice the concatenated id space, without which a
         saved multi-domain result cannot be interpreted. Plain Python types only
-        (`metadata` is written verbatim into manifest.json)."""
+        (`metadata` is written verbatim into manifest.json). `extra_metadata` (set by
+        the caller, e.g. the shim's node set) is merged in."""
         md = super().get_metadata()
         if self.domains is not None:
             md["domains"] = [int(v) for v in self.domains]
+        md.update(getattr(self, "extra_metadata", None) or {})
         return md

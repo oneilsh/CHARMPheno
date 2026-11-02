@@ -100,9 +100,10 @@ def test_pipeline_gated_lda_then_heads(spark):
         idx = sorted(rng.choice(30, size=6, replace=False).tolist())
         rows.append((Vectors.sparse(30, idx, [1.0] * len(idx)), [leaf],
                      _closure_labels(leaf), [1.0] * C))
-    df = spark.createDataFrame(rows, ["features", "frontier", "label", "labelMask"])
+    df = spark.createDataFrame(rows, ["features", "labels", "label", "labelMask"])
     lda = DagGatedLDAEstimator(gateNBg=2, gateTpn=1, maxIter=3, seed=0,
-                               subsamplingRate=1.0).setGateParent(PARENT)
+                               subsamplingRate=1.0).setDag(
+        {c: (None if p == 0 else p) for c, p in PARENT.items()})
     heads = DagHeadsEstimator(maxIter=30, stackedProbabilityCol="stacked")
     heads.setDagParent(PARENT)
     out = Pipeline(stages=[lda, heads]).fit(df).transform(df)

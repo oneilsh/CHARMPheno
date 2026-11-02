@@ -571,6 +571,64 @@ class NodeSet:
             raise _unknown_error(unknown[:_UNKNOWN_CAP], len(unknown))
         return tuple(self.user_ids[e] for e in sorted(eng))
 
+    def to_dict(self) -> dict:
+        """A JSON-ready form (lists only, user ids as JSON numbers / strings, so `1`
+        and `"1"` survive a round trip). `ROOT` never appears: a top-level node's
+        parents are `[]`. `from_dict` inverts it exactly."""
+        def pairs(d):
+            return [[n, list(v)] for n, v in d.items()]
+        return {
+            "nodes": list(self.user_ids[1:]),
+            "parents": [[n, [p for p in ps if p is not ROOT]]
+                        for n, ps in self.parents.items()],
+            "pruned": pairs(self.pruned),
+            "spliced": list(self.spliced),
+            "support": [[n, int(s)] for n, s in self.support.items()],
+            "n_docs": int(self.n_docs),
+            "landing": pairs(self.frontier.landing),
+            "unknown_labels": self.frontier.unknown_labels,
+            "min_docs_per_node": int(self.min_docs_per_node),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "NodeSet":
+        nodes = tuple(_coerce_id(n) for n in d["nodes"])
+        user_ids = (ROOT,) + nodes
+        engine_id = {n: i + 1 for i, n in enumerate(nodes)}
+        parents = {_coerce_id(n): (tuple(_coerce_id(p) for p in ps) if ps else (ROOT,))
+                   for n, ps in d["parents"]}
+        engine_parents = {engine_id[c]: sorted(0 if p is ROOT else engine_id[p]
+                                               for p in parents[c]) for c in nodes}
+        landing = {_coerce_id(n): tuple(int(e) for e in es) for n, es in d["landing"]}
+        return cls(
+            parents={n: parents[n] for n in nodes},
+            pruned={_coerce_id(n): tuple(_coerce_id(x) for x in ls)
+                    for n, ls in d["pruned"]},
+            spliced=tuple(_coerce_id(n) for n in d["spliced"]),
+            support={_coerce_id(n): int(s) for n, s in d["support"]},
+            n_docs=int(d["n_docs"]), engine_id=engine_id, user_ids=user_ids,
+            engine_parents=engine_parents,
+            frontier=FrontierFn(landing=landing,
+                                strict_anc=_strict_ancestors(engine_parents, len(nodes)),
+                                unknown_labels=d.get("unknown_labels", "error")),
+            min_docs_per_node=int(d.get("min_docs_per_node", 1)))
+
+
+def _strict_ancestors(engine_parents, n):
+    """`{engine id: frozenset of strict-ancestor engine ids}` (root 0 excluded) over
+    engine ids 1..n."""
+    eng_par = {e: [p for p in ps if p != 0] for e, ps in engine_parents.items()}
+    out = {}
+    for e in range(1, n + 1):
+        acc, stack = set(), list(eng_par[e])
+        while stack:
+            a = stack.pop()
+            if a not in acc:
+                acc.add(a)
+                stack.extend(eng_par[a])
+        out[e] = frozenset(acc)
+    return out
+
 
 def _children_of(red):
     """`{node: [children]}` from a `{child: [parents]}` map (parents outside it
@@ -678,16 +736,7 @@ def learn_node_set(dag, support, *, n_docs=None, min_docs_per_node=1,
                     for n in nodes}
     landing = {n: tuple(sorted(engine_id[a] for a in t))
                for n, t in landing_user.items()}
-    eng_par = {e: [p for p in ps if p != 0] for e, ps in engine_parents.items()}
-    strict_anc = {}
-    for e in range(1, len(user_ids)):
-        acc, stack = set(), list(eng_par[e])
-        while stack:
-            a = stack.pop()
-            if a not in acc:
-                acc.add(a)
-                stack.extend(eng_par[a])
-        strict_anc[e] = frozenset(acc)
+    strict_anc = _strict_ancestors(engine_parents, len(user_ids) - 1)
 
     return NodeSet(
         parents={n: parents[n] for n in order},

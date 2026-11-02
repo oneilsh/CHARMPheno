@@ -156,9 +156,12 @@ def test_multidomain_bundle_fits_through_the_gated_shim_and_round_trips(spark, t
     from spark_vi.io.export import save_result, load_result
     bundle = _three_domain_bundle(spark)
     est = DagGatedLDAEstimator(
-        featuresCols=["features_0", "features_1", "features_2"], frontierCol="frontier",
+        featuresCols=["features_0", "features_1", "features_2"], labelsCol="frontier",
         gateNBg=2, gateTpn=1, maxIter=2, seed=0, subsamplingRate=1.0)
-    est.setGateParent(bundle.parent_int)
+    # The bundle's engine-id DAG (root 0) as a user DAG: parentless nodes have no
+    # parent rather than parent 0. (The bundle moves to user ids in WP11.)
+    est.setDag({c: [q for q in (p if isinstance(p, (list, tuple)) else [p]) if q != 0]
+                or None for c, p in bundle.parent_int.items()})
     model = est.fit(bundle.train_df)
     lam = model.result.global_params["lambda"]
     assert isinstance(lam, dict) and set(lam) == {0, 1, 2}

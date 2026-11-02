@@ -307,6 +307,19 @@ def test_frontier_fn_pickles():
     assert f2(["d", "a"]) == ns.frontier(["d", "a"])
 
 
+def test_node_set_json_round_trip_keeps_id_types():
+    """`to_dict` -> JSON -> `from_dict` is the identity, with 1 and "1" kept apart
+    (the model persists its node set this way)."""
+    import json
+    from spark_vi.dag.nodeset import NodeSet
+    dag = {"A": None, 1: "A", "1": "A", 2: [1, "1"], "x": 2, "y": 2, "z": "y"}
+    ns = fit_node_set(dag, [[2], ["x"], ["x", 1], ["1"], ["z"], []],
+                      min_docs_per_node=2)
+    back = NodeSet.from_dict(json.loads(json.dumps(ns.to_dict())))
+    assert back == ns
+    assert 1 in back.spliced and "1" in back.engine_id      # 1 and "1" stay apart
+
+
 def _random_dag(rng, n):
     ids = [i if rng.random() < 0.5 else f"n{i}" for i in range(n)]
     dag = {}
