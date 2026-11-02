@@ -721,6 +721,9 @@ def build_mondo_usage_args(
     ]
     if effective.get("with_hpo"):
         argv.append("--with-hpo")
+    if effective.get("hpo_obo_url"):
+        # pin the HPO release: the live purl can move to a release without SNOMED xrefs
+        argv += ["--hpo-obo-url", str(effective["hpo_obo_url"])]
     return argv
 
 

@@ -132,28 +132,6 @@ def test_assemble_payload_states_stats_and_root():
     assert s["internal_terms"] == 1 and s["internal_used_terms"] == 1
 
 
-def test_fractional_count_suppressed_independently():
-    # frac is patient-derived: it can dip below the floor even when the EXACT count
-    # clears it (a term whose patients arrive via shared codes), so it gets its own gate.
-    rows = [
-        # exact 30 (reported) but fractional 12.4 -> must suppress the frac to ≤20
-        {"mondo_id": "MONDO:A", "label": "a", "is_internal": False, "parents": [],
-         "std_concepts": [1], "n_persons": 30, "n_frac": 12.4, "collision_siblings": []},
-        # exact and frac both clear the floor; frac rounds to int
-        {"mondo_id": "MONDO:B", "label": "b", "is_internal": False, "parents": [],
-         "std_concepts": [2], "n_persons": 5000, "n_frac": 2500.6, "collision_siblings": []},
-        # no n_frac supplied -> falls back to the exact count
-        {"mondo_id": "MONDO:C", "label": "c", "is_internal": False, "parents": [],
-         "std_concepts": [3], "n_persons": 90, "collision_siblings": []},
-    ]
-    by = {n["id"]: n for n in m.assemble_payload(meta={}, term_rows=rows)["nodes"]}
-    assert by["MONDO:A"]["count"] == 30 and by["MONDO:A"]["frac"] is None      # frac withheld
-    assert by["MONDO:A"]["frac_display"] == "≤20"
-    assert by["MONDO:B"]["frac"] == 2501 and by["MONDO:B"]["frac_display"] == "2501"
-    assert by["MONDO:C"]["frac"] == 90                                          # fell back to exact
-    assert by["root"]["frac"] is None and by["root"]["frac_display"] == ""
-
-
 def test_rare_flag_passthrough_and_stats():
     rows = [
         {"mondo_id": "MONDO:R", "label": "rare dx", "is_internal": False, "parents": [],
@@ -234,34 +212,6 @@ def test_suppress_count_floor_inclusive():
     assert m.suppress_count(None) == "n/a"
 
 
-def test_volume_band_ranges_and_floor():
-    # bottom band IS the small-cell floor (identical to a suppressed cell) — no exact
-    # count in 1..floor ever escapes as a band.
-    assert m.volume_band(0) == "0"
-    assert m.volume_band(1) == "≤20"
-    assert m.volume_band(20) == "≤20"          # floor inclusive
-    assert m.volume_band(21) == "21–100"
-    assert m.volume_band(100) == "21–100"
-    assert m.volume_band(101) == "101–1k"
-    assert m.volume_band(1000) == "101–1k"
-    assert m.volume_band(1001) == "1k–10k"
-    assert m.volume_band(10_000) == "1k–10k"
-    assert m.volume_band(10_001) == "10k–100k"
-    assert m.volume_band(100_000) == "10k–100k"
-    assert m.volume_band(100_001) == ">100k"
-    assert m.volume_band(5_000_000) == ">100k"
-    assert m.volume_band(None) == "n/a"
-    # no band label is ever a bare small-cell integer (1..floor)
-    for n in (1, 5, 20, 21, 999, 12345, 200000):
-        lab = m.volume_band(n)
-        assert not (lab.isdigit() and 1 <= int(lab) <= 20)
-
-
-def test_volume_band_respects_custom_floor():
-    assert m.volume_band(50, min_cell=50) == "≤50"
-    assert m.volume_band(51, min_cell=50) == "51–100"
-
-
 def test_parse_hpo_dag():
     obo = """format-version: 1.2
 
@@ -295,22 +245,6 @@ id: part_of
     assert parents.get("HP:0000118", []) == []          # a root: no is_a
     assert "HP:9999999" not in labels                    # obsolete excluded
     assert "HP:9999999" not in parents
-
-
-def test_band_histogram_counts_codes_heavy_first():
-    bands = (["≤20"] * 184 + ["1k–10k"] * 3 + [">100k"] * 2 + ["101–1k"] * 8)
-    hist = m.band_histogram(bands)
-    # heavy -> light order, empty bands omitted, counts are CODE counts
-    assert hist == [
-        {"band": ">100k", "codes": 2},
-        {"band": "1k–10k", "codes": 3},
-        {"band": "101–1k", "codes": 8},
-        {"band": "≤20", "codes": 184},
-    ]
-    # the "codes" figure is a count of codes (public identities), so a small value like
-    # 2 or 3 is NOT a small-cell disclosure and is reported raw.
-    assert hist[0]["codes"] == 2
-    assert m.band_histogram([]) == []
 
 
 def test_normalize_xref_vocab():
@@ -437,40 +371,6 @@ def test_build_safe_summary_suppresses_and_leaks_nothing():
     assert not re.search(r"\br\d{4}\b", out.replace("2026", ""))
 
 
-def test_source_code_catalog_passthrough():
-    # source_climb space: each term catalogs the originating source codes (ICD etc.)
-    # that reached it, as identity + a total; assemble_payload passes them through
-    # and defaults them to empty for the exact-map spaces.
-    rows = [
-        {"mondo_id": "MONDO:A", "label": "a", "is_internal": False, "parents": [],
-         "std_concepts": [1], "n_persons": 40, "collision_siblings": [],
-         "source_codes": [{"id": 11, "vocab": "ICD10CM", "code": "E11.9", "via": "exact",
-                           "band": "1k–10k"},
-                          {"id": 12, "vocab": "ICD10CM", "code": "E11.21", "via": "climbed",
-                           "band": "≤20"}],
-         "n_source_codes": 2,
-         "source_bands": [{"band": "1k–10k", "codes": 1}, {"band": "≤20", "codes": 1}]},
-        {"mondo_id": "MONDO:B", "label": "b", "is_internal": False, "parents": [],
-         "std_concepts": [2], "n_persons": 25, "collision_siblings": []},
-    ]
-    p = m.assemble_payload(meta={}, term_rows=rows)
-    by = {n["id"]: n for n in p["nodes"]}
-    assert by["MONDO:A"]["n_source_codes"] == 2
-    assert [c["code"] for c in by["MONDO:A"]["source_codes"]] == ["E11.9", "E11.21"]
-    assert by["MONDO:A"]["source_codes"][1]["via"] == "climbed"
-    # codes carry identity + band only, no embedded name (names resolved client-side)
-    assert "name" not in by["MONDO:A"]["source_codes"][0]
-    # per-code band + per-term band histogram pass through (the "where's the weight" shape)
-    assert by["MONDO:A"]["source_codes"][0]["band"] == "1k–10k"
-    assert by["MONDO:A"]["source_bands"] == [{"band": "1k–10k", "codes": 1},
-                                             {"band": "≤20", "codes": 1}]
-    # a term with no catalog defaults cleanly; the root too
-    assert by["MONDO:B"]["source_codes"] == [] and by["MONDO:B"]["n_source_codes"] == 0
-    assert by["MONDO:B"]["source_bands"] == []
-    assert by["root"]["source_codes"] == [] and by["root"]["n_source_codes"] == 0
-    assert by["root"]["source_bands"] == []
-
-
 def test_used_branch_category_for_zero_count_ancestor():
     # A 0-count internal ancestor that sits ABOVE a used leaf is "used_branch",
     # not "other".
@@ -505,57 +405,202 @@ def test_dag_structures():
 
 
 # --- complementary suppression of the source-code -> term roll-up marginal ----------
-def test_forced_lower_inclusion_exclusion():
-    # N_T=115, one 21-100 code (caps at 100) + one <=20 code -> |<=20 code| >= 15.
-    sb = [{"band": "21–100", "codes": 1}, {"band": "≤20", "codes": 1}]
-    assert m._forced_lower(115, 115, sb) == 15
-    # two <=20 codes, N_T=32 -> each forced >= 12 (endometriosis-in-scar shape).
-    assert m._forced_lower(32, 32, [{"band": "≤20", "codes": 2}]) == 12
-    # a big code covers the term -> the <=20 code is NOT forced up.
-    assert m._forced_lower(5000, 5000,
-                           [{"band": "1k–10k", "codes": 1}, {"band": "≤20", "codes": 1}]) <= 1
-    # no <=floor code present -> nothing to box.
-    assert m._forced_lower(5000, 5000, [{"band": "1k–10k", "codes": 2}]) == 0
+def _rep(N):
+    return {"state": "reported", "count": N, "display": str(N)}
 
 
-def test_safe_total_band_picks_finest_boring_band():
-    # flagged -> the small two-sided CONTAINING band already removes the narrowing.
-    need, disp, (lo, hi) = m.safe_total_band(32, [{"band": "≤20", "codes": 2}])
-    assert need and disp == "21–100" and (lo, hi) == (21, 100)
-    # once banded, differencing can no longer force the <=20 code >= 2.
-    assert m._forced_lower(lo, hi, [{"band": "≤20", "codes": 2}]) <= 1
-    # a safe term is left exact (no banding).
-    assert m.safe_total_band(5000,
-                             [{"band": "1k–10k", "codes": 1}, {"band": "≤20", "codes": 1}]) \
-        == (False, "5000", (5000, 5000))
+def test_chain_linear():
+    assert m.shortest_climb_chain(1, 3, 2, {1: [2], 2: [3]}, {2: 1, 3: 0}) == ([1, 2, 3], False)
 
 
-def test_complementary_suppress_bands_only_the_unsafe_and_assert_passes():
-    rows = [
-        {"mondo_id": "MONDO:SCAR", "label": "endometriosis in scar", "is_internal": False,
-         "parents": [], "std_concepts": [1], "n_persons": 32, "collision_siblings": [],
-         "source_bands": [{"band": "≤20", "codes": 2}]},
-        {"mondo_id": "MONDO:BIG", "label": "hypertension", "is_internal": False,
-         "parents": [], "std_concepts": [2], "n_persons": 5000, "collision_siblings": [],
-         "source_bands": [{"band": "1k–10k", "codes": 1}, {"band": "≤20", "codes": 1}]},
-    ]
-    p = m.assemble_payload(meta={}, term_rows=rows)   # calls assert_diff_safe internally
+def test_chain_diamond_is_ambiguous_and_deterministic():
+    parents = {1: [3, 2], 2: [4], 3: [4]}
+    assert m.shortest_climb_chain(1, 4, 2, parents, {2: 1, 3: 1}) == ([1, 2, 4], True)
+
+
+def test_chain_missing_returns_none():
+    assert m.shortest_climb_chain(1, 9, 2, {1: [2]}, {2: 1}) == (None, False)
+
+
+def test_chain_ignores_off_shortest_parent():
+    # 1 -> 5 is a parent but sits 2 levels from the target (a longer route); skip it
+    parents = {1: [5, 2], 2: [3], 5: [6], 6: [3]}
+    assert m.shortest_climb_chain(1, 3, 2, parents, {2: 1, 5: 2, 6: 1}) == ([1, 2, 3], False)
+
+
+def test_build_climb_paths_groups_by_target():
+    # std 10 climbs to Mondo X via anc 30 (10 -> 20 -> 30) and to Mondo Y via anc 40 (10 -> 40)
+    pairs = [(10, "MONDO:X", 30, 2), (10, "MONDO:Y", 40, 1)]
+    ca_rows = [(20, 30, 1)]
+    isa = [(10, 20), (20, 30), (10, 40)]
+    out = m.build_climb_paths(pairs, ca_rows, isa)
+    assert out[(10, "MONDO:X")] == ([10, 20, 30], False)
+    assert out[(10, "MONDO:Y")] == ([10, 40], False)
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.slow
+@pytest.mark.slow
+def test_collect_climb_paths_end_to_end(spark):
+    import pandas as pd
+    # std 11 climbs 11 -> 20 -> 30 (30 carries MONDO:X); std 10 climbs 10 -> 40 (MONDO:Y)
+    ca = spark.createDataFrame([(20, 11, 1), (30, 11, 2), (30, 20, 1), (40, 10, 1)],
+                               "ancestor_concept_id long, descendant_concept_id long, "
+                               "min_levels_of_separation long")
+    ca_f = spark.createDataFrame([(11, 30, 2), (10, 40, 1)], "std_cid long, anc_cid long, lev long")
+    nearest = ca_f.select("std_cid", "anc_cid")
+    anc_map = spark.createDataFrame([(30, "MONDO:X"), (40, "MONDO:Y")],
+                                    "anc_cid long, anc_mondo string")
+    reduced = pd.DataFrame({"std_cid": [11, 10], "mondo_id": ["MONDO:X", "MONDO:Y"]})
+    isa = spark.createDataFrame([(11, 20), (20, 30), (10, 40), (99, 98)],
+                                "concept_id_1 long, concept_id_2 long")
+    paths, n = m.collect_climb_paths(spark, ca, ca_f, nearest, anc_map, reduced, isa)
+    assert paths == {(11, "MONDO:X"): ([11, 20, 30], False), (10, "MONDO:Y"): ([10, 40], False)}
+    assert n == 5                                   # {10, 11, 20, 30, 40}
+
+
+def test_hpo_cache_name_is_keyed_by_url():
+    a = m.hpo_cache_name("http://purl.obolibrary.org/obo/hp.obo")
+    b = m.hpo_cache_name("http://purl.obolibrary.org/obo/hp/releases/2026-06-23/hp.obo")
+    assert a != b and a.endswith(".obo") and b.startswith("hp-")
+
+
+def test_hpo_data_version():
+    obo = "format-version: 1.2\ndata-version: hp/releases/2026-06-23\n\n[Term]\nid: HP:1\n"
+    assert m.hpo_data_version(obo) == "hp/releases/2026-06-23"
+    assert m.hpo_data_version("format-version: 1.2\n") is None
+
+
+# --- additive diagnosis cells (spec Revision 2) ---------------------------------------
+def _row(mid, parents=(), cells=(), **kw):
+    return dict({"mondo_id": mid, "label": mid.lower(), "is_internal": False,
+                 "parents": list(parents), "std_concepts": [], "n_persons": 0,
+                 "collision_siblings": [], "source_codes": [dict(c) for c in cells]}, **kw)
+
+
+def _cell(cid, n, step, vocab="ICD10CM"):
+    return {"id": cid, "vocab": vocab, "code": f"C{cid}", "step": step,
+            "n": m.publish_cell(n)}
+
+
+def test_publish_cell_is_midpoint_of_aou_bin():
+    # AoU's bins (1-20, 21-40, ...) represented by their midpoints: same information as the
+    # Data Browser's round-up, without its upward bias
+    assert [m.publish_cell(n) for n in (0, 1, 20, 21, 40, 41, 456, 460, 461)] == \
+        [0, 10, 10, 30, 30, 50, 450, 450, 470]
+
+
+def test_term_count_is_sum_of_published_cells():
+    # ICDXX with ≤20 diagnoses -> 10, ICDXX2 with 456 (bin 441-460) -> 450; term 460
+    p = m.assemble_payload(meta={}, term_rows=[
+        _row("MONDO:T", cells=[_cell(1, 7, 2), _cell(2, 456, 2)])])
+    t = {n["id"]: n for n in p["nodes"]}["MONDO:T"]
+    assert t["count"] == 460 and t["display"] == "460" and t["state"] == "reported"
+    assert t["imputed"] == 1 and sorted(c["n"] for c in t["source_codes"]) == [10, 450]
+    assert t["split"] == {"named": 460, "climbed": 0}
+
+
+def test_split_parts_are_sums_and_partition_the_count():
+    p = m.assemble_payload(meta={}, term_rows=[
+        _row("MONDO:T", cells=[_cell(1, 300, 1), _cell(2, 5, 2), _cell(3, 90, 4)])])
+    t = {n["id"]: n for n in p["nodes"]}["MONDO:T"]
+    assert t["split"] == {"named": 300, "climbed": 90} and t["count"] == 390
+
+
+def test_all_imputed_term_is_used_small():
+    p = m.assemble_payload(meta={}, term_rows=[
+        _row("MONDO:S", cells=[_cell(1, 3, 2), _cell(2, 19, 4)]), _row("MONDO:Z")])
     by = {n["id"]: n for n in p["nodes"]}
-    scar = by["MONDO:SCAR"]
-    assert scar["total_banded"] is True and scar["count"] is None
-    assert scar["display"] == "21–100" and scar["count_range"] == [21, 100]
-    assert scar["state"] == "reported"
-    assert by["MONDO:BIG"]["count"] == 5000 and not by["MONDO:BIG"].get("total_banded")
-    assert p["stats"]["total_banded_terms"] == 1
-    assert p["stats"]["reported_terms"] == 2
+    assert by["MONDO:S"]["count"] == 20 and by["MONDO:S"]["state"] == "used_small"
+    assert by["MONDO:Z"]["count"] == 0 and by["MONDO:Z"]["state"] == "unused"
+    assert p["stats"]["used_small_terms"] == 1 and p["stats"]["imputed_cells"] == 2
 
 
-def test_assert_diff_safe_catches_an_unsuppressed_narrowing():
+def test_rollup_counts_each_code_once_per_subtree():
+    # code 7 reaches both children of P (50 patients via SNOMED in A, climbed into B);
+    # in P's roll-up it counts once, at its largest cell, in its lowest-step part.
+    rows = [_row("MONDO:P"),
+            _row("MONDO:A", parents=["MONDO:P"], cells=[_cell(7, 50, 2)]),
+            _row("MONDO:B", parents=["MONDO:P"], cells=[_cell(7, 50, 4), _cell(8, 4, 4)])]
+    by = {n["id"]: n for n in m.assemble_payload(meta={}, term_rows=rows)["nodes"]}
+    assert by["MONDO:P"]["roll"] == {"all": 60, "named": 50, "climbed": 10, "imputed": 1}
+    assert by["MONDO:B"]["roll"]["all"] == 60 and by["MONDO:A"]["roll"]["all"] == 50
+    assert by["root"]["roll"]["all"] == 60
+    assert by["MONDO:B"]["count"] == 60     # within a term each code is its own cell
+
+
+def test_rollup_cells_multi_parent_term_counts_once():
+    cells = {"C": [{"id": 1, "n": 30, "step": 2}]}
+    parents = {"C": ["A", "B"], "A": ["R"], "B": ["R"], "R": []}
+    r = m.rollup_cells(cells, parents)
+    assert r["R"]["all"] == 30 and r["A"]["all"] == 30 and r["B"]["all"] == 30
+
+
+def test_catalog_cap_keeps_heaviest_but_sums_everything():
+    p = m.assemble_payload(meta={}, catalog_cap=1, term_rows=[
+        _row("MONDO:T", cells=[_cell(1, 3, 2), _cell(2, 400, 4)])])
+    t = {n["id"]: n for n in p["nodes"]}["MONDO:T"]
+    assert [c["n"] for c in t["source_codes"]] == [390] and t["n_source_codes"] == 2
+    assert t["count"] == 400
+
+
+def test_source_code_catalog_passthrough():
+    c = {"id": 9, "vocab": "ICD10CM", "code": "E27.3", "step": 4, "n": 110,
+         "path": [11, 12], "path_ambiguous": True}
+    t = {n["id"]: n for n in m.assemble_payload(
+        meta={}, term_rows=[_row("MONDO:T", cells=[c])])["nodes"]}["MONDO:T"]
+    assert t["source_codes"] == [c]
+
+
+def test_frac_is_never_published():
+    rows = [_row("MONDO:A", cells=[_cell(1, 30, 2)], n_frac=12.4)]
+    for nd in m.assemble_payload(meta={}, term_rows=rows)["nodes"]:
+        assert "frac" not in nd and "frac_display" not in nd and "frac_range" not in nd
+
+
+def test_assert_cells_safe_rejects_unsafe_payloads():
     import pytest
-    bad = [{"id": "X", "state": "reported", "count": 115,
-            "source_bands": [{"band": "21–100", "codes": 1}, {"band": "≤20", "codes": 1}]}]
-    with pytest.raises(AssertionError):
-        m.assert_diff_safe(bad)
-    ok = [{"id": "X", "state": "reported", "count": None, "count_range": [101, 1000],
-           "source_bands": [{"band": "21–100", "codes": 1}, {"band": "≤20", "codes": 1}]}]
-    m.assert_diff_safe(ok)
+    good = {"id": "X", "state": "reported", "cells": True, "count": 460,
+            "source_codes": [{"n": 10}, {"n": 450}], "split": {"named": 460, "climbed": 0},
+            "roll": {"all": 460, "named": 460, "climbed": 0, "imputed": 1}}
+    cells = {"X": [{"id": 1, "n": 10, "step": 2}, {"id": 2, "n": 450, "step": 2}]}
+    m.assert_cells_safe([good], cells)
+    for bad in (dict(good, source_codes=[{"n": 7}, {"n": 450}]),          # raw small cell
+                dict(good, source_codes=[{"n": 10}, {"n": 456}]),         # off-grid (exact) cell
+                dict(good, split={"named": 450, "climbed": 0}),           # split != count
+                dict(good, count=470),                                     # count != Σ cells
+                dict(good, roll={"all": 400, "named": 400, "climbed": 0, "imputed": 1}),
+                dict(good, frac=466)):
+        with pytest.raises(AssertionError):
+            m.assert_cells_safe([bad], cells)
+    with pytest.raises(AssertionError):                                    # legacy small total
+        m.assert_cells_safe([{"id": "L", "state": "reported", "count": 5}])
+
+
+def test_legacy_rows_without_cells_keep_masked_totals():
+    rows = [{"mondo_id": "MONDO:L", "label": "l", "is_internal": False, "parents": [],
+             "std_concepts": [1], "n_persons": 5, "collision_siblings": []},
+            {"mondo_id": "MONDO:M", "label": "m", "is_internal": False, "parents": [],
+             "std_concepts": [2], "n_persons": 500, "collision_siblings": []}]
+    by = {n["id"]: n for n in m.assemble_payload(meta={}, term_rows=rows)["nodes"]}
+    assert by["MONDO:L"]["count"] is None and by["MONDO:L"]["display"] == "≤20"
+    assert by["MONDO:M"]["count"] == 500 and "roll" not in by["MONDO:M"]
+
+
+@pytest.mark.slow
+def test_catalog_steps_lowest_wins(spark):
+    rows = [  # person, mondo, origin, via, k_src, k_std
+        (1, "T", 100, "standard_exact", 100, 7), (2, "T", 100, "climbed", 100, 8),
+        (3, "T", 200, "climbed", 200, 9), (4, "T", 100, "standard_exact", 100, 7),
+        (5, "T", 100, "standard_exact", 100, 6)]
+    att = spark.createDataFrame(rows, "person_id long, mondo_id string, origin_cid long, "
+                                      "via string, k_src long, k_std long")
+    steps = m.catalog_steps_df(att)
+    assert {(r.mondo_id, r.origin_cid): r.step for r in steps.collect()} == \
+        {("T", 100): 2, ("T", 200): 4}
+    std = {(r.mondo_id, r.origin_cid): (r.std_cid, r.multi_std)
+           for r in m.code_std_df(att, steps).collect()}
+    assert std[("T", 100)] == (7, True) and std[("T", 200)] == (9, False)
+    assert m.rolled_up_only_persons(att, steps) == 1

@@ -335,6 +335,162 @@ def nearest_mapped_standard_ancestors(edges) -> dict[int, list[int]]:
     return {d: sorted(anc) for d, (lv, anc) in best.items()}
 
 
+# --- mapping provenance: the ladder step per (term, code) --------------------------------
+# The attribution ladder's rungs, numbered as the dashboard shows them: (1) the source
+# code is a Mondo same_as; (2) its Maps-to SNOMED concept is a mapped Mondo term; (3) that
+# concept is an exact HPO xref; (4) it climbed SNOMED concept_ancestor to the nearest
+# mapped Mondo term.
+STEP_OF_VIA = {"source_exact": 1, "standard_exact": 2, "hpo_exact": 3, "climbed": 4}
+VIA_OF_STEP = {v: k for k, v in STEP_OF_VIA.items()}
+
+
+def _step_col(via_col):
+    from pyspark.sql import functions as F
+    m = F.create_map(*[F.lit(x) for kv in STEP_OF_VIA.items() for x in kv])
+    return m[via_col]
+
+
+def catalog_steps_df(attribution):
+    """(mondo_id, origin_cid, step): each code's step for each term it reaches, LOWEST
+    wins. A code with several Maps-to targets can reach one term directly on some rows
+    and by climbing on others; it is then a direct (named) code for that term and its
+    climb rows are not counted as climbed (user decision, 2026-11-02). Built-ins only."""
+    from pyspark.sql import functions as F
+    return (attribution.select("mondo_id", "origin_cid", _step_col(F.col("via")).alias("step"))
+            .groupBy("mondo_id", "origin_cid").agg(F.min("step").alias("step")))
+
+
+def code_std_df(attribution, steps):
+    """(mondo_id, origin_cid, std_cid, multi_std): the standard concept a code went
+    through for a term, among its rows AT the winning step — the one carrying the most
+    distinct persons (tie -> lowest id). ``multi_std`` flags codes that reach the term
+    through more than one standard concept (the hover says so). Identity only: the
+    person counts rank inside the cluster and are never emitted."""
+    from pyspark.sql import Window, functions as F
+    a = (attribution.withColumn("vstep", _step_col(F.col("via")))
+         .join(steps, ["mondo_id", "origin_cid"])
+         .where((F.col("vstep") == F.col("step")) & F.col("k_std").isNotNull()))
+    cnt = (a.groupBy("mondo_id", "origin_cid", "k_std")
+           .agg(F.countDistinct("person_id").alias("np")))
+    part = Window.partitionBy("mondo_id", "origin_cid")
+    return (cnt.withColumn("rn", F.row_number().over(
+                part.orderBy(F.col("np").desc(), F.col("k_std").asc())))
+            .withColumn("n_std", F.count(F.lit(1)).over(part))
+            .where(F.col("rn") == 1)
+            .select("mondo_id", "origin_cid", F.col("k_std").alias("std_cid"),
+                    (F.col("n_std") > 1).alias("multi_std")))
+
+
+def rolled_up_only_persons(attribution, steps) -> int:
+    """Cohort-wide distinct persons who reach at least one term ONLY through codes that
+    climbed to it. A single distinct-person count (like ``persons_climbed``), never a sum
+    of per-term parts, so it cannot be differenced against the per-term splits."""
+    from pyspark.sql import functions as F
+    per = (attribution.join(steps, ["mondo_id", "origin_cid"])
+           .groupBy("person_id", "mondo_id").agg(F.min("step").alias("best")))
+    return int(per.where(F.col("best") == 4).select("person_id").distinct().count())
+
+
+def build_climb_paths(pairs, ca_rows, isa_edges) -> dict:
+    """``{(std_cid, mondo_id): (chain | None, ambiguous)}`` for every climbed pair.
+
+    ``pairs``: ``(std_cid, mondo_id, anc_cid, dist)`` — the standard concept, the Mondo
+    term it was reduced to, the mapped SNOMED ancestor carrying that term, and
+    ``min_levels_of_separation`` between them. ``ca_rows``: ``(x, anc_cid, lev)``
+    concept_ancestor rows from the climb closure to each target ancestor. ``isa_edges``:
+    ``(child, parent)`` SNOMED ``Is a`` edges inside the closure. Structure only — no
+    person data. Pure."""
+    parents_of: dict = {}
+    for c, p in isa_edges:
+        parents_of.setdefault(int(c), []).append(int(p))
+    lev_by_anc: dict = {}
+    for x, anc, lev in ca_rows:
+        lev_by_anc.setdefault(int(anc), {})[int(x)] = int(lev)
+    out = {}
+    for std, mid, anc, dist in pairs:
+        out[(int(std), str(mid))] = shortest_climb_chain(
+            int(std), int(anc), int(dist), parents_of, lev_by_anc.get(int(anc), {}))
+    return out
+
+
+def collect_climb_paths(spark, ca, ca_f, nearest, anc_map, reduced_pd, isa_df):
+    """Gather the vocabulary structure for every climbed (standard concept, Mondo term)
+    pair and reconstruct one shortest SNOMED chain each (``build_climb_paths``).
+
+    ``ca``: concept_ancestor (ancestor_concept_id, descendant_concept_id,
+    min_levels_of_separation >= 1); ``ca_f``: its climb-restricted view (std_cid, anc_cid,
+    lev); ``nearest``: (std_cid, anc_cid) at the minimum lev; ``anc_map``: (anc_cid,
+    anc_mondo); ``reduced_pd``: pandas (std_cid, mondo_id) after tie reduction; ``isa_df``:
+    concept_relationship ``Is a`` rows (concept_id_1 = child, concept_id_2 = parent).
+    For each pair the target is the nearest mapped ancestor carrying that term (tie ->
+    lowest id). Structure only, no persons; collects are bounded by the climb closure.
+    Returns ``(paths_of, n_closure_nodes)``."""
+    import pandas as pd
+    from pyspark.sql import functions as F
+    from pyspark.sql.functions import broadcast
+    anc_lev = (ca_f.join(nearest, ["std_cid", "anc_cid"])
+               .join(broadcast(anc_map), "anc_cid")
+               .select("std_cid", F.col("anc_mondo").alias("mondo_id"), "anc_cid", "lev")
+               .distinct())
+    pairs_pd = (anc_lev.join(broadcast(spark.createDataFrame(
+                    reduced_pd[["std_cid", "mondo_id"]])), ["std_cid", "mondo_id"]).toPandas()
+                .sort_values(["std_cid", "mondo_id", "anc_cid"])
+                .drop_duplicates(["std_cid", "mondo_id"]))
+    if not len(pairs_pd):
+        return {}, 0
+    maxlev = (pairs_pd.groupby("std_cid", as_index=False)["lev"].max()
+              .rename(columns={"lev": "maxlev"}))
+    ml_sdf = broadcast(spark.createDataFrame(maxlev))
+    clos = (ca.join(ml_sdf, ca["descendant_concept_id"] == ml_sdf["std_cid"])
+              .where(F.col("min_levels_of_separation") < F.col("maxlev"))
+              .select(F.col("ancestor_concept_id").alias("x")).distinct())
+    anc_ids = {int(x) for x in pairs_pd["anc_cid"]}
+    node_ids = ({int(r.x) for r in clos.collect()}
+                | {int(x) for x in pairs_pd["std_cid"]} | anc_ids)
+    nodes_sdf = broadcast(spark.createDataFrame(pd.DataFrame({"nid": sorted(node_ids)})))
+    aids_sdf = broadcast(spark.createDataFrame(pd.DataFrame({"aid": sorted(anc_ids)})))
+    ca_rows = (ca.join(nodes_sdf, ca["descendant_concept_id"] == nodes_sdf["nid"])
+                 .join(aids_sdf, ca["ancestor_concept_id"] == aids_sdf["aid"])
+                 .select("descendant_concept_id", "ancestor_concept_id",
+                         "min_levels_of_separation").toPandas())
+    nodes2 = nodes_sdf.withColumnRenamed("nid", "nid2")
+    isa_pd = (isa_df.join(nodes_sdf, isa_df["concept_id_1"] == nodes_sdf["nid"])
+              .join(nodes2, isa_df["concept_id_2"] == nodes2["nid2"])
+              .select("concept_id_1", "concept_id_2").toPandas())
+    paths = build_climb_paths(
+        pairs_pd[["std_cid", "mondo_id", "anc_cid", "lev"]].itertuples(index=False, name=None),
+        ca_rows.itertuples(index=False, name=None),
+        isa_pd.itertuples(index=False, name=None))
+    return paths, len(node_ids)
+
+
+def shortest_climb_chain(start: int, target: int, dist: int,
+                         parents_of: "dict[int, list[int]]",
+                         lev_to_target: "dict[int, int]") -> "tuple[list[int] | None, bool]":
+    """One shortest SNOMED ``Is a`` chain from a climbed standard concept to the mapped
+    ancestor it rolled up to, for the dashboard's mapping-path hover.
+
+    ``dist`` is OMOP ``concept_ancestor.min_levels_of_separation`` (start -> target);
+    ``lev_to_target[x]`` is the same quantity for x -> target (target itself is 0).
+    Walking up ``Is a`` edges, a parent lies on SOME shortest chain iff its remaining
+    distance is exactly one less, so at each hop we keep only those parents and take the
+    lowest concept id (deterministic). ``ambiguous`` reports whether any hop had a choice
+    (the hover then says "one of several equally short paths"). Returns ``(None, False)``
+    when the edges don't realise the distance (vocabulary inconsistency). Pure."""
+    chain, cur, ambiguous = [int(start)], int(start), False
+    for remaining in range(int(dist), 0, -1):
+        want = remaining - 1
+        cands = sorted(p for p in parents_of.get(cur, [])
+                       if (0 if p == target else lev_to_target.get(p, -1)) == want
+                       and (want > 0 or p == target))
+        if not cands:
+            return None, False
+        ambiguous = ambiguous or len(cands) > 1
+        cur = cands[0]
+        chain.append(cur)
+    return (chain, ambiguous) if cur == target else (None, False)
+
+
 def reduce_tie_map(pairs, parents_of):
     """Reduce each climb tie-set to its MOST-SPECIFIC members in the Mondo DAG.
 
@@ -428,169 +584,124 @@ def suppress_count(n, min_cell: int = _MIN_CELL) -> str:
     return f"≤{min_cell}" if n <= min_cell else str(n)
 
 
-# Log-decade volume bands for per-source-code magnitude. A code's exact person
-# count NEVER leaves the cluster (differencing risk vs the per-term union total);
-# instead each code is tagged with the RANGE it falls in. Ranges are
-# differencing-proof by construction — the difference of two ranges is a range,
-# never a person — so bands compose safely with the exact per-term totals, across
-# count-spaces, and up/down the roll-up. The bottom band is the small-cell floor
-# itself, so a rare code reads "≤{floor}" exactly as a suppressed cell does.
-# Order is heavy -> light (canonical display order).
-_BAND_UPPERS = [100, 1_000, 10_000, 100_000]     # decade edges above the floor
-
 # The export carries code IDENTITIES only (vocab + code), never concept names: name text
 # would be egress from the workbench, and SNOMED/CPT4/etc. names are licensed. The
 # dashboard resolves human-readable names client-side for the public-domain vocabularies
 # (ICD-9-CM, ICD-10-CM, HCPCS) from a public terminology service (NIH Clinical Tables);
-# licensed vocabularies keep code-only display + an Athena click-through, covered by a
-# SNOMED CT sub-license disclaimer in the UI.
+# licensed vocabularies keep code-only display + an Athena click-through.
 
 
-def _band_label(min_cell: int) -> "list[str]":
-    """Canonical band labels, heaviest first, for a given small-cell floor."""
-    lo = [f"≤{min_cell}", f"{min_cell + 1}–100", "101–1k", "1k–10k", "10k–100k", ">100k"]
-    return list(reversed(lo))
+# --- additive diagnosis cells (spec Revision 2, 2026-11-02) -----------------------------
+# Every published patient figure is built from per-(term, source code) CELLS: the number of
+# distinct patients with that source code attributed to the term — a "diagnosis" is a
+# (patient, source code) pair, counted once however many rows the patient has for it. A
+# cell is published as the MIDPOINT of its AoU bin (Revision 3): the Data Browser's bins
+# are 1-20, 21-40, ... and it shows each count as the bin's top; we show the bin's middle
+# (10, 30, 50, ...). Same bins = no finer than AoU's own release, and aligned with its grid
+# so combining with it adds nothing; midpoints avoid the round-up's upward bias, which
+# would compound up the hierarchy. Every
+# aggregate — term count, named / climbed-only split, subtree roll-up — is a SUM OF
+# PUBLISHED CELLS, never a separately computed true number, so arithmetic on the payload
+# can only recover the imputed 10s: a masked cell's true value enters no published figure.
+# (Rounding exact aggregates separately would let the two roundings constrain each other;
+# summing published cells cannot.)
+IMPUTED = 10        # the 1-20 bin's midpoint
 
 
-def volume_band(n, min_cell: int = _MIN_CELL) -> str:
-    """Map a per-code patient count to a log-decade band label (a RANGE, never the
-    number). ``None`` -> ``"n/a"``, ``<=0`` -> ``"0"``, ``1..floor`` -> ``"≤{floor}"``
-    (identical to a suppressed cell), then ``21–100 / 101–1k / 1k–10k / 10k–100k /
-    >100k`` for ``floor == 20``. Pure; disclosure-safe (emits no exact patient count)."""
-    if n is None:
-        return "n/a"
-    n = int(n)
+def publish_cell(n, min_cell: int = _MIN_CELL) -> int:
+    """Published value of one cell: 0 stays 0; otherwise the midpoint of its ``min_cell``-
+    wide bin, ``w*ceil(n/w) - w/2`` (1-20 -> 10, 21-40 -> 30, 441-460 -> 450). Pure."""
+    n = int(n or 0)
     if n <= 0:
-        return "0"
-    if n <= min_cell:
-        return f"≤{min_cell}"
-    labels = [f"{min_cell + 1}–100", "101–1k", "1k–10k", "10k–100k"]
-    for up, lab in zip(_BAND_UPPERS, labels):
-        if n <= up:
-            return lab
-    return ">100k"
+        return 0
+    return min_cell * (-(-n // min_cell)) - min_cell // 2
 
 
-def band_histogram(bands, min_cell: int = _MIN_CELL) -> "list[dict]":
-    """Given the band label of every source code on a term (the FULL set, before any
-    display cap), return the distribution as ``[{"band": label, "codes": k}, ...]`` in
-    canonical heavy->light order, omitting empty bands. The ``codes`` figure counts
-    CODES (public non-personal identities), never persons — so it is safe at any value
-    (no small-cell suppression applies to a code count). This is the "where's the
-    weight" shape: e.g. ``>100k:2 · ≤20:184`` reads as Mondo-thin-but-heavy. Pure."""
-    from collections import Counter
-    c = Counter(bands)
-    out = []
-    for lab in _band_label(min_cell):
-        if c.get(lab):
-            out.append({"band": lab, "codes": int(c[lab])})
+def cell_sums(cells) -> dict:
+    """Sums over one term's PUBLISHED cells (dicts with ``n`` and ``step``):
+    ``{"all", "named", "climbed", "imputed", "n_cells"}`` where named = steps 1-3,
+    climbed = step 4 (named + climbed == all) and ``imputed`` counts the 10s. Pure."""
+    out = {"all": 0, "named": 0, "climbed": 0, "imputed": 0, "n_cells": 0}
+    for c in cells:
+        n = int(c["n"])
+        out["all"] += n
+        out["n_cells"] += 1
+        out["climbed" if int(c.get("step") or 0) == 4 else "named"] += n
+        out["imputed"] += int(n == IMPUTED)
     return out
 
 
-# --- complementary suppression: the source-code -> term roll-up marginal ------------
-# A term's total N_T is the union of its source codes' person sets, so it is a
-# roll-up MARGINAL over its per-code cells. That within-term roll-up (NOT any
-# term-to-term one — those don't exist here) lets inclusion-exclusion narrow a
-# suppressed cell: with two codes and N_T=115 where one code caps at 100,
-# |other| >= 115 - 100 = 15, boxing a <=floor code into [15,20] even though no exact
-# small count is published. So per-code bands do NOT compose safely with an EXACT
-# total for near-floor terms (correcting the note above): we complementary-suppress
-# the marginal — publish such a term's total as a STANDARD band instead of the exact
-# number. Because the only differencing channel is within a single term (no global
-# per-code count and no rolled-up term-to-term total are published), per-term safety
-# implies whole-file safety, and banding is information-removing, so ONE pass with no
-# recheck suffices. `assert_diff_safe` re-checks only as a redundant tripwire that
-# fires if those two structural preconditions are ever violated.
-def _band_bounds(label: str, min_cell: int = _MIN_CELL):
-    """(lo, hi) integer bounds for a standard band label. Pure."""
-    for lab, lo, hi in [
-        (f"≤{min_cell}", 1, min_cell), (f"{min_cell + 1}–100", min_cell + 1, 100),
-        ("101–1k", 101, 1000), ("1k–10k", 1001, 10000),
-        ("10k–100k", 10001, 100000), (">100k", 100001, float("inf")),
-    ]:
-        if lab == label:
-            return lo, hi
-    return 1, float("inf")
+def rollup_cells(cells_of: dict, parents_of: dict) -> dict:
+    """Subtree roll-up for every node, from PUBLISHED cells only.
 
+    ``cells_of[term]`` lists the term's published cells (``id`` = source concept, ``n``,
+    ``step``); ``parents_of[term]`` its DAG parents. A node's roll-up covers its whole
+    descendant closure (each term once, however many paths reach it) and counts each
+    DISTINCT source code once: a code attributed to several terms in the subtree would
+    otherwise count its patients twice, so it contributes its largest cell there, in the
+    part given by its lowest step (lowest step wins, as within a term). Returns
+    ``{node: {"all", "named", "climbed", "imputed"}}`` with named + climbed == all, for
+    nodes with a non-empty subtree. Pure."""
+    memo: dict = {}
 
-def _forced_lower(total_lo, total_hi, source_bands, min_cell: int = _MIN_CELL):
-    """Tightest lower bound sound differencing can place on a ≤floor source code of a
-    term whose published total lies in ``[total_lo, total_hi]`` and whose per-code band
-    histogram is ``source_bands`` (``[{"band", "codes"}]``, the FULL set).
+    def closure(t):                                  # t and all its ancestors
+        if t in memo:
+            return memo[t]
+        out = memo[t] = {t}
+        for p in parents_of.get(t, []):
+            out |= closure(p)
+        return out
 
-    From |c| >= N - Σ_{k≠c} min(band_hi(k), N): the attacker uses the smallest total
-    (total_lo) and each OTHER code's largest possible count (min(band_hi(k), total_hi)).
-    Returns the forced lower bound; >= 2 means a ≤floor cell is boxed into the
-    suppressed interior [2, floor]. 0 when the term carries no ≤floor code. Pure."""
-    floor = f"≤{min_cell}"
-    if not any(b["band"] == floor for b in source_bands):
-        return 0
-    others_max = 0
-    for b in source_bands:
-        _, hi = _band_bounds(b["band"], min_cell)
-        others_max += min(hi, total_hi) * int(b["codes"])
-    return total_lo - (others_max - min_cell)       # drop one ≤floor code (its cap = min_cell)
-
-
-def safe_total_band(n_persons, source_bands, min_cell: int = _MIN_CELL):
-    """``(needs_banding, display, (lo, hi))`` for a reported term's total.
-
-    If publishing the EXACT total would let differencing box a ≤floor code >= 2 into
-    the suppressed interior, return the finest STANDARD band that removes it: the
-    two-sided band CONTAINING the total when that already suffices (small, boring,
-    e.g. ``21–100``), else its ceiling (``≤100``), whose published lower bound is 1
-    and so is always safe. Standard buckets only — never a bespoke tight range.
-    Deterministic and one-shot (no retry loop). Pure."""
-    N = int(n_persons)
-    if _forced_lower(N, N, source_bands, min_cell) < 2:
-        return False, str(N), (N, N)
-    lbl = volume_band(N, min_cell)                   # containing two-sided band
-    lo, hi = _band_bounds(lbl, min_cell)
-    if _forced_lower(lo, hi, source_bands, min_cell) <= 1:
-        return True, lbl, (int(lo), int(hi))         # small two-sided band suffices
-    up = lbl.split("–")[1] if "–" in lbl else lbl.lstrip("≤")
-    return True, f"≤{up}", (1, int(hi) if hi != float("inf") else hi)  # ceiling fallback
-
-
-def complementary_suppress(nodes, min_cell: int = _MIN_CELL) -> int:
-    """Band the total of any reported node whose exact total + per-code bands would
-    box a ≤floor code into the suppressed interior. Mutates nodes in place (count ->
-    None, display -> band label, adds ``count_range`` + ``total_banded``); keeps
-    state/category/per-code bands untouched. Returns how many nodes were banded."""
-    banded = 0
-    for nd in nodes:
-        if nd.get("state") != "reported" or nd.get("count") is None:
+    agg: dict = {}
+    for t, cells in cells_of.items():
+        if not cells:
             continue
-        need, disp, (lo, hi) = safe_total_band(
-            nd["count"], nd.get("source_bands") or [], min_cell)
-        if need:
-            nd["count"] = None
-            nd["display"] = disp
-            nd["count_range"] = [lo, hi if hi != float("inf") else None]
-            nd["total_banded"] = True
-            banded += 1
-    return banded
+        for a in closure(t):
+            codes = agg.setdefault(a, {})
+            for c in cells:
+                st, n = int(c.get("step") or 0), int(c["n"])
+                cur = codes.get(c["id"])
+                codes[c["id"]] = (min(cur[0], st), max(cur[1], n)) if cur else (st, n)
+    out = {}
+    for a, codes in agg.items():
+        r = {"all": 0, "named": 0, "climbed": 0, "imputed": 0}
+        for st, n in codes.values():
+            r["all"] += n
+            r["climbed" if st == 4 else "named"] += n
+            r["imputed"] += int(n == IMPUTED)
+        out[a] = r
+    return out
 
 
-def assert_diff_safe(nodes, min_cell: int = _MIN_CELL) -> None:
-    """Post-condition tripwire: no published node lets sound differencing box a ≤floor
-    source code into a strict sub-interval of [1, floor]. Redundant given
-    ``complementary_suppress`` + within-term independence; it fires only if those
-    structural preconditions are broken later (e.g. a rolled-up total is added)."""
+def assert_cells_safe(nodes, cells_of: "dict | None" = None,
+                      min_cell: int = _MIN_CELL) -> None:
+    """Post-condition tripwire for the published payload: every cell is 0 or a bin
+    midpoint (≡ floor/2 mod floor); every aggregate equals the sum of the published cells it is built
+    from (term count vs ALL its cells when ``cells_of`` is given; split parts vs the
+    count; roll-up parts vs each other); no ``frac``; legacy (no-cell) totals are masked
+    or above the floor."""
+    def fail(nd, why):
+        raise AssertionError(f"unsafe node {nd.get('id')}: {why}")
     for nd in nodes:
-        if nd.get("state") != "reported":
+        if nd.get("kind") == "root":
             continue
-        if nd.get("count") is not None:
-            lo = hi = int(nd["count"])
-        else:
-            rng = nd.get("count_range") or [1, None]
-            lo, hi = rng[0], (rng[1] if rng[1] is not None else float("inf"))
-        f = _forced_lower(lo, hi, nd.get("source_bands") or [], min_cell)
-        if f >= 2:
-            raise AssertionError(
-                f"diff-unsafe term {nd.get('id')}: a ≤{min_cell} source code is boxed "
-                f"to >= {f} (within-term roll-up narrowing not suppressed)")
-
+        if nd.get("frac") is not None or nd.get("frac_display") or nd.get("frac_range"):
+            fail(nd, "frac published")
+        for c in nd.get("source_codes") or []:
+            if "n" in c and not (c["n"] == 0 or c["n"] % min_cell == min_cell // 2):
+                fail(nd, f"cell {c.get('vocab')} {c.get('code')} = {c['n']}")
+        if nd.get("cells"):
+            cnt = nd.get("count")
+            if cells_of is not None and cnt != cell_sums(cells_of.get(nd["id"], []))["all"]:
+                fail(nd, "count != sum of its cells")
+            sp = nd.get("split")
+            if sp and sp["named"] + sp["climbed"] != cnt:
+                fail(nd, "split parts do not sum to the count")
+            ro = nd.get("roll")
+            if ro and (ro["named"] + ro["climbed"] != ro["all"] or ro["all"] < (cnt or 0)):
+                fail(nd, "roll-up parts inconsistent")
+        elif nd.get("count") is not None and 0 < nd["count"] <= min_cell:
+            fail(nd, f"legacy count {nd['count']} inside 1..{min_cell}")
 
 
 # HPO (Human Phenotype Ontology) cross-reference vocab prefixes -> the OMOP vocabulary_id
@@ -643,6 +754,24 @@ def parse_hpo_xrefs(obo_text: str) -> "list[tuple]":
             if vocab:
                 rows.append((hp_id, hp_name, vocab, code.strip()))
     return rows
+
+
+def hpo_cache_name(url: str) -> str:
+    """Cache filename for an hp.obo, keyed by its URL, so pinning a different release
+    never silently reuses a previously cached file. Pure."""
+    import hashlib
+    return f"hp-{hashlib.sha256(url.encode()).hexdigest()[:12]}.obo"
+
+
+def hpo_data_version(obo_text: str):
+    """The ``data-version`` header of an hp.obo (e.g. ``hp/releases/2026-06-23``), or
+    None. Recorded in the payload meta as the HPO provenance. Pure."""
+    for line in obo_text.splitlines():
+        if line.startswith("data-version:"):
+            return line.split(":", 1)[1].strip()
+        if line.startswith("[Term]"):
+            break
+    return None
 
 
 def parse_hpo_dag(obo_text: str) -> "tuple[dict, dict]":
@@ -749,6 +878,8 @@ def build_safe_summary(results: list[dict]) -> str:
               f"{suppress_count(sv.get('persons_source_exact'), min_cell)} · standard-exact "
               f"{suppress_count(sv.get('persons_standard_exact'), min_cell)} · climbed "
               f"{suppress_count(sv.get('persons_climbed'), min_cell)}",
+              f"- persons reaching ≥1 term ONLY through climbed codes (≤-suppressed): "
+              f"{(lambda v: v if isinstance(v, str) else suppress_count(v, min_cell))(sv.get('persons_rolled_up_only'))}",
               "- unmatched **source codes** by vocabulary (distinct code counts, not "
               "patients — the vocabularies the SNOMED climb can't reach): " +
               (", ".join(f"{v}={n}" for v, n in sorted(
@@ -804,45 +935,58 @@ def build_safe_summary(results: list[dict]) -> str:
     return "\n".join(L)
 
 
-def assemble_payload(*, meta: dict, term_rows: list[dict],
-                     min_cell: int = _MIN_CELL) -> dict:
-    """Build the dashboard JSON. ``term_rows`` is one dict per mapped Mondo term:
+def assemble_payload(*, meta: dict, term_rows: list[dict], min_cell: int = _MIN_CELL,
+                     concepts: "dict | None" = None, catalog_cap: int = 400) -> dict:
+    """Build the dashboard JSON. ``term_rows`` is one dict per mapped term:
     ``mondo_id, label, is_internal(bool), parents(list[mondo_id]), std_concepts
-    (list[int]), n_persons(int raw), collision_siblings(list[mondo_id])``.
+    (list[int]), n_persons(int raw), collision_siblings(list[mondo_id])`` and, in the
+    source_climb space, ``source_codes``: the term's FULL list of catalogued codes, each
+    with its published cell ``n`` (see `publish_cell`) and ladder ``step``.
 
-    Pure and time-free (the driver stamps ``meta['generated_utc']``). Each node
-    carries a three-state ``state`` (unused/used_small/reported) AND a four-way
-    display ``category`` for the dashboard's show/hide layers:
-      * ``reported``     — exact count (>= floor)
-      * ``used_small``   — used, 0<count<floor (count withheld)
-      * ``used_branch``  — 0 direct count but an ANCESTOR of a used node (a branch
-                           point on the used skeleton — kept, structurally relevant)
-      * ``other``        — 0 count and NOT above any used node (the rest of Mondo)
-    Headline stats are exact term counts (terms are not patients).
+    CELL MODE (rows carry cells): every patient figure is a sum of published cells (spec
+    Revision 2) — ``count`` = Σ the term's cells (diagnoses), ``split`` = its step-1-3 /
+    step-4 sums, ``roll`` = `rollup_cells` over the subtree; ``imputed`` counts the 10s in
+    the term's own cells. No distinct-patient term total is published. The code list is
+    published heavy-first, capped at ``catalog_cap`` (the sums cover the full list).
+    LEGACY MODE (standard / source spaces, no cells): the term's distinct-patient total,
+    masked to ``≤floor`` by `usage_state`.
 
-    A final `complementary_suppress` pass bands the total (``count`` -> None,
-    ``display`` -> a standard band, ``count_range`` + ``total_banded`` added) for any
-    reported term whose exact total + per-code bands would let differencing box a
-    ≤floor source code into the suppressed interior; `assert_diff_safe` then re-checks
-    as a redundant post-condition. Such terms stay ``reported``/used in the stats."""
+    Pure and time-free (the driver stamps ``meta['generated_utc']``). Each node carries a
+    ``state`` (unused / used_small / reported) and a display ``category``:
+      * ``reported``    — a count with at least one exact cell (legacy: > floor)
+      * ``used_small``  — every cell imputed (legacy: masked ≤ floor)
+      * ``used_branch`` — 0 itself but an ANCESTOR of a used node (a structural branch point)
+      * ``other``       — 0 and not above any used node
+    `assert_cells_safe` re-checks the result as a post-condition."""
+    cell_mode = any("n" in c for r in term_rows for c in (r.get("source_codes") or []))
     nodes: list[dict] = []
     parents_of: dict[str, list[str]] = {_ROOT_ID: []}
     state_of: dict[str, str] = {}
     counts = {"unused": 0, "used_small": 0, "reported": 0}
-    n_internal_used = n_collision = 0
+    n_internal_used = n_collision = n_imputed = 0
     collision_kind_counts = {"shared_concept": 0, "climb_tie": 0, "mixed": 0}
+    cells_of = {r["mondo_id"]: list(r.get("source_codes") or []) for r in term_rows} \
+        if cell_mode else None
 
     for r in term_rows:
-        state, display, public = usage_state(r["n_persons"], min_cell)
-        # fractional (1/m) count — suppressed the same way (it is patient-derived and can
-        # dip below the floor even when the exact count clears it, so it needs its own gate).
-        frac_val = r.get("n_frac")
-        frac_val = r["n_persons"] if frac_val is None else frac_val
-        _fst, frac_display, frac_public = usage_state(int(round(frac_val)), min_cell)
+        mid = r["mondo_id"]
+        extra: dict = {}
+        if cell_mode:
+            sm = cell_sums(cells_of[mid])
+            public = sm["all"]
+            state = ("unused" if public == 0 else
+                     "used_small" if sm["imputed"] == sm["n_cells"] else "reported")
+            display = str(public)
+            n_imputed += sm["imputed"]
+            extra = {"cells": True, "imputed": sm["imputed"]}
+            if public:
+                extra["split"] = {"named": sm["named"], "climbed": sm["climbed"]}
+        else:
+            state, display, public = usage_state(r["n_persons"], min_cell)
         counts[state] += 1
-        state_of[r["mondo_id"]] = state
+        state_of[mid] = state
         parents = r["parents"] or [_ROOT_ID]
-        parents_of[r["mondo_id"]] = parents
+        parents_of[mid] = parents
         siblings = r.get("collision_siblings") or []
         # collision mechanism: source_climb sets it explicitly; other spaces' collisions
         # are all shared-concept (Maps-to coarsening), so default to that when flagged.
@@ -853,38 +997,35 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
                 collision_kind_counts[ckind] += 1
         if state != "unused" and r["is_internal"]:
             n_internal_used += 1
+        codes_full = list(r.get("source_codes") or [])
+        if cell_mode:   # heavy-first, so the cap keeps the high-volume codes
+            codes_full.sort(key=lambda c: (-int(c["n"]), int(c.get("step") or 0),
+                                           str(c.get("vocab")), str(c.get("code"))))
         nodes.append({
-            "id": r["mondo_id"],
+            "id": mid,
             "label": r["label"],
             "kind": "internal" if r["is_internal"] else "leaf",
             "parents": parents,
             "std_concepts": [int(c) for c in r["std_concepts"]],
             "state": state,
             "display": display,
-            "count": public,                 # None when withheld
-            "frac": frac_public,             # de-double-counted addable count (None if withheld)
-            "frac_display": frac_display,
+            "count": public,                 # None only for a masked legacy total
             "collision": bool(siblings),
             "collision_siblings": siblings,
             "collision_kind": ckind,
             "rare": bool(r.get("rare")),
             "rare_src": list(r.get("rare_src") or []),
-            # code multiplicity (exact COUNTS of source/target ids — not patient
-            # counts, so unsuppressed and un-differenceable): how many distinct ids
-            # roll into this term, by vocabulary, plus the ids themselves.
+            # code multiplicity (exact COUNTS of source/target ids — not patient counts).
             "codes": list(r.get("codes") or []),
             "n_codes": int(r.get("n_codes") or len(r.get("codes") or [])),
             "codes_by_vocab": dict(r.get("codes_by_vocab") or {}),
-            # source_climb catalog: the ORIGINATING source codes (ICD etc.) whose
-            # conditions were attributed to this term, by any tier (source-exact /
-            # standard-exact / climbed) — identity only (vocab+code+name+via), never
-            # per-code patient counts. Empty for the exact-map count spaces.
-            "source_codes": list(r.get("source_codes") or []),
-            "n_source_codes": int(r.get("n_source_codes") or len(r.get("source_codes") or [])),
-            # per-term magnitude histogram over the source codes: how many CODES fall in
-            # each volume band (a count of codes, never patients — safe at any value).
-            # The "where's the weight" shape; empty for the exact-map count spaces.
-            "source_bands": list(r.get("source_bands") or []),
+            # source_climb catalog: the ORIGINATING source codes attributed to this term,
+            # each with its step, mapping path and published cell. Empty for the exact-map
+            # count spaces.
+            "source_codes": codes_full[:catalog_cap] if cell_mode else codes_full,
+            "n_source_codes": len(codes_full) if cell_mode
+                              else int(r.get("n_source_codes") or len(codes_full)),
+            **extra,
         })
 
     depth = _depths(parents_of)
@@ -904,12 +1045,13 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
         nd["category"] = cat
         cat_counts[cat] += 1
 
-    # Complementary suppression of the source-code -> term roll-up marginal: band the
-    # total of any term whose exact total + per-code bands would box a ≤floor code into
-    # the suppressed interior. One pass suffices (within-term independence; see the note
-    # by `complementary_suppress`); category/state/stats are unaffected (banded terms are
-    # still reported & used — only their exact number becomes a standard band).
-    n_total_banded = complementary_suppress(nodes, min_cell)
+    root_roll = None
+    if cell_mode:   # subtree roll-ups, from published cells only
+        roll = rollup_cells(cells_of, parents_of)
+        for nd in nodes:
+            if nd["id"] in roll:
+                nd["roll"] = roll[nd["id"]]
+        root_roll = roll.get(_ROOT_ID)
 
     n_terms = len(term_rows)
     n_used = counts["used_small"] + counts["reported"]
@@ -918,7 +1060,7 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
         "used_terms": n_used,
         "used_small_terms": counts["used_small"],
         "reported_terms": counts["reported"],
-        "total_banded_terms": n_total_banded,
+        "imputed_cells": n_imputed,
         "unused_terms": counts["unused"],
         "used_branch_terms": cat_counts["used_branch"],
         "other_terms": cat_counts["other"],
@@ -937,12 +1079,19 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
     root = {"id": _ROOT_ID, "label": "Mondo disease (mapped-term view)",
             "kind": "root", "parents": [], "std_concepts": [], "state": "root",
             "category": "root", "display": "", "count": None,
-            "frac": None, "frac_display": "", "collision": False,
+            "collision": False,
             "collision_siblings": [], "collision_kind": "", "rare": False, "rare_src": [],
             "codes": [], "n_codes": 0, "codes_by_vocab": {},
-            "source_codes": [], "n_source_codes": 0, "source_bands": [], "depth": 0}
-    assert_diff_safe(nodes, min_cell)     # redundant post-condition; see the note above
-    return {"meta": meta, "stats": stats, "nodes": [root] + nodes}
+            "source_codes": [], "n_source_codes": 0, "depth": 0}
+    if root_roll:
+        root["roll"] = root_roll
+    assert_cells_safe(nodes, cells_of, min_cell)     # post-condition
+    out = {"meta": meta, "stats": stats, "nodes": [root] + nodes}
+    if concepts:
+        # identity table for every concept a catalog entry's ``std`` / ``path`` names:
+        # {str(concept_id): [vocabulary_id, concept_code]} (identities only, no names).
+        out["concepts"] = concepts
+    return out
 
 
 def format_summary(stats: dict, *, min_cell: int = _MIN_CELL) -> str:
@@ -1080,12 +1229,15 @@ def main(argv: list[str]) -> int:
     hpo_parent_adj: dict[str, list[str]] = {}
     hpo_has_child: set = set()
     hpo_cid_rows: "list[tuple]" = []
+    hpo_version = None
     if args.hpo_obo_url and args.count_space in ("source_climb", "all"):
         try:
-            dest = cache / "hp.obo"
+            dest = cache / hpo_cache_name(args.hpo_obo_url)
             if not (dest.exists() and dest.stat().st_size > 0):
                 sys.stderr.write(f"[hpo] downloading {args.hpo_obo_url}\n")
                 urllib.request.urlretrieve(args.hpo_obo_url, dest)  # noqa: S310
+            hpo_version = hpo_data_version(dest.read_text())
+            sys.stderr.write(f"[hpo] release {hpo_version}\n")
             for hp_id, hp_label, vocab, code in parse_hpo_xrefs(dest.read_text()):
                 if vocab == "SNOMED":
                     hpo_by_snomed.setdefault(code, (hp_id, hp_label))
@@ -1113,6 +1265,12 @@ def main(argv: list[str]) -> int:
                                  f"{len(hpo_cid_rows)} concept ids mapped\n")
         except Exception as e:                          # noqa: BLE001 — probe is best-effort
             sys.stderr.write(f"[hpo] probe skipped: {e}\n")
+    if args.with_hpo and not hpo_by_snomed:
+        # An HPO axis with no SNOMED xrefs is silently empty (the 2026-09-01 HPO release
+        # dropped them; exp 0120's first run). Fail before the expensive Spark work.
+        sys.exit(f"[hpo] --with-hpo but 0 SNOMED xrefs loaded from {args.hpo_obo_url} "
+                 f"(release {hpo_version}); pin a release that carries them via "
+                 f"--hpo-obo-url (e.g. .../obo/hp/releases/2026-06-23/hp.obo)")
 
     def run_space(space):
         """Count + assemble ONE count space; write its payload + TSV; return a summary
@@ -1122,17 +1280,16 @@ def main(argv: list[str]) -> int:
         source_codes_of: dict[str, dict] = {}   # source_climb catalog (empty otherwise)
         survey: dict = {}                       # source_climb tier coverage (empty otherwise)
         collision_kind_of: dict[str, str] = {}  # source_climb collision mechanism per term
-        frac_of: dict[str, float] = {}          # source_climb fractional (1/m) term count
 
         def assemble_axis(attribution, parent_adj, has_child, label_of, rare_of,
-                          out_name, axis_label):
+                          out_name, axis_label, paths_of=None):
             """CORE per-term assembly for ONE axis, run once per axis (Mondo, then HPO).
 
             Turns an ``attribution`` frame (person_id, mondo_id, origin_cid, via, k_src,
             k_std — the source_climb attribution for Mondo, ``t_hpo`` for HPO) plus the
             axis's OWN DAG structures (``parent_adj``/``has_child``/``label_of``/``rare_of``,
             passed in — NOT the Mondo ones) into the written payload ``<out>/<out_name>``
-            and its ``_nodes.tsv``. Computes, per axis: the fractional (1/m) count, the
+            and its ``_nodes.tsv``. Computes, per axis: the per-term counts, the step-tagged
             source-code catalog + volume bands, the collision split, the term universe and
             term_rows, then ``assemble_payload`` + write.
 
@@ -1147,67 +1304,65 @@ def main(argv: list[str]) -> int:
             is_mondo = axis_label == "mondo"
             hit = attribution.select("person_id", "mondo_id")
 
-            # FRACTIONAL (1/m) per-term count — the addable, de-double-counted number.
-            # A condition keyed by (person, source concept, standard concept) maps to m
-            # terms via its resolved tier (the collision); credit 1/m to each so the shares
-            # add back to 1 and summed / rolled-up counts never double-count the map
-            # ambiguity. m is a property of the condition (person-independent).
-            attr_k = attribution.select(
-                "person_id", "mondo_id",
-                F.coalesce(F.col("k_src"), F.lit(-1)).alias("k_src"),
-                F.coalesce(F.col("k_std"), F.lit(-1)).alias("k_std"))
-            m_of = (attr_k.select("k_src", "k_std", "mondo_id").distinct()
-                    .groupBy("k_src", "k_std").agg(F.count(F.lit(1)).alias("m")))
-            frac_pd = (attr_k.distinct().join(m_of, ["k_src", "k_std"])
-                       .groupBy("mondo_id")
-                       .agg(F.sum(F.lit(1.0) / F.col("m")).alias("frac")).toPandas())
-            frac_of = {str(r["mondo_id"]): float(r["frac"]) for _, r in frac_pd.iterrows()}
-
-            # per-term catalog of ORIGINATING source codes. Keep the FULL tier via for the
-            # collision split; the catalog display collapses to exact/climbed (exact wins if
-            # a code reaches a term both ways). Named via the concept table.
-            cat = (attribution.select("mondo_id", "origin_cid", "via").distinct()
-                   .withColumn("vrank", F.when(F.col("via") == "climbed", 1).otherwise(0)))
-            cat = (cat.withColumn("best", F.min("vrank").over(
-                       Window.partitionBy("mondo_id", "origin_cid")))
-                   .where(F.col("vrank") == F.col("best"))
-                   .select("mondo_id", "origin_cid", "via").distinct())
-            cat_named = (cat.join(concept_all, "origin_cid", "left")
-                         .select("mondo_id", "origin_cid", "via", "vocabulary_id", "concept_code")
+            # per-term catalog of ORIGINATING source codes, each tagged with its ladder STEP
+            # for the term (lowest wins: a code reaching the term directly on some rows and by
+            # climbing on others is a direct code here), the standard concept it went through,
+            # and -- for climbed codes -- one shortest SNOMED chain to the mapped ancestor
+            # (``paths_of``). ``via`` keeps the full tier name for the collision split.
+            steps = catalog_steps_df(attribution).cache()
+            cat_named = (steps.join(code_std_df(attribution, steps),
+                                    ["mondo_id", "origin_cid"], "left")
+                         .join(concept_all, "origin_cid", "left")
+                         .select("mondo_id", "origin_cid", "step", "std_cid", "multi_std",
+                                 "vocabulary_id", "concept_code")
                          .toPandas())
-            # per-(term, code) distinct-person volume -> a differencing-safe magnitude BAND
-            # per code (never the exact count) + a per-term band histogram.
+            cat_named["via"] = [VIA_OF_STEP[int(x)] for x in cat_named["step"]]
+            # per-(term, code) distinct-person count = one diagnosis CELL; only its
+            # published value (exact above the floor, IMPUTED at 1..floor) leaves the
+            # cluster, and every aggregate is built from those (spec Revision 2).
             code_counts = (attribution.groupBy("mondo_id", "origin_cid")
                            .agg(F.countDistinct("person_id").alias("np")).toPandas())
             np_of = {(str(r.mondo_id), int(r.origin_cid)): int(r.np)
                      for r in code_counts.itertuples()}
-            band_rank = {lab: i for i, lab in enumerate(_band_label(min_cell))}  # heavy=0
             source_codes_of: dict[str, dict] = {}
             code_disp = {}       # origin_cid -> "VOCAB code" for examples
+            concept_ids: set = set()   # every std / path concept, resolved to identities below
             for mid, sub in cat_named.groupby("mondo_id"):
                 recs = []
-                seen = set()   # one row per concept id: a code reaching a term via BOTH
-                               # source_exact and standard_exact must not display (or count
-                               # in the histogram) twice — both collapse to display "exact".
                 for r in sub.itertuples():
-                    cid = int(r.origin_cid)
-                    if cid in seen:
-                        continue
-                    seen.add(cid)
+                    cid, step = int(r.origin_cid), int(r.step)
                     vocab = str(r.vocabulary_id) if pd.notna(r.vocabulary_id) else "?"
                     code = str(r.concept_code) if pd.notna(r.concept_code) else str(cid)
-                    disp = "climbed" if str(r.via) == "climbed" else "exact"
-                    band = volume_band(np_of.get((str(mid), cid)), min_cell)
-                    recs.append({"id": cid, "vocab": vocab, "code": code,
-                                 "via": disp, "band": band})
+                    # `step` supersedes the old exact/climbed `via` (dropped to keep the
+                    # payload small); `std` is omitted when `path` carries it as path[0].
+                    rec = {"id": cid, "vocab": vocab, "code": code, "step": step,
+                           "n": publish_cell(np_of.get((str(mid), cid)), min_cell)}
+                    std = int(r.std_cid) if pd.notna(r.std_cid) else None
+                    if step > 1 and std is not None:          # step 1: source -> Mondo directly
+                        rec["std"] = std
+                        concept_ids.add(std)
+                        if pd.notna(r.multi_std) and bool(r.multi_std):
+                            rec["multi_std"] = True
+                    if step == 4 and std is not None:
+                        chain, amb = (paths_of or {}).get((std, str(mid)), (None, False))
+                        rec["path"] = chain                   # None -> hover shows "SNOMED"
+                        if chain:
+                            concept_ids.update(chain)
+                            rec.pop("std", None)              # == path[0]
+                        if amb:
+                            rec["path_ambiguous"] = True
+                    recs.append(rec)
                     code_disp[cid] = f"{vocab} {code}"
-                # histogram over the FULL set (before the display cap); sort heavy-first so
-                # the cap keeps the heavy hitters and the light tail collapses in the UI.
-                hist = band_histogram([c["band"] for c in recs], min_cell)
-                recs.sort(key=lambda c: (band_rank.get(c["band"], 99),
-                                         c["via"] != "exact", c["vocab"], c["code"]))
-                source_codes_of[str(mid)] = {"list": recs[:CATALOG_CAP], "n": len(recs),
-                                             "bands": hist}
+                # the FULL list: assemble_payload sums every cell, then caps the display
+                source_codes_of[str(mid)] = {"list": recs, "n": len(recs)}
+            concepts = {}
+            if concept_ids:
+                ids_sdf = broadcast(spark.createDataFrame(
+                    pd.DataFrame({"origin_cid": sorted(concept_ids)})))
+                for r in concept_all.join(ids_sdf, "origin_cid").toPandas().itertuples():
+                    concepts[str(int(r.origin_cid))] = [
+                        str(r.vocabulary_id) if pd.notna(r.vocabulary_id) else "?",
+                        str(r.concept_code) if pd.notna(r.concept_code) else ""]
 
             # collisions: a single source code attributed to >1 term -> a patient with that
             # code counts under each. Split by MECHANISM (shared_concept / climb_tie / mixed).
@@ -1267,7 +1422,7 @@ def main(argv: list[str]) -> int:
             for mid in sorted(keep_ids):
                 cids = sorted({int(c) for c in tm.get(mid, [])})
                 codes = codes_map.get(mid, [])
-                catrec = source_codes_of.get(mid) or {"list": [], "n": 0, "bands": []}
+                catrec = source_codes_of.get(mid) or {"list": [], "n": 0}
                 term_rows.append({
                     "mondo_id": mid,
                     "label": label_of.get(mid, mid),
@@ -1279,9 +1434,7 @@ def main(argv: list[str]) -> int:
                     "codes_by_vocab": codesbyvocab_map.get(mid, {}),
                     "source_codes": catrec["list"],
                     "n_source_codes": catrec["n"],
-                    "source_bands": catrec.get("bands", []),
                     "n_persons": count_of.get(mid, 0),
-                    "n_frac": frac_of.get(mid, float(count_of.get(mid, 0))),
                     "collision_siblings": siblings.get(mid, []),
                     "collision_kind": collision_kind_of.get(mid, ""),
                     "rare": rare_of.get(mid, False),
@@ -1299,6 +1452,11 @@ def main(argv: list[str]) -> int:
                     "persons_source_exact": int(t1.select("person_id").distinct().count()),
                     "persons_standard_exact": int(t2.select("person_id").distinct().count()),
                     "persons_climbed": int(t3.select("person_id").distinct().count()),
+                    # distinct persons reaching >= 1 term ONLY via climb-only codes (a single
+                    # cohort-wide count, never a sum of per-term split parts)
+                    "persons_rolled_up_only": (lambda n: n if (n == 0 or n > min_cell)
+                                               else f"≤{min_cell}")(
+                        rolled_up_only_persons(attribution, steps)),
                     "unmatched_codes_by_vocab": {
                         (str(r.vocabulary_id) if pd.notna(r.vocabulary_id) else "?"): int(r.codes)
                         for r in unm_codes_by_vocab.itertuples()},
@@ -1338,9 +1496,12 @@ def main(argv: list[str]) -> int:
                 "count_rule": meta_rule,
                 "generated_utc": generated_utc,
             }
+            if args.with_hpo and hpo_version:
+                meta["hpo_version"] = hpo_version
             if survey:
                 meta["survey"] = survey
-            payload = assemble_payload(meta=meta, term_rows=term_rows, min_cell=min_cell)
+            payload = assemble_payload(meta=meta, term_rows=term_rows, min_cell=min_cell,
+                                       concepts=concepts, catalog_cap=CATALOG_CAP)
 
             (out / out_name).write_text(json.dumps(payload))
             tsv_name = (out_name[:-5] if out_name.endswith(".json") else out_name) + "_nodes.tsv"
@@ -1348,17 +1509,19 @@ def main(argv: list[str]) -> int:
                 "mondo_id": nd["id"], "label": nd["label"], "kind": nd["kind"],
                 "depth": nd["depth"], "state": nd["state"], "category": nd["category"],
                 "n_patients": nd["display"],
-                "n_frac": nd.get("frac_display", ""),
                 "collision": int(nd["collision"]),
                 "collision_siblings": "|".join(nd["collision_siblings"]),
                 "n_codes": nd["n_codes"],
                 "codes_by_vocab": ";".join(f"{v}:{c}" for v, c in nd["codes_by_vocab"].items()),
                 "codes": "|".join(f"{c['vocab']}:{c['code']}" for c in nd["codes"]),
                 "n_source_codes": nd.get("n_source_codes", 0),
-                "source_codes": "|".join(f"{c['vocab']}:{c['code']}:{c['via']}:{c.get('band','')}"
-                                         for c in nd.get("source_codes", [])),
-                "source_bands": ";".join(f"{b['band']}:{b['codes']}"
-                                         for b in nd.get("source_bands", [])),
+                "source_codes": "|".join(
+                    f"{c['vocab']}:{c['code']}:{c.get('step', '')}:{c.get('n', '')}"
+                    for c in nd.get("source_codes", [])),
+                "imputed_cells": nd.get("imputed", 0),
+                "named": (nd.get("split") or {}).get("named", ""),
+                "climbed": (nd.get("split") or {}).get("climbed", ""),
+                "rollup": (nd.get("roll") or {}).get("all", ""),
                 "rare": int(nd["rare"]), "rare_src": "|".join(nd["rare_src"]),
                 "parents": "|".join(nd["parents"]),
             } for nd in payload["nodes"] if nd["kind"] != "root"]
@@ -1509,7 +1672,8 @@ def main(argv: list[str]) -> int:
                       .join(unmatched_std, ca["descendant_concept_id"] == unmatched_std["std_cid"], "inner")
                       .select(ca["descendant_concept_id"].alias("std_cid"),
                               ca["ancestor_concept_id"].alias("anc_cid"),
-                              ca["min_levels_of_separation"].alias("lev")))
+                              ca["min_levels_of_separation"].alias("lev"))
+                    .cache())     # reused by the nearest-ancestor pick and the path collection
             nearest = (ca_f.withColumn(
                            "mlev", F.min("lev").over(Window.partitionBy("std_cid")))
                        .where(F.col("lev") == F.col("mlev"))
@@ -1545,7 +1709,7 @@ def main(argv: list[str]) -> int:
                            .select(F.col("concept_id").alias("origin_cid"),
                                    "vocabulary_id", "concept_code"))
 
-            # The per-term assembly (fractional 1/m count, source-code catalog + bands,
+            # The per-term assembly (counts, named split, source-code catalog + bands,
             # collision split, term_rows, assemble_payload, write) is factored into
             # assemble_axis and run once per axis (Mondo below, then HPO). Only the
             # source_climb SURVEY inputs are computed here (Mondo-axis-only): tier person
@@ -1623,9 +1787,27 @@ def main(argv: list[str]) -> int:
             # --- assemble both axes from their attributions -------------------------------
             # Mondo: the source_climb attribution over the Mondo DAG (byte-identical to the
             # prior single-axis path); the survey is attached to this axis only.
+            # ---- climb chains for the mapping-path hover (structure only, no persons) -------
+            # For each climbed (standard concept, Mondo term) pair: the mapped SNOMED ancestor
+            # carrying that term at the nearest distance (tie -> lowest id) and one shortest
+            # ``Is a`` chain to it. Inputs are concept_ancestor rows over the climb closure and
+            # the ``Is a`` edges inside it — vocabulary structure, collected driver-side.
+            paths_of = {}
+            if len(reduced_pd):
+                isa_df = (_read_bq(spark, args.cdr, args.billing, "concept_relationship")
+                          .where(F.col("relationship_id") == "Is a")
+                          .select("concept_id_1", "concept_id_2"))
+                paths_of, n_nodes = collect_climb_paths(
+                    spark, ca, ca_f, nearest, anc_map, reduced_pd, isa_df)
+                n_ok = sum(1 for ch, _ in paths_of.values() if ch)
+                n_amb = sum(1 for _, a in paths_of.values() if a)
+                sys.stderr.write(f"[paths] climbed (concept, term) pairs {len(paths_of)} · "
+                                 f"chain reconstructed {n_ok} · ambiguous {n_amb} · "
+                                 f"closure nodes {n_nodes}\n")
+
             mondo_result = assemble_axis(
                 attribution, parent_adj, has_child, label_of, rare_of,
-                f"mondo_usage_{space}.json", "mondo")
+                f"mondo_usage_{space}.json", "mondo", paths_of=paths_of)
             # HPO: the HPO-exact rung (t_hpo) over the HPO DAG -> hpo_usage.json. Only when
             # --with-hpo built the axis (t_hpo is None otherwise -> no HPO payload).
             if t_hpo is not None:
@@ -1678,7 +1860,7 @@ def main(argv: list[str]) -> int:
         for mid in sorted(mapped_ids):
             cids = sorted({int(c) for c in term_match.get(mid, [])})
             codes = codes_of.get(mid, [])
-            cat = source_codes_of.get(mid) or {"list": [], "n": 0, "bands": []}
+            cat = source_codes_of.get(mid) or {"list": [], "n": 0}
             term_rows.append({
                 "mondo_id": mid,
                 "label": label_of.get(mid, mid),
@@ -1690,11 +1872,7 @@ def main(argv: list[str]) -> int:
                 "codes_by_vocab": codesbyvocab_of.get(mid, {}),
                 "source_codes": cat["list"],
                 "n_source_codes": cat["n"],
-                "source_bands": cat.get("bands", []),
                 "n_persons": count_of.get(mid, 0),
-                # fractional (1/m) de-double-counted count; falls back to the exact count
-                # for spaces without collisions (source) or that don't compute it.
-                "n_frac": frac_of.get(mid, float(count_of.get(mid, 0))),
                 "collision_siblings": siblings.get(mid, []),
                 "collision_kind": collision_kind_of.get(mid, ""),
                 "rare": rare_of.get(mid, False),
@@ -1731,7 +1909,6 @@ def main(argv: list[str]) -> int:
             "mondo_id": nd["id"], "label": nd["label"], "kind": nd["kind"],
             "depth": nd["depth"], "state": nd["state"], "category": nd["category"],
             "n_patients": nd["display"],
-            "n_frac": nd.get("frac_display", ""),
             "collision": int(nd["collision"]),
             "collision_siblings": "|".join(nd["collision_siblings"]),
             "n_codes": nd["n_codes"],
@@ -1740,8 +1917,6 @@ def main(argv: list[str]) -> int:
             "n_source_codes": nd.get("n_source_codes", 0),
             "source_codes": "|".join(f"{c['vocab']}:{c['code']}:{c['via']}:{c.get('band','')}"
                                      for c in nd.get("source_codes", [])),
-            "source_bands": ";".join(f"{b['band']}:{b['codes']}"
-                                     for b in nd.get("source_bands", [])),
             "rare": int(nd["rare"]), "rare_src": "|".join(nd["rare_src"]),
             "parents": "|".join(nd["parents"]),
         } for nd in payload["nodes"] if nd["kind"] != "root"]
