@@ -1,7 +1,7 @@
 ---
 id: 120
 slug: mondo-usage-provenance-split
-status: pending
+status: complete
 model_class: mondo_usage
 cohort: population_rare_priority
 source_table: condition_occurrence
@@ -66,4 +66,11 @@ make -C analysis/cloud exp ID=120
   withheld 1,257; no frac. Fixes: pin `hpo_obo_url` (above); cache `hp.obo` by URL; fail
   loudly when `--with-hpo` loads 0 SNOMED xrefs; record `meta.hpo_version`. Also trimmed
   redundant catalog fields (`via`, `std` when `path` present): 19.0 -> ~17.1 MB.
-- **run 2** — _(pending)_
+- **2026-11-02, run 2 — OK (HPO pinned to 2026-06-23).** Both payloads pass the two-sided
+  tripwire. Routing matches 0109 exactly where it should (persons climbed 322,454; 1,347 HPO
+  terms used; 4,371 SNOMED-xref'd HPO codes), so only the publication + provenance layers
+  changed. Mondo: 4,822 used / 3,063 reported / **80 banded** (vs 601 in the interim
+  payload); catalog steps 1: 5,074 · 2: 13,595 · 4: 44,520, with a SNOMED chain for
+  44,503 / 44,520 climbed entries; split exact 5,651 · mirror 2,605 · ranged 416 ·
+  withheld 1,255; persons reaching a term only by climbing 311,334. HPO: 1,347 used /
+  807 reported / 23 banded; all step 3, splits mirror. Payloads 16.8 MB + 1.9 MB.
