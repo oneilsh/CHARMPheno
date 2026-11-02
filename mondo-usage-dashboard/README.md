@@ -26,14 +26,14 @@ the detail panel docked beside it.
 
 The payload is produced on the AoU cluster (BigQuery + Spark) by
 [`analysis/cloud/mondo_usage_cloud.py`](../analysis/cloud/mondo_usage_cloud.py),
-run as experiment **0105**:
+currently run as experiment **0120** (`source_climb`, `--with-hpo`, HPO release pinned):
 
 ```bash
-make -C analysis/cloud exp ID=105
-# writes <run-dir>/mondo_usage.json  (+ mondo_usage_nodes.tsv)
+make -C analysis/cloud exp ID=120
+# writes <run-dir>/mondo_usage.json + hpo_usage.json  (+ *_nodes.tsv)
 ```
 
-Copy that `mondo_usage.json` here (or open it in the UI). The sample bundled in the
+Copy both files here (or open `mondo_usage.json` in the UI). The sample bundled in the
 repo uses the **real Mondo 2026-06-02 hierarchy** for three body systems
 (cardiovascular, respiratory, hematologic) with **synthetic, seeded** patient
 counts — it is labeled `SAMPLE DATA` in the header and contains no patient data.
@@ -95,19 +95,45 @@ diseases (they flag e.g. prostate cancer), so those are deliberately excluded.
 A ✦ also marks **rare-disease** terms.
 The detail drawer lists each term's source codes and its subtree roll-up.
 
-Each node shows **`direct of rolled (±unc)`** — e.g. `20k of 664k ±123`: the term's own
-exact patient count, then its subtree roll-up. The roll-up spans the term's **full DAG
-descendant closure** (every term reachable below it, each counted once even if it has
-several parents — so a multi-parent child like *rheumatoid vasculitis* contributes to
-every ancestor's roll-up). It is a **midpoint estimate**
-(each `≤20` term put at ≈ 10) with a **±** that allows **±10 per suppressed term** → `±10·s`
-(a round stand-in for the strict `±9.5` half-range of the 1–20 unknowns). It is deliberately
-*not* a √s statistical band — that would assume independence and understate the uncertainty.
-Because a patient with several of a subtree's diagnoses is summed several
-times, the rolled number is a **count of diagnoses, not distinct patients** (the drawer
-gives the honest bracket `floor–ceiling` and "at least N distinct patients"). The
-**Per-term / Rolled up** toggle picks which of the two numbers **drives node size and is
-bolded** (per-term → the direct count; rolled up → the roll-up); both are always shown.
+Each node shows **`direct of rolled (±unc)`**, e.g. `20k of 664k ±123`: the term's own
+patient count, then its subtree roll-up. The roll-up spans the term's **full DAG descendant
+closure** (every term reachable below it, each counted once even with several parents) and
+is the **sum of those terms' own counts**: a count of **diagnoses** (patient-term pairs),
+not distinct patients. A patient counts once per term they touch, so a code that maps to two
+terms, or two conditions in one branch, counts twice, by design. It is built only from the
+published per-term figures (no extra number is exported). Its uncertainty comes only from
+masked (`≤20`) and range-published terms: each contributes `[lo, hi]`, the shown value is
+the midpoint, and `±` is half the summed width, so `est ± unc` spans exactly
+`[floor, ceiling]`. (Earlier exports split shared diagnoses 1/m via a published `frac`; that
+figure leaked code overlaps and masked counts and was removed, see exp 0120.) The
+**Per-term / Rolled up** toggle picks which number **drives node size and is bolded**.
+
+**Mapping provenance (exp 0120+).** Each source code in a term's drawer is marked by the
+ladder step that placed it: `≡` **same-as** (the source code is a Mondo cross-reference),
+`→` **via SNOMED** (its Maps-to SNOMED concept is a mapped term), `◆` **HPO** (that SNOMED
+concept is an HPO cross-reference), `↑` **climbed** (rolled up the SNOMED hierarchy to the
+nearest mapped term). Colour is always paired with the glyph and a legend. Hovering a code
+shows its name, step and volume; **clicking** opens its mapping path (from the payload's
+`concepts` identity table) with every concept linked out (source + SNOMED to Athena, the
+term to Monarch), e.g.
+`ICD10CM J22 → SNOMED 195742007 → SNOMED 50417007 → SNOMED 128272009 → MONDO:0000270`
+(one of several equally short chains is flagged as such). Concept names are never exported;
+ICD/HCPCS names resolve from NIH Clinical Tables and SNOMED codes link to Athena.
+
+**Count toggle (All / Exclude climbed / Climbed only).** Each term's patients split into
+**named** (at least one code that names the term: steps 1–3) and **climbed only** (reached
+only by climbing). A code reaching a term directly on some rows and by climbing on others
+counts as named. The toggle recounts every term and drives sizes, colours, the hide-unused
+filter, the code list and its band chips. Terms where the climbed-only share is large are
+where a direct Mondo mapping is most needed.
+
+**Small-cell protection.** Every publish/withhold decision is made from already-public
+information only, so a decision itself never leaks. Totals are exact unless an exact figure
+could narrow a masked (`≤20`) source code, in which case they show as a 1-2-5 band
+(`21–50`, `51–100`, `101–200`, …). Split parts are exact, ranged (`≤20` plus
+`N-20–N-1`), mirrored (one part has no codes, so it is 0) or withheld (`—`). The driver's
+`assert_diff_safe` re-checks every published combination, from above and below, before
+writing.
 
 ## Method (why no roll-up)
 
@@ -134,8 +160,8 @@ meta strip):
   most specific mapped term reachable — source-exact, else standard-exact, else climb
   `concept_ancestor` (SNOMED-only) to the nearest mapped ancestor (ties → counted in each,
   flagged). Recovers coverage `source` drops. Each term catalogs the **originating source
-  codes** that reached it, tagged exact vs climbed (`↑`), in a "Source codes" drawer
-  section; the run also emits a per-vocabulary coverage survey.
+  codes** that reached it, tagged with their ladder step (see *Mapping provenance*), in a
+  "Source codes" drawer section; the run also emits a per-vocabulary coverage survey.
 - `all` (exp 0108) — runs all three in **one job** and writes `mondo_usage_<space>.json`
   for each (plus a primary `mondo_usage.json` = source_climb), the per-space TSVs, and a
   **disclosure-safe `mondo_usage_summary.md`** — term counts + ≤-suppressed person figures,

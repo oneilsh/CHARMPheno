@@ -192,6 +192,33 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
 @media(prefers-color-scheme:dark){:root:not([data-theme="light"]){
   --sys0:#4a97d6;--sys1:#f0a92a;--sys2:#2bbf9e;--sys3:#dd95c6;--sys4:#f0713a;--sys5:#8fd0f5;--desc:#6f9bff;--rare:#e77fc0}}
 :root[data-theme="dark"]{--sys0:#4a97d6;--sys1:#f0a92a;--sys2:#2bbf9e;--sys3:#dd95c6;--sys4:#f0713a;--sys5:#8fd0f5;--desc:#6f9bff;--rare:#e77fc0}
+/* mapping-step palette (1 same-as · 2 via SNOMED · 3 HPO · 4 climbed): four reference
+   categorical slots, validated light + dark with every pair compared (normal-vision floor
+   passes; colour-blind separation 6.9 is in the floor band), so each step ALSO carries a
+   glyph (≡ → ◆ ↑) and the legend names it — identity is never colour alone. */
+:root{--step1:#2a78d6;--step2:#e87ba4;--step3:#008300;--step4:#eda100}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--step1:#3987e5;--step2:#d55181;--step3:#008300;--step4:#c98500}}
+:root[data-theme="dark"]{--step1:#3987e5;--step2:#d55181;--step3:#008300;--step4:#c98500}
+.stepmk{display:inline-block;min-width:1.05em;text-align:center;font-weight:700;margin-right:2px}
+/* mapping-path dialog (click a source code) */
+.pathdlg{border:1px solid var(--border-strong);border-radius:12px;background:var(--surface);color:var(--ink);
+  padding:0;width:min(600px,calc(100vw - 32px));max-height:calc(100vh - 48px);box-shadow:var(--shadow)}
+.pathdlg::backdrop{background:rgba(10,15,20,.45)}
+.pathdlg .ph{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:16px 18px 10px;
+  border-bottom:1px solid var(--border)}
+.pathdlg h3{margin:0;font-size:16px;font-family:var(--mono);font-weight:600}
+.pathdlg .sub{color:var(--ink-2);font-size:12.5px;margin-top:4px}
+.pathdlg .pb{padding:12px 18px 16px;overflow:auto}
+.pathdlg ol{list-style:none;margin:6px 0 10px;padding:0}
+.pathdlg li{position:relative;padding:6px 0 6px 22px}
+.pathdlg li::before{content:"";position:absolute;left:6px;top:0;bottom:0;border-left:2px solid var(--border-strong)}
+.pathdlg li:first-child::before{top:50%}.pathdlg li:last-child::before{bottom:50%}
+.pathdlg li::after{content:"";position:absolute;left:2px;top:calc(50% - 5px);width:10px;height:10px;border-radius:50%;
+  background:var(--surface);border:2px solid var(--step-c,var(--ink-2))}
+.pathdlg .role{display:block;color:var(--muted);font-size:11px;font-family:var(--mono);letter-spacing:.02em}
+.pathdlg .hop{font-family:var(--mono);font-size:13px}
+.pathdlg .nm{color:var(--ink-2);font-size:12.5px;margin-left:6px}
+.pathdlg .note{color:var(--muted);font-size:11.5px;line-height:1.5;margin-top:8px}
 .rare-tag{color:var(--rare);border:1px solid var(--rare);border-radius:4px;padding:0 4px;font-size:9.5px;font-family:var(--mono);flex:0 0 auto;letter-spacing:.03em}
 
 /* graph (DAG explorer) */
@@ -297,7 +324,7 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
 .drawer .dh{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;
   padding:18px 18px 14px;border-bottom:1px solid var(--border)}
 .drawer .dh h3{font-family:var(--serif);font-size:19px;font-weight:600;line-height:1.2}
-.drawer .close{border:0;background:var(--surface-2);border-radius:7px;width:30px;height:30px;
+.drawer .close,.pathdlg .close{border:0;background:var(--surface-2);border-radius:7px;width:30px;height:30px;
   color:var(--ink-2);font-size:17px;flex:0 0 auto;cursor:pointer}
 .drawer .body{padding:16px 18px}
 .drawer-empty{padding:40px 18px;color:var(--muted);font-size:13px;text-align:center;line-height:1.6}
@@ -314,7 +341,8 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
 .warn{background:var(--cat-used-small-soft);border:1px solid var(--cat-used-small);border-radius:9px;
   padding:10px 12px;font-size:12.5px;color:var(--ink);margin-bottom:14px;line-height:1.45}
 .tip{position:fixed;pointer-events:none;background:var(--ink);color:var(--bg);font-size:12px;
-  font-family:var(--mono);padding:6px 9px;border-radius:6px;z-index:40;opacity:0;transition:opacity .1s;max-width:280px}
+  font-family:var(--mono);padding:6px 9px;border-radius:6px;z-index:40;opacity:0;transition:opacity .1s;max-width:440px;
+  white-space:pre-line;line-height:1.45}
 .foot{margin-top:26px;color:var(--muted);font-size:11.5px;line-height:1.6;font-family:var(--mono)}
 .foot b{color:var(--ink-2);font-weight:500}
 </style>
@@ -324,7 +352,7 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
   <header class="top">
     <div class="brand">
       <h1 id="brand-h1">Counting Diagnoses: AllOfUs on Mondo</h1>
-      <p>Diagnosis counts from the AllOfUs EHR database (v8) mapped to the Mondo disease and HPO phenotype ontologies. Counts of 20 or fewer have been masked; similar counts may be found at the <a href="https://databrowser.researchallofus.org/" target="_blank" rel="noopener">AllOfUs Public Data Browser</a>. <span class="mtip" tabindex="0">Methods details<span class="tip" role="tooltip"><span>Each participant's coded conditions in the AllOfUs <em>condition_occurrence</em> table are routed to a single best-home term by a ladder, taking the most specific reachable: (1) the <em>source</em> code (e.g. ICD) is one of a Mondo term's <em>same&nbsp;as</em> cross-references; else (2) its standardized SNOMED concept maps to a Mondo term via OMOP <em>Maps&nbsp;to</em>; else (3) the concept is an exact <b>HPO</b> phenotype term (used when Mondo has no specific term); else (4) it is rolled up the SNOMED hierarchy to the nearest Mondo ancestor. Mondo (diseases) is preferred, so HPO (phenotypes) claims only what Mondo would otherwise over-generalize &mdash; headache, nausea, lab abnormalities, and the like. Each participant is credited once per term; counts of 1&ndash;20 are masked and shown as &le;20.</span><span>The two ontologies are drawn together but <b>unlinked</b>: Mondo diseases grow rightward from the center, HPO phenotypes leftward, their roots meeting in the middle. Both keep their real branch structure &mdash; a grouping term with no code of its own is retained when it is a genuine <em>branch point</em> (two or more children lead to used terms); purely linear pass-through levels are collapsed.</span><span>A single coded condition can legitimately reach several terms in one ontology at once — its SNOMED concept is shared by several terms (OMOP's ICD&rarr;SNOMED <em>Maps&nbsp;to</em> is one-to-many), or it rolled up to several equally-near ancestors in Mondo's poly-hierarchy. So a term's own count answers "how many participants touch this term," and these per-term counts are not meant to be added together. When terms are combined in a subtree roll-up, each shared diagnosis is instead <em>split 1/m</em> across the <em>m</em> terms it reaches (fractional attribution), so the rolled-up total is de-double-counted and honestly additive.</span><span>Two node-size views are available. <em>Per-term</em> sizes each node by its own count, so a broad classification can look small while its specific children are large. <em>Rolled up</em> sizes each node by its de-double-counted subtree total — a diagnosis count (a participant with several diagnoses under one branch counts once per diagnosis), reported as a central estimate &plusmn; small-cell suppression.</span><span><b>Note that many Mondo disease entries do not have corresponding codes that would be found in an EHR; others do, but there is no direct mapping between them. Small counts or counts of 0 should thus be interpreted as absence of evidence, rather than evidence of absence.</b></span></span></span></p>
+      <p>Diagnosis counts from the AllOfUs EHR database (v8) mapped to the Mondo disease and HPO phenotype ontologies. Counts of 20 or fewer have been masked; similar counts may be found at the <a href="https://databrowser.researchallofus.org/" target="_blank" rel="noopener">AllOfUs Public Data Browser</a>. <span id="interim-note" hidden><b>Interim data:</b> some exact counts are temporarily shown as ranges, and the rolled-up view shows a bracket, while a stricter small-cell protection is applied; full detail returns with the next data refresh. </span><span class="mtip" tabindex="0">Methods details<span class="tip" role="tooltip"><span>Each participant's coded conditions in the AllOfUs <em>condition_occurrence</em> table are routed to a single best-home term by a ladder, taking the most specific reachable: (1) the <em>source</em> code (e.g. ICD) is one of a Mondo term's <em>same&nbsp;as</em> cross-references; else (2) its standardized SNOMED concept maps to a Mondo term via OMOP <em>Maps&nbsp;to</em>; else (3) the concept is an exact <b>HPO</b> phenotype term (used when Mondo has no specific term); else (4) it is rolled up the SNOMED hierarchy to the nearest Mondo ancestor. Mondo (diseases) is preferred, so HPO (phenotypes) claims only what Mondo would otherwise over-generalize &mdash; headache, nausea, lab abnormalities, and the like. Each participant is credited once per term; counts of 1&ndash;20 are masked and shown as &le;20.</span><span>The two ontologies are drawn together but <b>unlinked</b>: Mondo diseases grow rightward from the center, HPO phenotypes leftward, their roots meeting in the middle. Both keep their real branch structure &mdash; a grouping term with no code of its own is retained when it is a genuine <em>branch point</em> (two or more children lead to used terms); purely linear pass-through levels are collapsed.</span><span>A single coded condition can legitimately reach several terms in one ontology at once — its SNOMED concept is shared by several terms (OMOP's ICD&rarr;SNOMED <em>Maps&nbsp;to</em> is one-to-many), or it rolled up to several equally-near ancestors in Mondo's poly-hierarchy. So a term's own count answers "how many participants touch this term," and these per-term counts are not meant to be added together. When terms are combined in a subtree roll-up, their own counts are simply added, so the rolled-up figure counts <em>diagnoses</em> (patient&ndash;term pairs): a patient whose code reaches two terms, or who has two conditions in the branch, counts more than once.</span><span>Two node-size views are available. <em>Per-term</em> sizes each node by its own count, so a broad classification can look small while its specific children are large. <em>Rolled up</em> sizes each node by its subtree's diagnoses (the sum of its terms' counts), reported as an estimate &plusmn; the masked and range-published terms within it.</span><span>In a term's panel each source code is marked by the ladder step that placed it &mdash; <b style="color:var(--step1)">&equiv;</b>&nbsp;same-as, <b style="color:var(--step2)">&rarr;</b>&nbsp;via SNOMED, <b style="color:var(--step3)">&#9670;</b>&nbsp;HPO, <b style="color:var(--step4)">&uarr;</b>&nbsp;climbed &mdash; and clicking a code opens its mapping path, with each concept linked to Athena. The <em>Count</em> toggle splits each term's patients into those with at least one code that names the term (steps 1&ndash;3) and those reached only by climbing (step 4). To keep every count of 20 or fewer undisclosable, a total or a part is shown as a range (e.g. 21&ndash;50), or withheld (&mdash;), wherever an exact figure could reveal or narrow such a count.</span><span><b>Note that many Mondo disease entries do not have corresponding codes that would be found in an EHR; others do, but there is no direct mapping between them. Small counts or counts of 0 should thus be interpreted as absence of evidence, rather than evidence of absence.</b></span></span></span></p>
     </div>
     <div class="toolbar">
       <button class="btn ic" id="theme" title="Toggle theme" aria-label="Toggle color theme">
@@ -343,9 +371,15 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
           <span class="tb-sep"></span>
           <span class="tb-label">Node size</span>
-          <div class="tabs mode-t" id="mode" role="tablist" title="Node circle size. Per-term = the term's own exact count (the headline patient number). Rolled up = its subtree total — de-double-counted diagnoses (multi-maps split 1/m), central estimate ± small-cell suppression.">
+          <div class="tabs mode-t" id="mode" role="tablist" title="Node circle size. Per-term = the term's own patient count. Rolled up = its subtree's diagnoses (the sum of its terms' counts; a patient counts once per term), estimate ± the masked or range-published terms in it.">
             <button role="tab" data-mode="term" aria-selected="true">Per-term</button>
             <button role="tab" data-mode="rollup" aria-selected="false">Rolled up</button>
+          </div>
+          <span class="tb-label" id="part-label">Count</span>
+          <div class="tabs mode-t" id="part" role="tablist" title="Which patients each term counts. All = every patient attributed to it. Exclude climbed = patients with at least one code that names the term (same-as, via SNOMED, or HPO). Climbed only = patients reached only by rolling a more specific code up the SNOMED hierarchy. Parts that could reveal a count of 20 or fewer are shown as ranges or withheld (—).">
+            <button role="tab" data-part="all" aria-selected="true">All</button>
+            <button role="tab" data-part="named" aria-selected="false">Exclude climbed</button>
+            <button role="tab" data-part="rolled" aria-selected="false">Climbed only</button>
           </div>
           <label class="search">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>
@@ -375,6 +409,7 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
 </div>
 <div class="ctx-menu" id="ctxmenu" hidden></div>
 <div class="tip" id="tip"></div>
+<dialog class="pathdlg" id="pathdlg" aria-labelledby="pathdlg-h"><div id="pathdlg-body"></div></dialog>
 
 <script id="mondo-data" type="application/json">null</script>
 <script>
@@ -397,10 +432,6 @@ const fmtK=n=>{n=Math.round(n);return n<1000?(""+n):n<1e6?((n/1e3).toFixed(n<1e4
 const ownNum=n=>n.count!=null?n.count:(n.count_range?Math.round((n.count_range[0]+(n.count_range[1]||n.count_range[0]))/2):(DATA.meta.min_cell||20));
 const ownText=n=>n.count!=null?fmt(n.count):(n.display||("≤"+(DATA.meta.min_cell||20)));
 
-// Roll-up nominal: a masked (≤20) term contributes an unknown count in [1,20];
-// SMALL_NOMINAL is the point estimate used for the "nominal add-up" only (the
-// rigorous bracket uses 1 and 19 for floor/ceiling and never this value).
-const SMALL_NOMINAL=10;
 let DATA=null, byId=new Map(), kids=new Map(), dagKids=new Map(), roots=[], expanded=new Set(), selected=null;
 // Dual-axis (Mondo + HPO) plumbing: MONDO is the primary payload (DATA stays aliased
 // to it so all existing single-axis code is untouched). HPO is an optional second
@@ -423,8 +454,9 @@ let gNodeDrag=null, gJustDragged=false;   // in-progress node reorder drag
 let gFocus=null, gPeek=null, gCoord=new Map(), gExpandNotice="";
 let gColorMode="rarity";            // "rarity" (rare-disease designation) | "usage" (by category)
 const GRAPH_CAP=14;         // max children revealed per expansion before a "＋N more" node
-const state={view:"graph",q:"",rollup:false,hideUnused:true,vis:new Set(CATS.map(c=>c.key))};
-let HAS_FRAC=false;   // payload carries fractional (1/m) de-double-counted counts (computeRollup sets it)
+const state={view:"graph",q:"",rollup:false,part:"all",hideUnused:true,vis:new Set(CATS.map(c=>c.key))};
+let CONCEPTS={};      // payload identity table {concept_id: [vocab, code]} for mapping paths
+let HAS_SPLIT=false;  // payload carries the named / climbed-only split (enables the Count toggle)
 
 // Two-axis mode. When an hpo_usage.json exists, BOTH ontologies are drawn in ONE canvas:
 // the payloads are merged into a single node set (ids are already namespaced MONDO: / HP:),
@@ -453,7 +485,8 @@ function combine(mondo, hpo){
   promoteSpineRoot(nodes,"root"); promoteSpineRoot(nodes,"HP:root");
   // label the two axis roots as the ontology they head (keep the real term in .term for the drawer)
   for(const n of nodes){ if(n.kind==="root"){ n.term=n.term||n.label; n.label=n.axis==="hpo"?"HPO":"Mondo"; } }
-  return {meta:mondo.meta, stats:mondo.stats, nodes};
+  return {meta:mondo.meta, stats:mondo.stats, nodes,
+          concepts:Object.assign({}, mondo.concepts||{}, hpo.concepts||{})};
 }
 function promoteSpineRoot(nodes, rid){
   while(true){
@@ -489,6 +522,13 @@ async function tryFetch(u){try{const r=await fetch(u);if(!r.ok)return null;retur
 function load(d){
   DATA=d; MONDO=d; byId=new Map(); kids=new Map(); dagKids=new Map(); roots=[]; expanded=new Set(); selected=null;
   for(const n of d.nodes) byId.set(n.id,n);
+  CONCEPTS=d.concepts||{};
+  for(const n of d.nodes) if(!n._all) n._all={count:n.count,count_range:n.count_range,
+    display:n.display,state:n.state,category:n.category};
+  HAS_SPLIT=d.nodes.some(n=>n.split);
+  for(const sel of ["#part","#part-label"]){const e=$(sel); if(e) e.style.display=HAS_SPLIT?"":"none";}
+  if(!HAS_SPLIT) state.part="all";
+  projectPart();
   for(const n of d.nodes){                        // spanning tree via primary parent
     const p=(n.parents&&n.parents.length)?n.parents[0]:null;
     if(p==null||n.kind==="root"){ if(n.kind!=="root") roots.push(n.id); continue; }
@@ -551,52 +591,84 @@ function computeVisibleDesc(){
   DATA._anyVis=memo;
 }
 
-/* Roll-up aggregates over each node's (primary-parent) subtree. We only have
-   per-term suppressed counts, so a subtree's true DISTINCT-patient coverage is
-   bracketed, not exact:
-     floor = largest single term    (>= this many distinct people — one term alone)
-     ceil  = sum of terms, each ≤20 cell at 20  (<= this many — only if zero overlap)
-   ceil-floor is the aggregated uncertainty (overlap/double-counting + suppression).
-   est = a labeled nominal add-up (small terms at SMALL_NOMINAL). Roll-up is over the
-   full DAG descendant closure (matches the edges you can expand), counting each unique
-   descendant term ONCE — a multi-parent term contributes to every ancestor's roll-up
-   (not just a primary parent), but a shared descendant reached by several paths is not
-   double-counted. Computed by walking each term's ancestor set once and accumulating
-   into every ancestor (cheap; no per-node descendant sets stored). */
-// The payload carries a FRACTIONAL (1/m) de-double-counted count per term when the driver
-// computed it. If present, the roll-up sums those honestly (a shared diagnosis is split
-// across its terms, so the subtree sum never double-counts) and the only residual
-// uncertainty is small-cell suppression — the overlap bracket collapses. Falls back to the
-// old distinct-patient [floor…ceil] overlap bracket for payloads without frac.
+// Count modes: All (the published totals) / Exclude climbed (the NAMED part) / Climbed
+// only (the ROLLED-UP-ONLY part). The active part is PROJECTED onto each node's count fields
+// (count, count_range, display, state, category) so every view follows the mode with no
+// per-view branching; n._all keeps the published totals. A withheld part becomes an unknown
+// in [0, total] shown as "—".
+function projectPart(){
+  const min=DATA.meta.min_cell||20, mode=state.part;
+  for(const n of DATA.nodes){
+    if(n.kind==="root"||!n._all) continue;
+    Object.assign(n,n._all); n._withheld=false;
+    if(mode==="all"||!n.split) continue;
+    const sp=n.split, p=mode==="named"?sp.named:sp.rolled, tot=n._all;
+    const thi=tot.count!=null?tot.count:(tot.count_range?(tot.count_range[1]??tot.count_range[0]):min);
+    n.count_range=null;
+    if(sp.status==="withheld"){
+      n._withheld=true; n.count=null; n.display="—";
+      if(tot.state==="unused"){ n.state="unused"; n.count=0; n.display="0"; }
+      else if(thi<=min) n.state="used_small";
+      else { n.state="reported"; n.count_range=[0,thi]; }
+    } else if(p.count!=null){
+      n.count=p.count; n.display=String(p.count);
+      n.state=p.count===0?"unused":p.count<=min?"used_small":"reported";
+      if(n.state==="used_small"){ n.count=null; n.display="≤"+min; }
+    } else {
+      const [lo,hi]=p.range||[0,0];
+      n.count=null; n.display=p.display;
+      if(hi===0){ n.state="unused"; n.count=0; n.display="0"; }
+      else if(hi<=min) n.state="used_small";
+      else { n.state="reported"; n.count_range=[lo,hi]; }
+    }
+  }
+  if(mode==="all") return;
+  // categories under this part: an unused term above a used one is a branch point
+  const branch=new Set(), st=[];
+  for(const n of DATA.nodes)
+    if(n.kind!=="root"&&(n.state==="reported"||n.state==="used_small")) st.push(...(n.parents||[]));
+  while(st.length){ const id=st.pop(); if(branch.has(id)||!byId.has(id)) continue;
+    branch.add(id); st.push(...(byId.get(id).parents||[])); }
+  for(const n of DATA.nodes){ if(n.kind==="root"||!n._all) continue;
+    n.category=n.state==="reported"?"reported":n.state==="used_small"?"used_small"
+      :branch.has(n.id)?"used_branch":"other"; }
+}
+
+/* Roll-up = the subtree's DIAGNOSES: the sum of its terms' own counts, each term counted once
+   per subtree even when several DAG paths reach it. A patient counts once per term they touch,
+   so a code that maps to two terms, or two conditions in one branch, counts twice — by design,
+   and computed only from the published per-term figures (no new number leaves the cluster).
+   Uncertainty comes only from masked (≤20) and range-published terms: each contributes
+   [lo, hi]; the estimate is the midpoint and ± is half the summed width, so est ± pm spans
+   exactly [floor, ceil]. */
+function termRange(n,min){
+  if(n.state==="reported"){
+    if(n.count!=null) return [n.count,n.count];
+    const r=n.count_range||[min+1,null]; return [r[0], r[1]!=null?r[1]:r[0]];
+  }
+  if(n.state==="used_small") return [n._withheld?0:1, min];
+  return [0,0];
+}
 function computeRollup(){
-  const min=DATA.meta.min_cell||20;
-  HAS_FRAC=DATA.nodes.some(n=>typeof n.frac==="number"||(n.frac_display&&n.frac_display.length>0));
-  const memo=new Map();
-  const get=id=>{let r=memo.get(id); if(!r){r={R:0,s:0,maxT:0,nTerms:0,nUsed:0,nColl:0,F:0,fs:0,fmax:0};memo.set(id,r);} return r;};
-  get("root");
+  const min=DATA.meta.min_cell||20, memo=new Map();
+  const get=id=>{let r=memo.get(id); if(!r){r={lo:0,hi:0,nTerms:0,nUsed:0,nUnc:0,nColl:0};memo.set(id,r);} return r;};
   for(const n of DATA.nodes){
     if(n.kind==="root")continue;
-    const rep=n.state==="reported", small=n.state==="used_small", cnt=rep?ownNum(n):0;
-    const fr=(typeof n.frac==="number")?n.frac:null;                 // frac reported (>floor)
-    const fsupp=(fr==null && n.frac_display && n.frac_display.startsWith("≤"));  // frac withheld but used
+    const [lo,hi]=termRange(n,min), used=n.state==="reported"||n.state==="used_small";
     const anc=ancestorSet(n.id); anc.add(n.id);      // this term counts toward itself + every ancestor
     for(const a of anc){
-      const r=get(a);
-      r.nTerms++;
-      if(rep){ r.R+=cnt; if(cnt>r.maxT)r.maxT=cnt; r.nUsed++; }
-      else if(small){ r.s++; r.nUsed++; }
-      if(fr!=null){ r.F+=fr; if(fr>r.fmax)r.fmax=fr; }
-      else if(fsupp){ r.fs++; }
+      const r=get(a); r.nTerms++; r.lo+=lo; r.hi+=hi;
+      if(used) r.nUsed++;
+      if(hi>lo) r.nUnc++;
       if(n.collision) r.nColl++;
     }
   }
   ROLL_MAX=1; OWN_MAX=1; ROLL_EST_MAX=1;
   for(const [,r] of memo){
-    if(HAS_FRAC){ r.floor=Math.round(r.F); r.ceil=Math.round(r.F+min*r.fs); r.est=r.F+SMALL_NOMINAL*r.fs; }
-    else { r.floor=r.maxT; r.ceil=r.R+min*r.s; r.est=r.R+SMALL_NOMINAL*r.s; }
+    r.floor=r.lo; r.ceil=r.hi; r.est=(r.lo+r.hi)/2;
     ROLL_MAX=Math.max(ROLL_MAX,r.ceil); ROLL_EST_MAX=Math.max(ROLL_EST_MAX,r.est);
   }
-  for(const n of DATA.nodes) if(n.state==="reported") OWN_MAX=Math.max(OWN_MAX,n.count||0);
+  for(const n of DATA.nodes) if(n.state==="reported") OWN_MAX=Math.max(OWN_MAX,ownNum(n));
   DATA._roll=memo;
 }
 
@@ -605,6 +677,8 @@ function renderSource(){
   const m=DATA.meta||{}, s=$("#drawer-foot"); if(!s)return; s.innerHTML="";
   const sample=/sample|synthetic/i.test((m.cdr||"")+(m.count_rule||"")+(m.mondo_version||""));
   if(sample){const b=el("span","badge-sample","SAMPLE DATA");s.appendChild(b);}
+  const interim=!!m.sanitized; const note=$("#interim-note"); if(note) note.hidden=!interim;
+  if(interim){const b=el("span","badge-sample","INTERIM");b.title=m.sanitized;s.appendChild(b);}
   const add=(k,v)=>{const w=el("span");w.innerHTML=`${k} <b>${v}</b>`;s.appendChild(w);};
   add("Mondo",m.mondo_version||"—"); add("CDR",m.cdr||"—");
   add("source",m.source_table||"—"); add("count space",m.count_space||"standard");
@@ -631,7 +705,7 @@ function renderKPIs(){
   kpi("Reported (>20)",fmt(s.reported_terms),"exact counts publishable",CATMAP.reported.color);
   kpi("Used-small (≤20)",fmt(s.used_small_terms),"used, exact count withheld",CATMAP.used_small.color);
   kpi("Used branch points",fmt(s.used_branch_terms),"0 direct count, above used nodes",CATMAP.used_branch.color);
-  kpi("Multi-mapped",fmt(s.collision_terms),HAS_FRAC?"share codes with sibling terms (split 1/m in roll-ups)":"share a std concept with siblings",CATMAP.collision||"var(--collision)");
+  kpi("Multi-mapped",fmt(s.collision_terms),"share a code with sibling terms (counted in each)",CATMAP.collision||"var(--collision)");
   if(s.rare_used_terms!=null)
     kpi("Rare used",fmt(s.rare_used_terms),"rare dx (GARD/Orphanet) coded in the EHR","var(--rare)");
   renderCover();
@@ -687,9 +761,7 @@ function renderTree(){
   for(const r of roots) walk(r,0);
   host.appendChild(frag);
   $("#tree-hint").textContent=state.rollup
-    ? (HAS_FRAC
-        ? `${shown.toLocaleString()} rows · bar = subtree total; number = de-double-counted diagnoses (multi-maps split 1/m; ±<${DATA.meta.min_cell||20} suppression)`
-        : `${shown.toLocaleString()} rows · bar = subtree coverage [floor…ceiling]; number = distinct-patient bracket (overlap + <${DATA.meta.min_cell||20} suppression)`)
+    ? `${shown.toLocaleString()} rows · bar = subtree diagnoses [floor…ceiling]; number = estimate ± masked or range-published terms (a patient counts once per term)`
     : `${shown.toLocaleString()} rows · bar = this term's own patients; counts are per-term, never summed`;
 }
 function rowEl(n,depth,hasKids,isOpen){
@@ -720,7 +792,7 @@ function prevBar(n){
     const unc=el("span","unc"); unc.style.width=w(lg(r.ceil)/denom); unc.style.background="var(--accent)";
     const fill=el("span","fill"); fill.style.width=w(lg(r.floor)/denom); fill.style.background="var(--accent)";
     bar.appendChild(unc); bar.appendChild(fill);
-    bar.title=`subtree ${r.floor>0?fmt(r.floor):('≤'+min)}–${fmt(r.ceil)} distinct patients`;
+    bar.title=`subtree ${fmt(r.floor)}–${fmt(r.ceil)} diagnoses`;
     return bar;
   }
   const denom=lg(OWN_MAX);
@@ -739,11 +811,9 @@ function countSpec(n){
   if(state.rollup){
     const r=DATA._roll.get(n.id);
     if(!r||r.nUsed===0)return{cls:"zero",text:"0"};
-    const fl=r.floor>0?fmtK(r.floor):("≤"+min);
-    const sup=HAS_FRAC?r.fs:r.s;
-    const kind=HAS_FRAC?"subtree diagnoses (de-double-counted)":"subtree distinct patients";
-    return{cls:"reported",text:`${fl}–${fmtK(r.ceil)}`,
-      title:`${kind}: ${r.floor>0?fmt(r.floor):('≤'+min)} – ${fmt(r.ceil)}  ·  ${r.nUsed}/${r.nTerms} used, ${sup} suppressed, ${r.nColl} multi-mapped  ·  nominal ≈ ${fmt(r.est)}`};
+    const pm=rollupPM(r,min);
+    return{cls:"reported",text:`${fmtK(r.est)}${pm>0?" ±"+fmtK(pm):""}`,
+      title:`subtree diagnoses (a patient counts once per term): ${fmt(r.floor)} – ${fmt(r.ceil)}  ·  ${r.nUsed}/${r.nTerms} used, ${r.nUnc} masked or ranged, ${r.nColl} multi-mapped`};
   }
   if(n.state==="reported")return{cls:"reported",text:n.count!=null?fmt(n.count):(n.display||("≤"+min))};
   if(n.state==="used_small")return{cls:"used_small",text:"≤"+min};
@@ -784,15 +854,12 @@ const gval=id=>{const n=byId.get(id); if(!n)return 0;
   if(state.rollup){const r=DATA._roll.get(id);return r?r.est:0;}   // roll-up central estimate
   return n.state==="reported"?(n.count!=null?n.count:(n.count_range?Math.round((n.count_range[0]+(n.count_range[1]||n.count_range[0]))/2):(DATA.meta.min_cell||20))):n.state==="used_small"?(DATA.meta.min_cell||20):0.4;};
 
-// Suppression uncertainty on a subtree roll-up: each of the r.s suppressed (<min) terms
-// is an unknown integer in [1, min] (min=20), midpoint (min+1)/2 ≈ SMALL_NOMINAL. We band
-// each at ±SMALL_NOMINAL (the round number; the strict half-range is (min-1)/2 = 9.5, but
-// ±10 reads cleaner), so the reported ± is SMALL_NOMINAL·s. Deliberately NOT a √s band
-// (that assumes independence and understates the uncertainty). s=0 ⇒ exact, no ±.
+// Roll-up uncertainty: half the summed width of the masked / range-published terms, so
+// est ± pm spans exactly [floor, ceil]. Deliberately NOT a √n band (that assumes
+// independence and understates it). All-exact subtree ⇒ no ±.
 function rollupPM(r,min){
   if(!r) return 0;
-  const s=HAS_FRAC?r.fs:r.s;   // frac roll-up: only the ≤floor terms are uncertain (no overlap term)
-  return s>0?SMALL_NOMINAL*s:0;
+  return Math.round((r.ceil-r.floor)/2);
 }
 // Count segments drawn under a graph node: the direct (own) count, then the subtree
 // roll-up "of EST (±PM)" whenever the node has used descendants. Bold tracks the sizing
@@ -1442,7 +1509,9 @@ function select(id,quiet){
   if(!quiet){ gSel=new Set([id]); gIsolateSet=null; }
   selected=id; const n=byId.get(id); const dr=$("#drawer"); const inner=$("#drawer-inner");
   const min=DATA.meta.min_cell||20;
-  const disp=n.state==="reported"?ownText(n):n.state==="used_small"?`≤ ${min} (withheld)`:"0";
+  const disp=n._withheld?"—":n.state==="reported"?ownText(n):n.state==="used_small"?`≤ ${min} (masked)`:"0";
+  const withheldWhy=n._withheld?`<div style="font-size:11.5px;color:var(--muted);margin-top:2px;line-height:1.45">Not shown: splitting this term's ${n._all.count!=null?fmt(n._all.count):esc(String(n._all.display))} patients into named and climbed-only could reveal a count of ${min} or fewer.</div>`:"";
+  const partLbl=state.part==="named"?" (excl. climbed)":state.part==="rolled"?" (climbed only)":"";
   const purl=n.id.startsWith("MONDO:")?`https://monarchinitiative.org/${n.id}`:null;
   const cat=CATMAP[n.category]||{label:n.category,color:"var(--muted)"};
   let html=`<div class="dh"><div>
@@ -1454,21 +1523,22 @@ function select(id,quiet){
   html+=`<span class="pill" style="color:${cat.color};background:color-mix(in srgb,${cat.color} 15%,transparent)">${cat.label}</span>`;
   if(n.rare) html+=` <span class="pill" style="color:var(--rare);background:color-mix(in srgb,var(--rare) 15%,transparent)" title="Mondo rare-disease designation">✦ rare · ${(n.rare_src||["Mondo"]).join(", ")}</span>`;
   html+=`<dl class="kv" style="margin-top:14px">
-    <dt>Patients</dt><dd style="font-size:15px;color:${n.state==="reported"?cat.color:"var(--ink)"}">${disp}</dd>
+    <dt>Patients${partLbl}</dt><dd style="font-size:15px;color:${n.state==="reported"?cat.color:"var(--ink)"}">${disp}${withheldWhy}</dd>
+    ${n._withheld?"":splitRow(n)}
     <dt>MONDO id</dt><dd>${purl?`<a href="${purl}" target="_blank" rel="noopener">${n.id}</a>`:n.id}</dd>
     ${(n.source_codes&&n.source_codes.length)?sourceCatalogRow(n):codesRow(n)}
   </dl>`;
   const rr=DATA._roll&&DATA._roll.get(id);
   if(rr && (kids.get(id)||[]).length){
     const pm=rollupPM(rr,min);
-    const own=n.state==="reported"?ownText(n):n.state==="used_small"?("&le;"+min):"0";
+    const own=n._withheld?"—":n.state==="reported"?ownText(n):n.state==="used_small"?("&le;"+min):"0";
     const descUsed=Math.max(0, rr.nUsed - ((n.state==="reported"||n.state==="used_small")?1:0));
     html+=`<div class="section-t">Subtree roll-up</div>
       <div class="warn" style="background:var(--surface-2);border-color:var(--border);color:var(--ink-2)">
-        <b style="color:var(--ink);font-size:16px">${fmt(rr.est)}${pm>0?` ± ${fmt(pm)}`:""}</b> ${HAS_FRAC?"de-double-counted":"distinct participant"} diagnoses across this disease and its ${fmt(descUsed)} descendant term(s) with at least one diagnosis. <b>${own}</b> are diagnosed specifically at this node.${HAS_FRAC?" Multi-mapped diagnoses are split 1/m across their terms, so this total does not double-count them.":""}
+        <b style="color:var(--ink);font-size:16px">${fmt(Math.round(rr.est))}${pm>0?` ± ${fmt(pm)}`:""}</b> diagnoses across this term and its ${fmt(descUsed)} descendant term(s) with at least one diagnosis. <b>${own}</b> are at this node itself. A patient counts once per term they touch, so a code that maps to two terms, or two conditions in this branch, counts twice.
       </div>
       <dl class="kv"><dt>Used terms</dt><dd>${fmt(rr.nUsed)} of ${fmt(rr.nTerms)}</dd>
-        <dt>Suppressed</dt><dd>${fmt(HAS_FRAC?rr.fs:rr.s)} term(s) &le;${min}</dd></dl>`;
+        <dt>Uncertain</dt><dd>${fmt(rr.nUnc)} term(s) masked (&le;${min}) or shown as ranges</dd></dl>`;
   }
   if(n.collision&&n.collision_siblings.length){
     const k=n.collision_kind||"shared_concept";
@@ -1478,7 +1548,7 @@ function select(id,quiet){
       : k==="mixed"
       ? `they share a standard (SNOMED) concept for some codes and are climb-tied for others`
       : `OMOP maps them onto a <b>shared</b> standard (SNOMED) concept — often one generic ICD code splitting into several via <span class="mono">Maps&nbsp;to</span>`;
-    const note=`<b>${esc(n.label)}</b> shares diagnoses with the term(s) below because ${how}. A patient carrying that code touches all ${m} terms — but a shared diagnosis is <b>split 1/m</b> (here 1/${m}) across them, so roll-ups that include several of these terms don't double-count it. Read each term's own <b>Patients</b> figure as "everyone who touches this term"; use the subtree roll-up for an honest combined total.`;
+    const note=`<b>${esc(n.label)}</b> shares diagnoses with the term(s) below because ${how}. A patient carrying that code touches all ${m} terms and is counted in each. Read each term's own <b>Patients</b> figure as "everyone who touches this term"; a subtree roll-up that includes several of these terms counts that patient once per term (it counts diagnoses, not distinct patients).`;
     html+=`<div class="section-t" style="margin-top:16px">Shares diagnoses with</div>`+
     `<div style="color:var(--muted);font-size:11.5px;margin:-2px 0 8px;line-height:1.45">${note}</div>`+
     `<div class="chiplist">`+
@@ -1534,35 +1604,18 @@ function nihName(vocab,code){
     nihCache[key]=nm||null; return nihCache[key];
   }).catch(()=>{nihCache[key]=null; return null;});
 }
-// resolve-on-hover, reusing the graph's floating tooltip; cached so a code is fetched once.
-(function(){
-  const host=$("#drawer-inner"); if(!host) return;
-  let cur=null;
-  const codeAt=t=>t&&t.closest?t.closest("a[data-nih]"):null;
-  const keyOf=a=>a.getAttribute("data-nih")+":"+a.getAttribute("data-code");
-  const label=(a,nm)=>{const bt=a.getAttribute("data-tip")||""; return nm?nm+" · "+bt:bt;};
-  host.addEventListener("mouseover",e=>{
-    const a=codeAt(e.target); if(!a) return; cur=a;
-    const k=keyOf(a);
-    if(k in nihCache){ showTip(e,label(a,nihCache[k])); return; }
-    showTip(e,label(a,null));      // show base context immediately while the name loads
-    nihName(a.getAttribute("data-nih"),a.getAttribute("data-code"))
-      .then(nm=>{ if(cur===a) showTip(e,label(a,nm)); });
-  });
-  host.addEventListener("mousemove",e=>{
-    const a=codeAt(e.target); if(!a) return;
-    const k=keyOf(a); showTip(e,label(a, k in nihCache?nihCache[k]:null));
-  });
-  host.addEventListener("mouseout",e=>{ if(codeAt(e.target)){cur=null; hideTip();} });
-})();
 // source_climb catalog: the originating source codes (ICD etc.) that reached this
 // term, each tagged exact (own map) or climbed (rolled up a mapped ancestor). Identity
 // only — a "↑" marks the climbed ones. Absent (empty) for the exact-map count spaces.
 function sourceCatalogRow(n){
-  const sc=n.source_codes||[]; const bands=n.source_bands||[];
-  if(!sc.length&&!bands.length) return "";
+  const sc=n.source_codes||[];
+  // band chips follow the Count mode: the split carries each part's FULL histogram (the
+  // code list itself may be capped), so the shape stays honest when filtered.
+  const bands=(state.part==="named"&&n.split&&n.split.named_bands)
+    ||(state.part==="rolled"&&n.split&&n.split.rolled_bands)||n.source_bands||[];
+  if(!sc.length&&!(n.source_bands||[]).length) return "";
   const total=n.n_source_codes||sc.length;
-  if(!bands.length){                          // legacy payload (pre-band): plain identity list
+  if(!(n.source_bands||[]).length){           // legacy payload (pre-band): plain identity list
     const list=sc.map(c=>{const climbed=c.via==="climbed";
       const t=`${c.vocab} ${esc(String(c.code))}${climbed?" ↑":""}`;
       const href=c.id?athena(c.id):athenaSearch(c.code);
@@ -1582,37 +1635,35 @@ function sourceCatalogRow(n){
   // "shape": how many CODES sit in each volume band (a code count, never patients).
   const hist=bands.map(b=>chip(b.band,`<b style="opacity:.6"> ×${b.codes}</b>`)).join("");
   const histRow=bands.length?`<div style="margin:2px 0 5px">${hist}</div>`:"";
-  // Mondo's declared same-as cross-references for this term (n.codes) = the DIRECT codes.
-  // A catalogued source code that is one of them is a direct same-as match (≡); an "exact"
-  // code that is NOT is standardised in via OMOP Maps to (→); "climbed" rolled up (↑).
+  // Each catalogued code carries its ladder STEP for this term (1 same-as, 2 via SNOMED,
+  // 3 HPO, 4 climbed). Older payloads without `step` fall back to inferring same-as from the
+  // term's own cross-references (n.codes). Colour is always paired with a glyph + legend.
   const sameAs=new Set((n.codes||[]).filter(c=>c&&c.id!=null).map(c=>c.id));
-  const kindOf=c=>c.via==="climbed"?"up":(c.id!=null&&sameAs.has(c.id))?"same":"in";
-  const MARK={same:" ≡",in:" =",up:" ↑"};
-  const WORD={same:"Mondo same-as (direct cross-reference)",in:"standardised in via OMOP Maps to",up:"climbed to the nearest mapped ancestor"};
-  const link=c=>{const kd=kindOf(c);
-    const t=`${c.vocab} ${esc(String(c.code))}${MARK[kd]}`;
+  const stepOf=c=>c.step||(c.via==="climbed"?4:(c.id!=null&&sameAs.has(c.id))?1:2);
+  const part=state.part, inPart=c=>part==="named"?stepOf(c)<=3:part==="rolled"?stepOf(c)===4:true;
+  const shown=sc.filter(inPart);
+  const link=c=>{const st=stepOf(c), S=STEPS[st];
     const href=c.id?athena(c.id):athenaSearch(c.code);
-    const b=c.band&&!c.band.startsWith("≤")?` <span style="font-size:10px;color:var(--muted)">${c.band}</span>`:"";
-    const tip=`${c.vocab} · ${WORD[kd]}${c.band?" · "+c.band+" patients":""}`;
-    // public-domain vocabs (ICD/HCPCS) resolve their name on hover from NIH Clinical Tables
-    // (handler below) — no `title`, so the native browser tooltip doesn't fight the custom
-    // one; the base context rides in data-tip. Licensed vocabs (SNOMED) keep the native title.
-    if(NIH_EP[c.vocab])
-      return `<a href="${href}" target="_blank" rel="noopener" data-nih="${c.vocab}" data-code="${esc(String(c.code))}" data-tip="${esc(tip)}">${t}</a>${b}`;
-    return `<a href="${href}" target="_blank" rel="noopener" title="${tip}">${t}</a>${b}`;};
+    const b=c.band?` <span style="font-size:10px;color:var(--muted)">${c.band}</span>`:"";   // incl. ≤20
+    const mk=`<span class="stepmk" style="color:${S.color}" aria-hidden="true">${S.mk}</span>`;
+    const t=`${c.vocab} ${esc(String(c.code))}`;
+    // click opens the mapping-path dialog (name, step, path, links out); the href stays
+    // the Athena link for ctrl/⌘-click and no-JS.
+    const ci=sc.indexOf(c);
+    return `${mk}<a href="${href}" target="_blank" rel="noopener" data-node="${esc(n.id)}" data-ci="${ci}" aria-label="${esc(t+" · "+S.word+" · open mapping path")}">${t}</a>${b}`;};
   // each code+band is an UNBREAKABLE unit; the list wraps between units (no commas), so a
   // vocab/code never splits across lines.
   const unit=c=>`<span style="display:inline-block;white-space:nowrap;margin:0 14px 3px 0">${link(c)}</span>`;
   // preview the first few (heavy-first); the drawer expands to show ONLY the codes not
   // already shown (the rest of the in-payload list + a note for any beyond the export cap).
   const PREVIEW=8;
-  const inPayload=sc.length;
-  const notListed=Math.max(total-inPayload,0);
-  const preview=sc.slice(0,PREVIEW).map(unit).join("");
-  const rest=sc.slice(PREVIEW);
+  const partTotal=part==="all"?total
+    :((part==="named"?(n.split&&n.split.named_bands):(n.split&&n.split.rolled_bands))||[])
+      .reduce((a,b)=>a+(b.codes||0),0)||shown.length;
+  const notListed=Math.max(partTotal-shown.length,0);
+  const preview=shown.slice(0,PREVIEW).map(unit).join("");
+  const rest=shown.slice(PREVIEW);
   const moreN=rest.length+notListed;
-  // heavy-first sort means any un-shipped remainder is the LOWEST-volume codes; the band
-  // histogram above already shows the true full distribution, so this note stays honest.
   const restBody=rest.map(unit).join("")
     +(notListed?` <span style="color:var(--muted)">+${notListed} lower-volume codes not listed</span>`:"");
   const drawer=moreN
@@ -1620,13 +1671,96 @@ function sourceCatalogRow(n){
       +`Show ${fmt(moreN)} more code${moreN===1?"":"s"}</summary>`
       +`<div style="margin-top:6px">${restBody}</div></details>`
     : "";
-  const anySame=sc.some(c=>kindOf(c)==="same"), anyIn=sc.some(c=>kindOf(c)==="in"), anyUp=sc.some(c=>kindOf(c)==="up");
-  const legend=[anySame?"<b>≡</b> = Mondo same-as (direct)":"",anyIn?"<b>=</b> = exact via OMOP Maps&nbsp;to":"",anyUp?"<b>↑</b> = climbed to nearest mapped ancestor":""]
-    .filter(Boolean).join("; ");
-  return `<dt>Source codes (${total})</dt><dd>${histRow}<div>${preview}</div>${drawer}`+
-    `<div style="color:var(--muted);margin-top:4px">codes coded in the EHR that map here${legend?"; "+legend:""}. `+
-    `Hover an ICD/HCPCS code for its name (NIH Clinical Tables); SNOMED&nbsp;CT&reg; and other codes link to Athena. `+
+  const present=[1,2,3,4].filter(k=>shown.some(c=>stepOf(c)===k));
+  const legend=present.map(k=>`<span style="white-space:nowrap"><b style="color:${STEPS[k].color}">${STEPS[k].mk}</b> ${STEPS[k].short}</span>`).join(" · ");
+  const partNote=part==="named"?" (excluding climbed codes)":part==="rolled"?" (climbed codes only)":"";
+  return `<dt>Source codes (${fmt(partTotal)})</dt><dd>${histRow}<div>${preview||'<span style="color:var(--muted)">none in this view</span>'}</div>${drawer}`+
+    `<div style="color:var(--muted);margin-top:4px">codes coded in the EHR that map here${partNote}${legend?"; "+legend:""}. `+
+    `Click a code for its mapping path (each concept links to Athena; ctrl/⌘-click opens the code in Athena directly); ICD/HCPCS names come from NIH Clinical Tables. `+
     `Bands = distinct-patient volume as ranges; the shape shows where the weight sits.</div></dd>`;
+}
+// The four ladder steps, as the panel shows them (colour + glyph + words; never colour alone).
+const STEPS={
+  1:{mk:"≡",color:"var(--step1)",short:"same-as",word:"Step 1 · Mondo same-as: the source code is one of the term's cross-references"},
+  2:{mk:"→",color:"var(--step2)",short:"via SNOMED",word:"Step 2 · via SNOMED: the code's Maps-to SNOMED concept is a mapped term"},
+  3:{mk:"◆",color:"var(--step3)",short:"HPO",word:"Step 3 · HPO: the code's SNOMED concept is an HPO cross-reference"},
+  4:{mk:"↑",color:"var(--step4)",short:"climbed",word:"Step 4 · climbed: no direct mapping, so it was rolled up the SNOMED hierarchy to the nearest mapped term"},
+};
+// Tooltip text for one catalogued code: identity, mapping path SOURCE -> ... -> TERM using
+// concept identities from the payload's `concepts` table (codes only, never licensed names),
+// the step, and the code's volume band.
+// One catalogued code's mapping path as hops SOURCE -> [SNOMED ...] -> TERM, each with the
+// role it plays, from the payload's `concepts` identity table (codes only; never licensed
+// names). Returns null for a pre-0120 payload that recorded no paths.
+function pathHops(n,c,st){
+  if(c.step==null) return null;
+  const cc=id=>{const k=CONCEPTS[id]; return k?{vocab:k[0],code:k[1]}:{vocab:"concept",code:String(id)};};
+  const out=[{role:"Source code (as recorded in the EHR)",id:c.id,vocab:c.vocab,code:String(c.code)}];
+  const add=(id,role)=>{ if(id===c.id){ out[0].role+=" · itself a standard SNOMED concept"; return; }
+    out.push(Object.assign({role,id},cc(id))); };
+  if(st===2||st===3){
+    const std=c.std!=null?c.std:(c.path?c.path[0]:null);
+    if(std!=null) add(std, st===3?"Standard SNOMED concept (OMOP Maps to) · an HPO cross-reference"
+                                  :"Standard SNOMED concept (OMOP Maps to) · a mapped Mondo term");
+  } else if(st===4){
+    if(!c.path) out.push({role:"SNOMED hierarchy",vocab:"SNOMED",code:"(climbed; chain not reconstructed)",id:null});
+    else c.path.forEach((id,i)=>add(id,
+      i===0?"Standard SNOMED concept (OMOP Maps to) · no Mondo term of its own"
+      :i===c.path.length-1?"Nearest SNOMED ancestor that a Mondo term maps to"
+      :"SNOMED parent (Is a)"));
+  }
+  out.push({role:n.id.startsWith("HP:")?"HPO term":"Mondo term",term:n});
+  return out;
+}
+// Mapping-path dialog: each hop links out — source and SNOMED concepts to Athena (where
+// SNOMED CT names can be read under its licence; we don't redistribute them), ICD/HCPCS
+// names from NIH Clinical Tables, the final term to Monarch.
+function openPathDialog(n,c){
+  const st=c.step||4, S=STEPS[st], hops=pathHops(n,c,st);
+  const dlg=$("#pathdlg"), body=$("#pathdlg-body"); if(!dlg||!body) return;
+  const link=(h)=>{
+    if(h.term){ const t=h.term; return `<a class="hop" href="https://monarchinitiative.org/${t.id}" target="_blank" rel="noopener">${esc(t.id)}</a><span class="nm">${esc(t.label)}</span>`; }
+    const t=`${esc(h.vocab)} ${esc(h.code)}`;
+    const nm=NIH_EP[h.vocab]?`<span class="nm" data-nihname="${esc(h.vocab)}:${esc(h.code)}"></span>`:"";
+    return h.id!=null?`<a class="hop" href="${athena(h.id)}" target="_blank" rel="noopener" title="Open in Athena">${t}</a>${nm}`:`<span class="hop">${t}</span>${nm}`;
+  };
+  const notes=[];
+  if(c.path_ambiguous) notes.push("This is one of several equally short SNOMED paths; the one with the lowest concept ids is shown.");
+  if(c.multi_std) notes.push("This code maps to more than one standard SNOMED concept; the path through the most common one is shown.");
+  notes.push("SNOMED&nbsp;CT&reg; concept names are licensed, so they are not shown here; each SNOMED link opens the concept in Athena.");
+  body.innerHTML=`<div class="ph"><div>
+      <h3 id="pathdlg-h"><span class="stepmk" style="color:${S.color}" aria-hidden="true">${S.mk}</span>${esc(c.vocab)} ${esc(String(c.code))}<span class="nm" data-nihname="${esc(c.vocab)}:${esc(String(c.code))}"></span></h3>
+      <div class="sub">${esc(S.word)}${c.band?` · ${esc(c.band)} patients`:""}</div></div>
+      <button class="close" id="pathdlg-x" aria-label="Close">×</button></div>
+    <div class="pb">`+(hops
+      ? `<ol style="--step-c:${S.color}">${hops.map(h=>`<li><span class="role">${esc(h.role)}</span>${link(h)}</li>`).join("")}</ol>`
+      : `<p class="note">The mapping path was not recorded in this data release.</p>`)
+    +notes.map(t=>`<div class="note">${t}</div>`).join("")+`</div>`;
+  for(const sp of body.querySelectorAll("[data-nihname]")){
+    const [v,...rest]=sp.getAttribute("data-nihname").split(":"); const code=rest.join(":");
+    nihName(v,code).then(nm=>{ if(nm) sp.textContent=nm; });
+  }
+  $("#pathdlg-x").onclick=()=>dlg.close();
+  hideTip(); dlg.showModal();
+}
+(function(){
+  const dlg=$("#pathdlg"); if(!dlg) return;
+  dlg.addEventListener("click",e=>{ if(e.target===dlg) dlg.close(); });     // backdrop click
+  const host=$("#drawer-inner"); if(!host) return;
+  host.addEventListener("click",e=>{
+    const a=e.target.closest?e.target.closest("a[data-ci]"):null; if(!a) return;
+    if(e.metaKey||e.ctrlKey||e.shiftKey||e.button===1) return;            // modifier: open Athena
+    const n=byId.get(a.getAttribute("data-node")); if(!n) return;
+    const c=(n.source_codes||[])[+a.getAttribute("data-ci")]; if(!c) return;
+    e.preventDefault(); openPathDialog(n,c);
+  });
+})();
+// The named / climbed-only split as published for this term (exact, ranges, or withheld).
+function splitRow(n){
+  const sp=n.split; if(!sp||!sp.status) return "";
+  if(sp.status==="withheld")
+    return `<dt>Named · climbed only</dt><dd style="color:var(--muted)">not shown (could reveal a count of ${DATA.meta.min_cell||20} or fewer)</dd>`;
+  return `<dt>Named · climbed only</dt><dd><b>${esc(String(sp.named.display))}</b> · <b>${esc(String(sp.rolled.display))}</b></dd>`;
 }
 function hlMatch(text,q){                  // HTML-escaped text with <mark> around query matches
   text=String(text); if(!q) return esc(text);
@@ -1734,6 +1868,18 @@ document.querySelectorAll("#mode button").forEach(b=>b.onclick=()=>{
   state.rollup=b.dataset.mode==="rollup";
   document.querySelectorAll("#mode button").forEach(x=>x.setAttribute("aria-selected",x===b));
   gManualRank=new Map();   // size scale changes, so drop manual reorderings
+  renderAll();
+  if(selected) select(selected,true);
+});
+document.querySelectorAll("#part button").forEach(b=>b.onclick=()=>{
+  state.part=b.dataset.part;
+  document.querySelectorAll("#part button").forEach(x=>x.setAttribute("aria-selected",x===b));
+  projectPart();
+  for(const [,arr] of kids) arr.sort(sortNodes);
+  for(const [,arr] of dagKids) arr.sort(sortNodes);
+  roots.sort(sortNodes);
+  computeVisibleDesc(); computeRollup();
+  gManualRank=new Map();
   renderAll();
   if(selected) select(selected,true);
 });
