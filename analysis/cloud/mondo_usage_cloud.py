@@ -747,89 +747,178 @@ def safe_total_band(n_persons, source_bands, min_cell: int = _MIN_CELL):
     return True, f">{min_cell}", (floor_lo, float("inf"))   # widest: only 'reported' itself
 
 
-def _frac_floor_threshold(source_bands, min_cell: int = _MIN_CELL):
-    """Smallest published frac upper end that cannot cap a ≤floor code below the floor,
-    or None when the term has no ≤floor code (nothing to protect).
+def _node_total_bounds(nd, min_cell: int = _MIN_CELL):
+    """Public (lo, hi) of a node's total: exact count, its banded range, [1, floor] for a
+    used-small term, (0, 0) when unused."""
+    if nd.get("count") is not None:
+        return int(nd["count"]), int(nd["count"])
+    if nd.get("state") == "used_small":
+        return 1, min_cell
+    rng = nd.get("count_range")
+    if rng:
+        return int(rng[0]), (float("inf") if rng[1] is None else int(rng[1]))
+    return 0, 0
 
-    On a term whose codes are all unshared, every diagnosis carries m = 1, so
-    ``frac >= Σ_codes |persons(code)|`` and ``frac_hi - Σ_{other codes} band_lo`` is an
-    UPPER bound on a ≤floor code. Assuming m = 1 everywhere is the attacker's best case
-    (shared codes only weaken the bound), so requiring
-    ``frac_hi >= Σ_all band_lo + (min_cell - 1)`` (the ≤floor code's own band_lo is 1)
-    keeps every ≤floor code able to reach the floor. Depends only on the public bands."""
-    floor = f"≤{min_cell}"
-    if not any(b["band"] == floor for b in source_bands):
+
+def _band_lo_hi(bands, min_cell: int = _MIN_CELL):
+    """Expand a band histogram into one (lo, hi) per code."""
+    out = []
+    for b in bands:
+        lo, hi = _band_bounds(b["band"], min_cell)
+        out += [(int(lo), hi)] * int(b["codes"])
+    return out
+
+
+def _frac_bounds(nd, min_cell: int = _MIN_CELL):
+    """Public thresholds ``(T, L)`` for a term's published frac interval: its upper end
+    must be >= T and its lower end <= L; ``None`` when the term has no ≤floor cell for
+    frac to narrow. Depends only on published fields (bands, total, split).
+
+    Two inequalities link frac to the hidden cells, each tightest when every diagnosis
+    has m = 1 and every code one standard concept (the attacker's best case):
+      * frac >= Σ_codes |c|      (each person-code pair is >= 1 diagnosis), so frac's
+        UPPER end caps a ≤floor code c at frac_hi - LB(Σ other codes), and caps a small
+        person cell U (a union of codes C_U) at frac_hi - LB(Σ codes outside C_U);
+      * frac <= Σ_codes |c|      (k = 1, 1/m <= 1), so frac's LOWER end forces
+        |c| >= frac_lo - Σ_{d != c} cap_d, and U >= max_{C_U} |c| >= (frac_lo - Σ_{outside}
+        cap) / |C_U|.
+    The lower bounds on sums of other codes use the split when it is published (a named
+    part's codes sum to >= its lower end; the climbed codes' union is >= the rolled part),
+    and code caps use the part's upper end for named codes (each is a subset of the named
+    union) and the total's upper end otherwise. Small person cells: a used-small total,
+    and the ≤floor part of a ranged split."""
+    sp = nd.get("split") or {}
+    n_lo, n_hi = _node_total_bounds(nd, min_cell)
+    informative = sp.get("status") in ("exact", "ranged")
+    if informative:
+        parts = {"named": _band_lo_hi(sp.get("named_bands") or [], min_cell),
+                 "rolled": _band_lo_hi(sp.get("rolled_bands") or [], min_cell)}
+        part_lo = {k: int(sp[k]["range"][0]) for k in ("named", "rolled")}
+        cap_of = {"named": int(sp["named"]["range"][1]), "rolled": n_hi}
+    else:
+        parts = {"all": _band_lo_hi(nd.get("source_bands") or [], min_cell)}
+        part_lo = {"all": 0}
+        cap_of = {"all": n_hi}
+    small_cells = []                                  # (part key or None for all codes)
+    if nd.get("state") == "used_small":
+        small_cells.append(None)
+    if sp.get("status") == "ranged":
+        small_cells.append("named" if sp["named"]["range"][1] <= min_cell else "rolled")
+    has_small_code = any(lo == 1 and hi == min_cell for cs in parts.values() for lo, hi in cs)
+    if not has_small_code and not small_cells:
         return None
-    return sum(int(_band_bounds(b["band"], min_cell)[0]) * int(b["codes"])
-               for b in source_bands) + (min_cell - 1)
+    lows = {k: sum(lo for lo, _ in cs) for k, cs in parts.items()}
+    caps = {k: sum(min(hi, cap_of[k]) for _, hi in cs) for k, cs in parts.items()}
+    lb_sum = {k: max(part_lo[k], lows[k]) for k in parts}   # LB of Σ|c| over a part's codes
+    T, L = min_cell, float("inf")
+    for k, cs in parts.items():
+        others = sum(lb_sum[q] for q in parts if q != k)
+        outside_caps = sum(caps[q] for q in parts if q != k)
+        for lo, hi in cs:
+            if lo == 1 and hi == min_cell:              # a ≤floor code
+                T = max(T, others + lows[k] - 1 + min_cell)
+                cap_c = min(min_cell, cap_of[k])
+                L = min(L, outside_caps + caps[k] - cap_c + 1)
+    for k in small_cells:
+        if k is None:                                   # used-small total: all codes
+            L = min(L, sum(len(cs) for cs in parts.values()))
+            continue
+        others = sum(lb_sum[q] for q in parts if q != k)
+        T = max(T, others + min_cell)
+        if k == "named":                                # rolled-only has no union bound
+            L = min(L, sum(caps[q] for q in parts if q != k) + len(parts[k]))
+    return T, L
 
 
-def safe_frac(frac, source_bands, min_cell: int = _MIN_CELL, grid: int = 10):
-    """``(value, display, range)`` for a term's fractional (1/m) count — two-sided and
+def safe_frac(frac, nd, min_cell: int = _MIN_CELL, grid: int = 10):
+    """``(value, display, range)`` for a term's fractional (1/m) count ``frac`` on the
+    already-suppressed node ``nd`` (its total and split decided first) — two-sided and
     selection-free (Phase 0, 2026-11-02).
 
-    The old rule published frac exactly whenever it cleared the floor, which let
-    ``frac - Σ other codes' band lows`` cap a ≤floor code from ABOVE (down to exactly 1
-    on the live payload). Now the representation is chosen from public facts only:
-      * no ≤floor code on the term: exact above the floor, ``≤floor`` otherwise;
-      * a ≤floor code present: a ``grid``-wide bucket, except that any bucket ending at
-        or below the protection threshold (``_frac_floor_threshold``, rounded up to the
-        grid) is shown as ``≤threshold``. The published upper end is therefore never
-        below the threshold, so no ≤floor code can be capped below the floor, and which
-        display appears is a function of the bucket alone (no selection leak).
+    The old rule published frac exactly whenever it cleared the floor, which let frac cap
+    a ≤floor code from above (to exactly 1 on the live payload). Now, with ``(T, L)`` from
+    ``_frac_bounds`` (public information only):
+      * no ≤floor cell on the term: exact above the floor, ``≤floor`` otherwise;
+      * else a ``grid``-wide bucket, with every bucket ending at or below ``T`` (rounded
+        up to the grid) merged into ``≤Tg`` and every bucket starting above ``L``
+        (rounded down to a bucket start) merged into ``≥Ls``. The published upper end is
+        then >= T and the lower end <= L. When those two regions would overlap
+        (``Ls <= Tg``) frac is withheld — decided from T and L, never from frac itself.
     ``value`` is the exact int only in the exact case, else None. Pure."""
     F = int(round(float(frac)))
     if F <= 0:
         return 0, "0", [0, 0]
-    T = _frac_floor_threshold(source_bands, min_cell)
-    if T is None:
+    bounds = _frac_bounds(nd, min_cell)
+    if bounds is None:
         if F > min_cell:
             return F, str(F), [F, F]
         return None, f"≤{min_cell}", [1, min_cell]
-    tg = -(-T // grid) * grid                         # ceil to the grid
+    T, L = bounds
+    tg = -(-int(T) // grid) * grid                     # ceil to the grid
+    ls = float("inf") if L == float("inf") else ((int(L) - 1) // grid) * grid + 1
+    if ls <= tg:
+        return None, "—", None
     blo = ((F - 1) // grid) * grid + 1
     bhi = blo + grid - 1
     if bhi <= tg:
         return None, f"≤{tg}", [1, tg]
+    if blo >= ls:
+        return None, f"≥{ls}", [ls, None]
     return None, f"{blo}–{bhi}", [blo, bhi]
 
 
 # --- named / rolled-up-only split of a term's count ------------------------------------
 # A term's patients partition into NAMED (>= 1 attribution through a code whose step for
 # this term is 1-3: same-as, via SNOMED, or HPO) and ROLLED-UP ONLY (every attribution is
-# through codes that only CLIMBED to it, step 4). Two parts that sum to a published total
-# leave one differencing channel (part = total - other) plus the per-code bands of each
-# part, and every publish/withhold choice must itself be decided from public information
-# or the choice leaks. So eligibility is checked over EVERY hypothesis about the hidden
-# parts that is consistent with the public bands, and the term is withheld unless all of
-# them would publish safely. Spec: docs/superpowers/specs/2026-11-02-mondo-usage-mapping-
-# provenance-design.md (D3/D4), plan Task A3 (normative).
-def _caps(bands, N, min_cell: int = _MIN_CELL) -> int:
-    """Largest a part can be given its codes' bands (a union is <= the sum of its parts)."""
-    tot = 0
-    for b in bands:
-        _, hi = _band_bounds(b["band"], min_cell)
-        tot += int(min(hi, N)) * int(b["codes"])
-    return tot
+# through codes that only CLIMBED to it, step 4). Named is exactly the union of the named
+# codes' patients, so it is >= 1 whenever the term has a named code (public); rolled-up
+# only is the climbed codes' union MINUS the named patients, so it can be anything in
+# [0, union] — including 0 — even when climbed codes exist, and its codes can exceed it.
+# Two parts that sum to a published total leave one differencing channel plus each part's
+# per-code bands, and every publish/withhold choice must itself be decided from public
+# information or the choice leaks. So eligibility is checked over EVERY hypothesis about
+# the hidden parts that is consistent with the public bands, and the term is withheld
+# unless all of them would publish safely. Spec: docs/superpowers/specs/2026-11-02-mondo-
+# usage-mapping-provenance-design.md (D3/D4), plan Task A3.
+def _caps(bands, cap, min_cell: int = _MIN_CELL) -> int:
+    """Upper bound on the union of a part's codes: Σ min(band_hi, cap)."""
+    return int(sum(min(hi, cap) for _, hi in _band_lo_hi(bands, min_cell)))
 
 
 def _max_lo(bands, min_cell: int = _MIN_CELL) -> int:
-    """Smallest a part can be: at least its largest code's band floor (union >= max)."""
-    return max((int(_band_bounds(b["band"], min_cell)[0]) for b in bands), default=0)
+    """Lower bound on the union of a part's codes: its largest code's band floor."""
+    return max((lo for lo, _ in _band_lo_hi(bands, min_cell)), default=0)
 
 
-def _hyp_large_safe(N, large_bands, small_bands, min_cell: int = _MIN_CELL):
-    """(consistent, safe) for 'the other part is ≤floor, this part is large'.
-    Publishing it shows small = '≤floor' and large in [N-floor, N-1]."""
-    caps_l = _caps(large_bands, N, min_cell)
-    consistent = caps_l >= N - min_cell and _max_lo(small_bands, min_cell) <= min_cell
-    if not consistent:
-        return False, True
-    if N - caps_l > 1:                              # would force the small part >= 2
-        return True, False
-    lo = max(N - min_cell, _max_lo(large_bands, min_cell))
-    hi = min(N - 1, caps_l)
-    return True, _forced_lower(lo, hi, large_bands, min_cell) < 2
+def _split_eligible(N, named_bands, rolled_bands, min_cell: int = _MIN_CELL) -> bool:
+    """True iff EVERY hypothesis about the hidden (named, rolled) consistent with the
+    public bands would publish without narrowing a ≤floor cell. Requires N > 2·floor."""
+    caps_n = _caps(named_bands, N, min_cell)            # named = union of named codes
+    caps_r = _caps(rolled_bands, N, min_cell)           # rolled <= union of climbed codes
+    lo_n, lo_r = _max_lo(named_bands, min_cell), _max_lo(rolled_bands, min_cell)
+    # (i) both > floor: exact parts. Named = its codes' union (codes capped by it);
+    #     rolled only lower-bounds its codes' union (codes capped by N).
+    if caps_n > min_cell and caps_r > min_cell:
+        hi_n = min(N - min_cell - 1, caps_n)
+        if hi_n >= min_cell + 1 and _max_forced_exact(min_cell + 1, hi_n, named_bands,
+                                                      min_cell) >= 2:
+            return False
+        if _forced_lower(N - min_cell - 1, N, rolled_bands, min_cell) >= 2:
+            return False
+    # (ii) named in [1, floor], rolled large: shows named [1, floor], rolled [N-floor, N-1]
+    if lo_n <= min_cell and caps_r >= N - min_cell:
+        if N - caps_r > 1:                              # forces named >= 2
+            return False
+        if _forced_lower(max(N - min_cell, lo_r), N, rolled_bands, min_cell) >= 2:
+            return False
+    # (iii) rolled in [0, floor], named large: shows rolled [0, floor], named [N-floor, N]
+    if caps_n >= N - min_cell:
+        if N - caps_n > 1:                              # forces rolled >= 2
+            return False
+        if _forced_lower(max(N - min_cell, lo_n), min(N, caps_n), named_bands,
+                         min_cell) >= 2:
+            return False
+    return True
 
 
 def split_parts(node, *, n_total, n_named, named_bands, rolled_bands,
@@ -839,12 +928,14 @@ def split_parts(node, *, n_total, n_named, named_bands, rolled_bands,
 
     Returns ``{"status", "named", "rolled", "named_bands", "rolled_bands"}`` with each
     part ``{"count", "display", "range"}``. Status:
-      * ``exact``    — both parts exact (both 0 or > floor, all consistent hypotheses safe)
-      * ``ranged``   — one part ``≤floor`` ([1, floor]), the other [N-floor, N-1]
-      * ``mirror``   — one part is 0, so the other IS the total: copy its display
+      * ``mirror``   — a part is PUBLICLY zero (it has no codes), so the other part IS the
+                       total: copy the total's display
+      * ``exact``    — both parts exact and > floor (or the term is unused)
+      * ``ranged``   — named ``≤floor`` [1, floor] with rolled [N-floor, N-1], or rolled
+                       ``≤floor`` [0, floor] with named [N-floor, N]
       * ``withheld`` — total not exact, total <= 2·floor, or some consistent hypothesis
-                       would narrow a ≤floor cell. Revealing 'withheld' leaks nothing,
-                       because the condition depends only on public information.
+                       would narrow a ≤floor cell. Every branch condition is public, so the
+                       status itself leaks nothing.
     Pure."""
     N, a = int(n_total), int(n_named)
     b = N - a
@@ -855,33 +946,24 @@ def split_parts(node, *, n_total, n_named, named_bands, rolled_bands,
     zero, hidden = P(0, "0", [0, 0]), P(None, "—", None)
     if N == 0:
         return out("exact", zero, zero)
-    if a == 0 or b == 0:                            # the non-zero part IS the total
-        cnt = node.get("count")
-        rng = node.get("count_range")
+    if not named_bands or not rolled_bands:             # a part is publicly empty
+        cnt, rng = node.get("count"), node.get("count_range")
         if rng is None:
             rng = [cnt, cnt] if cnt is not None else [1, min_cell]
         full = P(cnt, node.get("display"), list(rng))
-        return out("mirror", zero if a == 0 else full, full if a == 0 else zero)
+        return out("mirror", zero if not named_bands else full,
+                   full if not named_bands else zero)
     if node.get("count") is None or node.get("state") != "reported" or N <= 2 * min_cell:
         return out("withheld", hidden, hidden)
-    # every hypothesis consistent with the public bands must publish safely
-    caps_n, caps_r = _caps(named_bands, N, min_cell), _caps(rolled_bands, N, min_cell)
-    ok = True
-    if caps_n > min_cell and caps_r > min_cell:     # (i) both parts > floor
-        for bands, caps in ((named_bands, caps_n), (rolled_bands, caps_r)):
-            hi = min(N - min_cell - 1, caps)
-            if hi >= min_cell + 1 and _max_forced_exact(min_cell + 1, hi, bands, min_cell) >= 2:
-                ok = False
-    for large, small in ((rolled_bands, named_bands), (named_bands, rolled_bands)):
-        _cons, safe = _hyp_large_safe(N, large, small, min_cell)   # (ii) / (iii)
-        ok = ok and safe
-    if not ok:
+    if not _split_eligible(N, named_bands, rolled_bands, min_cell):
         return out("withheld", hidden, hidden)
     if a > min_cell and b > min_cell:
         return out("exact", P(a, str(a), [a, a]), P(b, str(b), [b, b]))
-    small, big = P(None, f"≤{min_cell}", [1, min_cell]), \
-        P(None, f"{N - min_cell}–{N - 1}", [N - min_cell, N - 1])
-    return out("ranged", small if a <= min_cell else big, big if a <= min_cell else small)
+    if a <= min_cell:
+        return out("ranged", P(None, f"≤{min_cell}", [1, min_cell]),
+                   P(None, f"{N - min_cell}–{N - 1}", [N - min_cell, N - 1]))
+    return out("ranged", P(None, f"{N - min_cell}–{N}", [N - min_cell, N]),
+               P(None, f"≤{min_cell}", [0, min_cell]))
 
 
 def _check_split(nd, min_cell: int = _MIN_CELL) -> None:
@@ -891,38 +973,45 @@ def _check_split(nd, min_cell: int = _MIN_CELL) -> None:
         return
     st, nm, rl = sp["status"], sp["named"], sp["rolled"]
     nb, rb = sp.get("named_bands") or [], sp.get("rolled_bands") or []
-    fail = lambda why: (_ for _ in ()).throw(
-        AssertionError(f"diff-unsafe split on {nd.get('id')}: {why}"))
+
+    def fail(why):
+        raise AssertionError(f"diff-unsafe split on {nd.get('id')}: {why}")
+    N = nd.get("count")
     if st == "withheld":
         if nm["count"] is not None or rl["count"] is not None or nm["range"] or rl["range"]:
             fail("withheld split carries values")
     elif st == "mirror":
-        if 0 not in (nm["count"], rl["count"]):
-            fail("mirror split without a zero part")
+        if not ((nm["count"] == 0 and not nb) or (rl["count"] == 0 and not rb)):
+            fail("mirror split whose zero part has codes (a hidden zero)")
     elif st == "exact":
-        N = nd.get("count")
         if nm["count"] is None or rl["count"] is None:
             fail("exact split with a missing part")
         if N is not None and nm["count"] + rl["count"] != N:
             fail("exact parts do not sum to the total")
-        for c, bands in ((nm["count"], nb), (rl["count"], rb)):
+        for c in (nm["count"], rl["count"]):
             if 0 < c <= min_cell:
                 fail(f"exact part {c} inside 1..{min_cell}")
-            if c and _forced_lower(c, c, bands, min_cell) >= 2:
-                fail("exact part boxes a ≤floor code")
+        if nm["count"] and _forced_lower(nm["count"], nm["count"], nb, min_cell) >= 2:
+            fail("exact named part boxes a ≤floor code")
+        if rl["count"] and _forced_lower(rl["count"], N or rl["count"], rb, min_cell) >= 2:
+            fail("exact rolled part boxes a ≤floor code")
     elif st == "ranged":
-        N = nd.get("count")
         if N is None:
             fail("ranged split beside a non-exact total")
-        small, big, big_bands = ((nm, rl, rb) if nm["range"] == [1, min_cell] else (rl, nm, nb))
-        if small["range"] != [1, min_cell] or big["range"] != [N - min_cell, N - 1]:
-            fail("ranged parts not in canonical [1,floor] / [N-floor, N-1] form")
-        caps = _caps(big_bands, N, min_cell)
-        if N - caps > 1:
-            fail(f"large part caps at {caps}, forcing the ≤floor part >= {N - caps}")
-        lo = max(N - min_cell, _max_lo(big_bands, min_cell))
-        if _forced_lower(lo, min(N - 1, caps), big_bands, min_cell) >= 2:
-            fail("large part's range boxes a ≤floor code")
+        if nm["range"] == [1, min_cell] and rl["range"] == [N - min_cell, N - 1]:
+            if N - _caps(rb, N, min_cell) > 1:
+                fail("rolled part caps force the ≤floor named part >= 2")
+            if _forced_lower(max(N - min_cell, _max_lo(rb, min_cell)), N, rb, min_cell) >= 2:
+                fail("rolled part's range boxes a ≤floor code")
+        elif rl["range"] == [0, min_cell] and nm["range"] == [N - min_cell, N]:
+            caps = _caps(nb, N, min_cell)
+            if N - caps > 1:
+                fail("named part caps force the ≤floor rolled part >= 2")
+            if _forced_lower(max(N - min_cell, _max_lo(nb, min_cell)), min(N, caps), nb,
+                             min_cell) >= 2:
+                fail("named part's range boxes a ≤floor code")
+        else:
+            fail("ranged parts not in canonical form")
     else:
         fail(f"unknown status {st!r}")
 
@@ -977,20 +1066,27 @@ def assert_diff_safe(nodes, min_cell: int = _MIN_CELL) -> None:
                 f"to >= {f} (within-term roll-up narrowing not suppressed)")
     for nd in nodes:                                 # named / rolled-up-only split
         _check_split(nd, min_cell)
-    for nd in nodes:                                 # frac: the UPPER-bound channel
+    for nd in nodes:                                 # frac: both ends (two-sided)
         if nd.get("kind") == "root" or "frac_range" not in nd:
             continue
-        T = _frac_floor_threshold(nd.get("source_bands") or [], min_cell)
-        if T is None:
+        bounds = _frac_bounds(nd, min_cell)
+        if bounds is None:
             continue
+        T, L = bounds
         if nd.get("frac") is not None:
             raise AssertionError(
-                f"diff-unsafe term {nd.get('id')}: exact frac beside a ≤{min_cell} code")
+                f"diff-unsafe term {nd.get('id')}: exact frac beside a ≤{min_cell} cell")
         rng = nd.get("frac_range")
-        if rng and rng[1] is not None and rng[1] != 0 and int(rng[1]) < T:
+        if rng is None or rng == [0, 0]:
+            continue                                 # withheld / genuinely zero
+        if rng[1] is not None and int(rng[1]) < T:
             raise AssertionError(
                 f"diff-unsafe term {nd.get('id')}: frac upper end {rng[1]} caps a "
-                f"≤{min_cell} code below the floor (needs >= {T})")
+                f"≤{min_cell} cell below the floor (needs >= {T})")
+        if int(rng[0]) > L:
+            raise AssertionError(
+                f"diff-unsafe term {nd.get('id')}: frac lower end {rng[0]} forces a "
+                f"≤{min_cell} cell above 1 (needs <= {L})")
 
 
 
@@ -1151,7 +1247,7 @@ def build_safe_summary(results: list[dict]) -> str:
               f"{suppress_count(sv.get('persons_standard_exact'), min_cell)} · climbed "
               f"{suppress_count(sv.get('persons_climbed'), min_cell)}",
               f"- persons reaching ≥1 term ONLY through climbed codes (≤-suppressed): "
-              f"{suppress_count(sv.get('persons_rolled_up_only'), min_cell)}",
+              f"{(lambda v: v if isinstance(v, str) else suppress_count(v, min_cell))(sv.get('persons_rolled_up_only'))}",
               "- named / rolled-up-only split, **terms** by publication status: " +
               (", ".join(f"{k}={v}" for k, v in sorted(
                   (sv.get("split_terms_by_status") or {}).items())) or "(none)"),
@@ -1240,13 +1336,6 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
 
     for r in term_rows:
         state, display, public = usage_state(r["n_persons"], min_cell)
-        # fractional (1/m) count — patient-derived, so it gets its own gate: it can dip
-        # below the floor even when the exact count clears it, and (Phase 0) it can cap a
-        # ≤floor source code from above, so `safe_frac` publishes it two-sided.
-        frac_val = r.get("n_frac")
-        frac_val = r["n_persons"] if frac_val is None else frac_val
-        frac_public, frac_display, frac_range = safe_frac(
-            frac_val, r.get("source_bands") or [], min_cell)
         counts[state] += 1
         state_of[r["mondo_id"]] = state
         parents = r["parents"] or [_ROOT_ID]
@@ -1270,9 +1359,9 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
             "state": state,
             "display": display,
             "count": public,                 # None when withheld
-            "frac": frac_public,             # de-double-counted addable count (exact only)
-            "frac_display": frac_display,
-            "frac_range": frac_range,        # [lo, hi] always; the roll-up's uncertainty
+            "frac": None,                    # set by `safe_frac` once total + split are final
+            "frac_display": "",
+            "frac_range": None,
             "collision": bool(siblings),
             "collision_siblings": siblings,
             "collision_kind": ckind,
@@ -1328,6 +1417,14 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
             nd, n_total=int(r["n_persons"]), n_named=int(r["n_named"]),
             named_bands=r.get("named_bands") or [], rolled_bands=r.get("rolled_bands") or [],
             min_cell=min_cell)
+
+    # fractional (1/m) count — patient-derived, so it gets its own gate, decided LAST:
+    # its safe interval depends on everything else published for the term (the
+    # suppressed total, the split and the per-code bands; see `_frac_bounds`).
+    for r, nd in zip(term_rows, nodes):
+        frac_val = r.get("n_frac")
+        frac_val = r["n_persons"] if frac_val is None else frac_val
+        nd["frac"], nd["frac_display"], nd["frac_range"] = safe_frac(frac_val, nd, min_cell)
 
     n_terms = len(term_rows)
     n_used = counts["used_small"] + counts["reported"]
@@ -1751,7 +1848,9 @@ def main(argv: list[str]) -> int:
                     "persons_climbed": int(t3.select("person_id").distinct().count()),
                     # distinct persons reaching >= 1 term ONLY via climb-only codes (a single
                     # cohort-wide count, never a sum of per-term split parts)
-                    "persons_rolled_up_only": rolled_up_only_persons(attribution, steps),
+                    "persons_rolled_up_only": (lambda n: n if (n == 0 or n > min_cell)
+                                               else f"≤{min_cell}")(
+                        rolled_up_only_persons(attribution, steps)),
                     "unmatched_codes_by_vocab": {
                         (str(r.vocabulary_id) if pd.notna(r.vocabulary_id) else "?"): int(r.codes)
                         for r in unm_codes_by_vocab.itertuples()},
@@ -1970,7 +2069,8 @@ def main(argv: list[str]) -> int:
                       .join(unmatched_std, ca["descendant_concept_id"] == unmatched_std["std_cid"], "inner")
                       .select(ca["descendant_concept_id"].alias("std_cid"),
                               ca["ancestor_concept_id"].alias("anc_cid"),
-                              ca["min_levels_of_separation"].alias("lev")))
+                              ca["min_levels_of_separation"].alias("lev"))
+                    .cache())     # reused by the nearest-ancestor pick and the path collection
             nearest = (ca_f.withColumn(
                            "mlev", F.min("lev").over(Window.partitionBy("std_cid")))
                        .where(F.col("lev") == F.col("mlev"))
