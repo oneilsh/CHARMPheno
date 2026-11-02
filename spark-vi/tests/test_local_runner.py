@@ -136,3 +136,30 @@ def test_rejects_empty_corpus_and_non_model():
         LocalRunner(CountingModel()).fit([])
     with pytest.raises(TypeError):
         LocalRunner(object())
+
+
+def test_broadcast_params_ship_expelogbeta_and_give_identical_stats():
+    """The topic models ship exp(E[log beta]) instead of lambda; the E-step's
+    statistics are identical either way."""
+    from spark_vi.dag import DagLayout
+    from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
+    from spark_vi.models.topic.types import BOWDocument, GatedBOWDocument
+
+    rng = np.random.default_rng(0)
+    idx = [np.unique(rng.integers(0, 12, 6)).astype(np.int32) for _ in range(5)]
+    docs = [BOWDocument(i, np.ones(len(i)), len(i)) for i in idx]
+    lay = DagLayout({1: 0, 2: 0, 3: 1}, n_bg=1, tpn=1)
+    gdocs = [GatedBOWDocument(d.indices, d.counts, d.length,
+                              frontier=frozenset([3]) if i % 2 else frozenset())
+             for i, d in enumerate(docs)]
+    for model, rows in ((OnlineLDA(K=4, vocab_size=12, random_seed=1), docs),
+                        (DagGatedOnlineLDA(lay, 12, random_seed=1), gdocs),
+                        (DagGatedOnlineLDA(lay, 12, random_seed=1, domains=[7, 5]), gdocs)):
+        gp = model.initialize_global(None)
+        shipped = model.broadcast_params(gp)
+        assert "lambda" not in shipped and "expElogbeta" in shipped
+        a = model.local_update(iter(rows), gp)
+        b = model.local_update(iter(rows), shipped)
+        for k in a:
+            np.testing.assert_allclose(a[k], b[k], rtol=0, atol=0)

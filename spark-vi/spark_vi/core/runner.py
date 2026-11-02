@@ -188,7 +188,7 @@ class VIRunner:
                 # 2. Broadcast current global params — INSIDE the retried action,
                 # so a retry re-broadcasts instead of reusing blocks that may have
                 # died with the executors (retry_spark_action's contract).
-                bcast = sc.broadcast(global_params)
+                bcast = sc.broadcast(model.broadcast_params(global_params))
 
                 # Default-arg capture binds bcast and model by value at definition
                 # time (stored in __defaults__), the Spark-safe closure idiom.

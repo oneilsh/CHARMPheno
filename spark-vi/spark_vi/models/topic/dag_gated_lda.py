@@ -308,6 +308,13 @@ class DagGatedOnlineLDA(OnlineLDA):
         state["_init_seed"] = None
         return state
 
+    def broadcast_params(self, global_params):
+        """Ship the concatenated exp(E[log β]) (each domain normalized on its own)
+        instead of λ, plus α and the gate state the E-step reads."""
+        out = {k: v for k, v in global_params.items() if k != "lambda"}
+        out["expElogbeta"] = expElogbeta_from_lambda(global_params["lambda"])
+        return out
+
     def local_update(
         self,
         rows: Iterable[GatedBOWDocument],
@@ -327,7 +334,6 @@ class DagGatedOnlineLDA(OnlineLDA):
         lets the large background population train the node topics, collapsing them into
         generic comorbidity and destroying node specificity. Cost is O(|allowed|) per
         token = the doc's frontier closure (bounded by DAG depth), not K."""
-        lam = global_params["lambda"]
         alpha = global_params["alpha"]
         # Leaves-first schedule round (None = the production gate).
         gate_level = (self._gate_level(int(global_params["gate_iter"]))
@@ -336,7 +342,8 @@ class DagGatedOnlineLDA(OnlineLDA):
         # expElogbeta and each doc's concatenated token indices; lambda_stats stays a
         # single concatenated (K, V) array so VIRunner's mini-batch scaling /
         # combine_stats / broadcast are untouched.
-        expElogbeta = expElogbeta_from_lambda(lam)
+        expElogbeta = (global_params["expElogbeta"] if "expElogbeta" in global_params
+                       else expElogbeta_from_lambda(global_params["lambda"]))
         lambda_stats = np.zeros((self.K, self.V), dtype=np.float64)
 
         doc_loglik_sum = 0.0

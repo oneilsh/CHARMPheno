@@ -72,6 +72,18 @@ class VIModel(ABC):
 
     # Optional overrides ----------------------------------------------------
 
+    def broadcast_params(self, global_params: dict[str, np.ndarray]) -> dict[str, Any]:
+        """What the E-step needs this iteration, computed once on the driver.
+
+        The runners ship THIS (not `global_params`) to `local_update`. The default
+        is `global_params` itself. A model whose E-step reads a transform of the
+        globals overrides it to ship the transform instead: the topic models ship
+        exp(E[log β]) rather than λ, as MLlib's online LDA does, so the digamma over
+        the whole (K, V) matrix runs once per iteration instead of once per
+        partition. `local_update` must accept what this returns.
+        """
+        return global_params
+
     def combine_stats(
         self,
         a: dict[str, np.ndarray],

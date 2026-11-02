@@ -64,10 +64,11 @@ class LocalRunner:
     def _aggregate(self, rows: Sequence, global_params: dict) -> dict:
         model = self.model
         step = self.chunk_size or max(len(rows), 1)
+        params = model.broadcast_params(global_params)    # once, as VIRunner does
         agg = None
         for lo in range(0, len(rows), step):
             # iter(): local_update sees an iterator, as under mapPartitions.
-            stats = model.local_update(iter(rows[lo:lo + step]), global_params)
+            stats = model.local_update(iter(rows[lo:lo + step]), params)
             agg = stats if agg is None else model.combine_stats(agg, stats)
         return agg
 

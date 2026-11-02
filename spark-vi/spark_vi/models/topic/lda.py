@@ -123,6 +123,16 @@ def _dirichlet_kl(q_alpha: np.ndarray, p_alpha: np.ndarray) -> float:
     )
 
 
+def _expElogbeta_of(params):
+    """exp(E[log β]) from what the E-step was handed: the shipped transform when the
+    runner used `broadcast_params`, else computed from λ (direct callers)."""
+    eb = params.get("expElogbeta")
+    if eb is not None:
+        return eb
+    lam = params["lambda"]
+    return np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+
+
 class OnlineLDA(VIModel):
     """Online LDA fittable by VIRunner with mini-batch SVI.
 
@@ -224,6 +234,14 @@ class OnlineLDA(VIModel):
             "eta": np.array(self.eta),          # 0-d ndarray for combine_stats type-uniformity
         }
 
+    def broadcast_params(self, global_params):
+        """Ship exp(E[log β]) instead of λ (computed once per iteration on the
+        driver, not once per partition), plus the small globals."""
+        lam = global_params["lambda"]
+        out = {k: v for k, v in global_params.items() if k != "lambda"}
+        out["expElogbeta"] = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+        return out
+
     def local_update(
         self,
         rows: Iterable[BOWDocument],
@@ -240,12 +258,11 @@ class OnlineLDA(VIModel):
           2. Add the suff-stat row update to lambda_stats[:, indices].
           3. Accumulate the data-likelihood and per-doc Dirichlet-KL terms.
         """
-        lam = global_params["lambda"]                                 # (K, V)
         alpha = global_params["alpha"]                                # (K,)
         # Precompute expElogbeta once per partition (shared across docs).
-        expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+        expElogbeta = _expElogbeta_of(global_params)
 
-        lambda_stats = np.zeros_like(lam)
+        lambda_stats = np.zeros_like(expElogbeta)
         doc_loglik_sum = 0.0
         doc_theta_kl_sum = 0.0
         n_docs = 0
