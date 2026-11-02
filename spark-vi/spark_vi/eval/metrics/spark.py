@@ -4,8 +4,9 @@
 Input: an RDD of `(key, score (n,), y (n,))` column pieces, any number per key (a
 partition emits its slice of each column; the producer decides what a key is: a
 node, a (view, node) pair, one pooled detection column). Each piece is tallied on
-its executor, the tallies merge by key in the shuffle (`reduceByKey` combines
-map-side first), and each key's metrics and, for the keys in `curve_keys`, its
+its executor, a key's tallies are gathered in the shuffle (`combineByKey`, lists
+combined map-side first) and regrouped ONCE (`core.merge_all`; folding pairwise
+merges would re-sort the growing tally per partition), and each key's metrics and, for the keys in `curve_keys`, its
 thinned ROC/PR curve are computed where the merged tally lands. The driver receives
 one small dict per key.
 
@@ -34,7 +35,9 @@ def per_key_metrics(pieces, *, recall_targets=(), fdr_targets=(), topk_frac=0.01
         return key, m
 
     tallies = (pieces.map(lambda kys: (kys[0], core.tally(kys[1], kys[2])))
-               .reduceByKey(core.merge, numPartitions=num_partitions))
+               .combineByKey(lambda t: [t], lambda acc, t: acc + [t],
+                             lambda a, b: a + b, numPartitions=num_partitions)
+               .mapValues(core.merge_all))
     return dict(tallies.map(_eval).collect())
 
 

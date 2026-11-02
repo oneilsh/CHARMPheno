@@ -177,3 +177,16 @@ def test_ece_perfectly_calibrated_is_zero_and_miscalibrated_is_positive():
     assert core.ece(p, y) < 0.05
     assert core.ece(np.full(100, 0.9), np.zeros(100)) > 0.5
     assert core.ece([], []) is None
+
+
+def test_merge_all_equals_a_fold_of_pairwise_merges():
+    rng = np.random.default_rng(7)
+    parts = [core.tally(np.round(rng.random(50), 2), rng.random(50) < 0.3)
+             for _ in range(6)] + [core.EMPTY]
+    folded = core.EMPTY
+    for t in parts:
+        folded = core.merge(folded, t)
+    got = core.merge_all(parts)
+    for a, b in zip(got, folded):
+        np.testing.assert_array_equal(a, b)
+    assert core.merge_all([])[0].size == 0

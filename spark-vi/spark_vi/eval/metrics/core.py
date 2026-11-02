@@ -59,7 +59,8 @@ def tally(score, y):
 
 
 def merge(a, b):
-    """The tally of the union of two columns' rows."""
+    """The tally of the union of two columns' rows. For many tallies use
+    `merge_all`: folding `merge` re-sorts the growing tally at every step."""
     if a[0].size == 0:
         return b
     if b[0].size == 0:
@@ -67,6 +68,19 @@ def merge(a, b):
     return _group(np.concatenate([a[0], b[0]]),
                   np.concatenate([a[1], b[1]]).astype(np.float64),
                   np.concatenate([a[2], b[2]]).astype(np.float64))
+
+
+def merge_all(tallies):
+    """The tally of the union of any number of tallies, regrouped ONCE: O(n log n)
+    in the total size, where a fold of pairwise `merge`s is O(k · n log n)."""
+    ts = [t for t in tallies if t[0].size]
+    if not ts:
+        return EMPTY
+    if len(ts) == 1:
+        return ts[0]
+    return _group(np.concatenate([t[0] for t in ts]),
+                  np.concatenate([t[1] for t in ts]).astype(np.float64),
+                  np.concatenate([t[2] for t in ts]).astype(np.float64))
 
 
 def node_metrics(t, *, recall_targets=(), fdr_targets=(), topk_frac=0.01):

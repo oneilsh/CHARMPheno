@@ -8,15 +8,16 @@ from spark_vi.eval.metrics import core
 def per_key_metrics(pieces, *, recall_targets=(), fdr_targets=(), topk_frac=0.01,
                     curve_keys=(), max_points=300):
     """`{key: metrics dict (+ "curve" for curve_keys)}`; see `core.node_metrics`."""
-    tallies = {}
+    parts = {}
     for key, s, y in pieces:
-        t = core.tally(s, y)
-        tallies[key] = core.merge(tallies[key], t) if key in tallies else t
+        parts.setdefault(key, []).append(core.tally(s, y))
+    ck = set(curve_keys)
     out = {}
-    for key, t in tallies.items():
+    for key, ts in parts.items():
+        t = core.merge_all(ts)
         m = core.node_metrics(t, recall_targets=recall_targets,
                               fdr_targets=fdr_targets, topk_frac=topk_frac)
-        if key in set(curve_keys):
+        if key in ck:
             m["curve"] = core.curve(t, max_points=max_points)
         out[key] = m
     return out
