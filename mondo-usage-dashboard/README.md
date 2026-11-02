@@ -26,10 +26,10 @@ the detail panel docked beside it.
 
 The payload is produced on the AoU cluster (BigQuery + Spark) by
 [`analysis/cloud/mondo_usage_cloud.py`](../analysis/cloud/mondo_usage_cloud.py),
-currently run as experiment **0121** (`source_climb`, `--with-hpo`, HPO release pinned):
+currently run as experiment **0122** (`source_climb`, `--with-hpo`, HPO release pinned):
 
 ```bash
-make -C analysis/cloud exp ID=121
+make -C analysis/cloud exp ID=122
 # writes <run-dir>/mondo_usage.json + hpo_usage.json  (+ *_nodes.tsv)
 ```
 
@@ -95,14 +95,16 @@ diseases (they flag e.g. prostate cancer), so those are deliberately excluded.
 A ✦ also marks **rare-disease** terms.
 The detail drawer lists each term's source codes and its subtree roll-up.
 
-**Counting (exp 0121+).** Every count is of **diagnoses**: a participant with a given source
+**Counting (exp 0122+).** Every count is of **diagnoses**: a participant with a given source
 code, counted once however often it was recorded. Each (term, source code) pair is a *cell*,
-published exactly above 20 and as **10** (shown `10*`) for 1–20. Everything else is a sum of
-published cells: a term's count adds its codes' cells, its named / climbed-only split adds the
-cells of each kind, and a subtree **roll-up** adds the cells of every term beneath it, counting
-each source code once even when it reaches several of those terms. No separately computed total
-is published, so every figure on the page is reproducible from the cells. Each node shows
-**`direct of rolled`**; the **Per-term / Rolled up** toggle picks which one drives node size.
+published as the **middle of its 20-wide range**: 1–20 as 10 (shown `10*`), 21–40 as 30, 41–60
+as 50, and so on. These are the same ranges the AllOfUs Data Browser uses (it shows the top of
+each range), so nothing here is finer than AoU's own release, while midpoints avoid an upward
+bias that would compound up the hierarchy. Everything else is a sum of published cells: a
+term's count adds its codes' cells, its named / climbed-only split adds the cells of each kind,
+and a subtree **roll-up** adds the cells of every term beneath it, counting each source code
+once even when it reaches several of those terms. Each node shows **`direct of rolled`**; the
+**Per-term / Rolled up** toggle picks which one drives node size.
 
 **Mapping provenance (exp 0120+).** Each source code in a term's drawer is marked by the
 ladder step that placed it: `≡` **same-as** (the source code is a Mondo cross-reference),

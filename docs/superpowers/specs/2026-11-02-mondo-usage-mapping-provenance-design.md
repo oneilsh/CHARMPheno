@@ -278,3 +278,13 @@ bands). Mapping provenance (steps, `std`, paths, `concepts`, dialog) is unchange
 - **Precision note**: cells > 20 are exact, finer than the Data Browser's 20-grid (user's call).
 - Removed: per-code bands and histograms, `total_band`/`safe_total_band`/complementary
   suppression, `split_parts` and its hypotheses, the roll-up ±.
+
+## Revision 3 (2026-11-02, user decision): AoU bins at their midpoints
+
+Supersedes Revision 2's cell values (the additive structure is unchanged). Each cell is
+published as the **midpoint of its AoU bin**: bins are 1–20, 21–40, 41–60, … (the AoU Data
+Browser's, which shows each bin's top); published values are 10, 30, 50, … (`w·⌈n/w⌉ − w/2`,
+w = 20). Rationale: exact cells above 20 were finer than AoU's own release, so combining them
+with Data Browser counts could narrow small values; the same bins on the same grid add nothing
+when combined. Rounding up (AoU's display) biases totals upward and compounds up the hierarchy;
+midpoints are roughly unbiased above 20. Tripwire: every cell is 0 or ≡ 10 (mod 20).

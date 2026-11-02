@@ -595,22 +595,26 @@ def suppress_count(n, min_cell: int = _MIN_CELL) -> str:
 # Every published patient figure is built from per-(term, source code) CELLS: the number of
 # distinct patients with that source code attributed to the term — a "diagnosis" is a
 # (patient, source code) pair, counted once however many rows the patient has for it. A
-# cell is published exactly above the floor and as IMPUTED (10) for 1..floor. Every
+# cell is published as the MIDPOINT of its AoU bin (Revision 3): the Data Browser's bins
+# are 1-20, 21-40, ... and it shows each count as the bin's top; we show the bin's middle
+# (10, 30, 50, ...). Same bins = no finer than AoU's own release, and aligned with its grid
+# so combining with it adds nothing; midpoints avoid the round-up's upward bias, which
+# would compound up the hierarchy. Every
 # aggregate — term count, named / climbed-only split, subtree roll-up — is a SUM OF
 # PUBLISHED CELLS, never a separately computed true number, so arithmetic on the payload
 # can only recover the imputed 10s: a masked cell's true value enters no published figure.
 # (Rounding exact aggregates separately would let the two roundings constrain each other;
 # summing published cells cannot.)
-IMPUTED = 10
+IMPUTED = 10        # the 1-20 bin's midpoint
 
 
 def publish_cell(n, min_cell: int = _MIN_CELL) -> int:
-    """Published value of one cell: 0 stays 0, 1..floor becomes IMPUTED, above the floor
-    is exact. Pure."""
+    """Published value of one cell: 0 stays 0; otherwise the midpoint of its ``min_cell``-
+    wide bin, ``w*ceil(n/w) - w/2`` (1-20 -> 10, 21-40 -> 30, 441-460 -> 450). Pure."""
     n = int(n or 0)
     if n <= 0:
         return 0
-    return IMPUTED if n <= min_cell else n
+    return min_cell * (-(-n // min_cell)) - min_cell // 2
 
 
 def cell_sums(cells) -> dict:
@@ -671,8 +675,8 @@ def rollup_cells(cells_of: dict, parents_of: dict) -> dict:
 
 def assert_cells_safe(nodes, cells_of: "dict | None" = None,
                       min_cell: int = _MIN_CELL) -> None:
-    """Post-condition tripwire for the published payload: every cell is 0, IMPUTED, or
-    above the floor; every aggregate equals the sum of the published cells it is built
+    """Post-condition tripwire for the published payload: every cell is 0 or a bin
+    midpoint (≡ floor/2 mod floor); every aggregate equals the sum of the published cells it is built
     from (term count vs ALL its cells when ``cells_of`` is given; split parts vs the
     count; roll-up parts vs each other); no ``frac``; legacy (no-cell) totals are masked
     or above the floor."""
@@ -684,7 +688,7 @@ def assert_cells_safe(nodes, cells_of: "dict | None" = None,
         if nd.get("frac") is not None or nd.get("frac_display") or nd.get("frac_range"):
             fail(nd, "frac published")
         for c in nd.get("source_codes") or []:
-            if "n" in c and not (c["n"] in (0, IMPUTED) or c["n"] > min_cell):
+            if "n" in c and not (c["n"] == 0 or c["n"] % min_cell == min_cell // 2):
                 fail(nd, f"cell {c.get('vocab')} {c.get('code')} = {c['n']}")
         if nd.get("cells"):
             cnt = nd.get("count")

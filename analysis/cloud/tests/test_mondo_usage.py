@@ -485,25 +485,28 @@ def _cell(cid, n, step, vocab="ICD10CM"):
             "n": m.publish_cell(n)}
 
 
-def test_publish_cell():
-    assert [m.publish_cell(n) for n in (0, 1, 20, 21, 456)] == [0, 10, 10, 21, 456]
+def test_publish_cell_is_midpoint_of_aou_bin():
+    # AoU's bins (1-20, 21-40, ...) represented by their midpoints: same information as the
+    # Data Browser's round-up, without its upward bias
+    assert [m.publish_cell(n) for n in (0, 1, 20, 21, 40, 41, 456, 460, 461)] == \
+        [0, 10, 10, 30, 30, 50, 450, 450, 470]
 
 
 def test_term_count_is_sum_of_published_cells():
-    # the user's example: ICDXX with ≤20 diagnoses -> 10, ICDXX2 with 456 -> term 466
+    # ICDXX with ≤20 diagnoses -> 10, ICDXX2 with 456 (bin 441-460) -> 450; term 460
     p = m.assemble_payload(meta={}, term_rows=[
         _row("MONDO:T", cells=[_cell(1, 7, 2), _cell(2, 456, 2)])])
     t = {n["id"]: n for n in p["nodes"]}["MONDO:T"]
-    assert t["count"] == 466 and t["display"] == "466" and t["state"] == "reported"
-    assert t["imputed"] == 1 and sorted(c["n"] for c in t["source_codes"]) == [10, 456]
-    assert t["split"] == {"named": 466, "climbed": 0}
+    assert t["count"] == 460 and t["display"] == "460" and t["state"] == "reported"
+    assert t["imputed"] == 1 and sorted(c["n"] for c in t["source_codes"]) == [10, 450]
+    assert t["split"] == {"named": 460, "climbed": 0}
 
 
 def test_split_parts_are_sums_and_partition_the_count():
     p = m.assemble_payload(meta={}, term_rows=[
         _row("MONDO:T", cells=[_cell(1, 300, 1), _cell(2, 5, 2), _cell(3, 90, 4)])])
     t = {n["id"]: n for n in p["nodes"]}["MONDO:T"]
-    assert t["split"] == {"named": 310, "climbed": 90} and t["count"] == 400
+    assert t["split"] == {"named": 300, "climbed": 90} and t["count"] == 390
 
 
 def test_all_imputed_term_is_used_small():
@@ -539,12 +542,12 @@ def test_catalog_cap_keeps_heaviest_but_sums_everything():
     p = m.assemble_payload(meta={}, catalog_cap=1, term_rows=[
         _row("MONDO:T", cells=[_cell(1, 3, 2), _cell(2, 400, 4)])])
     t = {n["id"]: n for n in p["nodes"]}["MONDO:T"]
-    assert [c["n"] for c in t["source_codes"]] == [400] and t["n_source_codes"] == 2
-    assert t["count"] == 410
+    assert [c["n"] for c in t["source_codes"]] == [390] and t["n_source_codes"] == 2
+    assert t["count"] == 400
 
 
 def test_source_code_catalog_passthrough():
-    c = {"id": 9, "vocab": "ICD10CM", "code": "E27.3", "step": 4, "n": 120,
+    c = {"id": 9, "vocab": "ICD10CM", "code": "E27.3", "step": 4, "n": 110,
          "path": [11, 12], "path_ambiguous": True}
     t = {n["id"]: n for n in m.assemble_payload(
         meta={}, term_rows=[_row("MONDO:T", cells=[c])])["nodes"]}["MONDO:T"]
@@ -559,13 +562,14 @@ def test_frac_is_never_published():
 
 def test_assert_cells_safe_rejects_unsafe_payloads():
     import pytest
-    good = {"id": "X", "state": "reported", "cells": True, "count": 466,
-            "source_codes": [{"n": 10}, {"n": 456}], "split": {"named": 466, "climbed": 0},
-            "roll": {"all": 466, "named": 466, "climbed": 0, "imputed": 1}}
-    cells = {"X": [{"id": 1, "n": 10, "step": 2}, {"id": 2, "n": 456, "step": 2}]}
+    good = {"id": "X", "state": "reported", "cells": True, "count": 460,
+            "source_codes": [{"n": 10}, {"n": 450}], "split": {"named": 460, "climbed": 0},
+            "roll": {"all": 460, "named": 460, "climbed": 0, "imputed": 1}}
+    cells = {"X": [{"id": 1, "n": 10, "step": 2}, {"id": 2, "n": 450, "step": 2}]}
     m.assert_cells_safe([good], cells)
-    for bad in (dict(good, source_codes=[{"n": 7}, {"n": 456}]),          # raw small cell
-                dict(good, split={"named": 460, "climbed": 0}),           # split != count
+    for bad in (dict(good, source_codes=[{"n": 7}, {"n": 450}]),          # raw small cell
+                dict(good, source_codes=[{"n": 10}, {"n": 456}]),         # off-grid (exact) cell
+                dict(good, split={"named": 450, "climbed": 0}),           # split != count
                 dict(good, count=470),                                     # count != Σ cells
                 dict(good, roll={"all": 400, "named": 400, "climbed": 0, "imputed": 1}),
                 dict(good, frac=466)):
