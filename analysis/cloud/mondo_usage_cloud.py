@@ -582,6 +582,53 @@ def safe_total_band(n_persons, source_bands, min_cell: int = _MIN_CELL):
     return True, f">{min_cell}", (floor_lo, float("inf"))   # widest: only 'reported' itself
 
 
+def _frac_floor_threshold(source_bands, min_cell: int = _MIN_CELL):
+    """Smallest published frac upper end that cannot cap a ≤floor code below the floor,
+    or None when the term has no ≤floor code (nothing to protect).
+
+    On a term whose codes are all unshared, every diagnosis carries m = 1, so
+    ``frac >= Σ_codes |persons(code)|`` and ``frac_hi - Σ_{other codes} band_lo`` is an
+    UPPER bound on a ≤floor code. Assuming m = 1 everywhere is the attacker's best case
+    (shared codes only weaken the bound), so requiring
+    ``frac_hi >= Σ_all band_lo + (min_cell - 1)`` (the ≤floor code's own band_lo is 1)
+    keeps every ≤floor code able to reach the floor. Depends only on the public bands."""
+    floor = f"≤{min_cell}"
+    if not any(b["band"] == floor for b in source_bands):
+        return None
+    return sum(int(_band_bounds(b["band"], min_cell)[0]) * int(b["codes"])
+               for b in source_bands) + (min_cell - 1)
+
+
+def safe_frac(frac, source_bands, min_cell: int = _MIN_CELL, grid: int = 10):
+    """``(value, display, range)`` for a term's fractional (1/m) count — two-sided and
+    selection-free (Phase 0, 2026-11-02).
+
+    The old rule published frac exactly whenever it cleared the floor, which let
+    ``frac - Σ other codes' band lows`` cap a ≤floor code from ABOVE (down to exactly 1
+    on the live payload). Now the representation is chosen from public facts only:
+      * no ≤floor code on the term: exact above the floor, ``≤floor`` otherwise;
+      * a ≤floor code present: a ``grid``-wide bucket, except that any bucket ending at
+        or below the protection threshold (``_frac_floor_threshold``, rounded up to the
+        grid) is shown as ``≤threshold``. The published upper end is therefore never
+        below the threshold, so no ≤floor code can be capped below the floor, and which
+        display appears is a function of the bucket alone (no selection leak).
+    ``value`` is the exact int only in the exact case, else None. Pure."""
+    F = int(round(float(frac)))
+    if F <= 0:
+        return 0, "0", [0, 0]
+    T = _frac_floor_threshold(source_bands, min_cell)
+    if T is None:
+        if F > min_cell:
+            return F, str(F), [F, F]
+        return None, f"≤{min_cell}", [1, min_cell]
+    tg = -(-T // grid) * grid                         # ceil to the grid
+    blo = ((F - 1) // grid) * grid + 1
+    bhi = blo + grid - 1
+    if bhi <= tg:
+        return None, f"≤{tg}", [1, tg]
+    return None, f"{blo}–{bhi}", [blo, bhi]
+
+
 def complementary_suppress(nodes, min_cell: int = _MIN_CELL) -> int:
     """Band the total of any reported node whose exact total + per-code bands would
     box a ≤floor code into the suppressed interior. Mutates nodes in place (count ->
@@ -630,6 +677,20 @@ def assert_diff_safe(nodes, min_cell: int = _MIN_CELL) -> None:
             raise AssertionError(
                 f"diff-unsafe term {nd.get('id')}: a ≤{min_cell} source code is boxed "
                 f"to >= {f} (within-term roll-up narrowing not suppressed)")
+    for nd in nodes:                                 # frac: the UPPER-bound channel
+        if nd.get("kind") == "root" or "frac_range" not in nd:
+            continue
+        T = _frac_floor_threshold(nd.get("source_bands") or [], min_cell)
+        if T is None:
+            continue
+        if nd.get("frac") is not None:
+            raise AssertionError(
+                f"diff-unsafe term {nd.get('id')}: exact frac beside a ≤{min_cell} code")
+        rng = nd.get("frac_range")
+        if rng and rng[1] is not None and rng[1] != 0 and int(rng[1]) < T:
+            raise AssertionError(
+                f"diff-unsafe term {nd.get('id')}: frac upper end {rng[1]} caps a "
+                f"≤{min_cell} code below the floor (needs >= {T})")
 
 
 
@@ -874,11 +935,13 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
 
     for r in term_rows:
         state, display, public = usage_state(r["n_persons"], min_cell)
-        # fractional (1/m) count — suppressed the same way (it is patient-derived and can
-        # dip below the floor even when the exact count clears it, so it needs its own gate).
+        # fractional (1/m) count — patient-derived, so it gets its own gate: it can dip
+        # below the floor even when the exact count clears it, and (Phase 0) it can cap a
+        # ≤floor source code from above, so `safe_frac` publishes it two-sided.
         frac_val = r.get("n_frac")
         frac_val = r["n_persons"] if frac_val is None else frac_val
-        _fst, frac_display, frac_public = usage_state(int(round(frac_val)), min_cell)
+        frac_public, frac_display, frac_range = safe_frac(
+            frac_val, r.get("source_bands") or [], min_cell)
         counts[state] += 1
         state_of[r["mondo_id"]] = state
         parents = r["parents"] or [_ROOT_ID]
@@ -902,8 +965,9 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
             "state": state,
             "display": display,
             "count": public,                 # None when withheld
-            "frac": frac_public,             # de-double-counted addable count (None if withheld)
+            "frac": frac_public,             # de-double-counted addable count (exact only)
             "frac_display": frac_display,
+            "frac_range": frac_range,        # [lo, hi] always; the roll-up's uncertainty
             "collision": bool(siblings),
             "collision_siblings": siblings,
             "collision_kind": ckind,
@@ -977,7 +1041,7 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
     root = {"id": _ROOT_ID, "label": "Mondo disease (mapped-term view)",
             "kind": "root", "parents": [], "std_concepts": [], "state": "root",
             "category": "root", "display": "", "count": None,
-            "frac": None, "frac_display": "", "collision": False,
+            "frac": None, "frac_display": "", "frac_range": None, "collision": False,
             "collision_siblings": [], "collision_kind": "", "rare": False, "rare_src": [],
             "codes": [], "n_codes": 0, "codes_by_vocab": {},
             "source_codes": [], "n_source_codes": 0, "source_bands": [], "depth": 0}

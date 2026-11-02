@@ -148,10 +148,11 @@ def test_fractional_count_suppressed_independently():
     ]
     by = {n["id"]: n for n in m.assemble_payload(meta={}, term_rows=rows)["nodes"]}
     assert by["MONDO:A"]["count"] == 30 and by["MONDO:A"]["frac"] is None      # frac withheld
-    assert by["MONDO:A"]["frac_display"] == "≤20"
+    assert by["MONDO:A"]["frac_display"] == "≤20" and by["MONDO:A"]["frac_range"] == [1, 20]
     assert by["MONDO:B"]["frac"] == 2501 and by["MONDO:B"]["frac_display"] == "2501"
     assert by["MONDO:C"]["frac"] == 90                                          # fell back to exact
     assert by["root"]["frac"] is None and by["root"]["frac_display"] == ""
+    assert by["root"]["frac_range"] is None
 
 
 def test_rare_flag_passthrough_and_stats():
@@ -591,3 +592,34 @@ def test_assert_diff_safe_rejects_exact_total_with_unsafe_band():
     sb = [{"band": "21–100", "codes": 1}, {"band": "≤20", "codes": 1}]
     with pytest.raises(AssertionError):
         m.assert_diff_safe([{"id": "X", "state": "reported", "count": 101, "source_bands": sb}])
+
+
+# --- Phase 0: two-sided frac publication ----------------------------------------------
+def test_safe_frac_exact_without_small_codes():
+    assert m.safe_frac(2500.6, [{"band": "1k–10k", "codes": 2}]) == (2501, "2501", [2501, 2501])
+    assert m.safe_frac(12.4, [])[1:] == ("≤20", [1, 20])
+    assert m.safe_frac(0, []) == (0, "0", [0, 0])
+
+
+def test_safe_frac_upper_bound_never_narrows():
+    # On a collision-free term frac >= sum of per-code persons, so frac - sum(other codes'
+    # band lows) caps a ≤20 code. T = 101 + 1 + 19 = 121 is the smallest frac at which the
+    # ≤20 code can still reach 20; the published upper end never drops below it.
+    sb = [{"band": "101–1k", "codes": 1}, {"band": "≤20", "codes": 1}]
+    assert m.safe_frac(108, sb) == (None, "≤130", [1, 130])     # the measured live-leak shape
+    assert m.safe_frac(1234, sb) == (None, "1231–1240", [1231, 1240])
+    for F in range(1, 3000):                                     # property: cap >= 20 always
+        _, _, (_, hi) = m.safe_frac(F, sb)
+        assert hi - (101 + 1 - 1) >= 20
+
+
+def test_assert_diff_safe_rejects_unsafe_frac():
+    import pytest
+    sb = [{"band": "101–1k", "codes": 1}, {"band": "≤20", "codes": 1}]
+    base = {"id": "X", "state": "reported", "count": None, "count_range": [101, 1000],
+            "source_bands": sb}
+    with pytest.raises(AssertionError):                          # exact frac beside a ≤20 code
+        m.assert_diff_safe([dict(base, frac=108, frac_range=[108, 108])])
+    with pytest.raises(AssertionError):                          # range top below T
+        m.assert_diff_safe([dict(base, frac=None, frac_range=[101, 110])])
+    m.assert_diff_safe([dict(base, frac=None, frac_range=[1, 130])])
