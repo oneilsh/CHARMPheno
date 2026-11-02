@@ -1,0 +1,1 @@
+{"corpus_size_docs": 101758, "mean_codes_per_doc": 56.340828239548735, "k": 80, "v": 5000, "v_full": 8183, "cohort": {"id": "full", "label": "General Population (1 year windows)", "description": "Unfiltered 1-year windows on 10% of AllOfUs condition data, no clinical inclusion or window constraint applied."}}
