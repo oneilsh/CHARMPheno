@@ -1,20 +1,17 @@
 """The DisMech ribbon as an explicit native-Mondo label set (spec 2026-10-07 §D1).
 
-Two claims (the third, the fit-time `label_set` key fold, went with the option in
-the 2026-10 cleanup and ADR 0051; the ribbon is now read post hoc, e.g.
-`dag_gated_readout --readout-nodes`):
+One claim (the fit-time `label_set` key fold went with the option in the 2026-10
+cleanup and ADR 0051; the native build's ribbon filter, flat label DAG and
+per-document ancestor reduction went with the build's powering in spec 2026-10-30,
+when the native build stopped choosing a node set; the ribbon is read post hoc,
+e.g. `dag_gated_readout --readout-nodes`):
 
-  1. **The reader is faithful and the artifact is pinned.** `kb/disorders/*.yaml`
-     -> rows -> TSV -> rows round-trips; a disorder without a MONDO disease_term is
-     skipped and counted; the TSV refuses to load without its commit header; the
-     identity moves with the member set and NOT with the descriptive columns.
+  **The reader is faithful and the artifact is pinned.** `kb/disorders/*.yaml`
+  -> rows -> TSV -> rows round-trips; a disorder without a MONDO disease_term is
+  skipped and counted; the TSV refuses to load without its commit header; the
+  identity moves with the member set and NOT with the descriptive columns.
 
-  2. **The filter is a receipt, not a silent intersection.** `apply_label_set_filter`
-     keeps `powered & ribbon` and accounts for every member that did not make it
-     (unknown to this Mondo release / unpowered), and reports how flat the ribbon
-     really is (nested pairs within the kept set) without acting on it.
-
-Pure; no Spark.
+Plus the native build's mapping guards (exp 0136/0137), pure.
 """
 import sys
 from pathlib import Path
@@ -29,7 +26,6 @@ for _p in (str(REPO_ROOT), str(CLOUD), str(REPO_ROOT / "charmpheno"),
         sys.path.insert(0, _p)
 
 import dismech_ribbon as dr  # noqa: E402
-from charmpheno.mondo import native_dag as mnd  # noqa: E402
 
 _YAML_EDS = """
 name: Ehlers-Danlos Syndrome
@@ -149,41 +145,6 @@ def test_identity_moves_with_members_not_with_descriptions(kb, tmp_path):
     assert dr.label_set_identity(dr.load_ribbon(d)) != ident
 
 
-# --------------------------------------------------------------------------- #
-# 2. the filter is a receipt                                                    #
-# --------------------------------------------------------------------------- #
-#   root -> A -> B -> C ; root -> D ; E is a member unknown to this release
-_PARENT = {"A": ["root"], "B": ["A"], "C": ["B"], "D": ["root"], "root": []}
-_KNOWN = set(_PARENT)
-
-
-def test_filter_keeps_the_intersection_and_accounts_for_every_member():
-    powered = {"A", "B", "C", "D", "root"}
-    ribbon = {"A", "C", "D", "E", "Z"}           # B powered but not a member
-    kept, st = mnd.apply_label_set_filter(powered, ribbon, _PARENT,
-                                          known_terms=_KNOWN, name="t")
-    assert kept == {"A", "C", "D"}
-    assert st["n_members"] == 5 and st["n_kept"] == 3
-    assert st["n_unknown"] == 2                 # E, Z not in this Mondo release
-    assert st["n_unpowered"] == 0
-    # A is an ancestor of C within the kept set: reported, not acted on
-    assert st["n_nested_pairs"] == 1 and st["n_nested_members"] == 1
-    assert st["name"] == "t"
-
-
-def test_filter_reports_unpowered_members_and_a_flat_ribbon_has_no_pairs():
-    powered = {"A", "D"}
-    kept, st = mnd.apply_label_set_filter(powered, {"A", "C", "D"}, _PARENT,
-                                          known_terms=_KNOWN)
-    assert kept == {"A", "D"}
-    assert st["n_unpowered"] == 1 and st["n_unknown"] == 0
-    assert st["n_nested_pairs"] == 0
-    line = mnd.format_label_set_report({"label_set": st})
-    assert "3 member(s) -> 2 kept" in line and "1 unpowered" in line
-    assert mnd.format_label_set_report({"label_set": None}).endswith(
-        "(whole powered set)")
-
-
 def test_the_committed_ribbon_loads_and_matches_the_spec_pin():
     rb = dr.load_ribbon(REPO_ROOT / "analysis/cloud/label_sets/dismech_ribbon.tsv")
     assert rb.commit == "71cd0452358b01ef7d0b3cc213297f9837be7e54"
@@ -193,64 +154,12 @@ def test_the_committed_ribbon_loads_and_matches_the_spec_pin():
     assert "MONDO:0000001" not in rb.mondo_ids
 
 
-def test_flat_label_dag_puts_every_member_under_the_root():
-    """Exp 0135's first launch: the induced Hasse nested peripartum CM under DCM
-    (depth 4 overall). With flat=True every kept member is a root child, whatever
-    Mondo says, and the attestation roll-up is unchanged (most specific member)."""
-    A, B, C, D, R = ("MONDO:0000001", "MONDO:0000002", "MONDO:0000003",
-                     "MONDO:0000004", "MONDO:0000000")
-    #  R -> A -> B -> C ;  A, C kept (B unpowered); D kept, separate branch
-    parent = {A: [R], B: [A], C: [B], D: [R], R: []}
-    kept = {A, C, D}
-    nested, _ = mnd.build_native_label_dag(kept, parent, coded_ids=kept, flat=False)
-    flat, st = mnd.build_native_label_dag(kept, parent, coded_ids=kept, flat=True)
-    root = mnd.MONDO_NATIVE_ROOT_CID
-    assert all(ps == [root] for ps in flat.parents.values()), flat.parents
-    assert nested.parents[mnd.mondo_cid(C)] == [mnd.mondo_cid(A)]
-    assert st["n_hasse_multi_parent"] == 0
-    assert mnd.flat_label_parents({"X", "Y"}, {}) == {"X": [], "Y": []}
-    # roll-up is the same under both: a term under C lands on C only, never on A
-    assert mnd.roll_terms_to_kept([C], kept, parent) == {C: [C]}
-
-
-def test_member_ancestor_pairs_among_final_nodes():
-    E, H, C, R = "MONDO:0020066", "MONDO:0007523", "MONDO:0005021", "MONDO:0000000"
-    parent = {E: [R], H: [E], C: [R], R: []}
-    pairs = mnd.member_ancestor_pairs({E, H, C}, parent)
-    assert pairs == [(mnd.mondo_cid(E), mnd.mondo_cid(H))]
-    assert mnd.member_ancestor_pairs({H, C}, parent) == []
-
-
-@pytest.mark.slow
-def test_provider_keeps_the_descendant_only_when_a_doc_attests_both(spark):
-    """A patient coded with both 'EDS' and 'hypermobile EDS' attests hEDS only;
-    one coded with EDS alone attests EDS; a doc with no mapped code attests
-    nothing; without `ancestor_pairs` the provider is unchanged (both)."""
-    from charmpheno.omop.doc_spec import PatientCohortDocSpec
-    E, H = mnd.mondo_cid("MONDO:0020066"), mnd.mondo_cid("MONDO:0007523")
-    code_map = spark.createDataFrame([(101, E), (102, H), (103, E)],
-                                     ["std_cid", "node_cid"])
-    ev = spark.createDataFrame(
-        [(1, "fg", 101), (1, "fg", 102),        # both codes -> hEDS only
-         (2, "fg", 103),                        # EDS alone -> EDS
-         (3, "fg", 999)],                       # unmapped -> []
-        ["person_id", "source_cohort", "concept_id"])
-    spec = PatientCohortDocSpec()
-    reduced = mnd.make_mondo_native_attested_provider(
-        code_map, doc_spec=spec, ancestor_pairs=[(E, H)])(ev)
-    got = {r["person_id"]: sorted(r["attested_cids"]) for r in reduced.collect()}
-    assert got == {1: [H], 2: [E], 3: []}
-    plain = mnd.make_mondo_native_attested_provider(code_map, doc_spec=spec)(ev)
-    got0 = {r["person_id"]: sorted(r["attested_cids"]) for r in plain.collect()}
-    assert got0[1] == sorted([E, H]) and got0[2] == [E] and got0[3] == []
-
-
 # --------------------------------------------------------------------------- #
 # exp 0136: the multi-map guard (peripartum CM <- "Finding related to pregnancy") #
 # --------------------------------------------------------------------------- #
 def test_multimap_guard_drops_the_broad_target_and_keeps_the_disorder():
     from charmpheno.mondo.native_dag import (drop_ancestor_multimap_targets,
-                                  format_native_powering_report)
+                                             format_native_mapping_report)
     O903, PPCM, PREG = 45576878, 4037495, 444094
     J45, ASTHMA = 1, 317009
     X, A, B = 2, 10, 20                       # incomparable targets: both kept
@@ -259,9 +168,8 @@ def test_multimap_guard_drops_the_broad_target_and_keeps_the_disorder():
     kept, dropped = drop_ancestor_multimap_targets(src, [(PREG, PPCM), (99, A)])
     assert kept == {O903: {PPCM}, J45: {ASTHMA}, X: {A, B}}
     assert dropped == [(O903, PREG)]
-    rep = format_native_powering_report(dict(
-        n_codes_resolved=1, n_coded_terms=1, n_terms_with_any_support=1, n_powered=1,
-        min_positives=100, min_support_kept=100, n_codes_attesting=1,
+    rep = format_native_mapping_report(dict(
+        n_codes_resolved=1, n_coded_terms=1,
         n_multimap_sources=2, n_multimap_dropped=1, multimap_dropped_targets=[PREG]))
     assert "multi-map guard: 2 source code(s)" in rep and "1 ancestor target(s)" in rep
 

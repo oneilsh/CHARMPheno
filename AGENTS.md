@@ -48,7 +48,7 @@ over the loaders/tokens/BOW prep, folded into all three keys in
 **silently invalidates every bundle/corpus/covariate cache key, or poisons a
 cache under a byte-identical key** — a wrong-results hazard, not merely a rebuild
 cost. Several of those keys also carry **byte-pinned tripwire hashes** in
-`tests/scripts/test_case_finding_cache_mondo.py` (60 tests).
+`tests/scripts/test_case_finding_cache_mondo.py` (45 tests).
 
 **NOT everything is invalidated (mechanism-verified, do not overstate):** the
 **conversion sidecar** is keyed *independently* — `conversion_sidecar_key`
@@ -56,16 +56,20 @@ cost. Several of those keys also carry **byte-pinned tripwire hashes** in
 person_mod, DAG identity, code_map)`, deliberately **not** `cohort_defs_version`
 — so an assembler/cohorts edit does NOT orphan it (its docstring: "a bundle-key
 move does not orphan the sidecar"). Editing `conversion_sidecar.py` itself DOES
-move the sidecar key (last: ADR 0051 step 3). The raw Mondo ontology download
+move the sidecar key (last: WP11 of the DAG-gated user-API plan, 2026-11-02;
+the sidecar also moves when `MONDO_NATIVE_VERSION` is bumped, through its
+code-map identity). The raw Mondo ontology download
 (keyed by `mondo_version`) likewise survives. So a source-hashed edit rebuilds
 the bundle/corpus/covariates but leaves the expensive sidecar a HIT.
 
 **Treat as source-hashed / do-not-edit-casually:**
 `charmpheno/charmpheno/omop/{cohorts,multi_domain,case_finding_assembly,condition_dag,bigquery,measurement_tokens,topic_prep}.py`;
-`charmpheno/charmpheno/mondo/{native_dag,collapse,omop_mapping,ontology}.py`;
-`spark-vi/spark_vi/dag/{layout,ops}.py` (layout folds into every bundle key, ops into
-the Mondo ones). The **authoritative check** is that tripwire suite passing
-byte-identical.
+`charmpheno/charmpheno/mondo/{native_dag,omop_mapping,ontology}.py`;
+`spark-vi/spark_vi/dag/ops.py` (folds into the Mondo keys). Since spec 2026-10-30 the
+bundle carries the whole label DAG and per-document attested node ids, so the node
+set, the engine layout (`spark_vi/dag/layout.py`, no longer folded) and the dense
+readout targets are not bundle inputs. The **authoritative check** is that tripwire
+suite passing byte-identical.
 
 **A module that shapes the corpus must be folded in.** If you add one (a new
 loader, a new tokenizer), fold its source hash into the keys in the same commit;

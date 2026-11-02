@@ -20,22 +20,23 @@ def _tiny_bundle(spark):
         rows, ["person_id", "concept_id", "source_cohort",
                "condition_era_start_date"])
     return assemble_from_events(
-        ev, before, doc_spec=PatientCohortDocSpec(min_doc_length=0),
-        min_n=1, holdout_frac=0.3, split_salt=20260716,
-        vocab_size=50, min_df=1, min_patient_count=1, n_bg=2, tpn=1)
+        ev, before.user_dag(), names=before.names,
+        doc_spec=PatientCohortDocSpec(min_doc_length=0),
+        holdout_frac=0.3, split_salt=20260716,
+        vocab_size=50, min_df=1, min_patient_count=1)
 
 
 def test_bundle_cache_key_sensitive_and_stable():
     from _case_finding_cache import compute_bundle_cache_key
     base = dict(source_table="condition_era", person_mod=10, vocab_size=5000,
                 min_df=20, min_patient_count=20, doc_min_length=0,
-                prior_obs_days=365, window_days=365, disease="diabetes", min_n=50,
-                holdout_frac=0.2, split_salt=20260716, n_bg=2, tpn=1, cdr="p.d")
+                prior_obs_days=365, window_days=365, disease="diabetes",
+                holdout_frac=0.2, split_salt=20260716, cdr="p.d")
     k0 = compute_bundle_cache_key(**base)
     assert k0 == compute_bundle_cache_key(**base)              # stable
-    for field, val in [("disease", "rare6"), ("min_n", 25), ("holdout_frac", 0.3),
-                       ("person_mod", 20), ("vocab_size", 3000), ("n_bg", 3),
-                       ("tpn", 2)]:
+    for field, val in [("disease", "rare6"), ("holdout_frac", 0.3),
+                       ("person_mod", 20), ("vocab_size", 3000),
+                       ("strip_mode", "both")]:
         assert compute_bundle_cache_key(**{**base, field: val}) != k0
 
 
@@ -46,13 +47,11 @@ def test_bundle_cache_save_load_round_trip(spark, tmp_path):
     save(spark, bundle, uri, "k1")
     loaded = try_load(spark, uri, "k1")
     assert loaded is not None
-    # python fields restored with int keys
-    assert loaded.parent_int == bundle.parent_int
-    assert loaded.int2cid == bundle.int2cid
-    assert loaded.cid2int == bundle.cid2int
+    # python fields restored with their id types
+    assert loaded.dag == bundle.dag
     assert loaded.vocab_map == bundle.vocab_map
     assert loaded.name_by_id == bundle.name_by_id
-    assert loaded.ledger["K_nodes"] == bundle.ledger["K_nodes"]
+    assert loaded.ledger == bundle.ledger
     # DataFrame contents preserved (compare as sets of person_ids per split)
     assert ({r["person_id"] for r in loaded.train_df.collect()}
             == {r["person_id"] for r in bundle.train_df.collect()})
@@ -72,15 +71,15 @@ def test_bundle_cache_miss_then_hit(spark, tmp_path):
     uri = f"file://{tmp_path}/cache2"
     params = dict(source_table="condition_era", person_mod=10, vocab_size=5000,
                   min_df=20, min_patient_count=20, doc_min_length=0,
-                  prior_obs_days=365, window_days=365, disease="diabetes", min_n=50,
-                  holdout_frac=0.2, split_salt=20260716, n_bg=2, tpn=1, cdr="p.d",
+                  prior_obs_days=365, window_days=365, disease="diabetes",
+                  holdout_frac=0.2, split_salt=20260716, cdr="p.d",
                   billing="bp")
     b1 = load_or_build_case_finding_bundle(
         spark, cache_uri=uri, _assemble_fn=_stub_assemble, **params)
     b2 = load_or_build_case_finding_bundle(
         spark, cache_uri=uri, _assemble_fn=_stub_assemble, **params)
     assert calls["n"] == 1                       # built once, second call is a HIT
-    assert b1.parent_int == b2.parent_int == built.parent_int
+    assert b1.dag == b2.dag == built.dag
 
 
 def test_bundle_cache_write_failure_is_non_fatal(spark, tmp_path, monkeypatch, capsys):
@@ -97,8 +96,8 @@ def test_bundle_cache_write_failure_is_non_fatal(spark, tmp_path, monkeypatch, c
     monkeypatch.setattr(ccache, "save", _boom)
     params = dict(source_table="condition_era", person_mod=10, vocab_size=5000,
                   min_df=20, min_patient_count=20, doc_min_length=0,
-                  prior_obs_days=365, window_days=365, disease="diabetes", min_n=50,
-                  holdout_frac=0.2, n_bg=2, tpn=1, cdr="p.d", billing="bp")
+                  prior_obs_days=365, window_days=365, disease="diabetes",
+                  holdout_frac=0.2, cdr="p.d", billing="bp")
     out = ccache.load_or_build_case_finding_bundle(
         spark, cache_uri=f"file://{tmp_path}/nope", _assemble_fn=lambda s, **k: built,
         **params)
@@ -123,11 +122,11 @@ def test_bundle_cache_miss_then_hit_without_split_salt(spark, tmp_path):
     # Exactly the kwargs dag_placement_cloud.py passes — NO split_salt.
     params = dict(source_table="condition_era", person_mod=10, vocab_size=5000,
                   min_df=20, min_patient_count=20, doc_min_length=0,
-                  prior_obs_days=365, window_days=365, disease="diabetes", min_n=50,
-                  holdout_frac=0.2, n_bg=2, tpn=1, cdr="p.d", billing="bp")
+                  prior_obs_days=365, window_days=365, disease="diabetes",
+                  holdout_frac=0.2, cdr="p.d", billing="bp")
     b1 = load_or_build_case_finding_bundle(
         spark, cache_uri=uri, _assemble_fn=_stub_assemble, **params)
     b2 = load_or_build_case_finding_bundle(
         spark, cache_uri=uri, _assemble_fn=_stub_assemble, **params)
     assert calls["n"] == 1                       # miss builds once, then HIT
-    assert b1.parent_int == b2.parent_int == built.parent_int
+    assert b1.dag == b2.dag == built.dag

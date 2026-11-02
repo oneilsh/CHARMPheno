@@ -78,19 +78,23 @@ def _three_domain_bundle(spark, *, marker_in_obs=False, strip_mode="both"):
         obs_rows, ["person_id", "concept_id", "source_cohort", "observation_date"])
     spec = DomainVocabSpec(vocab_size=100, min_df=1, min_patient_count=1)
     return assemble_multidomain_from_events(
-        cond, [drug, obs], before, doc_spec=PatientCohortDocSpec(min_doc_length=0),
-        min_n=1, vocab_specs=[spec, spec, spec], holdout_frac=0.3,
+        cond, [drug, obs], before.user_dag(), names=before.names,
+        doc_spec=PatientCohortDocSpec(min_doc_length=0),
+        vocab_specs=[spec, spec, spec], holdout_frac=0.3,
         strip_mode=strip_mode)
 
 
-def test_assemble_multidomain_shape_and_condition_only_frontier(spark):
+def test_assemble_multidomain_shape_and_condition_only_labels(spark):
     bundle = _three_domain_bundle(spark)
     cols = set(bundle.train_df.columns)
     assert {"person_id", "doc_id", "features_0", "features_1", "features_2",
-            "frontier", "source_cohort"} <= cols
+            "labels", "source_cohort"} <= cols
+    assert "frontier" not in cols and "label" not in cols
     assert len(bundle.vocab_maps) == 3
-    fr = [f for r in bundle.train_df.collect() for f in (r["frontier"] or [])]
-    assert fr and max(fr) < len(bundle.parent_int) + 2   # engine node-ids only
+    assert bundle.dag == {100: [], 200: [100], 300: [100]}
+    labs = {x for r in bundle.train_df.collect() for x in r["labels"]}
+    assert labs == {200, 300}                 # condition node ids only (drug 900s,
+    #                                           observation 700s never label)
 
 
 def test_multidomain_strip_removes_marker_from_a_noncondition_domain(spark):
@@ -156,13 +160,12 @@ def test_multidomain_bundle_fits_through_the_gated_shim_and_round_trips(spark, t
     from spark_vi.io.export import save_result, load_result
     bundle = _three_domain_bundle(spark)
     est = DagGatedLDAEstimator(
-        featuresCols=["features_0", "features_1", "features_2"], labelsCol="frontier",
+        dag=bundle.dag, labelsCol="labels",
+        featuresCols=["features_0", "features_1", "features_2"],
         gateNBg=2, gateTpn=1, maxIter=2, seed=0, subsamplingRate=1.0)
-    # The bundle's engine-id DAG (root 0) as a user DAG: parentless nodes have no
-    # parent rather than parent 0. (The bundle moves to user ids in WP11.)
-    est.setDag({c: [q for q in (p if isinstance(p, (list, tuple)) else [p]) if q != 0]
-                or None for c, p in bundle.parent_int.items()})
     model = est.fit(bundle.train_df)
+    # the bundle's DAG and labels are the estimator's inputs as they are
+    assert set(model.dag()) <= set(bundle.dag)
     lam = model.result.global_params["lambda"]
     assert isinstance(lam, dict) and set(lam) == {0, 1, 2}
     assert model.result.metadata["domains"] == [len(vm) for vm in bundle.vocab_maps]
@@ -241,7 +244,7 @@ def test_assemble_multidomain_case_finding_corpus_wpc_seams(monkeypatch):
         return [object() for _ in domain_raws], object()  # (feature_frames, cond_label)
     monkeypatch.setattr(md, "lookback_feature_frames", _fake_lookback)
 
-    def _fake_assemble(cond0, extras, before_dag, *, doc_spec, **kw):
+    def _fake_assemble(cond0, extras, label_dag, *, doc_spec, **kw):
         captured["doc_spec"] = doc_spec
         return "BUNDLE"
     monkeypatch.setattr(md, "assemble_multidomain_from_events", _fake_assemble)
@@ -253,8 +256,8 @@ def test_assemble_multidomain_case_finding_corpus_wpc_seams(monkeypatch):
                         lambda *a, **k: pytest.fail("population index builder ran"))
 
     common = dict(disease="rare6", cdr="p.d", billing="bp", extra_domains=("drug",),
-                  person_mod=1, min_n=0, vocab_size=10, min_df=1, min_patient_count=1,
-                  doc_min_length=7, before_dag=object())  # non-None DAG skips the load
+                  person_mod=1, vocab_size=10, min_df=1, min_patient_count=1,
+                  doc_min_length=7, label_dag={1: []})  # a DAG given skips the load
 
     # external REQUIRES index_df
     with pytest.raises(ValueError, match="external.*requires an index_df"):

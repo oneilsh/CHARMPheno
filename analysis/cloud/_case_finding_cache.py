@@ -1,11 +1,11 @@
 """Write-through cache for the CaseFindingBundle (piece-3 driver).
 
 assemble_case_finding_corpus re-extracts from BigQuery, refits CountVectorizer,
-and rebuilds/prunes the DAG on every call. This module caches the resulting
+and rebuilds the label DAG on every call. This module caches the resulting
 bundle under a content-hash key so repeat runs (same assembly inputs) reload
 parquet + a small JSON instead of rebuilding. Mirrors analysis/cloud/
 _corpus_cache.py, but the bundle is richer than (bow, vocab, names): it also
-carries the DAG maps + ledger, stored as a text-serialized meta.json.
+carries the label DAG, names + ledger, stored as a text-serialized meta.json.
 
 The domain module (charmpheno.omop.case_finding_assembly) stays cache-free; the
 driver layer owns caching, exactly as _corpus_load wraps to_bow_dataframe.
@@ -57,22 +57,21 @@ def _module_source_hash(module) -> str:
 # byte-identical while making tomorrow's doc-unit change visible, which is the
 # whole point: the driver-side doc spec is hard-coded, so changing it alone would
 # otherwise poison the cache under a byte-identical key (audit seam 4 / R5.3).
-# This is the same "fold only when it is on" discipline `emit_labels` and `mondo`
+# This is the same "fold only when it is on" discipline `gate_attestation` and `mondo`
 # follow.
 DEFAULT_DOC_SPEC = "patient_cohort"
 
 
 def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_df,
                              min_patient_count, doc_min_length, prior_obs_days=None,
-                             window_days=None, disease, min_n, holdout_frac,
+                             window_days=None, disease, holdout_frac,
                              split_salt=None,
-                             n_bg, tpn, cdr=None, strip_mode="test_only",
+                             cdr=None, strip_mode="test_only",
                              window_mode="forward", lookback_days=365,
-                             label_window_days=365, emit_labels=False,
-                             label_mask_mode="full", multidomain=False,
+                             label_window_days=365, multidomain=False,
                              extra_domains=(), index_mode="disease", mondo=False,
                              mondo_version="", mondo_branch="",
-                             min_positives=0, mondo_native=False,
+                             mondo_native=False,
                              mondo_native_version="",
                              doc_spec=DEFAULT_DOC_SPEC,
                              episode_sampling=None,
@@ -81,11 +80,18 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
     """Stable 16-hex hash of the inputs that determine the assembled bundle.
 
     Folds cohort_defs_version(), corpus_code_version() (the loaders, measurement
-    tokens and bag-of-words prep) and content hashes of condition_dag,
-    case_finding_assembly and `spark_vi.dag.layout` (the frontier and the gate's
-    layout), so any assembly-logic edit auto-invalidates the cache (same discipline
-    as _corpus_cache's cohort_defs). `v` is the manual shape version for layout
-    changes unrelated to that source.
+    tokens and bag-of-words prep) and content hashes of condition_dag and
+    case_finding_assembly, so any assembly-logic edit auto-invalidates the cache
+    (same discipline as _corpus_cache's cohort_defs). `v` is the manual shape
+    version for layout changes unrelated to that source.
+
+    What is NOT an input (spec 2026-10-30, v6): the node-set threshold
+    (`min_n` / `min_positives`), the topic layout (`n_bg`, `tpn`) and the readout's
+    `label_mask_mode` / `emit_labels`. The bundle carries the whole label DAG and
+    each document's attested node ids; pruning, landing, the gate's layout and the
+    dense targets are the estimator's and the readout's, so one bundle serves every
+    fit of the corpus. `spark_vi.dag.layout` stopped shaping the bundle with them
+    and is no longer folded.
 
     `split_salt` defaults to the assembly's own `_SPLIT_SALT` constant when not
     given, so the key stays consistent with the split the (unparameterized)
@@ -99,7 +105,7 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
 
     `multidomain=True` selects the MULTI-DOMAIN corpus identity (the
     `charmpheno.omop.multi_domain` assembler): the per-domain `extra_domains` and
-    the `index_mode`, plus `mondo`/`mondo_version`/`mondo_branch`/`min_positives`
+    the `index_mode`, plus `mondo`/`mondo_version`/`mondo_branch`
     and `mondo_native` (+ `mondo_native_version` and the source hashes of
     `charmpheno.mondo` and `spark_vi.dag.ops`) for the native Mondo label space, the
     only Mondo flavour since ADR 0051 (`mondo` without `mondo_native` raises). The
@@ -121,19 +127,17 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
     supplied (`index_mode="external"`), so every existing key is byte-identical;
     see the fold site below.
 
-    `gate_frontier_mode` (exp 0111 WP-D3 / D13) marks a bundle whose `frontier` gate
-    is the 90-day presentation window while its `label`/`labelMask` stay the 365-day
-    frame (`gate90d`). Folded ONLY when a gate is requested (external path), the same
-    discipline — an un-gated episode bundle keys byte-identically.
+    `gate_frontier_mode` (exp 0111 WP-D3 / D13, removed in the 2026-10 cleanup) is
+    still folded when given, so a spec asking for it can never alias onto a plain
+    key (the drivers refuse such a spec before keying it).
 
     `gate_attestation` (label redesign R2, spec 2026-10-13) marks a bundle whose TRAIN
-    `frontier` is the all-ever attestation set (`ever`). Folded ONLY when not the
-    default label-year gate, so every existing key is byte-identical.
+    split carries the all-ever attestation (`gate_labels`, `ever`). Folded ONLY when
+    not the default label-year gate.
     """
     from charmpheno.omop import condition_dag, case_finding_assembly
     from charmpheno.omop.cohorts import cohort_defs_version
     from charmpheno.omop.source_identity import corpus_code_version
-    from spark_vi.dag import layout as dag_layout
     if not multidomain and (source_table is None or prior_obs_days is None
                             or window_days is None):
         raise TypeError(
@@ -149,23 +153,25 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
         "doc_min_length": int(doc_min_length),
         "prior_obs_days": None if prior_obs_days is None else int(prior_obs_days),
         "window_days": None if window_days is None else int(window_days),
-        "disease": str(disease), "min_n": int(min_n),
+        "disease": str(disease),
         "holdout_frac": float(holdout_frac), "split_salt": int(split_salt),
-        "n_bg": int(n_bg), "tpn": int(tpn), "cdr": cdr, "strip_mode": strip_mode,
+        "cdr": cdr, "strip_mode": strip_mode,
         "window_mode": window_mode, "lookback_days": int(lookback_days),
         "label_window_days": int(label_window_days),
         "cohort_defs": cohort_defs_version(),
         "corpus_code": corpus_code_version(),
         "dag_src": _module_source_hash(condition_dag),
         "assembly_src": _module_source_hash(case_finding_assembly),
-        "dag_layout_src": _module_source_hash(dag_layout),
-        "v": 5,
+        # v6 (spec 2026-10-30): the bundle carries the whole label DAG and the
+        # attested node ids (`labels`, `gate_labels`) instead of a pruned engine
+        # DAG, `frontier` and dense `label` / `labelMask`.
+        "v": 6,
     }
     # The doc unit. Every corpus in the repo was assembled under
     # DEFAULT_DOC_SPEC, and none of their keys names it, so folding the default
     # would orphan all of them for no semantic change; folding anything ELSE is
     # what closes the silent-poisoning hole (audit seam 4). Same discipline as
-    # `emit_labels` below — a field appears in the payload only when it says
+    # `gate_attestation` below — a field appears in the payload only when it says
     # something the payload does not already say.
     if str(doc_spec) != DEFAULT_DOC_SPEC:
         payload["doc_spec"] = str(doc_spec)
@@ -192,12 +198,6 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
         payload["gate_frontier_mode"] = str(gate_frontier_mode)
     if gate_attestation and str(gate_attestation) != "label":
         payload["gate_attestation"] = str(gate_attestation)
-    # Only fold the Gated-PC label columns into the key when they are requested,
-    # so the default (emit_labels=False) path keeps its existing key and existing
-    # dag-placement caches stay valid; a labeled bundle gets a distinct key.
-    if emit_labels:
-        payload["emit_labels"] = True
-        payload["label_mask_mode"] = str(label_mask_mode)
     # Same discipline for the multi-domain / Mondo identity: folded ONLY when that
     # path is in use, so a SNOMED key computed before this existed is unchanged.
     if multidomain:
@@ -218,25 +218,25 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
         payload["window_mode"] = "lookback"
         payload["mdv"] = 1            # multi-domain cache-format version
         if mondo:
-            # The label DAG is BUILT (charmpheno.mondo.native_dag), not loaded from
-            # concept_ancestor, so its identity is the build inputs plus the source of
-            # every module the build runs: the native build, the splice, the Mondo->
-            # OMOP map, the release fetch and the generic graph operations. The anchor
-            # flavour (mondo without mondo_native) was removed with ADR 0051.
+            # The label subgraph and the code ladder are BUILT
+            # (charmpheno.mondo.native_dag), not loaded from concept_ancestor, so their
+            # identity is the build inputs plus the source of every module the build
+            # runs: the native build, the Mondo->OMOP map, the release fetch and the
+            # generic graph operations. The anchor flavour (mondo without
+            # mondo_native) was removed with ADR 0051; the splice module `collapse`
+            # and the `min_positives` threshold with spec 2026-10-30.
             if not mondo_native:
                 raise ValueError(
                     "compute_bundle_cache_key: mondo=True requires mondo_native=True "
                     "(the anchor-Mondo label space was removed with ADR 0051)")
-            from charmpheno.mondo import collapse, native_dag, omop_mapping, ontology
+            from charmpheno.mondo import native_dag, omop_mapping, ontology
             from spark_vi.dag import ops as dag_ops
             payload["mondo"] = True
             payload["mondo_version"] = str(mondo_version)
             payload["mondo_branch"] = str(mondo_branch or "")
-            payload["min_positives"] = int(min_positives)
             payload["mondo_native"] = True
             payload["mondo_native_version"] = str(mondo_native_version)
             payload["mondo_native_src"] = _module_source_hash(native_dag)
-            payload["mondo_collapse_src"] = _module_source_hash(collapse)
             payload["mondo_omop_mapping_src"] = _module_source_hash(omop_mapping)
             payload["mondo_ontology_src"] = _module_source_hash(ontology)
             payload["dag_ops_src"] = _module_source_hash(dag_ops)
@@ -245,18 +245,19 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
 
 
 def _meta_dict(bundle) -> dict:
-    """Serialize a bundle's python-side fields (int keys are JSON-stringified).
+    """Serialize a bundle's python-side fields as JSON-ready values.
 
-    A multi-domain bundle carries `vocab_maps` (a LIST, one map per domain) where
-    the single-domain one carries `vocab_map`; the key written here is the witness
-    `try_load` reads back to decide which dataclass to reconstruct. Exactly one of
-    the two is ever written, so an old single-domain entry still restores as it
-    always did."""
+    The label DAG (`dag`) and the names (`name_by_id`) are written as LISTS OF
+    PAIRS, not objects: JSON object keys are always strings, and node ids are
+    concept-id ints on the SNOMED path and Mondo curie strings on the native one,
+    so pairs are what keeps each id's type (`_restore_meta` reads them back as
+    given). A multi-domain bundle carries `vocab_maps` (a LIST, one map per domain)
+    where the single-domain one carries `vocab_map`; the key written here is the
+    witness `try_load` reads back to decide which dataclass to reconstruct."""
+    from charmpheno.omop.case_finding_assembly import dag_edges
     meta = {
-        "parent_int": {str(c): list(ps) for c, ps in bundle.parent_int.items()},
-        "int2cid": {str(i): c for i, c in bundle.int2cid.items()},
-        "cid2int": {str(c): i for c, i in bundle.cid2int.items()},
-        "name_by_id": {str(c): n for c, n in bundle.name_by_id.items()},
+        "dag": dag_edges(bundle.dag),
+        "name_by_id": [[n, v] for n, v in sorted(bundle.name_by_id.items())],
         "ledger": bundle.ledger,
     }
     vocab_maps = getattr(bundle, "vocab_maps", None)
@@ -264,30 +265,28 @@ def _meta_dict(bundle) -> dict:
         meta["vocab_map"] = {str(c): i for c, i in bundle.vocab_map.items()}
     else:
         meta["vocab_maps"] = [{str(c): i for c, i in vm.items()} for vm in vocab_maps]
-    # WP-C' (exp 0136): the native `(std_cid, node_cid)` attestation map, same
+    # WP-C' (exp 0136): the native code ladder `(std_cid, Mondo term)`, same
     # attribute precedent, written only when the assembler attached one.
     code_map = getattr(bundle, "native_code_map", None)
     if code_map:
-        meta["native_code_map"] = [[int(a), int(b)] for a, b in code_map]
+        meta["native_code_map"] = [[int(a), b] for a, b in code_map]
     return meta
 
 
 def _restore_meta(meta: dict) -> dict:
+    from charmpheno.omop.case_finding_assembly import dag_from_edges
     out = {
-        "parent_int": {int(c): [int(p) for p in ps]
-                       for c, ps in meta["parent_int"].items()},
-        "int2cid": {int(i): int(c) for i, c in meta["int2cid"].items()},
-        "cid2int": {int(c): int(i) for c, i in meta["cid2int"].items()},
-        "name_by_id": {int(c): n for c, n in meta["name_by_id"].items()},
+        "dag": dag_from_edges(meta["dag"]),
+        "name_by_id": {n: v for n, v in meta["name_by_id"]},
         "ledger": meta["ledger"],
     }
     if "vocab_maps" in meta:                 # multi-domain (one map per domain)
         out["vocab_maps"] = [{int(c): int(i) for c, i in vm.items()}
                              for vm in meta["vocab_maps"]]
-    else:                                    # single-domain (incl. every old entry)
+    else:                                    # single-domain
         out["vocab_map"] = {int(c): int(i) for c, i in meta["vocab_map"].items()}
     if "native_code_map" in meta:
-        out["native_code_map"] = [(int(a), int(b)) for a, b in meta["native_code_map"]]
+        out["native_code_map"] = [(int(a), b) for a, b in meta["native_code_map"]]
     return out
 
 
@@ -311,9 +310,10 @@ def try_load(spark, cache_uri, key) -> Optional["CaseFindingBundle"]:
     The reconstructed TYPE follows the meta: a `vocab_maps` list restores a
     `MultiDomainBundle` (what the Mondo / extra-domain path assembles and what its
     consumers destructure — `bundle.vocab_maps`, per-domain features_i columns),
-    anything else a `CaseFindingBundle`. Both carry the same
-    parent_int/int2cid/cid2int/name_by_id/ledger bridge, so everything downstream
-    of the bundle is shape-agnostic."""
+    anything else a `CaseFindingBundle`. Both carry the same dag/name_by_id/ledger
+    fields and `labels` column, so everything downstream of the bundle is
+    shape-agnostic. A meta written before the v6 layout (no `dag`) is a MISS: its
+    key cannot be computed any more anyway."""
     base = f"{cache_uri.rstrip('/')}/{key}"
     try:
         train_df = spark.read.parquet(f"{base}/train.parquet")
@@ -321,11 +321,12 @@ def try_load(spark, cache_uri, key) -> Optional["CaseFindingBundle"]:
         meta_rows = spark.read.text(f"{base}/meta").collect()
     except Exception:
         return None
-    meta = _restore_meta(json.loads(meta_rows[0]["value"]))
-    common = dict(train_df=train_df, test_df=test_df,
-                  parent_int=meta["parent_int"], int2cid=meta["int2cid"],
-                  cid2int=meta["cid2int"], name_by_id=meta["name_by_id"],
-                  ledger=meta["ledger"])
+    raw = json.loads(meta_rows[0]["value"])
+    if "dag" not in raw:
+        return None
+    meta = _restore_meta(raw)
+    common = dict(train_df=train_df, test_df=test_df, dag=meta["dag"],
+                  name_by_id=meta["name_by_id"], ledger=meta["ledger"])
     if "vocab_maps" in meta:
         from charmpheno.omop.multi_domain import MultiDomainBundle
         bundle = MultiDomainBundle(vocab_maps=meta["vocab_maps"], **common)
@@ -351,9 +352,9 @@ def try_load(spark, cache_uri, key) -> Optional["CaseFindingBundle"]:
 _KEY_PARAM_NAMES = (
     "source_table", "person_mod", "vocab_size", "min_df",
     "min_patient_count", "doc_min_length", "prior_obs_days", "window_days",
-    "disease", "min_n", "holdout_frac", "split_salt", "n_bg", "tpn", "cdr",
+    "disease", "holdout_frac", "split_salt", "cdr",
     "strip_mode", "window_mode", "lookback_days", "label_window_days",
-    "emit_labels", "label_mask_mode", "extra_domains", "index_mode",
+    "extra_domains", "index_mode",
 )
 
 
@@ -363,7 +364,7 @@ def load_or_build_case_finding_bundle(spark, *, cache_uri=None, _assemble_fn=Non
     """Return the cached bundle on hit; otherwise assemble + write through.
 
     `assembly_params` are the assembler's kwargs (cdr, billing, disease,
-    person_mod, min_n, n_bg, tpn, vocab_size, ...). `_assemble_fn` is the assembler
+    person_mod, vocab_size, ...). `_assemble_fn` is the assembler
     seam — a testing hook, and on the multi-domain paths the real dispatch: the
     Mondo driver binds a closure that builds the Mondo DAG + code-ladder provider
     and THEN assembles, so a cache HIT never pays for a hierarchy the cached bundle
@@ -371,7 +372,7 @@ def load_or_build_case_finding_bundle(spark, *, cache_uri=None, _assemble_fn=Non
 
     `_key_extra` are cache-key inputs that are NOT assembler kwargs — the
     multi-domain/Mondo identity markers (`multidomain`, `mondo`, `mondo_version`,
-    `mondo_branch`, `min_positives`, `mondo_native`) that name
+    `mondo_branch`, `mondo_native`) that name
     WHICH corpus this is without being something the assembler is called with.
     """
     from charmpheno.omop.case_finding_assembly import assemble_case_finding_corpus

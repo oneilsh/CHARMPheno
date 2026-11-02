@@ -1,99 +1,48 @@
-"""Native-Mondo label DAG (exp 0110): map-and-roll labels, keep what's supported.
+"""Native-Mondo label space (exp 0110; redesigned by spec 2026-10-30): the Mondo graph,
+the code ladder, and the SUBGRAPH a DAG-gated fit is given.
 
-WHY THIS EXISTS — the limit of a two-patch sequence
----------------------------------------------------
-Exp 0104's whole-Mondo readout carried 763 degenerate (constant-fallback) label
-heads at C=3,820. Exp 0109 decomposed them exactly: 1 root, 143 STRUCTURAL
-only-child class nodes (removed by the splice-to-fixpoint reduction), and 619
-SUBSUMED CATEGORY-ANCHORS. The 619 are the deep one. Three facts compose into
-them:
+WHAT THIS MODULE HANDS OVER
+---------------------------
+Two things, both in Mondo's own ids (CURIE strings, `MONDO:%07d`):
 
-  * `powered_anchor_climb` attests EVERY powered ancestor of a coded concept;
-  * `anchor_hierarchy.reduce_to_anchor_hierarchy` nests anchors only under CLASS
-    covers, so a category-anchor sits as a SIBLING of its own descendants;
-  * closure masking hands out negatives only via siblings.
+  1. **The code ladder** (codes -> Mondo terms). A standard condition concept
+     resolves to the MOST SPECIFIC Mondo term(s) it maps to, via main's
+     `source_climb` ladder (ported from main's `mondo_usage_cloud.py`; the two
+     functions used are at the end of this module): standard-exact first, then a
+     `concept_ancestor` climb to the nearest mapped standard ancestor,
+     tie-reduced by `reduce_tie_map` to the most-specific Mondo term(s). The
+     mapping is guarded before the climb: curated wrong cross-references
+     (`EXCLUDED_MONDO_XREFS`), the hierarchy-consistency test
+     (`overbroad_exact_rows`) and the multi-map guard
+     (`drop_ancestor_multimap_targets`).
+  2. **The relevant subgraph** (`subgraph_parents`): every Mondo term some code
+     patients carry resolves to, plus all its Mondo ancestors (within
+     `branch_root` when set), with Mondo's own is-a edges among them. A
+     document's labels are the terms its in-window codes resolve to
+     (`make_mondo_native_attested_provider`), i.e. labels at the most-specific
+     attested terms.
 
-So a category is co-attested on every doc that fires a "sibling" and is never
-observed as a negative: an all-positive cell, a constant head, on 619 common
-clinical categories. The proposed patch (nest anchor-under-anchor) is a
-hand-rolled local approximation of what Mondo's own graph does globally — in a
-TRANSITIVE REDUCTION of the real ontology restricted to kept nodes a subsumed
-sibling cannot exist, because the redundant sibling edge is exactly what
-reduction deletes. This module stops reconstructing Mondo's hierarchy from
-covers and uses Mondo's hierarchy.
+WHAT IT NO LONGER DOES
+----------------------
+Powering (closure support >= `min_positives`), the induced Hasse over the kept
+set, the landing of unpowered terms on kept ancestors (`roll_terms_to_kept`) and
+the thin-chain splice (`collapse`) were the build's until spec 2026-10-30. They are
+generic DAG work that depends only on the TRAINING documents, so they moved into
+`spark_vi`'s `DagGatedLDAEstimator` (R3: support over the fit DataFrame,
+`minDocsPerNode` prune, landing, transitive reduction, splice to a fixpoint). The
+bundle therefore no longer depends on a threshold: the fit driver sets
+`minDocsPerNode` and the node set is the fitted model's (`dag()`, `prunedNodes()`,
+`splicedNodes()`). `induced_hasse_parents` stays for the readout DAG
+(`analysis/cloud/readout_dag.py`).
 
-THE DESIGN (plan §3, docs/superpowers/plans/2026-08-31-native-mondo-label-space-plan.md)
-----------------------------------------------------------------------------
-  1. **Frontier / attestation.** A document's attested nodes are the MOST
-     SPECIFIC mapped Mondo terms its in-window condition codes resolve to, via
-     main's `source_climb` ladder (ported from main's `mondo_usage_cloud.py`; the
-     two functions used are at the end of this module): standard-exact first,
-     then a `concept_ancestor` climb to the nearest mapped standard ancestor,
-     tie-reduced by `reduce_tie_map` to the most-specific Mondo term(s). This
-     replaces `powered_anchor_climb` and the whole OMOP-cid attestation
-     provider. The semantic improvement is inherited, not added: the old climb
-     attested every powered ancestor; this one attests the frontier.
-  2. **Powering.** Producer-side CLOSURE support: distinct persons per node
-     rolled through the is-a closure over Mondo's own graph. Keep nodes with
-     closure support >= `min_positives` (100). This replaces terminal powering
-     + class covers with ONE uniform rule — a kept node is "a Mondo disease with
-     enough patients under it", whether or not any code maps to it directly.
-     "Directly coded" becomes a node PROPERTY (`coded_cids`), not a node type.
-  3. **The label DAG.** `induced_hasse_parents(kept, parent_adj)` — the induced
-     multi-parent Hasse relation over the kept set — then `collapse`'s
-     splice-to-fixpoint as a generic thin-chain post-pass, with `is_terminal`
-     read as the directly-coded PROPERTY instead of exp 0109's positive-concept-id
-     sign test. By construction no kept node's sibling set can contain its own
-     descendant, so the 619-class trap is structurally impossible; the residual
-     degeneracy should be `1 (root) + a small thin-chain residue`.
-
-A CORRECTION TO THE PLAN, FOUND BY A TEST (recorded)
-----------------------------------------------------
-Plan §4 step 2 names `nearest_mapped_parents` as the label DAG's parent map, on
-main's docstring calling its output "the induced Hasse edges over mapped terms".
-It is not, and the gap is the plan's own bug in miniature: nearest-per-branch
-lets a DISTANT ancestor in as a parent whenever an intermediate is unpowered,
-which re-manufactures the subsumed-sibling shape (`induced_hasse_parents` has
-the three-node worked example and the arithmetic). The reduction step is added
-here, in this branch's new module; main's dashboard is unaffected, since it
-never turns that map into label cells. The acceptance property — no kept node is
-a sibling of its own descendant — is a unit test, not an aspiration.
-
-ENGINE ID SPACE (a deviation from the plan, recorded)
------------------------------------------------------
-Plan §3 says "`int2cid` maps engine ints to Mondo curies (strings)". That is NOT
-implementable without editing source-hashed modules, and the code says so in
-three places:
-
-  * `case_finding_assembly.attach_frontiers` hard-casts every attested id with
-    `int(c)` before `roll_up_to_survivors` looks it up in the DAG's node set
-    (`:269-271`); string node ids would miss on every lookup and every document's
-    frontier would collapse to the root;
-  * `doc_attested_nodes` / the attestation contract type the column as
-    `array<bigint>` (`:218,:232-240`), and `multi_domain._attest` feeds it
-    straight into that same cast;
-  * `gated_pc_readout.bundle_drift_report` re-reads the map as
-    `{int(i): int(c) ...}` (`:416`), so the drift gate itself is int-typed.
-
-All three live in modules whose source hashes are folded into every bundle cache
-key (`_case_finding_cache.py:112-113,133`), and editing any of them orphans exp
-0104's and 0109's cached bundles and moves four pinned tripwire hashes. So the
-engine id space here is **stable positive integers = the Mondo curie's numeric
-part** (`MONDO:0004995` -> `4995`), with the forest root at `-1` (the
-`_FOREST_ROOT_CID` / `MONDO_ROOT_CID` convention). The encoding is:
-
-  * INJECTIVE — Mondo ids are `MONDO:%07d`, so the numeric part identifies the
-    term;
-  * STABLE — it depends only on the curie, not on the kept set or an enumeration
-    order, unlike the removed anchor build's sorted synthetic negatives, so two builds of
-    different kept sets agree on what node `4995` is;
-  * REVERSIBLE — `mondo_curie(cid)` reconstructs the curie for reports, and
-    `name_by_id` carries the human label the readout actually renders.
-
-There is no collision with the OMOP concept ids the legacy Mondo path uses,
-because on this path NO node is keyed by an OMOP concept id: the label space is
-Mondo end to end. `ConditionDag` / `build_condition_dag` / `DagLayout` are
-id-agnostic (sorting and dict lookups only) and are used unmodified.
+ID SPACE
+--------
+The handed-over DAG and the label columns use the CURIE strings (`array<string>`
+labels). `mondo_cid` (`MONDO:0004995` -> 4995) and `mondo_curie` remain the
+integer encoding the readout tables, the code map file and the conversion sidecar
+use (injective, stable across builds, reversible); `MONDO_NATIVE_ROOT_CID` (-1) is
+the synthetic root in those integer tables. The code map frame carries both
+(`node_id` string, `node_cid` long).
 
 THE SOURCE-EXACT RUNG IS OFF, AND NOT BY CHOICE (deviation, recorded)
 ---------------------------------------------------------------------
@@ -101,53 +50,41 @@ Main's ladder has three rungs; this one has two. Rung 1 (source-exact:
 `condition_source_concept_id` is one of the term's own Mondo `same_as` codes)
 discriminates two rows that share a standard concept but differ in their source
 code, so it can only be applied to a frame that CARRIES the source concept id.
-The corpus's label frame does not and structurally cannot: it is built from
-`condition_era` (`multi_domain.assemble_multidomain_case_finding_corpus:365-368`),
-and OMOP's `condition_era` has no source-concept column at all — which is why
-main's own driver refuses the source spaces unless `--source-table
-condition_occurrence`. Adding the column would mean editing `cohorts.py`
-(`lookback_feature_label_events`), the maximum-blast-radius hashed module.
-
-So both rungs that a `condition_era` frame can express are implemented, and the
-SAME two-rung resolution powers AND attests. Keeping powering richer than
-attestation would be worse than the missing rung: nodes powered only by
-source-exact rows would be kept and then never attested, manufacturing exactly
-the `no_pos` degenerates the acceptance gate is trying to drive to zero. The
-HPO rung stays off by scope (plan §6).
+The corpus's label frame does not: it is built from `condition_era`, which has no
+source-concept column. Both rungs that a `condition_era` frame can express are
+implemented. The HPO rung stays off by scope.
 
 CACHE-KEY DISCIPLINE
 --------------------
 `_case_finding_cache.compute_bundle_cache_key` folds this module's source hash, and
-those of `collapse`, `omop_mapping`, `ontology` and `spark_vi.dag`, into every bundle
-key: any edit here is a cache drop (AGENTS.md). Until ADR 0051 this module lived at
-`analysis/cloud/mondo_native_dag.py`; the move was itself one announced drop.
+those of `omop_mapping`, `ontology` and `spark_vi.dag.ops`, into every native bundle
+key: any edit here is a cache drop (AGENTS.md). `MONDO_NATIVE_VERSION` is the
+citable record of which construction a bundle was built under.
 
 BROADCAST DISCIPLINE (ADR 0047)
 -------------------------------
-Nothing here creates an `sc.broadcast`, so there is nothing to `destroy()`;
-every join hint is `F.broadcast(df)`, which is a planner hint, not a broadcast
-object (ADR 0047 §2 puts those explicitly out of scope). Nothing array-shaped
-rides a task closure: the per-document attestation is a JOIN against a small
-code-map DataFrame, not a UDF over a captured dict, and the closure roll-up is a
-join against a small `(term, ancestor)` frame built on the driver.
+Nothing here creates an `sc.broadcast`; every join hint is `F.broadcast(df)`, a
+planner hint, not a broadcast object. Nothing array-shaped rides a task closure:
+the per-document attestation is a JOIN against the small code-map DataFrame.
 """
 from __future__ import annotations
 
-# The generic graph primitives (moved to spark_vi.dag with ADR 0051) stay importable
-# from here under the names this module and its callers have always used.
-from spark_vi.dag.ops import (ancestor_closure, nearest_kept_ancestors,  # noqa: F401
-                              parent_adjacency, transitive_reduction_parents)
+from typing import NamedTuple
 
-# The forest root's node id, matching case_finding_assembly._FOREST_ROOT_CID and
-# the removed anchor build's MONDO_ROOT_CID so this DAG roots exactly like the others (engine-id 0).
-# Mondo numeric ids are positive, so -1 cannot collide with a real term.
+# The generic graph primitives (spark_vi.dag.ops) stay importable from here under
+# the names this module's callers have always used.
+from spark_vi.dag.ops import (ancestor_closure, parent_adjacency,  # noqa: F401
+                              transitive_reduction_parents)
+
+# The synthetic root's id in the INTEGER tables (readout DAG, int2cid bridges, the
+# conversion sidecar's node ids). Mondo numeric ids are positive, so -1 cannot
+# collide with a real term. The handed-over DAG has no such node: the estimator adds
+# its own synthetic root above every parentless term.
 MONDO_NATIVE_ROOT_CID = -1
 
-# Bumped when this build's OUTPUT would change for the same inputs. Folded into
-# the bundle cache key alongside this module's source hash: the hash is the
-# automatic guard (nobody has to remember), the version string is the citable
-# record of WHICH construction a cached bundle was built under.
-MONDO_NATIVE_VERSION = "native-mondo-v6"   # v2: multi-map guard; v4/v5: hierarchy-consistency test, threshold 3 -> 10; v6: curated xref exclusions (exp 0137; v3 anchor test withdrawn)
+# Bumped when this build's OUTPUT would change for the same inputs; folded into the
+# bundle cache key beside this module's source hash.
+MONDO_NATIVE_VERSION = "native-mondo-v7"   # v2: multi-map guard; v4/v5: hierarchy-consistency test, threshold 3 -> 10; v6: curated xref exclusions (exp 0137); v7: the subgraph handover (spec 2026-10-30: powering and splice moved to the estimator)
 
 _MONDO_PREFIX = "MONDO:"
 
@@ -156,10 +93,11 @@ _MONDO_PREFIX = "MONDO:"
 # Id space                                                                     #
 # --------------------------------------------------------------------------- #
 def mondo_cid(mondo_id) -> int:
-    """Engine concept-id for a Mondo curie: its numeric part (`MONDO:0004995` ->
-    4995). Injective (Mondo ids are `MONDO:%07d`) and independent of the kept set,
-    so node identity is stable across builds. See the module docstring for why the
-    engine id space is int and not the curie itself."""
+    """The integer id of a Mondo curie: its numeric part (`MONDO:0004995` -> 4995).
+    Injective (Mondo ids are `MONDO:%07d`) and independent of any node set, so it is
+    stable across builds: the id the integer tables (readout DAG, bundle_meta bridge,
+    code map file, conversion sidecar) key Mondo terms by. The DAG and labels handed
+    to the fit use the curie itself."""
     s = str(mondo_id)
     if not s.startswith(_MONDO_PREFIX):
         raise ValueError(f"not a Mondo curie: {mondo_id!r}")
@@ -170,8 +108,8 @@ def mondo_cid(mondo_id) -> int:
 
 
 def mondo_curie(cid) -> str:
-    """The Mondo curie for an engine concept-id (4995 -> 'MONDO:0004995'). The
-    inverse of `mondo_cid`; the root (-1) has no curie and raises."""
+    """The Mondo curie for an integer id (4995 -> 'MONDO:0004995'). The inverse of
+    `mondo_cid`; the integer tables' root (-1) has no curie and raises."""
     c = int(cid)
     if c < 0:
         raise ValueError(f"{cid!r} is not a Mondo term id (the root has no curie)")
@@ -182,82 +120,31 @@ def mondo_curie(cid) -> str:
 # Pure graph core (no Spark, no pandas — unit-tested in                        #
 # tests/test_mondo_native_dag.py)                                              #
 # --------------------------------------------------------------------------- #
+def subgraph_parents(terms, parent_adj, *, within=None) -> dict:
+    """The relevant subgraph handed to the fit: `{term: [parents]}` over every term in
+    `terms` and all its Mondo ancestors, with Mondo's own is-a edges among them.
 
+    Why the closure and not just `terms`: a document labelled at a term is evidence
+    for every ancestor (the estimator's support is counted over each document's
+    label closure), and an ancestor with no code of its own can still collect enough
+    documents to earn a topic block. Restricting to `terms` would drop exactly the
+    mid-level groupings the closure-support powering used to keep.
 
-def closure_rows(terms, parent_adj) -> list:
-    """Sorted `(term, ancestor)` pairs covering the reflexive closure of every term
-    in `terms` — the small driver-built frame the producer-side support aggregation
-    joins the attribution frame against (plan §3: "one aggregation over the
-    attribution frame joined to the closure"). Ships as data, never as a task
-    closure (ADR 0047's closure clause)."""
-    return sorted({(t, a) for t in terms for a in ancestor_closure(t, parent_adj)})
-
-
-def closure_support(person_terms, parent_adj) -> dict:
-    """`{term: distinct persons in its is-a closure}` — the PURE twin of the Spark
-    aggregation, for tests and small frames.
-
-    `person_terms` is an iterable of `(person_id, mondo_id)` attribution pairs. A
-    person counts toward a node once, no matter how many of its descendants they
-    attest, and counts toward EVERY ancestor of every term they attest (that is
-    what "closure support" means, and why closure support >= direct support). This
-    is the number `min_positives` thresholds — deliberately NOT main's fractional
-    1/m per-term count, which is an addability/egress device (plan §2's
-    "egress vs internal" split)."""
-    memo: dict = {}
-    persons: dict = {}
-    for person, term in person_terms:
-        anc = memo.get(term)
-        if anc is None:
-            anc = memo[term] = ancestor_closure(term, parent_adj)
-        for a in anc:
-            persons.setdefault(a, set()).add(person)
-    return {a: len(ps) for a, ps in persons.items()}
-
-
-def roll_terms_to_kept(terms, kept, parent_adj) -> dict:
-    """`{term: sorted landing nodes}` over `terms` via `nearest_kept_ancestors`.
-
-    This is the native analogue of the removed anchor build's `powered_anchor_climb`'s restriction
-    to the powered terminals, and it ROLLS UP rather than dropping: a code whose
-    most-specific Mondo term missed `min_positives` still attests that term's
-    nearest kept ancestors instead of vanishing. Because every attested id is then
-    a node of the DAG handed to the assembler, `attach_frontiers`'s own roll-up
-    never has to fire — an attestation can never fall through to the root by
-    accident (which it WOULD, silently, if a spliced-out or unpowered id reached
-    it: `_nearest_surviving_ancestors` returns `{root}` for an id the DAG has never
-    heard of)."""
-    memo: dict = {}
-    return {t: sorted(nearest_kept_ancestors(t, kept, parent_adj, memo))
-            for t in terms}
-
-
-def member_ancestor_pairs(terms, parent_adj) -> list:
-    """`[(ancestor_cid, descendant_cid)]` for every pair of `terms` where one is a
-    Mondo ancestor of the other — the pairs a FLAT label forest hides from the fit
-    DAG but the per-document attestation must still respect (spec 2026-10-07 R1,
-    decided 2026-10-08): a patient coded with BOTH "Ehlers-Danlos syndrome" and
-    "hypermobile EDS" attests hEDS only, never both. Exp 0135 launch 1's digest
-    had "Ehlers-Danlos syndrome" among hEDS's top words and "EDS type 3" among
-    EDS's: the same patients, in both blocks, by coding rather than by ontology —
-    which is the nesting the ribbon exists to remove. Sorted, cid space."""
-    terms = {str(t) for t in terms}
-    pairs = set()
+    Every parent of a node in the closure is itself in the closure, so the edges are
+    complete. `within` (a set of curies: the `branch_root` subtree) restricts both
+    the terms and their ancestors; a term outside it is dropped, and the branch root
+    becomes parentless. Parentless terms map to `[]` (the estimator hangs them from
+    its synthetic root). Parent lists are sorted; ids are kept as given."""
+    nodes = set()
     for t in terms:
+        t = str(t)
+        if within is not None and t not in within:
+            continue
         for a in ancestor_closure(t, parent_adj):
-            if a != t and a in terms:
-                pairs.add((mondo_cid(a), mondo_cid(t)))
-    return sorted(pairs)
-
-
-def flat_label_parents(kept_ids, parent_adj) -> dict:
-    """The FLAT label forest (spec 2026-10-07 R1): `{kept term: []}` for every
-    kept term, so each attaches directly to the synthetic root. `parent_adj` is
-    accepted for signature parity with `induced_hasse_parents` and is not read:
-    the whole point is that Mondo's nesting of two members does not enter the
-    fit. The count of such nestings is still reported (`apply_label_set_filter`'s
-    `n_nested_pairs`) so a reader knows how flat the ribbon is under Mondo."""
-    return {str(k): [] for k in kept_ids}
+            if within is None or a in within:
+                nodes.add(a)
+    return {n: sorted(p for p in parent_adj.get(n, ()) if p in nodes)
+            for n in sorted(nodes)}
 
 
 def induced_hasse_parents(kept_ids, parent_adj) -> dict:
@@ -477,170 +364,6 @@ def resolve_code_terms(standard_pairs, climb_pairs, parent_adj) -> dict:
     return out
 
 
-def build_native_label_dag(kept_ids, parent_adj, coded_ids, *, names=None,
-                           root=MONDO_NATIVE_ROOT_CID, flat=False):
-    """The label DAG over a POWERED Mondo term set: induced Hasse, then splice.
-
-    `kept_ids` are the Mondo curies clearing `min_positives` on closure support;
-    `parent_adj` is Mondo's own `{child: [parents]}` disease adjacency; `coded_ids`
-    are the curies some condition code resolves to DIRECTLY (the node property that
-    replaces exp 0109's positive-concept-id terminal test). `names` is
-    `{mondo_id: label}`.
-
-    Two steps, both reused rather than rewritten:
-
-      1. `induced_hasse_parents(kept_ids, parent_adj)` — `nearest_mapped_parents`
-         followed by the transitive reduction that makes it an actual Hasse
-         diagram (read that function's docstring: the reduction is not optional,
-         it is what closes the 619-category-anchor mechanism). Multi-parenthood is
-         PRESERVED wherever parents are genuinely incomparable (~50% of Mondo
-         terms have more than one parent); only comparable pairs are reduced, and
-         a transitive reduction cannot leave a node as a sibling of its own
-         descendant.
-      2. `collapse.collapse_engine_dag` — exp 0109's splice-to-fixpoint,
-         applied as a generic thin-chain post-pass with `is_terminal` = "directly
-         coded". A non-coded node with exactly one kept child is a rung in a
-         ladder, not a label, and its would-be attestations simply roll one level
-         further up (`roll_terms_to_kept` is computed against the POST-splice node
-         set, so nothing is stranded).
-
-    `flat=True` (spec 2026-10-07 R1, the DisMech ribbon) REPLACES step 1 with
-    `flat_label_parents`: every kept member attaches directly to the root, however
-    Mondo nests them. Exp 0135's first launch ran WITHOUT this — the ribbon's
-    nested members (peripartum cardiomyopathy under dilated cardiomyopathy;
-    hundreds of members under three generic "disease" members) came through the
-    induced Hasse as a depth-4 DAG, so the gate, the closure mask and the
-    closure-scope anchors all saw a hierarchy the design said the fit must not.
-    Attestation is unaffected either way (`roll_terms_to_kept` already stops at
-    the first kept member on each upward branch, so a patient is labelled with the
-    most specific member only); the hierarchy is left to the stacked READ.
-
-    Returns `(dag, stats)`; `stats` carries both stages' counts plus the splice's
-    own `predicted_degenerate` (the number the readout banner then confirms or
-    refutes)."""
-    from charmpheno.omop.condition_dag import build_condition_dag
-    from charmpheno.mondo.collapse import collapse_engine_dag
-
-    names = {str(k): str(v) for k, v in (names or {}).items()}
-    kept = {str(k) for k in kept_ids}
-    coded = {str(c) for c in coded_ids}
-
-    hasse = (flat_label_parents(kept, parent_adj) if flat
-             else induced_hasse_parents(kept, parent_adj))
-    edges, node_ids = set(), set()
-    for child, parents in hasse.items():
-        ci = mondo_cid(child)
-        node_ids.add(ci)
-        if parents:
-            for p in parents:
-                pi = mondo_cid(p)
-                edges.add((pi, ci))
-                node_ids.add(pi)
-        else:
-            edges.add((root, ci))
-    node_names = {root: "mondo disease root"}
-    for term in kept:
-        node_names[mondo_cid(term)] = names.get(term, term)
-    dag = build_condition_dag(sorted(edges), root, sorted(node_ids), node_names)
-
-    coded_cids = {mondo_cid(c) for c in coded if c in kept}
-    n_hasse_nodes = len(dag.nodes())
-    n_multi_parent = sum(1 for ps in dag.parents.values() if len(ps) > 1)
-    collapsed, collapse_stats = collapse_engine_dag(
-        dag, is_terminal=lambda cid: cid in coded_cids)
-    stats = {
-        "version": MONDO_NATIVE_VERSION,
-        "n_kept": len(kept),
-        "n_coded_kept": len(coded_cids),
-        "n_hasse_nodes": n_hasse_nodes,
-        "n_hasse_multi_parent": n_multi_parent,
-        "n_final_nodes": len(collapsed.nodes()),
-        "n_final_multi_parent": sum(1 for ps in collapsed.parents.values()
-                                    if len(ps) > 1),
-        "collapse": collapse_stats,
-    }
-    return collapsed, stats
-
-
-def apply_label_set_filter(kept_terms, label_set, parent_adj, *, known_terms=None,
-                           name="") -> tuple:
-    """Restrict the powered set to an explicit label set (the DisMech ribbon) and
-    account for every member that did not make it — pure, so the receipt is
-    unit-testable without BigQuery.
-
-    `kept_terms` is the post-powering set (closure support >= min_positives,
-    optionally branch-restricted); `label_set` the Mondo curies the fit may label;
-    `parent_adj` Mondo's own `{child: [parents]}`; `known_terms` (optional) the
-    ids of this Mondo release, so a member DisMech names that this release lacks
-    (a newer term, a retired one) is reported as `unknown` rather than silently
-    counted as unpowered.
-
-    Returns `(kept, stats)` with `kept = kept_terms & label_set` and
-      n_members           |label_set|
-      n_kept              |kept|
-      n_unknown           members not in this Mondo release
-      n_unpowered         known members below min_positives (or outside the branch)
-      n_nested_pairs      (ancestor, descendant) pairs WITHIN `kept` under Mondo —
-                          the ribbon is treated as flat regardless (spec: a DisMech
-                          curation question, surfaced not acted on), and the stacked
-                          read still sees the real hierarchy; the count is the
-                          receipt that says how flat the ribbon actually is.
-      n_nested_members    distinct kept members that are an ancestor of another
-    The nested pairs are computed by walking each kept member's ancestor closure
-    (`ancestor_closure`), so the cost is |kept| x depth — trivial."""
-    label_set = {str(x) for x in label_set}
-    kept_terms = {str(x) for x in kept_terms}
-    kept = kept_terms & label_set
-    unknown = (label_set - set(map(str, known_terms))) if known_terms is not None \
-        else set()
-    unpowered = label_set - kept - unknown
-    nested_pairs = set()
-    for t in kept:
-        for a in ancestor_closure(t, parent_adj):
-            if a != t and a in kept:
-                nested_pairs.add((a, t))
-    stats = {
-        "name": str(name or ""),
-        "n_members": len(label_set), "n_kept": len(kept),
-        "n_unknown": len(unknown), "n_unpowered": len(unpowered),
-        "n_nested_pairs": len(nested_pairs),
-        "n_nested_members": len({a for a, _ in nested_pairs}),
-    }
-    return kept, stats
-
-
-def format_label_set_report(stats) -> str:
-    """The ribbon receipt (spec §D1), printed with the powering report."""
-    ls = stats.get("label_set") if isinstance(stats, dict) else None
-    if not ls:
-        return "[mondo-native] label set: none (whole powered set)"
-    return (
-        f"[mondo-native] label set {ls['name'] or '(unnamed)'}: {ls['n_members']} "
-        f"member(s) -> {ls['n_kept']} kept; {ls['n_unknown']} not in this Mondo "
-        f"release, {ls['n_unpowered']} unpowered; {ls['n_nested_pairs']} nested "
-        f"(ancestor, descendant) pair(s) within the kept set over "
-        f"{ls['n_nested_members']} ancestor member(s) — label DAG built FLAT "
-        f"(every member under the root); a document attesting both members of a "
-        f"nested pair keeps the DESCENDANT only "
-        f"({len(stats.get('flat_ancestor_pairs') or [])} pair(s) among the final "
-        f"nodes)")
-
-
-def format_native_build_report(stats) -> str:
-    """The one-line DAG-build diagnostic, printed BEFORE any fit so the structural
-    claim is on the record ahead of the readout's own banner (the same discipline
-    `collapse.format_collapse_report` follows)."""
-    col = stats["collapse"]
-    return (
-        f"[mondo-native] label DAG ({stats['version']}): {stats['n_kept']} powered "
-        f"term(s) ({stats['n_coded_kept']} directly coded); induced Hasse "
-        f"{stats['n_hasse_nodes']} node(s), {stats['n_hasse_multi_parent']} with "
-        f">1 parent; splice removed {col['spliced']} thin-chain + "
-        f"{col['dropped_childless']} childless in {col['passes']} pass(es) -> "
-        f"{stats['n_final_nodes']} node(s) "
-        f"({stats['n_final_multi_parent']} multi-parent); "
-        f"predicted residual degenerate = {col['predicted_degenerate']}")
-
 
 def _dropped_examples(dropped, concept_pd, top=10):
     """The most-dropped multi-map targets by number of source codes, named, for
@@ -653,20 +376,28 @@ def _dropped_examples(dropped, concept_pd, top=10):
     return [(str(name.get(t, t)), int(k)) for t, k in cnt.most_common(int(top))]
 
 
-def format_native_powering_report(stats) -> str:
-    """The powering half of the build receipt: how many Mondo terms carry ANY
-    closure support, how many clear `min_positives`, and the smallest kept
-    support. C and K are expected to GROW versus exp 0104 (closure support >=
-    direct support), so these numbers are MEASURED here and cited by the
-    experiment doc rather than predicted."""
+
+
+def format_native_build_report(stats) -> str:
+    """The one-line subgraph diagnostic, printed BEFORE any fit so the shape of what
+    the estimator is given is on the record (the node set itself is the fit's: the
+    estimator's own log line reports kept / pruned / spliced)."""
     return (
-        f"[mondo-native] powering: {stats['n_codes_resolved']} standard code(s) "
-        f"resolve to {stats['n_coded_terms']} Mondo term(s); "
-        f"{stats['n_terms_with_any_support']} term(s) carry closure support, "
-        f"{stats['n_powered']} clear min_positives={stats['min_positives']} "
-        f"(smallest kept support {stats['min_support_kept']}); "
-        f"{stats['n_codes_attesting']} code(s) attest the final DAG"
+        f"[mondo-native] label subgraph ({stats['version']}): {stats['n_coded_terms']} "
+        f"coded term(s) + ancestors -> {stats['n_nodes']} node(s), "
+        f"{stats['n_multi_parent']} with >1 parent, {stats['n_top']} top-level"
         + (f"; branch={stats['branch']}" if stats.get("branch") else "")
+        + "; powering and splice are the estimator's (minDocsPerNode)")
+
+
+def format_native_mapping_report(stats) -> str:
+    """The code-ladder half of the build receipt: how many standard codes resolve to
+    how many Mondo terms, and what the mapping guards dropped."""
+    return (
+        f"[mondo-native] code ladder: {stats['n_codes_resolved']} standard code(s) "
+        f"patients carry resolve to {stats['n_coded_terms']} Mondo term(s)"
+        + (f"; branch={stats['branch']} ({stats['n_codes_outside_branch']} code(s) "
+           f"outside it dropped)" if stats.get("branch") else "")
         + (f"; multi-map guard: {stats['n_multimap_sources']} source code(s) map to "
            f">1 standard concept, {stats['n_multimap_dropped']} ancestor target(s) "
            f"dropped ({len(stats.get('multimap_dropped_targets') or [])} distinct)"
@@ -693,54 +424,57 @@ def format_native_powering_report(stats) -> str:
            if stats.get("code_map_audit") else ""))
 
 
+
+
 # --------------------------------------------------------------------------- #
 # Spark / BigQuery build                                                       #
 # --------------------------------------------------------------------------- #
+class MondoLabelInputs(NamedTuple):
+    """What `build_mondo_native_fit_inputs` hands over (a tuple, so it unpacks).
+
+    dag           `{curie: [parent curies]}`: the relevant subgraph
+                  (`subgraph_parents`); `[]` = top-level (hangs from the
+                  estimator's synthetic root).
+    code_map_sdf  `(std_cid long, node_id string, node_cid long)`: each standard
+                  code patients carry -> the most-specific Mondo term(s) it resolves
+                  to (`node_id` the curie, `node_cid` its `mondo_cid`). Wrap with
+                  `make_mondo_native_attested_provider`.
+    node_ids      the subgraph's curies (sorted).
+    names         `{curie: Mondo label}` over the subgraph.
+    stats         the build receipt (`format_native_mapping_report`,
+                  `format_native_build_report`); counts of codes and terms only.
+    """
+    dag: dict
+    code_map_sdf: object
+    node_ids: list
+    names: dict
+    stats: dict
+
+
 def build_mondo_native_fit_inputs(spark, *, cdr, billing,
                                   mondo_version="2026-06-02",
                                   mondo_cache_dir="data/mondo",
-                                  min_positives=100, branch_root=None,
-                                  label_set=None, label_set_name="",
-                                  condition_source_table="condition_occurrence"):
-    """Build the native-Mondo `before_dag` + the per-code attestation map (BQ).
+                                  branch_root=None,
+                                  condition_source_table="condition_occurrence"
+                                  ) -> MondoLabelInputs:
+    """Build the code ladder and the label subgraph (BigQuery + Spark).
 
-    The native sibling of the removed anchor build's `build_mondo_fit_inputs`, same call shape so
-    `gated_pc_cloud.mondo_assemble_fn` can dispatch to either:
-
-      1. whole-Mondo -> OMOP mapping (`build_mondo_to_omop`, restrict=None), which
-         gives the standard-exact rung and the climb's targets;
+      1. whole-Mondo -> OMOP mapping (`build_mondo_to_omop`, restrict=None) with the
+         curated exclusions, the hierarchy-consistency test and the multi-map guard:
+         the standard-exact rung and the climb's targets;
       2. the climb rung — `concept_ancestor` restricted to mapped ancestors and to
          the standard concepts that have NO exact term, reduced to nearest by
          `nearest_mapped_standard_ancestors` and tie-reduced by `reduce_tie_map`;
-      3. CLOSURE support: distinct persons per node, rolled through Mondo's own
-         is-a closure, thresholded at `min_positives`;
-      4. the label DAG (`build_native_label_dag`: induced Hasse + splice);
-      5. the code map re-resolved against the FINAL node set, so every attestation
-         lands on a node the DAG actually has.
+      3. the codes patients actually carry (the WHOLE population's condition table,
+         no person_mod: the ladder is a corpus-independent property), restricted to
+         `branch_root`'s subtree when set;
+      4. the subgraph: those codes' terms and all their Mondo ancestors
+         (`subgraph_parents`).
 
-    `branch_root` (optional) restricts the kept set to one body-system subtree
-    (the template-branch knob the removed anchor build's `branch_mondo_id_set` provides); `None` =
-    whole Mondo, which is what exp 0110 runs.
-
-    `label_set` (optional; spec 2026-10-07 §D1) restricts the kept set to an
-    explicit set of Mondo curies — the DisMech ribbon (`dismech_ribbon.py`) — so
-    the FIT sees a flat forest of disorders while everything a patient's codes
-    resolve to UNDER a member still rolls up to it (`roll_terms_to_kept`), and
-    anything under no member is background-only. Powering is unchanged (closure
-    support >= `min_positives`); the filter is applied after it, like
-    `branch_root`, through `apply_label_set_filter`, whose receipt (members not in
-    this Mondo release, unpowered members, members Mondo nests under another
-    member) lands in `stats["label_set"]`. `label_set_name` is the citable
-    identity printed in the receipt (e.g. `dismech:<commit>:<n>:<digest>`).
-
-    Returns `(before_dag, code_map_sdf, kept_cids, support_of, stats)`:
-      before_dag    integer-id `ConditionDag` over Mondo term ids (feed to the
-                    multi-domain assembler with `min_n=0`);
-      code_map_sdf  `(std_cid, node_cid)` — wrap with
-                    `make_mondo_native_attested_provider`;
-      kept_cids     the powered node ids surviving the splice;
-      support_of    `{node_cid: closure support}` for logging / per-node reports;
-      stats         the build receipt (`format_native_build_report`).
+    No threshold: which nodes get a topic block is learned by the estimator from
+    the training documents (`minDocsPerNode`), so the same build serves every fit.
+    `branch_root` (optional) restricts to one body-system subtree; `None` = whole
+    Mondo.
     """
     from pathlib import Path
 
@@ -873,17 +607,17 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
         term_of_std.setdefault(c, set()).add(m)
 
     # --- 2. the condition frame + the climb rung -------------------------------
-    # Powering reads the WHOLE population (no person_mod): a node's support is a
-    # corpus-independent property, the same convention the anchor build's power-count used.
+    # The WHOLE population (no person_mod): which codes are in use is a
+    # corpus-independent property, so every corpus of this CDR gets the same ladder.
     cond = load_omop_bigquery(
         spark=spark, cdr_dataset=cdr, billing_project=billing,
-        source_table=condition_source_table).select("person_id", "concept_id").cache()
+        source_table=condition_source_table).select("person_id", "concept_id")
+    used_std = cond.select(F.col("concept_id").alias("std_cid")).distinct().cache()
     try:
         std_ids_sdf = broadcast(spark.createDataFrame(
             pd.DataFrame({"map_cid": mapped_std_ids})))
         # Only codes with NO exact term climb (main's precedence: never climb past
         # an exact hit), and only codes patients actually carry are worth climbing.
-        used_std = cond.select(F.col("concept_id").alias("std_cid")).distinct()
         unmatched = used_std.join(std_ids_sdf,
                                   used_std["std_cid"] == std_ids_sdf["map_cid"],
                                   "left_anti")
@@ -905,93 +639,64 @@ def build_mondo_native_fit_inputs(spark, *, cdr, billing,
                        for a in ancs for m in term_of_std.get(a, ())]
         code_terms = resolve_code_terms(std_pairs, climb_pairs, parent_adj)
 
-        # --- 3. closure support over Mondo's own graph -------------------------
-        # The attribution frame, reduced to distinct (person, term) BEFORE the
-        # closure join: persons x terms-per-person is small (~1e7), the raw
-        # condition table is not, and the join multiplies rows by closure depth.
-        attr_pd = pd.DataFrame(
-            [(c, mondo_cid(m)) for c, ms in code_terms.items() for m in ms],
-            columns=["std_cid", "node_cid"]).astype({"std_cid": int, "node_cid": int})
-        attr_sdf = broadcast(spark.createDataFrame(attr_pd))
-        attributed = (cond.join(attr_sdf, cond["concept_id"] == attr_sdf["std_cid"],
-                                "inner")
-                      .select("person_id", "node_cid").distinct())
-        coded_terms = sorted({m for ms in code_terms.values() for m in ms})
-        clos_pd = pd.DataFrame(
-            [(mondo_cid(t), mondo_cid(a))
-             for t, a in closure_rows(coded_terms, parent_adj)],
-            columns=["node_cid", "anc_cid"])
-        clos_sdf = broadcast(spark.createDataFrame(clos_pd))
-        # `.distinct()` then `count()` rather than `countDistinct`: the pair frame
-        # is already deduped per (person, node), so this is one shuffle instead of
-        # a per-group hash set. The column is renamed off `count` because
-        # `DataFrame.itertuples` shadows that name with the namedtuple method.
-        support_pd = (attributed.join(clos_sdf, "node_cid", "inner")
-                      .select("person_id", "anc_cid").distinct()
-                      .groupBy("anc_cid").count()
-                      .withColumnRenamed("count", "n_persons").toPandas())
+        # --- 3. the codes patients carry ----------------------------------------
+        # The exact rung resolves every mapped code, carried or not; the subgraph
+        # is built from carried codes only, so no term enters it that no patient
+        # can attest (it would be pruned at fit time anyway, and it would bloat the
+        # DAG every fit is given).
+        keys_sdf = broadcast(spark.createDataFrame(
+            pd.DataFrame({"k": sorted(code_terms)}).astype({"k": int})))
+        carried = {int(r[0]) for r in
+                   used_std.join(keys_sdf, used_std["std_cid"] == keys_sdf["k"],
+                                 "inner").select("std_cid").collect()}
     finally:
-        cond.unpersist()
+        used_std.unpersist()
+    code_terms = {c: ts for c, ts in code_terms.items() if c in carried}
 
-    support_of = {int(r.anc_cid): int(r.n_persons)
-                  for r in support_pd.itertuples(index=False)}
-    kept_terms = {mondo_curie(c) for c, n in support_of.items()
-                  if n >= int(min_positives)}
+    within = None
+    n_outside = 0
     if branch_root:
-        kept_terms &= branch_mondo_id_set(branch_root, edges_df=edges_df,
-                                          nodes_df=nodes_df)
-    label_set_stats = None
-    if label_set is not None:
-        kept_terms, label_set_stats = apply_label_set_filter(
-            kept_terms, label_set, parent_adj, known_terms=all_ids,
-            name=label_set_name)
+        within = branch_mondo_id_set(branch_root, edges_df=edges_df, nodes_df=nodes_df)
+        restricted = {c: [t for t in ts if t in within] for c, ts in code_terms.items()}
+        n_outside = sum(1 for ts in restricted.values() if not ts)
+        code_terms = {c: ts for c, ts in restricted.items() if ts}
 
-    # --- 4. the label DAG, and 5. the code map against its FINAL node set ------
-    before_dag, stats = build_native_label_dag(
-        kept_terms, parent_adj, coded_terms, names=label_of,
-        flat=(label_set is not None))
-    final_terms = {mondo_curie(c) for c in before_dag.nodes()
-                   if c != MONDO_NATIVE_ROOT_CID}
-    landing = roll_terms_to_kept(coded_terms, final_terms, parent_adj)
-    rows = sorted({(int(c), mondo_cid(land))
-                   for c, ms in code_terms.items() for m in ms
-                   for land in landing.get(m, ())})
+    # --- 4. the subgraph ---------------------------------------------------------
+    coded_terms = sorted({t for ts in code_terms.values() for t in ts})
+    dag = subgraph_parents(coded_terms, parent_adj, within=within)
+    names = {n: label_of.get(n, n) for n in dag}
+    rows = sorted({(int(c), str(t)) for c, ts in code_terms.items() for t in ts})
     code_map_sdf = spark.createDataFrame(
-        pd.DataFrame(rows, columns=["std_cid", "node_cid"])
-        .astype({"std_cid": int, "node_cid": int}))
-    # Measured at BUILD time, not guessed (plan §3 "scale expectations"): C and K
-    # are expected to GROW relative to exp 0104's 3,677, because closure support
-    # >= direct support and mid-level terms with no code of their own now qualify.
-    stats.update(min_positives=int(min_positives),
-                 n_codes_resolved=len(code_terms),
-                 n_coded_terms=len(coded_terms),
-                 n_terms_with_any_support=len(support_of),
-                 n_powered=len(kept_terms),
-                 min_support_kept=min((support_of[mondo_cid(t)]
-                                       for t in kept_terms), default=0),
-                 n_codes_attesting=len({c for c, _ in rows}),
-                 branch=str(branch_root or ""),
-                 label_set=label_set_stats,
-                 flat=bool(label_set is not None),
-                 n_multimap_sources=sum(1 for tg in src_tg.values() if len(tg) > 1),
-                 n_multimap_dropped=len(multimap_dropped),
-                 multimap_dropped_targets=sorted({t for _, t in multimap_dropped}),
-                 multimap_dropped_examples=_dropped_examples(multimap_dropped, concept_pd),
-                 n_overbroad_dropped=len(overbroad_dropped),
-                 n_overbroad_terms=len({m for m, *_ in overbroad_dropped}),
-                 overbroad_dropped_examples=overbroad_top,
-                 overbroad_near_kept=overbroad_near,
-                 n_xref_excluded=int(n_map_excluded),
-                 snomed_xref_suspects=snomed_suspects,
-                 code_map_audit=code_map_audit(
-                     rows, {c for c, _ in std_pairs},
-                     names={mondo_cid(t): label_of.get(t, t) for t in final_terms}))
-    kept_cids = {c for c in before_dag.nodes() if c != MONDO_NATIVE_ROOT_CID}
-    if label_set is not None:
-        # The nesting the flat DAG does not carry, for the provider's per-document
-        # most-specific reduction (`make_mondo_native_attested_provider`).
-        stats["flat_ancestor_pairs"] = member_ancestor_pairs(final_terms, parent_adj)
-    return before_dag, code_map_sdf, kept_cids, support_of, stats
+        pd.DataFrame({"std_cid": [c for c, _ in rows],
+                      "node_id": [t for _, t in rows],
+                      "node_cid": [mondo_cid(t) for _, t in rows]},
+                     columns=["std_cid", "node_id", "node_cid"])
+        .astype({"std_cid": "int64", "node_id": str, "node_cid": "int64"}))
+    stats = {
+        "version": MONDO_NATIVE_VERSION,
+        "n_codes_resolved": len(code_terms),
+        "n_coded_terms": len(coded_terms),
+        "n_nodes": len(dag),
+        "n_multi_parent": sum(1 for ps in dag.values() if len(ps) > 1),
+        "n_top": sum(1 for ps in dag.values() if not ps),
+        "branch": str(branch_root or ""),
+        "n_codes_outside_branch": int(n_outside),
+        "n_multimap_sources": sum(1 for tg in src_tg.values() if len(tg) > 1),
+        "n_multimap_dropped": len(multimap_dropped),
+        "multimap_dropped_targets": sorted({t for _, t in multimap_dropped}),
+        "multimap_dropped_examples": _dropped_examples(multimap_dropped, concept_pd),
+        "n_overbroad_dropped": len(overbroad_dropped),
+        "n_overbroad_terms": len({m for m, *_ in overbroad_dropped}),
+        "overbroad_dropped_examples": overbroad_top,
+        "overbroad_near_kept": overbroad_near,
+        "n_xref_excluded": int(n_map_excluded),
+        "snomed_xref_suspects": snomed_suspects,
+        "code_map_audit": code_map_audit(
+            [(c, mondo_cid(t)) for c, t in rows], {c for c, _ in std_pairs},
+            names={mondo_cid(t): label_of.get(t, t) for t in coded_terms}),
+    }
+    return MondoLabelInputs(dag=dag, code_map_sdf=code_map_sdf, node_ids=sorted(dag),
+                            names=names, stats=stats)
 
 
 def branch_mondo_id_set(branch_root, *, edges_df, nodes_df) -> set:
@@ -1004,72 +709,43 @@ def branch_mondo_id_set(branch_root, *, edges_df, nodes_df) -> set:
             | {str(x) for x in _descendants(child_adj, str(branch_root))})
 
 
-def make_mondo_native_attested_provider(code_map_sdf, *, doc_spec,
-                                        ancestor_pairs=None):
-    """A `provider(events_df) -> attested_df` for the `attested_provider` seam —
-    the native analogue of the removed anchor build's `make_mondo_attested_provider`.
 
-    Per document, the attested nodes are the Mondo label nodes the patient's
-    in-window condition codes resolve to through the ladder
-    (`condition ⋈ code_map on concept_id = std_cid -> node_cid`). Every `node_cid`
-    is already a node of the DAG handed to the assembler (the map was re-resolved
-    against the final node set), so `attach_frontiers`'s roll-up is a no-op and
-    `frontier_from_coded` reduces the set to its most-specific members — the
-    frontier, not every powered ancestor.
+
+def make_mondo_native_attested_provider(code_map_sdf, *, doc_spec):
+    """A `provider(events_df) -> attested_df` for the assembler's `attested_provider`
+    seam.
+
+    Per document, the labels are the Mondo terms the patient's in-window condition
+    codes resolve to through the ladder (`condition ⋈ code_map on concept_id =
+    std_cid -> node_id`): the most-specific term per code, in Mondo curies. Not
+    reduced across codes (a document may carry a term and, through another code, its
+    ancestor): the estimator's label contract allows ancestors, and its frontier
+    reduction is internal.
 
     A full doc roster is LEFT-joined so background docs (no resolvable condition
-    code) survive with an empty `attested_cids` and a `[]` frontier, exactly like
-    the SNOMED and legacy-Mondo providers.
+    code) survive with an empty `labels` array.
 
-    `ancestor_pairs` (`[(ancestor_cid, descendant_cid)]`, the FLAT ribbon's
-    `member_ancestor_pairs`) switches on the per-document MOST-SPECIFIC reduction:
-    a node is dropped from a document's attested set when the same document also
-    attests one of its Mondo descendants. On a flat DAG `frontier_from_coded`
-    cannot do this (the two are siblings there), and without it a patient coded
-    with both "EDS" and "hypermobile EDS" would sit in both blocks — the nesting
-    the ribbon removes from the DAG, re-entering through the coding. `None` (the
-    default, every non-ribbon run) leaves the provider byte-identical.
-
-    Returns `[doc_id, person_id, source_cohort, attested_cids: array<bigint>]`.
-    Joins, not UDFs: nothing array-shaped rides the task closure (ADR 0047); the
-    reduction is an explode-free anti-join on the (doc, node) pair frame."""
+    Returns `[doc_id, person_id, source_cohort, labels: array<string>]`. Joins, not
+    UDFs: nothing array-shaped rides the task closure (ADR 0047)."""
     from pyspark.sql import functions as F
     from pyspark.sql.functions import broadcast
 
-    pairs = [(int(a), int(d)) for a, d in (ancestor_pairs or ())]
-
     def provider(events_df):
+        cm = code_map_sdf.select("std_cid",
+                                 F.col("node_id").cast("string").alias("node_id"))
         ev = doc_spec.derive_docs(events_df)
         roster = ev.groupBy("doc_id").agg(
             F.first("person_id").alias("person_id"),
             F.first("source_cohort").alias("source_cohort"),
         )
-        pair_df = (ev.join(broadcast(code_map_sdf),
-                           ev["concept_id"] == code_map_sdf["std_cid"], "inner")
-                     .select("doc_id", F.col("node_cid").cast("long").alias("node_cid"))
-                     .distinct())
-        if pairs:
-            spark = events_df.sparkSession
-            anc_sdf = broadcast(spark.createDataFrame(pairs, ["anc_cid", "desc_cid"]))
-            # (doc, ancestor) rows that have a (doc, descendant) row in the same
-            # document — the ones the most-specific rule removes.
-            dominated = (pair_df.alias("a")
-                         .join(anc_sdf, F.col("a.node_cid") == F.col("anc_cid"))
-                         .join(pair_df.alias("d"),
-                               (F.col("d.doc_id") == F.col("a.doc_id"))
-                               & (F.col("d.node_cid") == F.col("desc_cid")))
-                         .select(F.col("a.doc_id").alias("doc_id"),
-                                 F.col("a.node_cid").alias("node_cid"))
-                         .distinct())
-            pair_df = pair_df.join(dominated, on=["doc_id", "node_cid"],
-                                   how="left_anti")
+        pair_df = (ev.join(broadcast(cm), ev["concept_id"] == cm["std_cid"], "inner")
+                     .select("doc_id", "node_id").distinct())
         attested = (pair_df.groupBy("doc_id")
-                    .agg(F.collect_set("node_cid").alias("attested_cids")))
+                    .agg(F.array_sort(F.collect_set("node_id")).alias("labels")))
         return (
             roster.join(attested, on="doc_id", how="left")
-            .withColumn("attested_cids",
-                        F.coalesce(F.col("attested_cids"),
-                                   F.array().cast("array<bigint>")))
+            .withColumn("labels",
+                        F.coalesce(F.col("labels"), F.array().cast("array<string>")))
         )
 
     return provider

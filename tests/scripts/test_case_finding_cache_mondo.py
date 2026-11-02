@@ -23,6 +23,7 @@ Local-Spark for the round-trip and the seam; pure for the key and the drift gate
 import json
 import os
 import sys
+import types
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -55,8 +56,7 @@ from charmpheno.mondo.native_dag import MONDO_NATIVE_VERSION  # noqa: E402
 _SNOMED_BASE = dict(
     source_table="condition_era", person_mod=10, vocab_size=5000, min_df=20,
     min_patient_count=20, doc_min_length=0, prior_obs_days=365, window_days=365,
-    disease="diabetes", min_n=50, holdout_frac=0.2, split_salt=20260716,
-    n_bg=2, tpn=1, cdr="p.d")
+    disease="diabetes", holdout_frac=0.2, split_salt=20260716, cdr="p.d")
 # A cached SNOMED bundle lives under exactly these; if one of them moves OUTSIDE a
 # deliberate cache drop, every cache entry in every bucket silently becomes
 # unreachable and the next run rebuilds from BigQuery.
@@ -95,17 +95,28 @@ _SNOMED_BASE = dict(
 # `multi_domain.py` (`multi_domain_src`) import them from `spark_vi.dag.layout`. All
 # four hashes moved at once; `spark_vi/dag/{layout,ops}.py` themselves are untouched.
 # Announced full drop; these are the post-drop values.
-_SNOMED_KEY = "7ae90c671efc1b0a"
-_SNOMED_LABELED_KEY = "867b7b9b4c7373e0"          # emit_labels + closure mask
-_SNOMED_LOOKBACK_KEY = "dcfbbc2052b41078"         # lookback windowing + strip both
+#
+# RE-PINNED by WP11 of the DAG-gated user-API plan (2026-11-02, spec 2026-10-30): the
+# bundle carries the whole label DAG and each document's attested node ids (`labels`,
+# `gate_labels`) instead of a pruned engine DAG, `frontier` and dense
+# `label` / `labelMask`. `case_finding_assembly.py`, `condition_dag.py`,
+# `multi_domain.py` and `charmpheno/mondo/native_dag.py` changed (`collapse.py`
+# removed); the payload version went 5 -> 6; `min_n` / `min_positives`, `n_bg` /
+# `tpn` and `emit_labels` / `label_mask_mode` left the key (not bundle inputs any
+# more) and `spark_vi.dag.layout` stopped being folded (it no longer shapes the
+# bundle). The second SNOMED pin was the `emit_labels` + closure-mask key; that
+# option is gone, so it now pins the all-ever gate fold (`gate_attestation="ever"`).
+# Announced full drop; these are the post-drop values.
+_SNOMED_KEY = "94e21c0c95f5e9d4"
+_SNOMED_EVER_KEY = "e872acd4ebe84669"              # gate_attestation=ever
+_SNOMED_LOOKBACK_KEY = "4637ca2477bc417b"      # lookback windowing + strip both
 
 
 def test_existing_snomed_keys_are_byte_identical():
     """The whole compatibility claim in three hashes."""
     k = ccache.compute_bundle_cache_key
     assert k(**_SNOMED_BASE) == _SNOMED_KEY
-    assert k(**_SNOMED_BASE, emit_labels=True,
-             label_mask_mode="closure") == _SNOMED_LABELED_KEY
+    assert k(**_SNOMED_BASE, gate_attestation="ever") == _SNOMED_EVER_KEY
     assert k(**dict(_SNOMED_BASE, window_mode="lookback", strip_mode="both",
                     lookback_days=730, label_window_days=180)) == _SNOMED_LOOKBACK_KEY
 
@@ -119,7 +130,7 @@ def test_multidomain_flag_alone_changes_the_key():
 
 _MD_BASE = dict(_SNOMED_BASE, multidomain=True, extra_domains=("drug",),
                 index_mode="population", mondo=True, mondo_version="2026-06-02",
-                mondo_branch="", min_positives=100, mondo_native=True,
+                mondo_branch="", mondo_native=True,
                 mondo_native_version="native-mondo-v1")
 # The native-Mondo key, pinned the same way the SNOMED keys above are: the whole-
 # Mondo record bundles live under keys of this shape. It folds the source hashes of
@@ -134,7 +145,9 @@ _MD_BASE = dict(_SNOMED_BASE, multidomain=True, extra_domains=("drug",),
 # `preindex_closure` fold were removed with it (the driver had refused them since
 # the 2026-10 cleanup). Post-drop value; re-pinned by WP4 (2026-11-02, the
 # `spark_vi.dag.layout` import move in `case_finding_assembly` / `multi_domain`).
-_MONDO_NATIVE_KEY = "b7e1f8c795568d57"
+# Re-pinned by WP11 (2026-11-02, the subgraph handover; see the SNOMED pins' note):
+# `collapse` and `spark_vi.dag.layout` no longer fold, `min_positives` left the key.
+_MONDO_NATIVE_KEY = "ae054f1ef347c379"
 
 
 def test_the_native_mondo_key_is_byte_identical():
@@ -149,7 +162,10 @@ def test_the_anchor_mondo_flavour_is_refused():
 
 
 def test_the_removed_key_options_are_gone_from_the_signature():
-    for gone in ("dag_collapse", "label_set", "preindex_closure"):
+    """Including the ones spec 2026-10-30 took out of the bundle: the node-set
+    threshold, the topic layout and the readout's dense-label options."""
+    for gone in ("dag_collapse", "label_set", "preindex_closure", "min_n",
+                 "min_positives", "n_bg", "tpn", "emit_labels", "label_mask_mode"):
         with pytest.raises(TypeError):
             ccache.compute_bundle_cache_key(**_MD_BASE, **{gone: True})
 
@@ -194,17 +210,24 @@ def _moves_the_key(module, **base):
 
 
 def test_every_module_the_native_build_runs_is_folded_into_the_key():
-    """Auto-invalidation: an edit to any module that shapes the label DAG changes
-    the key, so a stale native bundle can never be served. Checked by
-    monkeypatching the hash helper rather than by pinning one hash per module."""
-    from charmpheno.mondo import collapse, native_dag, omop_mapping, ontology
+    """Auto-invalidation: an edit to any module that shapes the label subgraph or
+    the labels changes the key, so a stale native bundle can never be served.
+    Checked by monkeypatching the hash helper rather than by pinning one hash per
+    module."""
+    from charmpheno.mondo import native_dag, omop_mapping, ontology
+    from charmpheno.omop import case_finding_assembly, condition_dag, multi_domain
     from spark_vi.dag import layout, ops
 
-    for module in (native_dag, collapse, omop_mapping, ontology, ops, layout):
+    for module in (native_dag, omop_mapping, ontology, ops, case_finding_assembly,
+                   condition_dag, multi_domain):
         assert _moves_the_key(module, **_MD_BASE), module.__name__
-    # the generic layout shapes every frontier, so it folds on the SNOMED path too
-    assert _moves_the_key(layout, **_SNOMED_BASE)
+    for module in (case_finding_assembly, condition_dag):
+        assert _moves_the_key(module, **_SNOMED_BASE), module.__name__
     assert not _moves_the_key(native_dag, **_SNOMED_BASE)
+    # the engine layout no longer shapes the bundle (spec 2026-10-30): the gate's
+    # layout is the estimator's, learned at fit time
+    assert not _moves_the_key(layout, **_SNOMED_BASE)
+    assert not _moves_the_key(layout, **_MD_BASE)
 
 
 def test_the_corpus_shaping_modules_are_folded_into_every_key(monkeypatch):
@@ -256,8 +279,9 @@ def test_readout_recovers_a_native_spec_from_the_manifest():
     spec = gpr.corpus_spec_from_manifest(m)
     assert spec["dag_source"] == "mondo_native"
     assert spec["dag_collapse"] is False
-    assert spec["index_mode"] == "population" and spec["min_n"] == 0
-    assert spec["min_positives"] == 100
+    assert spec["index_mode"] == "population"
+    for gone in ("min_n", "min_positives", "n_bg", "tpn", "emit_labels"):
+        assert gone not in spec
     assert (gpr.bundle_key_from_manifest(m)
             == gpc.multidomain_cache_key(spec))
 
@@ -267,7 +291,6 @@ def test_readout_recovers_a_native_spec_from_the_manifest():
     ("index_mode", "disease"),
     ("mondo_version", "2026-07-01"),
     ("mondo_branch", "MONDO:0004995"),
-    ("min_positives", 50),
     ("mondo", False),
 ])
 def test_every_mondo_field_moves_the_key(field, val):
@@ -322,8 +345,8 @@ def test_doc_spec_default_leaves_all_four_pinned_hashes_byte_identical():
     k = ccache.compute_bundle_cache_key
     d = ccache.DEFAULT_DOC_SPEC
     assert k(**_SNOMED_BASE, doc_spec=d) == _SNOMED_KEY
-    assert k(**_SNOMED_BASE, emit_labels=True, label_mask_mode="closure",
-             doc_spec=d) == _SNOMED_LABELED_KEY
+    assert k(**_SNOMED_BASE, gate_attestation="ever",
+             doc_spec=d) == _SNOMED_EVER_KEY
     assert k(**dict(_SNOMED_BASE, window_mode="lookback", strip_mode="both",
                     lookback_days=730, label_window_days=180),
              doc_spec=d) == _SNOMED_LOOKBACK_KEY
@@ -379,28 +402,27 @@ def test_readout_recovers_the_doc_spec_from_the_manifest():
 # Cache format: a multi-domain bundle round-trips.                             #
 # --------------------------------------------------------------------------- #
 _VOCAB_MAPS = [{101: 0, 102: 1, 103: 2, 104: 3}, {201: 0, 202: 1, 203: 2}]
-_PARENT_INT = {0: [], 1: [0], 2: [0]}
-_INT2CID = {0: -1, 1: 1001, 2: 1002}
-_CID2INT = {-1: 0, 1001: 1, 1002: 2}
-_NAME_BY_ID = {-1: "mondo disease root", 1001: "node a", 1002: "node b"}
-_LEDGER = {"K_nodes": 2, "kept": 2, "dropped": 0}
+# The label subgraph in Mondo curies (spec 2026-10-30): A over B and C.
+_A, _B, _C = "MONDO:0001001", "MONDO:0001002", "MONDO:0001003"
+_DAG = {_A: [], _B: [_A], _C: [_A]}
+_NAME_BY_ID = {_A: "node a", _B: "node b", _C: "node c"}
+_LEDGER = {"n_dag_nodes": 3, "train_fg_docs": 12, "test_fg_docs": 8}
+_CODE_MAP = [(101, _B), (102, _C), (103, _B)]
 
 
 def _md_frame(spark, n, offset=0):
     """The frame the multi-domain assembler emits: per-domain BOW columns plus the
-    condition-only frontier and the Step-A dense label/mask."""
+    condition-only attested node ids (`labels`)."""
     from pyspark.ml.linalg import VectorUDT, Vectors
-    from pyspark.sql.types import (ArrayType, DoubleType, LongType, StringType,
-                                   StructField, StructType)
+    from pyspark.sql.types import (ArrayType, LongType, StringType, StructField,
+                                   StructType)
     schema = StructType([
         StructField("doc_id", LongType(), False),
         StructField("person_id", LongType(), False),
         StructField("features_0", VectorUDT(), False),
         StructField("features_1", VectorUDT(), False),
-        StructField("frontier", ArrayType(LongType()), False),
+        StructField("labels", ArrayType(StringType()), False),
         StructField("source_cohort", StringType(), False),
-        StructField("label", ArrayType(DoubleType()), False),
-        StructField("labelMask", ArrayType(DoubleType()), False),
     ])
     rng = np.random.default_rng(offset + 7)
     rows = []
@@ -408,19 +430,20 @@ def _md_frame(spark, n, offset=0):
         pid = offset + d
         f0 = Vectors.dense(rng.integers(0, 3, size=4).astype(float))
         f1 = Vectors.dense(rng.integers(0, 3, size=3).astype(float))
-        node = 1 + (d % 2)
-        rows.append((int(pid), int(pid), f0, f1, [int(node)], "general",
-                     [1.0, float(node == 1), float(node == 2)], [1.0, 1.0, 1.0]))
+        node = _B if d % 2 == 0 else _C
+        rows.append((int(pid), int(pid), f0, f1, [node], "general"))
     return spark.createDataFrame(rows, schema)
 
 
 def _md_bundle(spark, n_train=12, n_test=8):
     from charmpheno.omop.multi_domain import MultiDomainBundle
-    return MultiDomainBundle(
+    b = MultiDomainBundle(
         train_df=_md_frame(spark, n_train), test_df=_md_frame(spark, n_test, 1000),
-        parent_int=dict(_PARENT_INT), int2cid=dict(_INT2CID),
-        cid2int=dict(_CID2INT), vocab_maps=[dict(vm) for vm in _VOCAB_MAPS],
+        dag={n: list(ps) for n, ps in _DAG.items()},
+        vocab_maps=[dict(vm) for vm in _VOCAB_MAPS],
         name_by_id=dict(_NAME_BY_ID), ledger=dict(_LEDGER))
+    b.native_code_map = list(_CODE_MAP)
+    return b
 
 
 @pytest.mark.slow
@@ -435,19 +458,18 @@ def test_multidomain_bundle_round_trips_through_the_cache(spark, tmp_path):
 
     assert isinstance(loaded, MultiDomainBundle)
     assert loaded.vocab_maps == _VOCAB_MAPS          # a LIST, int keys restored
-    assert loaded.parent_int == _PARENT_INT
-    assert loaded.int2cid == _INT2CID
-    assert loaded.cid2int == _CID2INT
+    assert loaded.dag == _DAG                        # curies stay strings
     assert loaded.name_by_id == _NAME_BY_ID
     assert loaded.ledger == _LEDGER
+    assert loaded.native_code_map == _CODE_MAP
     for got, want in ((loaded.train_df, bundle.train_df),
                       (loaded.test_df, bundle.test_df)):
         assert set(got.columns) == set(want.columns)
         assert "features_0" in got.columns and "features_1" in got.columns
         a = {r["person_id"]: (list(r["features_0"]), list(r["features_1"]),
-                              list(r["label"])) for r in got.collect()}
+                              list(r["labels"])) for r in got.collect()}
         b = {r["person_id"]: (list(r["features_0"]), list(r["features_1"]),
-                              list(r["label"])) for r in want.collect()}
+                              list(r["labels"])) for r in want.collect()}
         assert a == b
 
 
@@ -463,9 +485,8 @@ def test_single_domain_bundle_round_trip_is_unchanged(spark, tmp_path):
     df = spark.createDataFrame(
         [(int(d), Vectors.dense([float(d), 1.0])) for d in range(5)], schema)
     bundle = CaseFindingBundle(
-        train_df=df, test_df=df, parent_int=dict(_PARENT_INT),
-        int2cid=dict(_INT2CID), cid2int=dict(_CID2INT), vocab_map={101: 0, 102: 1},
-        name_by_id=dict(_NAME_BY_ID), ledger=dict(_LEDGER))
+        train_df=df, test_df=df, dag={100: [], 200: [100]}, vocab_map={101: 0, 102: 1},
+        name_by_id={100: "dm", 200: "t2"}, ledger=dict(_LEDGER))
     uri = f"file://{tmp_path}/cache1d"
     ccache.save(spark, bundle, uri, "sdkey")
 
@@ -476,19 +497,41 @@ def test_single_domain_bundle_round_trip_is_unchanged(spark, tmp_path):
     loaded = ccache.try_load(spark, uri, "sdkey")
     assert isinstance(loaded, CaseFindingBundle)
     assert loaded.vocab_map == {101: 0, 102: 1}
+    assert loaded.dag == {100: [], 200: [100]}       # int concept ids stay ints
+    assert loaded.name_by_id == {100: "dm", 200: "t2"}
     assert not hasattr(loaded, "vocab_maps")
 
 
-def test_restore_meta_reads_a_legacy_single_vocab_map():
-    """Entries written before this change have no `vocab_maps` key at all; they must
-    keep restoring as single-domain."""
+def test_restore_meta_keeps_each_node_ids_type():
+    """The DAG and the names ride as LISTS of pairs, so an int concept id and a str
+    curie both come back as given (JSON object keys would stringify them)."""
+    meta = {"dag": [[100, None], [200, 100]], "vocab_map": {"101": "0"},
+            "name_by_id": [[100, "dm"], [200, "t2"]], "ledger": {}}
+    out = ccache._restore_meta(json.loads(json.dumps(meta)))
+    assert out["dag"] == {100: [], 200: [100]}
+    assert out["name_by_id"] == {100: "dm", 200: "t2"}
+    assert out["vocab_map"] == {101: 0} and "vocab_maps" not in out
+    cm = {"dag": [[_A, None], [_B, _A]], "vocab_maps": [{"101": 0}],
+          "name_by_id": [[_A, "a"]], "ledger": {}, "native_code_map": [[101, _B]]}
+    out = ccache._restore_meta(json.loads(json.dumps(cm)))
+    assert out["dag"] == {_A: [], _B: [_A]}
+    assert out["native_code_map"] == [(101, _B)]
+
+
+@pytest.mark.slow
+def test_a_pre_v6_meta_is_a_miss(spark, tmp_path):
+    """An entry from before the node-set redesign (a pruned engine DAG, no `dag`)
+    cannot serve this contract: `try_load` treats it as a MISS."""
+    uri = f"file://{tmp_path}/old"
+    df = spark.createDataFrame([(1,)], "person_id long")
+    df.write.parquet(f"{uri}/k/train.parquet")
+    df.write.parquet(f"{uri}/k/test.parquet")
     legacy = {"parent_int": {"1": ["0"]}, "int2cid": {"0": "-1"},
               "cid2int": {"-1": "0"}, "vocab_map": {"101": "0"},
               "name_by_id": {"-1": "root"}, "ledger": {"K_nodes": 1}}
-    out = ccache._restore_meta(legacy)
-    assert out["vocab_map"] == {101: 0}
-    assert "vocab_maps" not in out
-    assert out["parent_int"] == {1: [0]}
+    (spark.createDataFrame([(json.dumps(legacy),)], "value STRING")
+     .coalesce(1).write.text(f"{uri}/k/meta"))
+    assert ccache.try_load(spark, uri, "k") is None
 
 
 # --------------------------------------------------------------------------- #
@@ -498,35 +541,30 @@ _MONDO_SPEC = {
     "dag_source": "mondo_native", "disease": "rare6", "cdr": "p.d", "billing": "bp",
     "source_table": "condition_era", "extra_domains": ["drug"],
     "index_mode": "population", "person_mod": 1, "vocab_size": 5000, "min_df": 20,
-    "min_patient_count": 20, "doc_min_length": 10, "min_n": 0, "holdout_frac": 0.2,
-    "n_bg": 8, "tpn": 1, "strip_mode": "test_only", "lookback_days": 365,
-    "label_window_days": 365, "label_mask_mode": "full", "emit_labels": True,
+    "min_patient_count": 20, "doc_min_length": 10, "holdout_frac": 0.2,
+    "strip_mode": "test_only", "lookback_days": 365,
+    "label_window_days": 365,
     "window_mode": "lookback", "prior_obs_days": 0, "window_days": 0,
-    "mondo_version": "2026-06-02", "mondo_branch": "", "min_positives": 100,
+    "mondo_version": "2026-06-02", "mondo_branch": "",
     "mondo_cache_dir": "data/mondo", "dag_collapse": False,
     "doc_spec": "patient_cohort", "preindex_closure": False,
 }
 
 
-class _FakeDag:
-    names = {-1: "root"}
-
-    def nodes(self):
-        return [-1]
-
-
 def _fake_build_inputs(spark, **kw):
     """Stands in for build_mondo_native_fit_inputs — the minutes of BigQuery whose
     whole point here is that a cache HIT never reaches it."""
-    return _FakeDag(), object(), {1001, 1002}, {1001: 400, 1002: 250}, {
-        "n_final_nodes": 3, "n_coded_kept": 2}
+    from charmpheno.mondo.native_dag import MondoLabelInputs
+    return MondoLabelInputs(dag=dict(_DAG), code_map_sdf=object(),
+                            node_ids=sorted(_DAG), names=dict(_NAME_BY_ID),
+                            stats={"n_nodes": 3})
 
 
 @pytest.fixture
 def _quiet_native_reports(monkeypatch):
     from charmpheno.mondo import native_dag as mnd
     monkeypatch.setattr(mnd, "format_native_build_report", lambda s: "build")
-    monkeypatch.setattr(mnd, "format_native_powering_report", lambda s: "power")
+    monkeypatch.setattr(mnd, "format_native_mapping_report", lambda s: "mapping")
 
 
 @pytest.mark.slow
@@ -543,22 +581,24 @@ def test_mondo_load_or_build_misses_once_then_hits(spark, tmp_path, capsys,
     def _build(spark_, **kw):
         calls["build"] += 1
         assert kw["mondo_version"] == "2026-06-02"
-        assert kw["min_positives"] == 100
+        assert "min_positives" not in kw           # no threshold in the build
         assert kw["branch_root"] is None           # '' means whole Mondo
         return _fake_build_inputs(spark_, **kw)
 
     def _assemble(spark_, **kw):
         calls["assemble"] += 1
-        # the seam must hand the assembler the DAG + provider it just built
-        assert isinstance(kw["before_dag"], _FakeDag)
+        # the seam must hand the assembler the subgraph + provider it just built
+        assert kw["label_dag"] == _DAG and kw["names"] == _NAME_BY_ID
         assert kw["attested_provider"] is not None
-        assert kw["index_mode"] == "population" and kw["min_n"] == 0
+        assert kw["index_mode"] == "population"
+        for gone in ("min_n", "n_bg", "tpn", "emit_labels", "label_mask_mode"):
+            assert gone not in kw
         assert kw["extra_domains"] == ("drug",)
         return built
 
-    def _on_inputs(*, count_of, terminal_cids, reduced):
+    def _on_inputs(*, stats):
         calls["on_inputs"] += 1
-        assert count_of == {1001: 400, 1002: 250}
+        assert stats == {"n_nodes": 3}
 
     uri = f"file://{tmp_path}/mondo-cache"
     b1 = gpc.multidomain_load_or_build(
@@ -574,7 +614,7 @@ def test_mondo_load_or_build_misses_once_then_hits(spark, tmp_path, capsys,
         "a HIT must not rebuild the Mondo DAG or re-assemble"
     assert "case-finding-cache HIT" in capsys.readouterr().out
     assert b2.vocab_maps == b1.vocab_maps == _VOCAB_MAPS
-    assert b2.parent_int == _PARENT_INT
+    assert b2.dag == _DAG
     assert {r["person_id"] for r in b2.train_df.collect()} == \
         {r["person_id"] for r in built.train_df.collect()}
 
@@ -587,13 +627,11 @@ def _mondo_manifest(**over):
     """What the driver writes for a mondo fit: corpus_manifest IS the corpus spec."""
     cm = {k: v for k, v in _MONDO_SPEC.items()}
     cm["cache_uri"] = None
-    cm["int2cid"] = {str(i): c for i, c in _INT2CID.items()}
-    cm["name_by_id"] = {str(c): n for c, n in _NAME_BY_ID.items()}
     cm["domain_vocab_sizes"] = [len(vm) for vm in _VOCAB_MAPS]
-    m = {"model_class": "gated_pc", "C": 3, "K": 5, "weight_y": 1.0,
+    m = {"model_class": "gated_pc", "C": 4, "K": 11, "model_path": "model",
          "max_iter": 4, "min_label_count": 0, "dag_source": "mondo_native",
-         "extra_domains": ["drug"], "disease": "rare6", "min_n": 50,
-         "strip_mode": "test_only", "label_mask_mode": "full",
+         "extra_domains": ["drug"], "disease": "rare6",
+         "strip_mode": "test_only", "label_mask_mode": "full", "labels_col": "labels",
          "window_mode": "lookback", "lookback_days": 365, "label_window_days": 365,
          "n_bg": 8, "tpn": 1, "corpus_manifest": cm}
     m.update(over)
@@ -609,11 +647,11 @@ def test_readout_key_for_a_mondo_manifest_matches_the_fit_key():
     assert from_manifest == gpc.multidomain_cache_key(spec)
     assert from_manifest == ccache.compute_bundle_cache_key(
         person_mod=1, vocab_size=5000, min_df=20, min_patient_count=20,
-        doc_min_length=10, disease="rare6", min_n=0, holdout_frac=0.2, n_bg=8,
-        tpn=1, cdr="p.d", strip_mode="test_only", lookback_days=365,
-        label_window_days=365, emit_labels=True, label_mask_mode="full",
+        doc_min_length=10, disease="rare6", holdout_frac=0.2,
+        cdr="p.d", strip_mode="test_only", lookback_days=365,
+        label_window_days=365,
         multidomain=True, extra_domains=("drug",), index_mode="population",
-        mondo=True, mondo_version="2026-06-02", mondo_branch="", min_positives=100,
+        mondo=True, mondo_version="2026-06-02", mondo_branch="",
         mondo_native=True, mondo_native_version=MONDO_NATIVE_VERSION)
 
 
@@ -626,13 +664,14 @@ def test_readout_key_for_a_mondo_manifest_is_not_the_snomed_key():
     assert gpr.bundle_key_from_manifest(m) != snomed
 
 
-def test_readout_recovers_the_mondo_min_n_from_an_older_manifest():
-    """A mondo fit passes min_n=0 (its DAG is already powered) while the top-level
-    manifest records the CLI default. A manifest written before corpus_manifest
-    carried the effective value must still recompute the fit's own key."""
+def test_the_fit_knobs_a_manifest_still_carries_do_not_key_the_bundle():
+    """`min_n`, `min_positives`, `n_bg`, `tpn`, `label_mask_mode` are fit or readout
+    settings since spec 2026-10-30: a manifest carrying them (top level or in the
+    corpus spec) keys the same bundle as one without them."""
     m = _mondo_manifest()
-    del m["corpus_manifest"]["min_n"]
-    assert gpr.corpus_spec_from_manifest(m)["min_n"] == 0
+    m["corpus_manifest"].update(min_n=50, min_positives=100, n_bg=200, tpn=3,
+                                label_mask_mode="closure", emit_labels=True)
+    m.update(min_n=7, n_bg=12)
     assert gpr.bundle_key_from_manifest(m) == gpr.bundle_key_from_manifest(
         _mondo_manifest())
 
@@ -641,14 +680,14 @@ def test_readout_cli_overrides_supply_a_missing_mondo_spec():
     """An older mondo manifest has no Mondo build inputs at all; the overrides are
     what make such a run recoverable (they are key inputs, so a wrong one misses)."""
     m = _mondo_manifest()
-    for f in ("mondo_version", "mondo_branch", "min_positives", "billing"):
+    for f in ("mondo_version", "mondo_branch", "billing"):
         del m["corpus_manifest"][f]
     spec = gpr.corpus_spec_from_manifest(
-        m, mondo_version="2026-06-02", min_positives=100, billing="bp")
+        m, mondo_version="2026-06-02", billing="bp")
     assert spec["mondo_version"] == "2026-06-02" and spec["billing"] == "bp"
     assert gpr.bundle_key_from_manifest(
-        m, mondo_version="2026-06-02", min_positives=100) == \
-        gpr.bundle_key_from_manifest(_mondo_manifest())
+        m, mondo_version="2026-06-02") == gpr.bundle_key_from_manifest(
+            _mondo_manifest())
 
 
 
@@ -658,15 +697,17 @@ def test_readout_parses_the_rebuild_flags():
     assert a.cache_write == "on"
     b = gpr.build_parser().parse_args(
         ["--run-dir", "/runs/0104-x", "--no-rebuild", "--dag-source", "mondo_native",
-         "--billing", "proj", "--min-positives", "100"])
+         "--billing", "proj"])
     assert b.no_rebuild is True and b.dag_source == "mondo_native"
-    assert b.billing == "proj" and b.min_positives == 100
+    assert b.billing == "proj"
+    with pytest.raises(SystemExit):            # the threshold is the fit's now
+        gpr.build_parser().parse_args(["--run-dir", "/r", "--min-positives", "100"])
 
 
 
 def test_snomed_manifest_still_takes_the_single_domain_path():
     """No dag_source / extra_domains -> the key it has always had."""
-    m = {"disease": "rare6", "min_n": 20, "strip_mode": "both",
+    m = {"disease": "rare6", "strip_mode": "both",
          "label_mask_mode": "full", "window_mode": "lookback", "lookback_days": 365,
          "label_window_days": 365, "n_bg": 40, "tpn": 5, "C": 27,
          "corpus_manifest": {
@@ -678,23 +719,35 @@ def test_snomed_manifest_still_takes_the_single_domain_path():
     assert gpr.bundle_key_from_manifest(m) == ccache.compute_bundle_cache_key(
         source_table="condition_era", person_mod=1, vocab_size=5000, min_df=20,
         min_patient_count=20, doc_min_length=10, prior_obs_days=0, window_days=365,
-        disease="rare6", min_n=20, holdout_frac=0.2, n_bg=40, tpn=5, cdr="p.d",
+        disease="rare6", holdout_frac=0.2, cdr="p.d",
         strip_mode="both", window_mode="lookback", lookback_days=365,
-        label_window_days=365, emit_labels=True, label_mask_mode="full")
+        label_window_days=365)
 
 
 # --- the drift gate ------------------------------------------------------- #
 class _StubBundle:
-    def __init__(self, vocab_maps, int2cid):
+    def __init__(self, vocab_maps, dag):
         self.vocab_maps = vocab_maps
-        self.int2cid = int2cid
+        self.dag = dag
         self.train_df = self.test_df = None
+
+
+class _StubModel:
+    """`getDag()` (the DAG the fit was given) and the node set's size."""
+    def __init__(self, dag, n_heads):
+        self._dag, self._n = dag, n_heads
+
+    def getDag(self):
+        return {n: list(ps) for n, ps in self._dag.items()}
+
+    def _ns(self):
+        return types.SimpleNamespace(user_ids=tuple(range(self._n)))
 
 
 def test_drift_report_is_silent_on_the_corpus_the_fit_used():
     got = gpr.bundle_drift_report(
-        _StubBundle([dict(vm) for vm in _VOCAB_MAPS], dict(_INT2CID)),
-        _mondo_manifest(), [4, 3])
+        _StubBundle([dict(vm) for vm in _VOCAB_MAPS], dict(_DAG)),
+        _mondo_manifest(), [4, 3], _StubModel(_DAG, 4))
     assert got == []
 
 
@@ -706,26 +759,36 @@ def test_drift_report_catches_a_vocabulary_that_moved():
     wider[204] = 3                                   # one more concept than the fit
     drifted = [dict(_VOCAB_MAPS[0]), wider]
     got = gpr.bundle_drift_report(
-        _StubBundle(drifted, dict(_INT2CID)), _mondo_manifest(), [4, 3])
+        _StubBundle(drifted, dict(_DAG)), _mondo_manifest(), [4, 3],
+        _StubModel(_DAG, 4))
     assert len(got) == 1
     assert "domain 1" in got[0] and "V=3" in got[0] and "4 concepts" in got[0]
 
 
 def test_drift_report_catches_a_domain_count_change():
     got = gpr.bundle_drift_report(
-        _StubBundle([dict(_VOCAB_MAPS[0])], dict(_INT2CID)), _mondo_manifest(), [4, 3])
+        _StubBundle([dict(_VOCAB_MAPS[0])], dict(_DAG)), _mondo_manifest(), [4, 3])
     assert got and "2 domain(s)" in got[0] and "has 1" in got[0]
 
 
-def test_drift_report_catches_a_relabelled_dag():
-    """Engine id c is the head's row c. If the rebuilt DAG maps a different concept
-    onto an id, every per-node number would be attributed to the wrong disease."""
-    moved = dict(_INT2CID)
-    moved[2] = 9999
+def test_drift_report_catches_a_label_dag_that_moved():
+    """The model's node set was learned on the DAG it was given; a rebuilt corpus
+    whose label DAG differs (a Mondo release re-parented a term, the code ladder
+    reached another term) is not the corpus the heads' labels mean."""
+    moved = dict(_DAG)
+    moved[_C] = [_B]
     got = gpr.bundle_drift_report(
         _StubBundle([dict(vm) for vm in _VOCAB_MAPS], moved), _mondo_manifest(),
-        [4, 3])
-    assert got and "engine-id -> concept-id map differs at 1 node" in got[0]
+        [4, 3], _StubModel(_DAG, 4))
+    assert got and "label DAG is not the one the model was fit with" in got[0]
+    assert "1 with other parents" in got[0]
+
+
+def test_drift_report_catches_a_manifest_model_mismatch():
+    got = gpr.bundle_drift_report(
+        _StubBundle([dict(vm) for vm in _VOCAB_MAPS], dict(_DAG)),
+        _mondo_manifest(), [4, 3], _StubModel(_DAG, 6))
+    assert got and "C=4" in got[0]
 
 
 def test_lambda_vocab_sizes_reads_both_lambda_shapes():
@@ -736,19 +799,42 @@ def test_lambda_vocab_sizes_reads_both_lambda_shapes():
 
 
 # --- main(): MISS -> rebuild, --no-rebuild -> fail fast, drift -> abort ----- #
+def _saved_model(run, lam, *, n_bg=8, tpn=1):
+    """A fitted DagGatedLDAModel saved to <run>/model as the fit driver saves it: the
+    node set learned from the train labels of `_md_bundle` (min 1 doc), the per-domain
+    λ, the feature columns and the DAG Params. Built from a VIResult instead of a
+    fit, so the readout tests do not pay for an SVI run."""
+    from spark_vi.core.result import VIResult
+    from spark_vi.dag.nodeset import fit_node_set
+    from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAModel
+    import dag_gated_fit as _gpc
+    ns = fit_node_set(_DAG, [[_B], [_C]], min_docs_per_node=1)
+    K = n_bg + len(ns.nodes) * tpn
+    md = {"model_class": "DagGatedOnlineLDA",
+          "dag_node_set": {**ns.to_dict(), "n_bg": n_bg, "tpn": tpn}}
+    res = VIResult(global_params={"lambda": lam, "alpha": np.full(K, 1.0 / K)},
+                   elbo_trace=[], n_iterations=1, converged=True, metadata=md)
+    model = DagGatedLDAModel(res)
+    model.setFeaturesCols(["features_0", "features_1"])
+    model.setLabelsCol("labels")
+    model.setDag(_DAG)
+    _gpc.save_fitted_model(model, run)
+    return model
+
+
 def _run_dir(tmp_path, manifest, *, lam=None):
-    """A finished multi-domain fit on disk: per-domain λ (lambda_0/lambda_1, the
-    shape _save_fit writes) plus the manifest."""
+    """A finished multi-domain fit on disk: the saved model (<run>/model), the
+    per-domain λ (lambda_0/lambda_1, the shape _save_fit writes) and the manifest."""
     run = tmp_path / "0104-gated-pc-mondo"
     run.mkdir(parents=True, exist_ok=True)
-    K, C = int(manifest["K"]), int(manifest["C"])
+    K = int(manifest["K"])
     rng = np.random.default_rng(3)
     lam = lam or {0: np.abs(rng.normal(size=(K, 4))) + 0.1,
                   1: np.abs(rng.normal(size=(K, 3))) + 0.1}
     np.savez(run / "gated_pc_result.npz",
              **{f"lambda_{m}": lam[m] for m in sorted(lam)},
-             alpha=np.full(K, 1.0 / K), w_CK=rng.normal(size=(C, K)) * 0.5,
-             b_CK=np.zeros(C))
+             alpha=np.full(K, 1.0 / K))
+    _saved_model(run, lam)
     (run / "manifest.json").write_text(json.dumps(manifest))
     return run
 
@@ -820,6 +906,40 @@ def test_readout_rebuilds_on_a_miss_writes_through_and_scores(
     again = ccache.try_load(patched_spark, uri, key)
     assert again is not None and again.vocab_maps == _VOCAB_MAPS
     assert "features_1" in again.train_df.columns
+
+
+@pytest.mark.slow
+def test_readout_reads_the_node_set_from_the_fitted_model(
+        patched_spark, tmp_path, capsys, monkeypatch, _quiet_native_reports):
+    """The heads, the stacked product, the bundle meta, the landed code map and the
+    gated NPMI all read the FITTED model's node set (spec 2026-10-30): the targets
+    are built from the bundle's `labels` on it, the bridge in bundle_meta.json is its
+    engine order, and the code ladder lands on its kept nodes."""
+    manifest = _mondo_manifest()
+    run = _run_dir(tmp_path, manifest)
+    built = _md_bundle(patched_spark)
+    monkeypatch.setattr(gpr, "rebuild_bundle",
+                        lambda spark_, spec, *, cache_uri=None: built)
+    rc = gpr.main(["--run-dir", str(run), "--cache-uri", f"file://{tmp_path}/c3",
+                   "--min-label-count", "0", "--readout-stacked",
+                   "--readout-hierarchy", "flat"])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "fitted model loaded: 3 kept node(s)" in out
+    res = json.loads((run / "results_readout_stacked.json").read_text())
+    assert "gated_pc" in res and "gated_pc_stacked" in res
+    meta = json.loads((run / "bundle_meta.json").read_text())
+    model = gpc.load_fitted_model(run)
+    br = gpc.node_bridge(model, _NAME_BY_ID)
+    assert meta["int2cid"] == {str(e): c for e, c in br["int2cid"].items()}
+    assert sorted(meta["int2cid"].values()) == [-1, 1001, 1002, 1003]
+    rows = (run / "code_map.tsv").read_text().splitlines()[1:]
+    assert sorted(rows) == ["101\t1002", "102\t1003", "103\t1002"]
+    rc = gpr.main(["--run-dir", str(run), "--cache-uri", f"file://{tmp_path}/c3",
+                   "--npmi", "--npmi-top", "2"])
+    assert rc == 0, capsys.readouterr().out
+    npmi = json.loads((run / "npmi.json").read_text())["rows"]
+    assert {r["cid"] for r in npmi if r["kind"] == "node"} == {1001, 1002, 1003}
 
 
 @pytest.mark.slow

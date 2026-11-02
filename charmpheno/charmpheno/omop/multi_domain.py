@@ -54,8 +54,8 @@ def multidomain_bow(domain_events, vocab_specs, *, doc_spec):
     conditions by convention. A doc present in only some domains gets an EMPTY
     vector (of the absent domain's vocab size) on each absent side -- never a
     dropped row -- so every doc carries all N columns and each per-domain vector
-    size is CONSTANT across the corpus (SP3a's shim derives domainBounds from the
-    first row and validates every row against it).
+    size is CONSTANT across the corpus (the estimator reads each domain's width
+    from its vectors and validates every row against it).
     """
     from charmpheno.omop.topic_prep import to_bow_dataframe
 
@@ -99,19 +99,17 @@ def multidomain_bow(domain_events, vocab_specs, *, doc_spec):
 class MultiDomainBundle:
     """The assembled N-domain case-finding corpus. `train_df`/`test_df` carry
     feature columns features_0 .. features_{N-1} (domain 0 = conditions) plus
-    `frontier` (engine-ids) and `source_cohort`. `vocab_maps` is the list of
-    per-domain {concept_id: vocab_idx} maps in domain order.
+    `labels` (the attested label-DAG node ids; condition-only) and `source_cohort`.
+    `vocab_maps` is the list of per-domain {concept_id: vocab_idx} maps in domain
+    order.
 
-    The frontier is CONDITION-ONLY (gate ⟂ domain): the bridge/receipt fields are
-    identical to the single-domain bundle -- `parent_int`/`int2cid`/`cid2int`
-    bridge engine <-> concept-id; `name_by_id` is {concept_id: concept_name};
-    `ledger` is the pruning receipt. Clinical domain names live in the DRIVER, not
-    here -- this bundle is index-based and domain-agnostic."""
+    The labels are CONDITION-ONLY (gate ⟂ domain): `dag` is the label DAG
+    `{node: [parents]}` (the estimator's `setDag`), `name_by_id` is {node id: name},
+    `ledger` the receipt (`case_finding_assembly.label_ledger`). Clinical domain names
+    live in the DRIVER, not here -- this bundle is index-based and domain-agnostic."""
     train_df: object
     test_df: object
-    parent_int: dict
-    int2cid: dict
-    cid2int: dict
+    dag: dict
     vocab_maps: list
     name_by_id: dict
     ledger: dict
@@ -127,7 +125,7 @@ def lookback_feature_frames(domain_raws, index_df, date_cols, *,
     the pre-index [index - lookback_days, index) window is kept as that domain's
     feature frame. Only domain 0's forward [index, index + label_window_days)
     window is kept as the label frame -- the gate is condition-only, so a
-    drug/observation event never defines a frontier. index_df carries
+    drug/observation event never labels a document. index_df carries
     source_cohort AND index_date, which the join propagates onto every
     feature/label frame (index_date is what an EpisodeDocSpec keys the document on
     -- exp 0111 R5.2; the passthrough lives in `lookback_feature_label_events`, so
@@ -165,52 +163,47 @@ def _frozen_vocab_spec(spec: DomainVocabSpec, vocab_map: dict) -> DomainVocabSpe
                    vocab=vocab_list)
 
 
-def assemble_multidomain_from_events(cond_events, extra_events, before_dag, *,
-                                     doc_spec, min_n, vocab_specs,
-                                     holdout_frac=0.2, split_salt=None, n_bg=2,
-                                     tpn=1, strip_mode="test_only",
-                                     label_events=None, emit_labels=False,
-                                     label_mask_mode="full",
+def assemble_multidomain_from_events(cond_events, extra_events, label_dag, *,
+                                     names=None, doc_spec, vocab_specs,
+                                     holdout_frac=0.2, split_salt=None,
+                                     strip_mode="test_only",
+                                     label_events=None,
                                      attested_provider=None) -> MultiDomainBundle:
     """Assemble the N-domain case-finding bundle from already-windowed events.
 
     A thin N-domain layer over the single-domain `assemble_from_events`
-    orchestration: it reuses that module's split, frontier, prune, ledger, and
-    strip helpers verbatim, swaps the single BOW for the N-column `multidomain_bow`,
-    and applies the leakage strip PER DOMAIN over all N vocabularies.
+    orchestration: it reuses that module's split, attestation, label-join and strip
+    helpers, swaps the single BOW for the N-column `multidomain_bow`, and applies
+    the leakage strip PER DOMAIN over all N vocabularies.
 
     Domain 0 is conditions (`cond_events`); domains 1..N-1 are `extra_events` in
     order. `vocab_specs` has one spec per domain (len == 1 + len(extra_events)).
-    The frontier/label side is CONDITION-ONLY: the attestation frame is
-    `cond_events`, or `label_events` when given (lookback mode). A non-condition
-    event never enters a frontier.
+    The label side is CONDITION-ONLY: the attestation frame is `cond_events`, or
+    `label_events` when given (lookback mode). A non-condition event never labels.
 
     Split-first, leakage-free: the SAME salted split (keyed on person_id) is
     applied to every domain frame AND the label frame, so a person's rows across
-    all domains and labels land on the same side. The DAG is pruned on TRAIN
-    condition-node counts; each domain's vocabulary is fit on TRAIN, frozen for
-    TEST. Per-domain strip: node-marker concept-ids are mapped through EACH
-    domain's vocab_map and stripped from that column (defensive; a condition marker
-    is expected only in vocab 0, but the strip is symmetric across domains).
-    `strip_mode="test_only"` (default) strips TEST only; `"both"` also strips TRAIN.
+    all domains and labels land on the same side. Each domain's vocabulary is fit
+    on TRAIN, frozen for TEST. No node is dropped here: `label_dag` is handed over
+    whole and the estimator learns the node set from the training documents.
+    Per-domain strip: the DAG's node ids are mapped through EACH domain's
+    vocab_map and stripped from that column (a SNOMED node is a condition concept;
+    Mondo curies are in no vocabulary, so on the Mondo path the strip removes
+    nothing). `strip_mode="test_only"` (default) strips TEST only; `"both"` also
+    strips TRAIN.
 
     `attested_provider` (optional): a callable ``events_df -> attested_df``
-    (columns doc_id, person_id, source_cohort, attested_cids) that replaces the
-    default exact-node attestation (`doc_attested_nodes(ev, node_cids, ...)`).
-    This is the DAG-source seam: pass `before_dag` = the native Mondo label DAG
+    (columns doc_id, person_id, source_cohort, labels) that replaces the default
+    exact-node attestation (`doc_attested_nodes(ev, node_ids, ...)`). This is the
+    DAG-source seam: pass `label_dag` = the native Mondo subgraph
     (`charmpheno.mondo.native_dag.build_mondo_native_fit_inputs`) and
     `attested_provider` = its code-ladder provider
-    (`native_dag.make_mondo_native_attested_provider`) to place patients on Mondo
-    nodes; everything else (split/prune/ledger/frontier/BOW/strip/labels) is
-    unchanged. NOTE: a Mondo DAG is already POWERED (its class nodes have no direct
-    OMOP attestation and would be dropped by min_n>0), so pass `min_n=0` with it —
-    the DAG is taken as built.
+    (`native_dag.make_mondo_native_attested_provider`) to label patients with Mondo
+    terms; everything else (split/BOW/strip) is unchanged.
     """
-    from charmpheno.omop.condition_dag import prune_by_attestation, pruning_ledger
     from charmpheno.omop.case_finding_assembly import (
-        _SPLIT_SALT, split_train_test, doc_attested_nodes, node_patient_counts,
-        attach_frontiers, most_specific_cids, strip_test_features, attach_labels)
-    from spark_vi.dag.layout import DagLayout
+        _SPLIT_SALT, split_train_test, doc_attested_nodes, strip_test_features,
+        attach_label_column, label_ledger)
 
     if split_salt is None:
         split_salt = _SPLIT_SALT
@@ -224,7 +217,7 @@ def assemble_multidomain_from_events(cond_events, extra_events, before_dag, *,
             f"vocab_specs ({len(vocab_specs)}) must equal number of domains "
             f"({len(domain_events)} = 1 condition + {len(extra_events)} extra)")
 
-    node_cids = before_dag.nodes()
+    node_ids = set(label_dag)
 
     # 1) split PATIENTS first, keyed on person_id with the SAME salted hash, so a
     #    person's rows across all domains + labels land on the same side.
@@ -239,62 +232,32 @@ def assemble_multidomain_from_events(cond_events, extra_events, before_dag, *,
         train_lab, test_lab = split_train_test(
             label_events, holdout_frac=holdout_frac, split_salt=split_salt)
 
-    # 2) condition-only frontier: prune the DAG on TRAIN attestation counts.
-    #    Default attestation is exact-node (patient has the code == the node);
-    #    `attested_provider` overrides it with a roll-up (the Mondo SNOMED-climb),
-    #    keeping the same [doc_id, person_id, source_cohort, attested_cids] shape.
+    # 2) condition-only attestation. Default is exact-node (patient has the code ==
+    #    the node); `attested_provider` overrides it (the Mondo code ladder),
+    #    keeping the same [doc_id, person_id, source_cohort, labels] shape.
     def _attest(ev):
         if attested_provider is not None:
             return attested_provider(ev)
-        return doc_attested_nodes(ev, node_cids, doc_spec=doc_spec)
+        return doc_attested_nodes(ev, node_ids, doc_spec=doc_spec)
     train_att = _attest(train_lab).cache()
     test_att = _attest(test_lab).cache()
     try:
-        counts = node_patient_counts(train_att)
-        after_dag = prune_by_attestation(before_dag, counts, min_n)
-        parent_int, int2cid, cid2int = after_dag.to_engine()
-        lay = DagLayout(parent_int, n_bg=n_bg, tpn=tpn)
-        keep = after_dag.nodes()
+        ledger = label_ledger(train_att, test_att, len(node_ids))
 
-        # 3) ledger: TRAIN + TEST coarsening.
-        def _fg_ms(att_df):
-            return [most_specific_cids({int(c) for c in r["attested_cids"]}, before_dag)
-                    for r in att_df.where(F.size("attested_cids") > 0)
-                                   .select("attested_cids").collect()]
-        train_fg = _fg_ms(train_att)
-        ledger = pruning_ledger(before_dag, after_dag, counts,
-                                cohort_frontiers=train_fg)
-        test_fg = _fg_ms(test_att)
-        test_coarsened = sum(1 for ms in test_fg if any(c not in keep for c in ms))
-        ledger["test_fg_docs"] = len(test_fg)
-        ledger["test_coarsening_rate"] = (
-            test_coarsened / len(test_fg) if test_fg else 0.0)
-
-        # 4) frontiers for both sides via the TRAIN-pruned DAG.
-        train_fr = attach_frontiers(train_att, before_dag, keep, cid2int, lay)
-        test_fr = attach_frontiers(test_att, before_dag, keep, cid2int, lay)
-
-        # 5) N-domain BOW: fit each domain's vocab on TRAIN, freeze for TEST.
+        # 3) N-domain BOW: fit each domain's vocab on TRAIN, freeze for TEST.
         train_bow, vms = multidomain_bow(train_doms, vocab_specs, doc_spec=doc_spec)
         test_bow, _ = multidomain_bow(
             test_doms, [_frozen_vocab_spec(s, vm) for s, vm in zip(vocab_specs, vms)],
             doc_spec=doc_spec)
+        train_df = attach_label_column(train_bow, train_att)
+        test_df = attach_label_column(test_bow, test_att)
 
-        def _label(bow, fr):
-            return (bow.join(fr.select("doc_id", "frontier", "source_cohort"),
-                             on="doc_id", how="left")
-                    .withColumn("frontier",
-                                F.coalesce(F.col("frontier"),
-                                           F.array().cast("array<bigint>"))))
-        train_df = _label(train_bow, train_fr)
-        test_df = _label(test_bow, test_fr)
-
-        # 6) per-domain leakage strip over ALL N vocabularies (defensive).
+        # 4) per-domain leakage strip over ALL N vocabularies.
         per_domain = [(f"features_{i}", vms[i]) for i in range(len(vms))]
 
         def _strip(df):
             for col, vm in per_domain:
-                drop_idxs = {vm[c] for c in node_cids if c in vm}
+                drop_idxs = {vm[c] for c in node_ids if c in vm}
                 df = strip_test_features(df, drop_idxs, features_col=col)
             return df
 
@@ -302,22 +265,11 @@ def assemble_multidomain_from_events(cond_events, extra_events, before_dag, *,
         if strip_mode == "both":
             train_df = _strip(train_df)
 
-        # 7) (Gated-PC) dense per-node label + observed mask from the CONDITION-only
-        #    frontier — identical to the single-domain path (attach_labels reads the
-        #    `frontier` column, which is condition-only here; the head is domain-
-        #    agnostic, so multi-domain features do not change the label side). C =
-        #    len(int2cid); label index c == engine id c. Off by default.
-        if emit_labels:
-            C = len(int2cid)
-            train_df = attach_labels(
-                train_df, lay, C, label_mask_mode=label_mask_mode)
-            test_df = attach_labels(
-                test_df, lay, C, label_mask_mode=label_mask_mode)
-
         return MultiDomainBundle(
-            train_df=train_df, test_df=test_df, parent_int=parent_int,
-            int2cid=int2cid, cid2int=cid2int, vocab_maps=vms,
-            name_by_id=dict(before_dag.names), ledger=ledger)
+            train_df=train_df, test_df=test_df,
+            dag={n: list(ps) for n, ps in label_dag.items()}, vocab_maps=vms,
+            name_by_id={n: v for n, v in (names or {}).items() if n in node_ids},
+            ledger=ledger)
     finally:
         train_att.unpersist(); test_att.unpersist()
 
@@ -333,15 +285,14 @@ _SUPPORTED_EXTRA_DOMAINS = ("drug", "procedure", "measurement")
 
 def assemble_multidomain_case_finding_corpus(
         spark, *, disease="rare6", cdr, billing, extra_domains=("drug",),
-        person_mod, min_n, holdout_frac=0.2, split_salt=None,
-        vocab_size, min_df, min_patient_count, n_bg=2, tpn=1, doc_min_length=0,
+        person_mod, holdout_frac=0.2, split_salt=None,
+        vocab_size, min_df, min_patient_count, doc_min_length=0,
         strip_mode="test_only", lookback_days=365, label_window_days=365,
-        emit_labels=True, label_mask_mode="full",
-        before_dag=None, attested_provider=None, index_mode="disease",
+        label_dag=None, names=None, attested_provider=None, index_mode="disease",
         index_df=None, doc_spec=None):
     """End-to-end BQ assembly of the multi-domain case-finding bundle (LOOKBACK
-    mode). Domain 0 is conditions (the label/gate source); ``extra_domains`` are
-    read single-domain and windowed against the SAME condition-derived index.
+    mode). Domain 0 is conditions (the label source); ``extra_domains`` are read
+    single-domain and windowed against the SAME condition-derived index.
 
     The multi-domain sibling of ``case_finding_assembly.assemble_case_finding_corpus``
     — same disease DAG, same PatientCohortDocSpec, same lookback windowing — but it
@@ -351,27 +302,28 @@ def assemble_multidomain_case_finding_corpus(
     second domain); pass an already-lookback config. Requires a live CDR
     (cluster-covered, like the single-domain lookback body).
 
+    Label DAG: the disease's SNOMED anchor forest by default
+    (`case_finding_assembly.snomed_label_dag`), or a caller-built `label_dag` +
+    `names` (the native Mondo subgraph) with its `attested_provider` (the code
+    ladder).
+
     Two injection seams (exp 0111 R7.1), on the `attested_provider` precedent so
     that ALL episode logic stays driver-owned and no episode code lands in this
     source-hashed module:
 
     - `index_df` + `index_mode="external"`: a driver-supplied
       `(person_id, index_date, source_cohort, ...)` index frame used VERBATIM as
-      the index table, so an episode index (one row per (person, episode)) drives
-      the windowing without a builder here. The two self-building modes
-      ("population"/"disease") REJECT a non-None `index_df` -- they own their index
-      -- and "external" REQUIRES one.
-    - `doc_spec`: the document unit. `None` defaults to today's
-      `PatientCohortDocSpec(min_doc_length=doc_min_length)` (byte-for-byte the
-      prior behavior); a caller passes an `EpisodeDocSpec` to key documents on the
-      per-event `index_date` the R5.2 passthrough now carries.
+      the index table. The two self-building modes ("population"/"disease")
+      REJECT a non-None `index_df` -- they own their index -- and "external"
+      REQUIRES one.
+    - `doc_spec`: the document unit. `None` defaults to
+      `PatientCohortDocSpec(min_doc_length=doc_min_length)`.
     """
     from charmpheno.omop import load_omop_bigquery
     from charmpheno.omop.cohorts import (
-        case_finding_index_table, case_finding_population_index_table,
-        disease_anchors)
+        case_finding_index_table, case_finding_population_index_table)
     from charmpheno.omop.case_finding_assembly import (
-        load_condition_dag, _FOREST_ROOT_CID, _LOOKBACK_PRIOR_OBS_DAYS)
+        _LOOKBACK_PRIOR_OBS_DAYS, snomed_label_dag)
     from charmpheno.omop.doc_spec import PatientCohortDocSpec
 
     bad = [d for d in extra_domains if d not in _SUPPORTED_EXTRA_DOMAINS]
@@ -398,12 +350,9 @@ def assemble_multidomain_case_finding_corpus(
     # gate is the intrinsic ≥1yr floor (not the forward knob). "disease" anchors
     # the index on first-dx foreground + general background; "population" indexes
     # EVERY patient on a random event-anchored window (whole-Mondo / template-branch
-    # fit, where the Mondo climb — not one disease — defines the frontier);
+    # fit, where the Mondo code ladder — not one disease — defines the labels);
     # "external" takes a driver-built index frame verbatim (the episode seam).
     if index_mode == "external":
-        # Injection seam: the driver already built the index (an episode index,
-        # say), so no builder runs here — its columns propagate through the
-        # lookback join to the doc spec, which reads only the ones it declares.
         if index_df is None:
             raise ValueError(
                 "index_mode='external' requires an index_df (the driver-supplied "
@@ -436,17 +385,9 @@ def assemble_multidomain_case_finding_corpus(
         domain_raws, index_df, date_cols,
         lookback_days=lookback_days, label_window_days=label_window_days)
 
-    # Label DAG: the disease's SNOMED anchor forest by default, or a caller-built
-    # override (the Mondo engine DAG). When overridden the caller also supplies an
-    # `attested_provider` (the SNOMED-climb) and passes min_n=0 (the Mondo DAG is
-    # already powered — see assemble_multidomain_from_events).
-    if before_dag is None:
-        anchors = disease_anchors(disease)
-        root = _FOREST_ROOT_CID if len(anchors) > 1 else None
-        before_dag = load_condition_dag(
-            spark, anchors=anchors, root=root, cdr=cdr, billing=billing)
-    # Doc-unit seam: default to today's spec byte-for-byte; a caller injects an
-    # EpisodeDocSpec to key documents on the index_date the R5.2 passthrough carries.
+    if label_dag is None:
+        label_dag, names = snomed_label_dag(spark, disease=disease, cdr=cdr,
+                                            billing=billing)
     if doc_spec is None:
         doc_spec = PatientCohortDocSpec(min_doc_length=doc_min_length)
 
@@ -460,8 +401,7 @@ def assemble_multidomain_case_finding_corpus(
                         min_patient_count=min_patient_count, binary=b)
         for b in domain_binary]
     return assemble_multidomain_from_events(
-        feature_frames[0], feature_frames[1:], before_dag, doc_spec=doc_spec,
-        min_n=min_n, vocab_specs=vocab_specs, holdout_frac=holdout_frac,
-        split_salt=split_salt, n_bg=n_bg, tpn=tpn, strip_mode=strip_mode,
-        label_events=cond_label, emit_labels=emit_labels,
-        label_mask_mode=label_mask_mode, attested_provider=attested_provider)
+        feature_frames[0], feature_frames[1:], label_dag, names=names,
+        doc_spec=doc_spec, vocab_specs=vocab_specs, holdout_frac=holdout_frac,
+        split_salt=split_salt, strip_mode=strip_mode,
+        label_events=cond_label, attested_provider=attested_provider)

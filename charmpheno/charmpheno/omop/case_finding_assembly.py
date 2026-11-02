@@ -1,31 +1,31 @@
 # charmpheno/charmpheno/omop/case_finding_assembly.py
-"""Assemble the labeled hierarchical case-finding corpus from OMOP.
+"""Assemble the labeled case-finding corpus from OMOP.
 
-One document per patient tagged with its set-valued DAG frontier (the clinical
-truth), the pruned label DagLayout, and a held-out split with the leakage strip
-applied. Piece 2 of the cluster driver (piece 1 = condition_dag.py; piece 3 =
-the cloud driver). Composes the piece-1 DAG builder, the population+disease
-cohort machinery (cohorts.apply_population_disease_cohort), to_bow_dataframe,
-and the engine's frontier helpers (spark_vi.dag).
+One document per patient carrying its features and the label DAG nodes it ATTESTS
+(the clinical truth), a held-out split, and the leakage strip applied. The bundle
+holds the label DAG itself (`dag`, `{node: [parents]}` in the user's node ids) and
+per document the attested node ids (`labels`), which is exactly what the DAG-gated
+estimator and the readout heads take (spec 2026-10-30 R1/R2/R6): no frontier, no
+dense label vectors, no engine ids, no threshold. Which nodes get a topic block
+(support, prune, landing, reduction, splice) is learned by the estimator from the
+TRAINING documents; the dense per-node targets are built from the fitted node set
+by the readout (`spark_vi.readout.labels`).
 
-This is the concept-id DOMAIN bridge: concept-ids are expected here. The engine
-stays integer-id agnostic. Three id spaces are threaded with care (the tests pin
-the translations):
+Composes the SNOMED DAG builder (condition_dag.py), the population+disease cohort
+machinery (cohorts.py) and `to_bow_dataframe`. Two id spaces:
 
-  concept-id  raw OMOP concept_id; DAG build/prune/counts/roll-up.
-  engine-id   contiguous 0..N from ConditionDag.to_engine() (anchor->0);
-              DagLayout, frontier_from_coded, the emitted frontier column.
+  node id     the label DAG's ids: OMOP concept ids (int) on the SNOMED path, Mondo
+              curies (str) on the native Mondo path (`charmpheno.mondo.native_dag`).
+              `labels` is `array<bigint>` / `array<string>` accordingly.
   vocab-index [0,V) from vocab_map {concept_id: idx}; features SparseVector,
               leakage strip.
 
-See docs/superpowers/specs/2026-07-15-case-finding-assembly-design.md.
+See docs/superpowers/specs/2026-07-15-case-finding-assembly-design.md and
+docs/architecture/LABEL_RULES.md.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-
-from charmpheno.omop.condition_dag import _nearest_surviving_ancestors
-from spark_vi.dag.layout import frontier_from_coded
 
 # Fixed salt for the deterministic train/test split. Hashing person_id with a
 # constant salt makes the split reproducible + resume-stable across runs (Spark's
@@ -35,9 +35,9 @@ _SPLIT_SALT = 20260716
 
 # Synthetic concept-id for the multi-disease forest root. Real OMOP concept_ids
 # are positive, so -1 is a safe sentinel that cannot collide with an attested
-# code; it becomes engine-id 0 (the never-pruned DAG root) after to_engine().
-# Used only when a disease resolves to more than one DAG anchor (the rare6
-# forest); single-anchor diseases root the DAG at the anchor itself.
+# code. Used only when a disease resolves to more than one DAG anchor (the rare6
+# forest); it is dropped from the handed-over DAG (`ConditionDag.user_dag`), whose
+# parentless anchors hang from the estimator's own synthetic root.
 _FOREST_ROOT_CID = -1
 
 # Lookback mode requires at least one year of pre-index observation so the
@@ -52,143 +52,36 @@ _FOREST_ROOT_CID = -1
 # disable it by inheriting prior_obs_days=0 from a forward config.
 _LOOKBACK_PRIOR_OBS_DAYS = 365
 
+# The bundle's label columns (spec 2026-10-30 "What changes outside spark-vi"):
+# LABELS_COL is the label-year attestation (every bundle); GATE_LABELS_COL the
+# all-ever attestation a gate may be fit on instead (exp 0146, R8), added to the
+# TRAIN split by the fit driver only when asked for.
+LABELS_COL = "labels"
+GATE_LABELS_COL = "gate_labels"
 
-def _descendants(children_map: dict[int, list[int]], root: int) -> set[int]:
-    """Proper descendants of `root` in a {parent: [children]} concept-id map."""
-    out: set[int] = set()
-    stack = list(children_map.get(root, []))
-    while stack:
-        x = stack.pop()
-        if x in out:
-            continue
-        out.add(x)
-        stack.extend(children_map.get(x, []))
+
+def dag_edges(dag) -> list:
+    """`{node: [parents]}` -> a JSON-ready edge list `[[child, parent | None], ...]`
+    (a top-level node is `[node, None]`), sorted. JSON keeps an int and a str apart,
+    so the ids round-trip with their type (`dag_from_edges`)."""
+    out = []
+    for n in sorted(dag):
+        ps = sorted(dag[n])
+        if not ps:
+            out.append([n, None])
+        out.extend([n, p] for p in ps)
     return out
 
 
-def most_specific_cids(attested_cids, before_dag) -> set[int]:
-    """The most-specific attested concept-ids: attested nodes with no attested
-    proper descendant. Concept-id-space analogue of frontier_from_coded, used for
-    the pruning ledger's coarsening accounting (which measures depths in the
-    pre-prune ontology)."""
-    C = set(attested_cids)
-    ch = before_dag.children()
-    return {c for c in C if not (_descendants(ch, c) & (C - {c}))}
-
-
-def roll_up_to_survivors(attested_cids, before_dag, keep) -> set[int]:
-    """Map each attested concept-id to a surviving node: itself if kept, else its
-    nearest surviving ancestors (transitive walk up the PRE-PRUNE DAG). Mirrors
-    prune_by_attestation's rewire (same _nearest_surviving_ancestors walk), so a
-    rolled-up patient lands exactly where the pruned DAG reattaches its node."""
-    surv: set[int] = set()
-    for c in attested_cids:
-        if c in keep:
-            surv.add(c)
-        else:
-            surv |= _nearest_surviving_ancestors(before_dag, c, keep)
-    return surv
-
-
-def doc_frontier_engine_ids(attested_cids, before_dag, keep, cid2int, lay) -> list[int]:
-    """The set-valued frontier in ENGINE-id space (sorted). Roll pruned
-    attestations up to survivors (concept-id), map via cid2int, then
-    frontier_from_coded over the pruned DagLayout (most-specific engine nodes;
-    incomparable survivors kept as a set). Empty attestation (background doc) ->
-    []."""
-    if not attested_cids:
-        return []
-    survivors = roll_up_to_survivors(attested_cids, before_dag, keep)
-    engine_ids = [cid2int[c] for c in survivors if c in cid2int]
-    return sorted(frontier_from_coded(engine_ids, lay))
-
-
-def frontier_to_label(frontier, lay, C, *, label_mask_mode="full"):
-    """The (label, label_mask) pair for one doc, from its ENGINE-id frontier.
-
-    This is the Gated-PC seam: the gated unsupervised model consumes only the
-    set-valued `frontier`, but the supervised PC head needs a dense per-node
-    binary outcome vector (`label`) + an observed-cell mask (`label_mask`). Pure
-    (no Spark); the label DAG is the same `DagLayout` the gate uses, so the
-    label index space IS the engine-id node space:
-
-      label[c] = 1  iff node c is in the is-a CLOSURE of any frontier node
-                    (each frontier node + all its ancestors via the DAG). The
-                    layout's `closure` includes the root (engine-id 0), so every
-                    FOREGROUND doc has label[0] = 1. A background doc (empty
-                    frontier) yields the ALL-ZERO label — a known negative for
-                    every disease node under the default mask.
-
-    `C` is the number of label heads = `len(int2cid)` (engine nodes incl. root);
-    label index c is engine-id c directly, so no remap is needed downstream.
-
-    `label_mask_mode` (the observation policy; an open modeling choice —
-    docs/superpowers/plans/2026-08-13-smooshed-gated-pc-aou-integration-plan.md §5.1):
-      "full" (default): mask = ones(C). Every node is observed — coded conditions
-        give a full membership vector and a background doc is treated as a true
-        negative everywhere. Caveat: coded-absence != true-absence (a
-        data-quality assumption, not a masking one).
-      "closure": observe only the active closure (the positives) and their DAG
-        siblings (other children of an active node's parents — the near-boundary
-        negatives), leaving distant unrelated nodes UNOBSERVED. Under this policy
-        a background doc observes nothing (empty active set => all-zero mask), so
-        it contributes no head signal; use only when coded-absence is untrusted.
-    """
-    active = set()
-    for f in frontier:
-        active.update(lay.closure(int(f)))
-    import numpy as np
-    label = np.zeros(C, dtype=np.float64)
-    for c in active:
-        if 0 <= c < C:
-            label[c] = 1.0
-
-    if label_mask_mode == "full":
-        mask = np.ones(C, dtype=np.float64)
-    elif label_mask_mode == "closure":
-        observed = set(active)
-        for c in active:
-            for p in lay.parents.get(c, []):
-                observed.update(lay.children.get(p, []))
-        mask = np.zeros(C, dtype=np.float64)
-        for c in observed:
-            if 0 <= c < C:
-                mask[c] = 1.0
-    else:
-        raise ValueError(
-            f"label_mask_mode must be 'full' or 'closure', got {label_mask_mode!r}")
-    return label, mask
-
-
-def attach_labels(df, lay, C, *, label_mask_mode="full", frontier_col="frontier",
-                  label_col="label", label_mask_col="labelMask"):
-    """Append dense `label`/`labelMask` array<double> columns derived from the
-    engine-id `frontier_col` via `frontier_to_label` (one UDF, both vectors).
-
-    Only used when `assemble_from_events(emit_labels=True)`; the unsupervised
-    gated placement path ignores these columns, so one bundle serves both the
-    gated placement and Gated-PC. `lay`/`C` are small and picklable (captured in
-    the UDF closure, broadcast with the task), mirroring `attach_frontiers`."""
-    from pyspark.sql import functions as F
-    from pyspark.sql.types import (
-        ArrayType, DoubleType, StructField, StructType,
-    )
-
-    schema = StructType([
-        StructField("label", ArrayType(DoubleType(), False), False),
-        StructField("labelMask", ArrayType(DoubleType(), False), False),
-    ])
-
-    def _lm(fr):
-        label, mask = frontier_to_label(
-            [int(x) for x in (fr or [])], lay, C, label_mask_mode=label_mask_mode)
-        return ([float(v) for v in label], [float(v) for v in mask])
-
-    lm_udf = F.udf(_lm, schema)
-    tmp = df.withColumn("_lm", lm_udf(F.col(frontier_col)))
-    return (tmp.withColumn(label_col, F.col("_lm.label"))
-               .withColumn(label_mask_col, F.col("_lm.labelMask"))
-               .drop("_lm"))
+def dag_from_edges(edges) -> dict:
+    """The inverse of `dag_edges`: `{node: [parents]}`, every node a key."""
+    out: dict = {}
+    for c, p in edges:
+        out.setdefault(c, [])
+        if p is not None:
+            out[c].append(p)
+            out.setdefault(p, [])
+    return {n: sorted(ps) for n, ps in out.items()}
 
 
 def strip_features(vec, drop_idxs):
@@ -209,13 +102,14 @@ def strip_features(vec, drop_idxs):
     return SparseVector(vec.size, list(idxs), list(vals))
 
 
-def doc_attested_nodes(events_df, node_cids, *, doc_spec):
+def doc_attested_nodes(events_df, node_ids, *, doc_spec):
     """Per document, the distinct in-window condition concept-ids that are DAG
-    nodes. Derives doc_id via `doc_spec`, then LEFT-joins a full doc roster
-    against the node-filtered attestations so background docs (no DAG-node code)
-    survive with an empty `attested_cids` (they get a `[]` frontier downstream).
+    nodes (the SNOMED path's exact-node attestation). Derives doc_id via
+    `doc_spec`, then LEFT-joins a full doc roster against the node-filtered
+    attestations so background docs (no DAG-node code) survive with an empty
+    `labels`.
 
-    Returns [doc_id, person_id, source_cohort, attested_cids: array<bigint>].
+    Returns [doc_id, person_id, source_cohort, labels: array<bigint>] (sorted).
     person_id and source_cohort are constant within a doc_id (the cohort arms are
     disjoint by person and doc_id encodes source_cohort), so F.first is
     well-defined."""
@@ -227,51 +121,36 @@ def doc_attested_nodes(events_df, node_cids, *, doc_spec):
         F.first("source_cohort").alias("source_cohort"),
     )
     attested = (
-        ev.where(F.col("concept_id").isin(list(node_cids)))
+        ev.where(F.col("concept_id").isin([int(n) for n in node_ids]))
           .groupBy("doc_id")
-          .agg(F.collect_set(F.col("concept_id").cast("long")).alias("attested_cids"))
+          .agg(F.array_sort(F.collect_set(F.col("concept_id").cast("long")))
+               .alias(LABELS_COL))
     )
     return (
         roster.join(attested, on="doc_id", how="left")
-        .withColumn(
-            "attested_cids",
-            F.coalesce(F.col("attested_cids"),
-                       F.array().cast("array<bigint>")),
-        )
+        .withColumn(LABELS_COL, F.coalesce(F.col(LABELS_COL),
+                                           F.array().cast("array<bigint>")))
     )
 
 
-def node_patient_counts(attested_df) -> dict[int, int]:
-    """Distinct `person_id` per attested node concept-id (patient count, the
-    learnability measure the prune uses — NOT patient-year count). Collected to a
-    small driver dict (one entry per DAG node)."""
+def attach_label_column(bow, attested, *, col=LABELS_COL, extra=("source_cohort",)):
+    """`bow` LEFT-joined with `attested`'s `col` (and `extra` columns) on doc_id; a
+    document with no attestation row gets an EMPTY array of the column's own
+    element type (background), never a null."""
     from pyspark.sql import functions as F
-
-    exploded = attested_df.select(
-        "person_id", F.explode("attested_cids").alias("node_cid"),
-    ).distinct()
-    rows = (
-        exploded.groupBy("node_cid")
-        .agg(F.countDistinct("person_id").alias("n"))
-        .collect()
-    )
-    return {int(r["node_cid"]): int(r["n"]) for r in rows}
+    dt = attested.schema[col].dataType.simpleString()
+    return (bow.join(attested.select("doc_id", col, *extra), on="doc_id", how="left")
+            .withColumn(col, F.coalesce(F.col(col), F.array().cast(dt))))
 
 
-def attach_frontiers(attested_df, before_dag, keep, cid2int, lay):
-    """Add a `frontier: array<bigint>` column (ENGINE-id space) to `attested_df`
-    by applying `doc_frontier_engine_ids` per row. The DAG/keep/cid2int/lay
-    structures are small and picklable; they are captured in the UDF closure and
-    broadcast with the task."""
+def label_ledger(train_att, test_att, n_nodes, *, col=LABELS_COL) -> dict:
+    """The bundle's receipt: the DAG size and the foreground (non-empty `labels`)
+    document counts per split. Counts of documents and nodes only. The node-set
+    receipt (kept / pruned / spliced) is the fitted model's."""
     from pyspark.sql import functions as F
-    from pyspark.sql.types import ArrayType, LongType
-
-    def _fr(cids):
-        return [int(x) for x in doc_frontier_engine_ids(
-            [int(c) for c in (cids or [])], before_dag, keep, cid2int, lay)]
-
-    udf = F.udf(_fr, ArrayType(LongType()))
-    return attested_df.withColumn("frontier", udf(F.col("attested_cids")))
+    return {"n_dag_nodes": int(n_nodes),
+            "train_fg_docs": int(train_att.where(F.size(col) > 0).count()),
+            "test_fg_docs": int(test_att.where(F.size(col) > 0).count())}
 
 
 def split_train_test(df, *, holdout_frac, split_salt=_SPLIT_SALT):
@@ -308,79 +187,53 @@ def strip_test_features(test_df, drop_idxs, *, features_col="features"):
 @dataclass
 class CaseFindingBundle:
     """The assembled case-finding corpus. `train_df`/`test_df` carry
-    [person_id, doc_id, features, frontier(engine-ids), source_cohort] — the exact
-    shape `DagGatedLDAEstimator(frontierCol="frontier").fit` consumes. `parent_int`/`int2cid`/`cid2int` bridge engine <-> concept-id;
-    `vocab_map` is {concept_id: vocab_idx}; `name_by_id` is {concept_id:
-    concept_name} for interpretation; `ledger` is the pruning receipt
-    (kept/dropped/K_nodes + coarsening).
-
-    NOTE (id space): `name_by_id` is keyed on CONCEPT-ids, but every engine-side
-    consumer (`DagLayout.nodes`, the readout's per-node tables) is keyed on ENGINE-ids.
-    Remap before rendering:  {i: name_by_id[c] for i, c in int2cid.items() if c in name_by_id}.
-    Passing name_by_id straight to an engine-id consumer silently mislabels every node."""
+    [person_id, doc_id, features, labels, source_cohort]: `labels` the attested node
+    ids (the estimator's `labelsCol`). `dag` is the label DAG `{node: [parents]}` in
+    those ids (the estimator's `setDag`); `vocab_map` is {concept_id: vocab_idx};
+    `name_by_id` is {node id: name} for interpretation; `ledger` the receipt
+    (`label_ledger`)."""
     train_df: object
     test_df: object
-    parent_int: dict
-    int2cid: dict
-    cid2int: dict
+    dag: dict
     vocab_map: dict
     name_by_id: dict
     ledger: dict
 
 
-def assemble_from_events(events_df, before_dag, *, doc_spec, min_n,
+def assemble_from_events(events_df, label_dag, *, names=None, doc_spec,
                          holdout_frac=0.2, split_salt=_SPLIT_SALT,
                          vocab_size, min_df, min_patient_count,
-                         n_bg=2, tpn=1, strip_mode="test_only",
-                         label_events=None, emit_labels=False,
-                         label_mask_mode="full") -> CaseFindingBundle:
+                         strip_mode="test_only",
+                         label_events=None) -> CaseFindingBundle:
     """Assemble the case-finding bundle from already-windowed events (with a
-    `source_cohort` column) + the pre-prune concept-id DAG. This is the testable
-    core: no BigQuery, pure Spark + domain logic. See the module docstring for the
-    id-space ordering.
+    `source_cohort` column) + the label DAG (`{concept_id: [parents]}`, e.g.
+    `ConditionDag.user_dag()`). This is the testable core: no BigQuery, pure Spark +
+    domain logic.
 
-    Split-first, leakage-free: patients are split into train/test BEFORE
-    anything else runs. DAG pruning (`min_n`) and vocabulary fitting both see
-    TRAIN patients only; TEST attestations are rolled onto the TRAIN-pruned DAG
-    (`attach_frontiers` walks each dropped test node up to its nearest
-    surviving ancestor) and TEST documents are bag-of-worded with the FROZEN
-    train vocabulary. `ledger["test_coarsening_rate"]`/`["test_fg_docs"]`
-    report how much the test foreground was coarsened by a DAG pruned on train
-    counts alone. `cohort_frontiers` (train) for the ledger's (train)
-    coarsening rate is computed from the FOREGROUND docs only (background
-    attestations are empty) and collected to the driver — foreground scale,
-    run once at prep time.
+    Split-first, leakage-free: patients are split into train/test BEFORE anything
+    else runs. The vocabulary is fit on TRAIN patients only and frozen for TEST.
+    Each document's `labels` are the DAG nodes its label-frame codes attest
+    (exact-node attestation, `doc_attested_nodes`); no node is dropped here: the
+    estimator learns the node set from the training documents.
 
-    `emit_labels` (optional, default False): when True, append dense
-    `label`/`labelMask` array<double> columns (length `C = len(int2cid)`) to both
-    splits via `attach_labels`, so the SAME bundle feeds both the gated fit (reads
-    `frontier`) and the readout heads (read `label`/`labelMask`). `label_mask_mode` ('full' default / 'closure') is the
-    observation policy — see `frontier_to_label`. Off by default so the existing
-    gated-placement path is byte-for-byte unchanged.
+    `label_events` (optional): when given, `labels` come from `label_events` instead
+    of `events_df`, while features still come from `events_df`. This is lookback
+    mode: a patient's features are their pre-index history and their labels are
+    read from a separate forward window. The patient split is applied to BOTH frames
+    with the same `split_train_test(holdout_frac, split_salt)` so a person's feature
+    and label rows land on the same side.
 
-    `label_events` (optional): when given, the frontier (attestation ->
-    `doc_attested_nodes`/`attach_frontiers`) is derived from `label_events`
-    instead of `events_df`, while features (`to_bow_dataframe`) still come from
-    `events_df`. This is lookback mode: a patient's features are their
-    pre-index history and their frontier is read from a separate forward
-    window. The patient split is applied to BOTH frames with the same
-    `split_train_test(holdout_frac, split_salt)` so a person's feature and
-    label rows land on the same side. When `label_events is None` (default,
-    forward mode) behavior is unchanged: frontier and features both come from
-    `events_df`."""
-    from pyspark.sql import functions as F
-    from charmpheno.omop.condition_dag import prune_by_attestation, pruning_ledger
+    Leakage strip (`strip_mode`): the vocabulary dims of the DAG's node ids are
+    removed from TEST features (`"both"`: train too), so a held-out patient is not
+    scored on the code that defines its label."""
     from charmpheno.omop.topic_prep import to_bow_dataframe
-    from spark_vi.dag.layout import DagLayout
 
-    node_cids = before_dag.nodes()
+    if strip_mode not in ("test_only", "both"):
+        raise ValueError(
+            f"strip_mode must be 'test_only' or 'both', got {strip_mode!r}")
+    node_ids = set(label_dag)
     # 1) split PATIENTS first (events carry person_id); nothing downstream sees
-    #    the other side. Same deterministic hash as the doc-level split. When a
-    #    separate label frame is given (lookback mode: features are the
-    #    pre-index window, the frontier is read from the forward label window),
-    #    split it on the SAME person hash so a person's feature and label rows
-    #    stay on the same side. label_events is None in forward mode -> frontier
-    #    and features both come from events_df (unchanged).
+    #    the other side.
     train_events, test_events = split_train_test(
         events_df, holdout_frac=holdout_frac, split_salt=split_salt)
     if label_events is None:
@@ -389,43 +242,13 @@ def assemble_from_events(events_df, before_dag, *, doc_spec, min_n,
         train_lab, test_lab = split_train_test(
             label_events, holdout_frac=holdout_frac, split_salt=split_salt)
 
-    # 2) prune the DAG on TRAIN patient counts only. Attestations come from the
-    #    label frame (== events_df in forward mode). NOTE (lookback mode): the
-    #    leakage strip below (step 6) is NARROW, not the no-op the old comment
-    #    claimed — it drops only the DAG's OWN node cids (before_dag.nodes() =
-    #    anchor cids + synthetic negatives; audit §E6), which a prevalent patient's
-    #    pre-index window can still carry, and it never touches the attestation-
-    #    climbed DESCENDANTS that actually place a patient on a node. So the
-    #    windowing alone does not make the strip vacuous.
-    train_att = doc_attested_nodes(train_lab, node_cids, doc_spec=doc_spec).cache()
-    test_att = doc_attested_nodes(test_lab, node_cids, doc_spec=doc_spec).cache()
+    # 2) attestation per document (exact node), both splits.
+    train_att = doc_attested_nodes(train_lab, node_ids, doc_spec=doc_spec).cache()
+    test_att = doc_attested_nodes(test_lab, node_ids, doc_spec=doc_spec).cache()
     try:
-        counts = node_patient_counts(train_att)
-        after_dag = prune_by_attestation(before_dag, counts, min_n)
-        parent_int, int2cid, cid2int = after_dag.to_engine()
-        lay = DagLayout(parent_int, n_bg=n_bg, tpn=tpn)
-        keep = after_dag.nodes()
+        ledger = label_ledger(train_att, test_att, len(node_ids))
 
-        # 3) ledger: TRAIN coarsening (as before) + TEST coarsening (new).
-        def _fg_ms(att_df):
-            return [most_specific_cids({int(c) for c in r["attested_cids"]}, before_dag)
-                    for r in att_df.where(F.size("attested_cids") > 0)
-                                   .select("attested_cids").collect()]
-        train_fg = _fg_ms(train_att)
-        ledger = pruning_ledger(before_dag, after_dag, counts,
-                                cohort_frontiers=train_fg)
-        test_fg = _fg_ms(test_att)
-        test_coarsened = sum(1 for ms in test_fg if any(c not in keep for c in ms))
-        ledger["test_fg_docs"] = len(test_fg)
-        ledger["test_coarsening_rate"] = (
-            test_coarsened / len(test_fg) if test_fg else 0.0)
-
-        # 4) frontiers for both sides via the TRAIN DAG (test attestations to
-        #    pruned nodes roll up to nearest surviving ancestor).
-        train_fr = attach_frontiers(train_att, before_dag, keep, cid2int, lay)
-        test_fr = attach_frontiers(test_att, before_dag, keep, cid2int, lay)
-
-        # 5) vocab fit on TRAIN; frozen for TEST.
+        # 3) vocab fit on TRAIN; frozen for TEST.
         train_bow, vocab_map = to_bow_dataframe(
             train_events, doc_spec=doc_spec, vocab_size=vocab_size,
             min_df=min_df, min_patient_count=min_patient_count)
@@ -434,39 +257,21 @@ def assemble_from_events(events_df, before_dag, *, doc_spec, min_n,
             vocab_list[idx] = cid
         test_bow, _ = to_bow_dataframe(test_events, doc_spec=doc_spec, vocab=vocab_list)
 
-        def _label(bow, fr):
-            return (bow.join(fr.select("doc_id", "frontier", "source_cohort"),
-                             on="doc_id", how="left")
-                    .withColumn("frontier",
-                                F.coalesce(F.col("frontier"),
-                                           F.array().cast("array<bigint>"))))
-        train_df = _label(train_bow, train_fr)
-        test_df = _label(test_bow, test_fr)
+        train_df = attach_label_column(train_bow, train_att)
+        test_df = attach_label_column(test_bow, test_att)
 
-        # 6) leakage strip (test_only): drop DAG-node type codes from TEST features.
-        drop_idxs = {vocab_map[c] for c in before_dag.nodes() if c in vocab_map}
+        # 4) leakage strip: drop DAG-node type codes from TEST features.
+        drop_idxs = {vocab_map[c] for c in node_ids if c in vocab_map}
         test_df = strip_test_features(test_df, drop_idxs)
         if strip_mode == "both":
             train_df = strip_test_features(train_df, drop_idxs)
-        elif strip_mode != "test_only":
-            raise ValueError(
-                f"strip_mode must be 'test_only' or 'both', got {strip_mode!r}")
-
-        # 7) (Gated-PC) dense per-node label + observed mask from the frontier.
-        #    C = len(int2cid) (engine nodes incl. root 0); label index c == engine
-        #    id c, so the head's C rows align with the gate's DagLayout node space.
-        #    Off by default — only the supervised PC head reads these columns.
-        if emit_labels:
-            C = len(int2cid)
-            train_df = attach_labels(
-                train_df, lay, C, label_mask_mode=label_mask_mode)
-            test_df = attach_labels(
-                test_df, lay, C, label_mask_mode=label_mask_mode)
 
         return CaseFindingBundle(
-            train_df=train_df, test_df=test_df, parent_int=parent_int,
-            int2cid=int2cid, cid2int=cid2int, vocab_map=vocab_map,
-            name_by_id=dict(before_dag.names), ledger=ledger)
+            train_df=train_df, test_df=test_df,
+            dag={n: list(ps) for n, ps in label_dag.items()},
+            vocab_map=vocab_map,
+            name_by_id={n: v for n, v in (names or {}).items() if n in node_ids},
+            ledger=ledger)
     finally:
         train_att.unpersist(); test_att.unpersist()
 
@@ -566,42 +371,36 @@ def load_condition_dag(spark, *, anchors, cdr, billing, root=None):
 
 def assemble_case_finding_corpus(spark, *, disease="diabetes", cdr, billing,
                                  source_table="condition_era", person_mod,
-                                 min_n, holdout_frac=0.2, split_salt=_SPLIT_SALT,
+                                 holdout_frac=0.2, split_salt=_SPLIT_SALT,
                                  vocab_size, min_df, min_patient_count,
-                                 n_bg=2, tpn=1, doc_min_length=0,
+                                 doc_min_length=0,
                                  prior_obs_days=365, window_days=365,
                                  strip_mode="test_only", window_mode="forward",
-                                 lookback_days=365, label_window_days=365,
-                                 emit_labels=False, label_mask_mode="full"):
+                                 lookback_days=365, label_window_days=365):
     """End-to-end BQ assembly: load OMOP (person_mod sample), apply the
     `disease`+background cohort, build the disease's label DAG, and assemble the
     bundle.
 
-    `window_mode="forward"` (default, unchanged behavior): one `window_days`
-    window per patient via `apply_population_disease_cohort`; frontier and
-    features both come from that single window (`assemble_from_events`'s
-    `label_events=None` path).
+    `window_mode="forward"` (default): one `window_days` window per patient via
+    `apply_population_disease_cohort`; labels and features both come from that
+    single window (`assemble_from_events`'s `label_events=None` path).
 
     `window_mode="lookback"`: an index date per patient
     (`cohorts.case_finding_index_table`) splits raw events into a pre-index
     feature frame (`lookback_days` back) and a forward label frame
     (`label_window_days` forward) via `cohorts.lookback_feature_label_events`.
-    Features are read from the feature frame, the frontier from the label frame
-    (`assemble_from_events(..., label_events=label_events)`).
 
     `disease` is the single knob. Its DAG anchors come from the cohort registry
     (cohorts.disease_anchors) — the SAME concept ancestors that define the
     foreground arm — so a single-disease name (diabetes, eds) roots the DAG at
-    one anchor while a multi-disease name (rare6) builds a forest of the six
-    anchors' subtrees under a synthetic root (_FOREST_ROOT_CID). Thin wrapper
-    over assemble_from_events; the per-doc unit is PatientCohortDocSpec (doc_id =
-    source_cohort:person_id) so each patient's single window is exactly one
-    document. Requires a live CDR; unit tests cover assemble_from_events and
-    _condition_dag_from_frames directly (the lookback BQ body here is
-    cluster-covered, not unit-tested — only the arg surface is)."""
+    one anchor (a top-level node of the handed-over DAG) while a multi-disease name
+    (rare6) builds a forest of the six anchors' subtrees (the synthetic forest root
+    `_FOREST_ROOT_CID` is dropped: the anchors are top-level). Node ids are OMOP
+    concept ids (int). Requires a live CDR; unit tests cover assemble_from_events
+    and _condition_dag_from_frames directly."""
     from charmpheno.omop import load_omop_bigquery
     from charmpheno.omop.cohorts import (
-        apply_population_disease_cohort, disease_anchors,
+        apply_population_disease_cohort,
         case_finding_index_table, lookback_feature_label_events,
     )
     from charmpheno.omop.doc_spec import PatientCohortDocSpec
@@ -613,9 +412,7 @@ def assemble_case_finding_corpus(spark, *, disease="diabetes", cdr, billing,
 
     if window_mode == "lookback":
         # The lookback prior-observation gate is the fixed ≥1yr floor
-        # (_LOOKBACK_PRIOR_OBS_DAYS), NOT the forward-mode prior_obs_days knob:
-        # it is intrinsic to the pre-diagnosis framing so a lookback experiment
-        # cannot disable it by inheriting prior_obs_days=0 from a forward config.
+        # (_LOOKBACK_PRIOR_OBS_DAYS), NOT the forward-mode prior_obs_days knob.
         index_df = case_finding_index_table(
             omop, disease=disease, spark=spark, cdr_dataset=cdr,
             billing_project=billing, date_col=date_col,
@@ -635,14 +432,23 @@ def assemble_case_finding_corpus(spark, *, disease="diabetes", cdr, billing,
         raise ValueError(
             f"window_mode must be 'forward' or 'lookback', got {window_mode!r}")
 
-    anchors = disease_anchors(disease)
-    root = _FOREST_ROOT_CID if len(anchors) > 1 else None
-    before_dag = load_condition_dag(
-        spark, anchors=anchors, root=root, cdr=cdr, billing=billing)
+    dag, names = snomed_label_dag(spark, disease=disease, cdr=cdr, billing=billing)
     doc_spec = PatientCohortDocSpec(min_doc_length=doc_min_length)
     return assemble_from_events(
-        events, before_dag, doc_spec=doc_spec, min_n=min_n,
+        events, dag, names=names, doc_spec=doc_spec,
         holdout_frac=holdout_frac, split_salt=split_salt, vocab_size=vocab_size,
-        min_df=min_df, min_patient_count=min_patient_count, n_bg=n_bg, tpn=tpn,
-        strip_mode=strip_mode, label_events=label_arg,
-        emit_labels=emit_labels, label_mask_mode=label_mask_mode)
+        min_df=min_df, min_patient_count=min_patient_count,
+        strip_mode=strip_mode, label_events=label_arg)
+
+
+def snomed_label_dag(spark, *, disease, cdr, billing):
+    """`(dag, names)`: the disease's SNOMED label DAG in the estimator's user-id
+    contract (`ConditionDag.user_dag`; int concept ids, the synthetic forest root
+    dropped) and `{concept_id: name}`."""
+    from charmpheno.omop.cohorts import disease_anchors
+    anchors = disease_anchors(disease)
+    root = _FOREST_ROOT_CID if len(anchors) > 1 else None
+    cdag = load_condition_dag(spark, anchors=anchors, root=root, cdr=cdr,
+                              billing=billing)
+    dag = cdag.user_dag(synthetic_root=root)
+    return dag, {n: cdag.names.get(n, str(n)) for n in dag}

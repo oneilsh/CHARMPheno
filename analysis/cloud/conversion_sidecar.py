@@ -37,8 +37,11 @@ COINCIDENCE of the current doc unit, not a property of this frame, and exp 0111'
 episode doc unit ends it. Every join that crosses a grain boundary names the
 crossing in the code that does it (`conversion_analysis.py` does, at its one join).
 
-`node_cid` is a FRONTIER node — the most-specific label node a code resolves to,
-the same cid the attestation providers emit — NOT a closure. "First attestation of
+`node_cid` is the MOST-SPECIFIC Mondo term a code resolves to (the code ladder's
+output, `mondo_cid` of the curie the attestation provider emits; since spec
+2026-10-30 it is no longer landed on a powered node set, which is the fitted
+model's business) — NOT a closure. Readers map it onto their own nodes through the
+Mondo is-a (`prevalence_check.sidecar_nodes_to_readout`). "First attestation of
 `closure(c)`" is a driver-side fold at ANALYSIS time: the min over every frontier
 node whose closure contains c (i.e. over c's own subtree). Storing the closure
 here instead would multiply the frame by the average closure depth for a number
@@ -90,7 +93,7 @@ import sys
 # the sidecar key next to this module's source hash: the hash is the automatic
 # guard (nobody has to remember), the version string is the citable record of
 # WHICH construction a cached sidecar carries.
-CONVERSION_SIDECAR_VERSION = "conversion-sidecar-v1"
+CONVERSION_SIDECAR_VERSION = "conversion-sidecar-v2"   # v2: node_cid = the code ladder's most-specific Mondo term (spec 2026-10-30), no longer landed on a powered node set
 
 # The parquet's columns. Named once, here, because three files read them and a
 # silent rename is a wrong join rather than an error.
@@ -175,11 +178,13 @@ def conversion_sidecar_key(*, cdr, person_mod, dag_source, mondo_version="",
     Five things and no more:
 
       * `cdr` + `person_mod` — which patients, which data release;
-      * `dag_source` + `mondo_version` + `mondo_branch` + `min_positives` — which
-        label nodes exist, since `node_cid` is one of them;
+      * `dag_source` + `mondo_version` + `mondo_branch` — which label terms exist,
+        since `node_cid` is one of them (`min_positives` is accepted and folded for
+        old callers; the native build has no threshold since spec 2026-10-30, so the
+        current caller passes 0);
       * `code_map_identity` — an optional caller-supplied token for a code map that
-        is not fully described by the four above (the native build re-resolves its
-        map against the final node set, so its identity is the node set's);
+        is not fully described by the fields above (the native build's version and
+        subgraph size);
       * this module's `version` + source hash — the automatic guard.
 
     Deliberately ABSENT: everything about the corpus that does not change which
@@ -439,7 +444,8 @@ def code_map_from_manifest(spark, corpus_manifest):
     sidecar is cached rather than recomputed per analysis.
 
     The native build's `(std_cid, node_cid)` map is NORMALIZED to
-    `(concept_id, node_cid)`. Returns `(code_map, identity)`, where
+    `(concept_id, node_cid)` (`node_cid` the most-specific Mondo term's
+    `mondo_cid`). Returns `(code_map, identity)`, where
     `identity` is the token the sidecar key folds for a map whose content the four
     DAG fields do not fully determine."""
     cm = corpus_manifest
@@ -451,15 +457,14 @@ def code_map_from_manifest(spark, corpus_manifest):
             "(`mondo_native`); the anchor-Mondo and SNOMED label spaces were removed.")
     from charmpheno.mondo.native_dag import (MONDO_NATIVE_VERSION,
                                              build_mondo_native_fit_inputs)
-    _dag, code_map_sdf, kept, _support, _stats = build_mondo_native_fit_inputs(
+    built = build_mondo_native_fit_inputs(
         spark, cdr=cm["cdr"], billing=cm["billing"],
         mondo_version=cm.get("mondo_version") or "",
         mondo_cache_dir=cm.get("mondo_cache_dir") or "data/mondo",
-        min_positives=int(cm.get("min_positives") or 0),
         branch_root=(cm.get("mondo_branch") or None))
-    return (normalize_code_map(code_map_sdf, concept_col="std_cid",
+    return (normalize_code_map(built.code_map_sdf, concept_col="std_cid",
                                node_col="node_cid"),
-            f"mondo_native:{MONDO_NATIVE_VERSION}:{len(kept)}")
+            f"mondo_native:{MONDO_NATIVE_VERSION}:{len(built.node_ids)}")
 
 
 def main(argv=None) -> int:
@@ -500,7 +505,6 @@ def main(argv=None) -> int:
                 dag_source=cm.get("dag_source"),
                 mondo_version=cm.get("mondo_version") or "",
                 mondo_branch=cm.get("mondo_branch") or "",
-                min_positives=int(cm.get("min_positives") or 0),
                 code_map_identity=identity)
             print(f"[sidecar] key={key} uri={sidecar_uri}", flush=True)
         if not args.force and try_load_sidecar(spark, sidecar_uri, key) is not None:
