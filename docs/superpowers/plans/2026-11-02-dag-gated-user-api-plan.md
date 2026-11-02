@@ -16,7 +16,7 @@ filled in as packages land.
 
 | WP | what | spec | validates locally | disposition |
 |---|---|---|---|---|
-| 1 | **Any-URI I/O** (`spark_vi.io.fs`: scheme dispatch, plain Python for local paths, Hadoop FS via py4j otherwise; manifest-last on object stores). Callers: `save_result` / `load_result`, readout checkpoint + heads file, `DagHeadsModel.save` / `load`, shims' `resumeFrom` check. | R13 L1 | yes (`file://` URIs on local Spark) | |
+| 1 | **Any-URI I/O** (`spark_vi.io.fs`: scheme dispatch, plain Python for local paths, Hadoop FS via py4j otherwise; manifest-last on object stores). Callers: `save_result` / `load_result`, readout checkpoint + heads file, `DagHeadsModel.save` / `load`, shims' `resumeFrom` check. | R13 L1 | yes (`file://` URIs on local Spark) | done (`spark_vi/io/fs.py`, tests `test_io_fs.py`) |
 | 2 | **Broadcast expElogbeta, not λ**, in the fit: a `VIModel` hook (what the E-step needs per iteration; default `global_params`), used by the gated engine and OnlineLDA. | parked | yes (Spark-vs-local agreement, full-batch gate) | |
 | 3 | **Sparse partition statistics** in the gated E-step: accumulate only touched (topic, word) cells, densify at combine. | parked | yes (bit-identical stats on fixtures) | |
 | 4 | **DAG input + node-set learning** (`spark_vi.dag` internal helpers): R1 parsing (dict / Spark DF / pandas DF, mixed ids), validation, support pass, prune, land, reduce, splice; `DagLayout` / `frontier_from_coded` made private. | R1, R3, R4, dec. 5 | yes | |

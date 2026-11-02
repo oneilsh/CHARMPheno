@@ -19,12 +19,13 @@ pass reads instead of re-fitting.
 from __future__ import annotations
 
 import hashlib
+import io
 import logging
 import time
-from pathlib import Path
 
 import numpy as np
 
+from spark_vi.io import fs
 from spark_vi.readout.solver import (fold_standardization, solve_batched_lr,
                                      standardized_grad_from_raw,
                                      unfold_standardization)
@@ -88,25 +89,15 @@ def write_ckpt(path, W_std, b_std, it, fingerprint):
     disk or a storage hiccup must not kill a solve that is otherwise healthy.
     Returns True on success.
     """
-    path = Path(path)
-    tmp = path.with_name(path.name + ".tmp")
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(tmp, "wb") as fh:
-            # File OBJECT, not a name: np.savez appends `.npz` to a str path,
-            # which would make the tmp name (and thus the rename) a guess.
-            np.savez(fh, W_std=np.ascontiguousarray(W_std, dtype=np.float64),
-                     b_std=np.ascontiguousarray(b_std, dtype=np.float64),
-                     iter=np.int64(it), fingerprint=np.str_(fingerprint))
-        tmp.replace(path)
+        fs.write_bytes(str(path), fs.npz_bytes(
+            W_std=np.ascontiguousarray(W_std, dtype=np.float64),
+            b_std=np.ascontiguousarray(b_std, dtype=np.float64),
+            iter=np.int64(it), fingerprint=np.str_(fingerprint)))
         return True
     except Exception as exc:                     # pragma: no cover - I/O failure
         log.info(f"readout checkpoint write FAILED ({exc}); the solve "
               "continues uncheckpointed")
-        try:
-            tmp.unlink(missing_ok=True)
-        except Exception:
-            pass
         return False
 
 
@@ -120,14 +111,15 @@ def read_ckpt(path, fingerprint):
     own first checkpoint overwrites it, and until then a stale-but-explainable
     file on disk is more useful for diagnosis than a silent deletion.
     """
-    path = Path(path)
-    if not path.exists():
+    path = str(path)
+    name = path.rstrip("/").rsplit("/", 1)[-1]
+    if not fs.exists(path):
         return None
     try:
-        with np.load(path, allow_pickle=False) as z:
+        with np.load(io.BytesIO(fs.read_bytes(path)), allow_pickle=False) as z:
             got = str(z["fingerprint"].item())
             if got != fingerprint:
-                log.info(f"readout checkpoint {path.name} IGNORED: "
+                log.info(f"readout checkpoint {name} IGNORED: "
                       f"fingerprint {got[:12]} != {fingerprint[:12]} — it belongs "
                       "to a different arm/corpus/basis. Starting cold.")
                 return None
@@ -135,7 +127,7 @@ def read_ckpt(path, fingerprint):
                     np.asarray(z["b_std"], dtype=np.float64),
                     int(z["iter"]))
     except Exception as exc:
-        log.info(f"readout checkpoint {path.name} UNREADABLE ({exc}); "
+        log.info(f"readout checkpoint {name} UNREADABLE ({exc}); "
               "starting cold")
         return None
 
@@ -158,7 +150,7 @@ def heads_path(run_dir, label):
     Keyed by `label` for the same reason the solver checkpoint is
     (`readout_heads_gated_pc.npz`, `..._unsup_gated.npz`, `..._dag_head.npz`): a
     run fits several arms into one dir and each is a different scoring model."""
-    return Path(run_dir) / f"readout_heads_{label or 'arm'}.npz"
+    return fs.join(run_dir, f"readout_heads_{label or 'arm'}.npz")
 
 
 def heads_fingerprint(C, K, theta_topm, label, degenerate):
@@ -197,16 +189,12 @@ def write_heads(run_dir, label, V, b_raw, const, degenerate, C, K,
     scale once the solver checkpoint is gone — V is W_std/sd and explodes on
     low-variance (starved) topics. Additive; older sidecars simply lack it."""
     path = heads_path(run_dir, label)
-    tmp = path.with_name(path.name + ".tmp")
+    name = path.rsplit("/", 1)[-1]
     fp = heads_fingerprint(C, K, theta_topm, label, degenerate)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(tmp, "wb") as fh:
-            # File OBJECT, not a name: np.savez appends `.npz` to a str path,
-            # which would make the tmp name (and thus the rename) a guess.
-            extra = ({"W_std": np.ascontiguousarray(W_std, dtype=np.float64)}
-                     if W_std is not None else {})
-            np.savez(fh,
+        extra = ({"W_std": np.ascontiguousarray(W_std, dtype=np.float64)}
+                 if W_std is not None else {})
+        fs.write_bytes(path, fs.npz_bytes(
                      version=np.str_(_HEADS_VERSION),
                      label=np.str_(label or "arm"),
                      V=np.ascontiguousarray(V, dtype=np.float64),
@@ -216,9 +204,8 @@ def write_heads(run_dir, label, V, b_raw, const, degenerate, C, K,
                      degenerate=np.ascontiguousarray(degenerate, dtype=bool),
                      C=np.int64(int(C)), K=np.int64(int(K)),
                      theta_topm=np.int64(int(theta_topm)),
-                     fingerprint=np.str_(fp))
-        tmp.replace(path)
-        log.info(f"wrote readout heads {path.name} "
+                     fingerprint=np.str_(fp)))
+        log.info(f"wrote readout heads {name} "
               f"(C={int(C)} K={int(K)} topm={int(theta_topm)}) — "
               "later scoring passes read this, no re-fit")
         return True
@@ -226,10 +213,6 @@ def write_heads(run_dir, label, V, b_raw, const, degenerate, C, K,
         log.info(f"readout heads write FAILED ({exc}); the fit is "
               "unaffected, but a later scoring pass will need a "
               "re-readout to persist them")
-        try:
-            tmp.unlink(missing_ok=True)
-        except Exception:
-            pass
         return False
 
 
@@ -245,13 +228,14 @@ def read_heads(run_dir, label, *, C=None, K=None, theta_topm=None):
     old manifest may not record K); the V-shape check against the STORED C/K still
     runs regardless."""
     path = heads_path(run_dir, label)
-    if not path.exists():
+    name = path.rsplit("/", 1)[-1]
+    if not fs.exists(path):
         return None
     try:
-        with np.load(path, allow_pickle=False) as z:
+        with np.load(io.BytesIO(fs.read_bytes(path)), allow_pickle=False) as z:
             ver = str(z["version"].item())
             if ver != _HEADS_VERSION:
-                log.info(f"readout heads {path.name} IGNORED: version "
+                log.info(f"readout heads {name} IGNORED: version "
                       f"{ver!r} != {_HEADS_VERSION!r}")
                 return None
             gC, gK, gm = int(z["C"]), int(z["K"]), int(z["theta_topm"])
@@ -260,16 +244,16 @@ def read_heads(run_dir, label, *, C=None, K=None, theta_topm=None):
             const = np.asarray(z["const"], dtype=np.float64)
             degenerate = np.asarray(z["degenerate"], dtype=bool)
     except Exception as exc:
-        log.info(f"readout heads {path.name} UNREADABLE ({exc})")
+        log.info(f"readout heads {name} UNREADABLE ({exc})")
         return None
     for name, want, got in (("C", C, gC), ("K", K, gK),
                             ("theta_topm", theta_topm, gm)):
         if want is not None and int(want) != got:
-            log.info(f"readout heads {path.name} IGNORED: {name}={got} "
+            log.info(f"readout heads {name} IGNORED: {name}={got} "
                   f"!= manifest {name}={int(want)} — a different arm/run")
             return None
     if V.shape != (gC, gK):
-        log.info(f"readout heads {path.name} IGNORED: V shape {V.shape} "
+        log.info(f"readout heads {name} IGNORED: V shape {V.shape} "
               f"!= (C={gC}, K={gK})")
         return None
     return V, b_raw, const, degenerate, gC, gK, gm
@@ -362,7 +346,7 @@ def fit_heads(data, *, l2=1.0, gtol=READOUT_GTOL, max_iter=READOUT_MAX_ITER,
     if warm_start is not None:
         W0, b0 = unfold_standardization(warm_start[0], warm_start[1], mu, sd)
         x0 = (np.where(keep[:, None], W0, 0.0), np.where(keep, b0, 0.0))
-    ckpt_path = Path(checkpoint_path) if checkpoint_path is not None else None
+    ckpt_path = str(checkpoint_path) if checkpoint_path is not None else None
     fingerprint = None
     if ckpt_path is not None:
         # Derived AFTER the moments pass because the counts come from it —
@@ -466,10 +450,10 @@ def fit_heads(data, *, l2=1.0, gtol=READOUT_GTOL, max_iter=READOUT_MAX_ITER,
         # that is already done.) Best-effort: a failed unlink is not worth failing
         # a completed fit over.
         try:
-            ckpt_path.unlink(missing_ok=True)
-        except OSError as exc:                   # pragma: no cover - I/O failure
+            fs.remove(ckpt_path)
+        except Exception as exc:                 # pragma: no cover - I/O failure
             log.info(f"{tag}could not remove readout checkpoint "
-                  f"{ckpt_path.name} ({exc})")
+                  f"{ckpt_path} ({exc})")
     V, b_raw = fold_standardization(W_std, b_std, mu, sd)
     gmax = float(info["grad_inf_norm"][keep].max()) if keep.any() else 0.0
     # `converged` = gtol OR the principled numerical stall; at gtol=1e-4 (sklearn's

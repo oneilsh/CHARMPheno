@@ -15,7 +15,6 @@ file are the readout's own; this module only maps Params onto them.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import numpy as np
 from pyspark.ml import Estimator, Model
@@ -185,23 +184,24 @@ class DagHeadsModel(_DagHeadsParams, Model):
         """Write the heads (`readout.heads.write_heads`) and the Params to `path`."""
         from spark_vi.readout.heads import write_heads
 
-        path = Path(path)
-        path.mkdir(parents=True, exist_ok=True)
+        from spark_vi.io import fs
+        path = str(path)
         C, K = self.V.shape
         if not write_heads(path, "model", self.V, self.b_raw, self.const,
                            self.degenerate, C, K, self.theta_topm):
             raise OSError(f"could not write the heads to {path}")
         params = {p.name: self.getOrDefault(p) for p in self.params
                   if self.hasDefault(p) or self.isSet(p)}
-        (path / "params.json").write_text(json.dumps(
+        fs.write_text(fs.join(path, "params.json"), json.dumps(
             {"model_class": "DagHeadsModel", "params": params}, sort_keys=True))
 
     @classmethod
     def load(cls, path):
         from spark_vi.readout.heads import read_heads
 
-        path = Path(path)
-        meta = json.loads((path / "params.json").read_text())
+        from spark_vi.io import fs
+        path = str(path)
+        meta = json.loads(fs.read_text(fs.join(path, "params.json")))
         if meta.get("model_class") != "DagHeadsModel":
             raise ValueError(f"{path} holds a {meta.get('model_class')!r}, not a "
                              "DagHeadsModel")

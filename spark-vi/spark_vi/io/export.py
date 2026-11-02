@@ -20,6 +20,7 @@ docs/decisions/0006-unified-persistence-format.md.
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 from pathlib import Path
@@ -27,6 +28,7 @@ from pathlib import Path
 import numpy as np
 
 from spark_vi.core.result import VIResult
+from spark_vi.io import fs
 
 # Manifest schema version. Bump when changing the on-disk shape; load_result
 # rejects unknown versions with a clear error to provide a migration handle.
@@ -185,18 +187,14 @@ def save_result(result: VIResult, out_dir: Path | str) -> None:
     instead of a manifest from one iteration over params from another. The
     remaining window is the renames themselves.
     """
-    out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    params_dir = out / "params"
-    params_dir.mkdir(exist_ok=True)
-    staged: list[Path] = []
+    out = str(out_dir)
+    params_dir = fs.join(out, "params")
+    staged: list[tuple[str, bytes]] = []
 
-    def _stage_npy(path: Path, arr) -> None:
-        # np.save appends ".npy" to a bare str/Path; a file object keeps the name.
-        tmp = path.with_name(path.name + ".tmp")
-        with open(tmp, "wb") as f:
-            np.save(f, arr)
-        staged.append(path)
+    def _stage_npy(path: str, arr) -> None:
+        buf = io.BytesIO()
+        np.save(buf, arr)
+        staged.append((path, buf.getvalue()))
 
     # A dict-valued param is stored per key, NOT as one array: the blocks have
     # different widths (V_m differs per domain), so there is no single array to
@@ -207,16 +205,16 @@ def save_result(result: VIResult, out_dir: Path | str) -> None:
         if isinstance(arr, dict):
             keys = sorted(arr)
             for k in keys:
-                _stage_npy(params_dir / f"{name}_{k}.npy",
+                _stage_npy(fs.join(params_dir, f"{name}_{k}.npy"),
                            _check_saveable_param(f"{name}[{k}]", arr[k]))
             dict_param_keys[name] = [int(k) for k in keys]
         else:
-            _stage_npy(params_dir / f"{name}.npy", _check_saveable_param(name, arr))
+            _stage_npy(fs.join(params_dir, f"{name}.npy"), _check_saveable_param(name, arr))
 
     # Split diagnostic_traces by storage strategy. Array traces go to
     # traces/<name>.npy; scalar (and empty) traces stay inline in JSON.
     diagnostic_traces_manifest: dict = {}
-    traces_dir: Path | None = None
+    traces_dir: str | None = None
     for name, trace in result.diagnostic_traces.items():
         kind = _classify_trace(name, list(trace))
         if kind == "scalar":
@@ -237,10 +235,9 @@ def save_result(result: VIResult, out_dir: Path | str) -> None:
             diagnostic_traces_manifest[name] = {"json": list(trace)}
         else:  # array
             if traces_dir is None:
-                traces_dir = out / "traces"
-                traces_dir.mkdir(exist_ok=True)
+                traces_dir = fs.join(out, "traces")
             stacked = np.stack([np.asarray(x) for x in trace], axis=0)
-            _stage_npy(traces_dir / f"{name}.npy", stacked)
+            _stage_npy(fs.join(traces_dir, f"{name}.npy"), stacked)
             diagnostic_traces_manifest[name] = {"file": f"traces/{name}.npy"}
 
     manifest = {
@@ -253,12 +250,29 @@ def save_result(result: VIResult, out_dir: Path | str) -> None:
         "diagnostic_traces": diagnostic_traces_manifest,
         "dict_param_keys": dict_param_keys,
     }
-    manifest_tmp = out / "manifest.json.tmp"
-    manifest_tmp.write_text(json.dumps(manifest, indent=2))
-    # Commit: every staged file, then the manifest that names them.
-    for path in staged:
-        os.replace(path.with_name(path.name + ".tmp"), path)
-    os.replace(manifest_tmp, out / "manifest.json")
+    manifest_bytes = json.dumps(manifest, indent=2).encode("utf-8")
+    if fs.is_local(out):
+        # Stage every file under a `.tmp` name, then commit by rename, manifest last.
+        root = fs.local_path(out)
+        os.makedirs(os.path.join(root, "params"), exist_ok=True)
+        if traces_dir is not None:
+            os.makedirs(os.path.join(root, "traces"), exist_ok=True)
+        locs = [(fs.local_path(p), data) for p, data in staged]
+        for p, data in locs:
+            with open(p + ".tmp", "wb") as f:
+                f.write(data)
+        man = os.path.join(root, "manifest.json")
+        with open(man + ".tmp", "wb") as f:
+            f.write(manifest_bytes)
+        for p, _ in locs:
+            os.replace(p + ".tmp", p)
+        os.replace(man + ".tmp", man)
+    else:
+        # Object stores: each object appears only when its upload completes; write
+        # the data files, then the manifest that names them (no renames).
+        for p, data in staged:
+            fs.write_bytes(p, data, atomic=False)
+        fs.write_bytes(fs.join(out, "manifest.json"), manifest_bytes, atomic=False)
 
 
 def load_result(in_dir: Path | str) -> VIResult:
@@ -288,15 +302,18 @@ def load_result(in_dir: Path | str) -> VIResult:
     format_version was introduced are treated as version 1 (no production
     checkpoints predate this field).
     """
-    in_path = Path(in_dir)
-    manifest = json.loads((in_path / "manifest.json").read_text())
+    in_path = str(in_dir)
+    manifest = json.loads(fs.read_text(fs.join(in_path, "manifest.json")))
     version = manifest.get("format_version", 1)
     if version not in _READABLE_FORMAT_VERSIONS:
         raise ValueError(
             f"Unsupported persistence format_version {version}; this build "
             f"reads format_version(s) {_READABLE_FORMAT_VERSIONS}."
         )
-    params_dir = in_path / "params"
+    params_dir = fs.join(in_path, "params")
+
+    def _npy(p, **kw):
+        return np.load(io.BytesIO(fs.read_bytes(p)), **kw)
     # JSON object keys are strings; the per-domain lambda is keyed by INT domain
     # index and every consumer indexes it with an int, so convert back.
     dict_param_keys = {n: [int(k) for k in ks]
@@ -305,11 +322,11 @@ def load_result(in_dir: Path | str) -> VIResult:
     for name in manifest["param_names"]:
         if name in dict_param_keys:
             global_params[name] = {
-                k: np.load(params_dir / f"{name}_{k}.npy")
+                k: _npy(fs.join(params_dir, f"{name}_{k}.npy"))
                 for k in dict_param_keys[name]
             }
         else:
-            global_params[name] = np.load(params_dir / f"{name}.npy")
+            global_params[name] = _npy(fs.join(params_dir, f"{name}.npy"))
 
     diagnostic_traces: dict[str, list] = {}
     for name, entry in manifest.get("diagnostic_traces", {}).items():
@@ -319,7 +336,7 @@ def load_result(in_dir: Path | str) -> VIResult:
             # label strings), which np.save pickles. These are our own trusted
             # checkpoint sidecars. Numeric traces load identically either way;
             # global_params (line above) stay strict (numeric only).
-            arr = np.load(in_path / entry["file"], allow_pickle=True)
+            arr = _npy(fs.join(in_path, entry["file"]), allow_pickle=True)
             # Split rows back into a list of arrays. arr is 2D
             # (n_iterations, dim); we copy each row so a caller mutating
             # one row can't silently corrupt the others through the shared

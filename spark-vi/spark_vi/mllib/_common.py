@@ -9,7 +9,6 @@ spark_vi.mllib.topic._common so this module stays free of topic content.
 from __future__ import annotations
 
 import dataclasses
-from pathlib import Path
 
 from pyspark.ml.param import Param, Params, TypeConverters
 
@@ -103,7 +102,7 @@ def apply_persistence_params(estimator, base_config):
     methods need. Raises ``ValueError`` on invalid Param combinations and
     ``FileNotFoundError`` if ``resumeFrom`` is set but the path lacks a
     ``manifest.json``. Returns ``(updated_config, resume_path)`` where
-    ``resume_path`` is a :class:`Path` or ``None``.
+    ``resume_path`` is a path or URI string, or ``None``.
 
     The ``interval = max_iterations + 1`` trick handles the case where
     ``saveDir`` is set but ``saveInterval`` is -1: VIConfig requires both
@@ -124,7 +123,8 @@ def apply_persistence_params(estimator, base_config):
         raise ValueError(
             "saveInterval > 0 requires saveDir to be set"
         )
-    if resume_from != "" and not (Path(resume_from) / "manifest.json").exists():
+    from spark_vi.io import fs
+    if resume_from != "" and not fs.exists(fs.join(resume_from, "manifest.json")):
         raise FileNotFoundError(
             f"No manifest.json at resumeFrom path: {resume_from}"
         )
@@ -133,13 +133,13 @@ def apply_persistence_params(estimator, base_config):
         interval = save_interval if save_interval > 0 else base_config.max_iterations + 1
         config = dataclasses.replace(
             base_config,
-            checkpoint_dir=Path(save_dir),
+            checkpoint_dir=str(save_dir),        # a URI must not go through Path
             checkpoint_interval=interval,
         )
     else:
         config = base_config
 
-    resume_path = Path(resume_from) if resume_from else None
+    resume_path = str(resume_from) if resume_from else None
     return config, resume_path
 
 
