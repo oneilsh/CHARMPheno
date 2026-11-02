@@ -335,6 +335,144 @@ def nearest_mapped_standard_ancestors(edges) -> dict[int, list[int]]:
     return {d: sorted(anc) for d, (lv, anc) in best.items()}
 
 
+# --- mapping provenance: the ladder step per (term, code) --------------------------------
+# The attribution ladder's rungs, numbered as the dashboard shows them: (1) the source
+# code is a Mondo same_as; (2) its Maps-to SNOMED concept is a mapped Mondo term; (3) that
+# concept is an exact HPO xref; (4) it climbed SNOMED concept_ancestor to the nearest
+# mapped Mondo term.
+STEP_OF_VIA = {"source_exact": 1, "standard_exact": 2, "hpo_exact": 3, "climbed": 4}
+VIA_OF_STEP = {v: k for k, v in STEP_OF_VIA.items()}
+
+
+def _step_col(via_col):
+    from pyspark.sql import functions as F
+    m = F.create_map(*[F.lit(x) for kv in STEP_OF_VIA.items() for x in kv])
+    return m[via_col]
+
+
+def catalog_steps_df(attribution):
+    """(mondo_id, origin_cid, step): each code's step for each term it reaches, LOWEST
+    wins. A code with several Maps-to targets can reach one term directly on some rows
+    and by climbing on others; it is then a direct (named) code for that term and its
+    climb rows are not counted as climbed (user decision, 2026-11-02). Built-ins only."""
+    from pyspark.sql import functions as F
+    return (attribution.select("mondo_id", "origin_cid", _step_col(F.col("via")).alias("step"))
+            .groupBy("mondo_id", "origin_cid").agg(F.min("step").alias("step")))
+
+
+def named_counts_df(attribution, steps):
+    """(mondo_id, n_named): distinct persons with >= 1 attribution to the term through a
+    code whose (term, code) step is 1-3. Rolled-up-only = total - n_named."""
+    from pyspark.sql import functions as F
+    return (attribution.join(steps, ["mondo_id", "origin_cid"])
+            .where(F.col("step") <= 3).groupBy("mondo_id")
+            .agg(F.countDistinct("person_id").alias("n_named")))
+
+
+def code_std_df(attribution, steps):
+    """(mondo_id, origin_cid, std_cid, multi_std): the standard concept a code went
+    through for a term, among its rows AT the winning step — the one carrying the most
+    distinct persons (tie -> lowest id). ``multi_std`` flags codes that reach the term
+    through more than one standard concept (the hover says so). Identity only: the
+    person counts rank inside the cluster and are never emitted."""
+    from pyspark.sql import Window, functions as F
+    a = (attribution.withColumn("vstep", _step_col(F.col("via")))
+         .join(steps, ["mondo_id", "origin_cid"])
+         .where((F.col("vstep") == F.col("step")) & F.col("k_std").isNotNull()))
+    cnt = (a.groupBy("mondo_id", "origin_cid", "k_std")
+           .agg(F.countDistinct("person_id").alias("np")))
+    part = Window.partitionBy("mondo_id", "origin_cid")
+    return (cnt.withColumn("rn", F.row_number().over(
+                part.orderBy(F.col("np").desc(), F.col("k_std").asc())))
+            .withColumn("n_std", F.count(F.lit(1)).over(part))
+            .where(F.col("rn") == 1)
+            .select("mondo_id", "origin_cid", F.col("k_std").alias("std_cid"),
+                    (F.col("n_std") > 1).alias("multi_std")))
+
+
+def rolled_up_only_persons(attribution, steps) -> int:
+    """Cohort-wide distinct persons who reach at least one term ONLY through codes that
+    climbed to it. A single distinct-person count (like ``persons_climbed``), never a sum
+    of per-term parts, so it cannot be differenced against the per-term splits."""
+    from pyspark.sql import functions as F
+    per = (attribution.join(steps, ["mondo_id", "origin_cid"])
+           .groupBy("person_id", "mondo_id").agg(F.min("step").alias("best")))
+    return int(per.where(F.col("best") == 4).select("person_id").distinct().count())
+
+
+def build_climb_paths(pairs, ca_rows, isa_edges) -> dict:
+    """``{(std_cid, mondo_id): (chain | None, ambiguous)}`` for every climbed pair.
+
+    ``pairs``: ``(std_cid, mondo_id, anc_cid, dist)`` — the standard concept, the Mondo
+    term it was reduced to, the mapped SNOMED ancestor carrying that term, and
+    ``min_levels_of_separation`` between them. ``ca_rows``: ``(x, anc_cid, lev)``
+    concept_ancestor rows from the climb closure to each target ancestor. ``isa_edges``:
+    ``(child, parent)`` SNOMED ``Is a`` edges inside the closure. Structure only — no
+    person data. Pure."""
+    parents_of: dict = {}
+    for c, p in isa_edges:
+        parents_of.setdefault(int(c), []).append(int(p))
+    lev_by_anc: dict = {}
+    for x, anc, lev in ca_rows:
+        lev_by_anc.setdefault(int(anc), {})[int(x)] = int(lev)
+    out = {}
+    for std, mid, anc, dist in pairs:
+        out[(int(std), str(mid))] = shortest_climb_chain(
+            int(std), int(anc), int(dist), parents_of, lev_by_anc.get(int(anc), {}))
+    return out
+
+
+def collect_climb_paths(spark, ca, ca_f, nearest, anc_map, reduced_pd, isa_df):
+    """Gather the vocabulary structure for every climbed (standard concept, Mondo term)
+    pair and reconstruct one shortest SNOMED chain each (``build_climb_paths``).
+
+    ``ca``: concept_ancestor (ancestor_concept_id, descendant_concept_id,
+    min_levels_of_separation >= 1); ``ca_f``: its climb-restricted view (std_cid, anc_cid,
+    lev); ``nearest``: (std_cid, anc_cid) at the minimum lev; ``anc_map``: (anc_cid,
+    anc_mondo); ``reduced_pd``: pandas (std_cid, mondo_id) after tie reduction; ``isa_df``:
+    concept_relationship ``Is a`` rows (concept_id_1 = child, concept_id_2 = parent).
+    For each pair the target is the nearest mapped ancestor carrying that term (tie ->
+    lowest id). Structure only, no persons; collects are bounded by the climb closure.
+    Returns ``(paths_of, n_closure_nodes)``."""
+    import pandas as pd
+    from pyspark.sql import functions as F
+    from pyspark.sql.functions import broadcast
+    anc_lev = (ca_f.join(nearest, ["std_cid", "anc_cid"])
+               .join(broadcast(anc_map), "anc_cid")
+               .select("std_cid", F.col("anc_mondo").alias("mondo_id"), "anc_cid", "lev")
+               .distinct())
+    pairs_pd = (anc_lev.join(broadcast(spark.createDataFrame(
+                    reduced_pd[["std_cid", "mondo_id"]])), ["std_cid", "mondo_id"]).toPandas()
+                .sort_values(["std_cid", "mondo_id", "anc_cid"])
+                .drop_duplicates(["std_cid", "mondo_id"]))
+    if not len(pairs_pd):
+        return {}, 0
+    maxlev = (pairs_pd.groupby("std_cid", as_index=False)["lev"].max()
+              .rename(columns={"lev": "maxlev"}))
+    ml_sdf = broadcast(spark.createDataFrame(maxlev))
+    clos = (ca.join(ml_sdf, ca["descendant_concept_id"] == ml_sdf["std_cid"])
+              .where(F.col("min_levels_of_separation") < F.col("maxlev"))
+              .select(F.col("ancestor_concept_id").alias("x")).distinct())
+    anc_ids = {int(x) for x in pairs_pd["anc_cid"]}
+    node_ids = ({int(r.x) for r in clos.collect()}
+                | {int(x) for x in pairs_pd["std_cid"]} | anc_ids)
+    nodes_sdf = broadcast(spark.createDataFrame(pd.DataFrame({"nid": sorted(node_ids)})))
+    aids_sdf = broadcast(spark.createDataFrame(pd.DataFrame({"aid": sorted(anc_ids)})))
+    ca_rows = (ca.join(nodes_sdf, ca["descendant_concept_id"] == nodes_sdf["nid"])
+                 .join(aids_sdf, ca["ancestor_concept_id"] == aids_sdf["aid"])
+                 .select("descendant_concept_id", "ancestor_concept_id",
+                         "min_levels_of_separation").toPandas())
+    nodes2 = nodes_sdf.withColumnRenamed("nid", "nid2")
+    isa_pd = (isa_df.join(nodes_sdf, isa_df["concept_id_1"] == nodes_sdf["nid"])
+              .join(nodes2, isa_df["concept_id_2"] == nodes2["nid2"])
+              .select("concept_id_1", "concept_id_2").toPandas())
+    paths = build_climb_paths(
+        pairs_pd[["std_cid", "mondo_id", "anc_cid", "lev"]].itertuples(index=False, name=None),
+        ca_rows.itertuples(index=False, name=None),
+        isa_pd.itertuples(index=False, name=None))
+    return paths, len(node_ids)
+
+
 def shortest_climb_chain(start: int, target: int, dist: int,
                          parents_of: "dict[int, list[int]]",
                          lev_to_target: "dict[int, int]") -> "tuple[list[int] | None, bool]":
@@ -1012,6 +1150,11 @@ def build_safe_summary(results: list[dict]) -> str:
               f"{suppress_count(sv.get('persons_source_exact'), min_cell)} · standard-exact "
               f"{suppress_count(sv.get('persons_standard_exact'), min_cell)} · climbed "
               f"{suppress_count(sv.get('persons_climbed'), min_cell)}",
+              f"- persons reaching ≥1 term ONLY through climbed codes (≤-suppressed): "
+              f"{suppress_count(sv.get('persons_rolled_up_only'), min_cell)}",
+              "- named / rolled-up-only split, **terms** by publication status: " +
+              (", ".join(f"{k}={v}" for k, v in sorted(
+                  (sv.get("split_terms_by_status") or {}).items())) or "(none)"),
               "- unmatched **source codes** by vocabulary (distinct code counts, not "
               "patients — the vocabularies the SNOMED climb can't reach): " +
               (", ".join(f"{v}={n}" for v, n in sorted(
@@ -1068,7 +1211,7 @@ def build_safe_summary(results: list[dict]) -> str:
 
 
 def assemble_payload(*, meta: dict, term_rows: list[dict],
-                     min_cell: int = _MIN_CELL) -> dict:
+                     min_cell: int = _MIN_CELL, concepts: "dict | None" = None) -> dict:
     """Build the dashboard JSON. ``term_rows`` is one dict per mapped Mondo term:
     ``mondo_id, label, is_internal(bool), parents(list[mondo_id]), std_concepts
     (list[int]), n_persons(int raw), collision_siblings(list[mondo_id])``.
@@ -1217,7 +1360,12 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
             "codes": [], "n_codes": 0, "codes_by_vocab": {},
             "source_codes": [], "n_source_codes": 0, "source_bands": [], "depth": 0}
     assert_diff_safe(nodes, min_cell)     # redundant post-condition; see the note above
-    return {"meta": meta, "stats": stats, "nodes": [root] + nodes}
+    out = {"meta": meta, "stats": stats, "nodes": [root] + nodes}
+    if concepts:
+        # identity table for every concept a catalog entry's ``std`` / ``path`` names:
+        # {str(concept_id): [vocabulary_id, concept_code]} (identities only, no names).
+        out["concepts"] = concepts
+    return out
 
 
 def format_summary(stats: dict, *, min_cell: int = _MIN_CELL) -> str:
@@ -1400,7 +1548,7 @@ def main(argv: list[str]) -> int:
         frac_of: dict[str, float] = {}          # source_climb fractional (1/m) term count
 
         def assemble_axis(attribution, parent_adj, has_child, label_of, rare_of,
-                          out_name, axis_label):
+                          out_name, axis_label, paths_of=None):
             """CORE per-term assembly for ONE axis, run once per axis (Mondo, then HPO).
 
             Turns an ``attribution`` frame (person_id, mondo_id, origin_cid, via, k_src,
@@ -1438,18 +1586,21 @@ def main(argv: list[str]) -> int:
                        .agg(F.sum(F.lit(1.0) / F.col("m")).alias("frac")).toPandas())
             frac_of = {str(r["mondo_id"]): float(r["frac"]) for _, r in frac_pd.iterrows()}
 
-            # per-term catalog of ORIGINATING source codes. Keep the FULL tier via for the
-            # collision split; the catalog display collapses to exact/climbed (exact wins if
-            # a code reaches a term both ways). Named via the concept table.
-            cat = (attribution.select("mondo_id", "origin_cid", "via").distinct()
-                   .withColumn("vrank", F.when(F.col("via") == "climbed", 1).otherwise(0)))
-            cat = (cat.withColumn("best", F.min("vrank").over(
-                       Window.partitionBy("mondo_id", "origin_cid")))
-                   .where(F.col("vrank") == F.col("best"))
-                   .select("mondo_id", "origin_cid", "via").distinct())
-            cat_named = (cat.join(concept_all, "origin_cid", "left")
-                         .select("mondo_id", "origin_cid", "via", "vocabulary_id", "concept_code")
+            # per-term catalog of ORIGINATING source codes, each tagged with its ladder STEP
+            # for the term (lowest wins: a code reaching the term directly on some rows and by
+            # climbing on others is a direct code here), the standard concept it went through,
+            # and -- for climbed codes -- one shortest SNOMED chain to the mapped ancestor
+            # (``paths_of``). ``via`` keeps the full tier name for the collision split.
+            steps = catalog_steps_df(attribution).cache()
+            cat_named = (steps.join(code_std_df(attribution, steps),
+                                    ["mondo_id", "origin_cid"], "left")
+                         .join(concept_all, "origin_cid", "left")
+                         .select("mondo_id", "origin_cid", "step", "std_cid", "multi_std",
+                                 "vocabulary_id", "concept_code")
                          .toPandas())
+            cat_named["via"] = [VIA_OF_STEP[int(x)] for x in cat_named["step"]]
+            named_of = {str(r.mondo_id): int(r.n_named)
+                        for r in named_counts_df(attribution, steps).toPandas().itertuples()}
             # per-(term, code) distinct-person volume -> a differencing-safe magnitude BAND
             # per code (never the exact count) + a per-term band histogram.
             code_counts = (attribution.groupBy("mondo_id", "origin_cid")
@@ -1459,30 +1610,51 @@ def main(argv: list[str]) -> int:
             band_rank = {lab: i for i, lab in enumerate(_band_label(min_cell))}  # heavy=0
             source_codes_of: dict[str, dict] = {}
             code_disp = {}       # origin_cid -> "VOCAB code" for examples
+            concept_ids: set = set()   # every std / path concept, resolved to identities below
             for mid, sub in cat_named.groupby("mondo_id"):
                 recs = []
-                seen = set()   # one row per concept id: a code reaching a term via BOTH
-                               # source_exact and standard_exact must not display (or count
-                               # in the histogram) twice — both collapse to display "exact".
                 for r in sub.itertuples():
-                    cid = int(r.origin_cid)
-                    if cid in seen:
-                        continue
-                    seen.add(cid)
+                    cid, step = int(r.origin_cid), int(r.step)
                     vocab = str(r.vocabulary_id) if pd.notna(r.vocabulary_id) else "?"
                     code = str(r.concept_code) if pd.notna(r.concept_code) else str(cid)
-                    disp = "climbed" if str(r.via) == "climbed" else "exact"
                     band = volume_band(np_of.get((str(mid), cid)), min_cell)
-                    recs.append({"id": cid, "vocab": vocab, "code": code,
-                                 "via": disp, "band": band})
+                    rec = {"id": cid, "vocab": vocab, "code": code,
+                           "via": "climbed" if step == 4 else "exact", "step": step,
+                           "band": band}
+                    std = int(r.std_cid) if pd.notna(r.std_cid) else None
+                    if step > 1 and std is not None:          # step 1: source -> Mondo directly
+                        rec["std"] = std
+                        concept_ids.add(std)
+                        if pd.notna(r.multi_std) and bool(r.multi_std):
+                            rec["multi_std"] = True
+                    if step == 4 and std is not None:
+                        chain, amb = (paths_of or {}).get((std, str(mid)), (None, False))
+                        rec["path"] = chain                   # None -> hover shows "SNOMED"
+                        if chain:
+                            concept_ids.update(chain)
+                        if amb:
+                            rec["path_ambiguous"] = True
+                    recs.append(rec)
                     code_disp[cid] = f"{vocab} {code}"
-                # histogram over the FULL set (before the display cap); sort heavy-first so
-                # the cap keeps the heavy hitters and the light tail collapses in the UI.
+                # histograms over the FULL set (before the display cap), overall and per part
+                # of the named / rolled-up-only split; sort heavy-first so the cap keeps the
+                # heavy hitters and the light tail collapses in the UI.
                 hist = band_histogram([c["band"] for c in recs], min_cell)
+                named_hist = band_histogram([c["band"] for c in recs if c["step"] <= 3], min_cell)
+                rolled_hist = band_histogram([c["band"] for c in recs if c["step"] == 4], min_cell)
                 recs.sort(key=lambda c: (band_rank.get(c["band"], 99),
-                                         c["via"] != "exact", c["vocab"], c["code"]))
+                                         c["step"], c["vocab"], c["code"]))
                 source_codes_of[str(mid)] = {"list": recs[:CATALOG_CAP], "n": len(recs),
-                                             "bands": hist}
+                                             "bands": hist, "named_bands": named_hist,
+                                             "rolled_bands": rolled_hist}
+            concepts = {}
+            if concept_ids:
+                ids_sdf = broadcast(spark.createDataFrame(
+                    pd.DataFrame({"origin_cid": sorted(concept_ids)})))
+                for r in concept_all.join(ids_sdf, "origin_cid").toPandas().itertuples():
+                    concepts[str(int(r.origin_cid))] = [
+                        str(r.vocabulary_id) if pd.notna(r.vocabulary_id) else "?",
+                        str(r.concept_code) if pd.notna(r.concept_code) else ""]
 
             # collisions: a single source code attributed to >1 term -> a patient with that
             # code counts under each. Split by MECHANISM (shared_concept / climb_tie / mixed).
@@ -1555,7 +1727,10 @@ def main(argv: list[str]) -> int:
                     "source_codes": catrec["list"],
                     "n_source_codes": catrec["n"],
                     "source_bands": catrec.get("bands", []),
+                    "named_bands": catrec.get("named_bands", []),
+                    "rolled_bands": catrec.get("rolled_bands", []),
                     "n_persons": count_of.get(mid, 0),
+                    "n_named": named_of.get(mid, 0),
                     "n_frac": frac_of.get(mid, float(count_of.get(mid, 0))),
                     "collision_siblings": siblings.get(mid, []),
                     "collision_kind": collision_kind_of.get(mid, ""),
@@ -1574,6 +1749,9 @@ def main(argv: list[str]) -> int:
                     "persons_source_exact": int(t1.select("person_id").distinct().count()),
                     "persons_standard_exact": int(t2.select("person_id").distinct().count()),
                     "persons_climbed": int(t3.select("person_id").distinct().count()),
+                    # distinct persons reaching >= 1 term ONLY via climb-only codes (a single
+                    # cohort-wide count, never a sum of per-term split parts)
+                    "persons_rolled_up_only": rolled_up_only_persons(attribution, steps),
                     "unmatched_codes_by_vocab": {
                         (str(r.vocabulary_id) if pd.notna(r.vocabulary_id) else "?"): int(r.codes)
                         for r in unm_codes_by_vocab.itertuples()},
@@ -1615,7 +1793,11 @@ def main(argv: list[str]) -> int:
             }
             if survey:
                 meta["survey"] = survey
-            payload = assemble_payload(meta=meta, term_rows=term_rows, min_cell=min_cell)
+            payload = assemble_payload(meta=meta, term_rows=term_rows, min_cell=min_cell,
+                                       concepts=concepts)
+            if survey:   # counts of TERMS by split status (term counts, not patients)
+                survey["split_terms_by_status"] = dict(Counter(
+                    nd["split"]["status"] for nd in payload["nodes"] if nd.get("split")))
 
             (out / out_name).write_text(json.dumps(payload))
             tsv_name = (out_name[:-5] if out_name.endswith(".json") else out_name) + "_nodes.tsv"
@@ -1630,10 +1812,14 @@ def main(argv: list[str]) -> int:
                 "codes_by_vocab": ";".join(f"{v}:{c}" for v, c in nd["codes_by_vocab"].items()),
                 "codes": "|".join(f"{c['vocab']}:{c['code']}" for c in nd["codes"]),
                 "n_source_codes": nd.get("n_source_codes", 0),
-                "source_codes": "|".join(f"{c['vocab']}:{c['code']}:{c['via']}:{c.get('band','')}"
-                                         for c in nd.get("source_codes", [])),
+                "source_codes": "|".join(
+                    f"{c['vocab']}:{c['code']}:{c.get('step', c['via'])}:{c.get('band','')}"
+                    for c in nd.get("source_codes", [])),
                 "source_bands": ";".join(f"{b['band']}:{b['codes']}"
                                          for b in nd.get("source_bands", [])),
+                "split_status": (nd.get("split") or {}).get("status", ""),
+                "named": ((nd.get("split") or {}).get("named") or {}).get("display", ""),
+                "rolled_up_only": ((nd.get("split") or {}).get("rolled") or {}).get("display", ""),
                 "rare": int(nd["rare"]), "rare_src": "|".join(nd["rare_src"]),
                 "parents": "|".join(nd["parents"]),
             } for nd in payload["nodes"] if nd["kind"] != "root"]
@@ -1898,9 +2084,27 @@ def main(argv: list[str]) -> int:
             # --- assemble both axes from their attributions -------------------------------
             # Mondo: the source_climb attribution over the Mondo DAG (byte-identical to the
             # prior single-axis path); the survey is attached to this axis only.
+            # ---- climb chains for the mapping-path hover (structure only, no persons) -------
+            # For each climbed (standard concept, Mondo term) pair: the mapped SNOMED ancestor
+            # carrying that term at the nearest distance (tie -> lowest id) and one shortest
+            # ``Is a`` chain to it. Inputs are concept_ancestor rows over the climb closure and
+            # the ``Is a`` edges inside it — vocabulary structure, collected driver-side.
+            paths_of = {}
+            if len(reduced_pd):
+                isa_df = (_read_bq(spark, args.cdr, args.billing, "concept_relationship")
+                          .where(F.col("relationship_id") == "Is a")
+                          .select("concept_id_1", "concept_id_2"))
+                paths_of, n_nodes = collect_climb_paths(
+                    spark, ca, ca_f, nearest, anc_map, reduced_pd, isa_df)
+                n_ok = sum(1 for ch, _ in paths_of.values() if ch)
+                n_amb = sum(1 for _, a in paths_of.values() if a)
+                sys.stderr.write(f"[paths] climbed (concept, term) pairs {len(paths_of)} · "
+                                 f"chain reconstructed {n_ok} · ambiguous {n_amb} · "
+                                 f"closure nodes {n_nodes}\n")
+
             mondo_result = assemble_axis(
                 attribution, parent_adj, has_child, label_of, rare_of,
-                f"mondo_usage_{space}.json", "mondo")
+                f"mondo_usage_{space}.json", "mondo", paths_of=paths_of)
             # HPO: the HPO-exact rung (t_hpo) over the HPO DAG -> hpo_usage.json. Only when
             # --with-hpo built the axis (t_hpo is None otherwise -> no HPO payload).
             if t_hpo is not None:

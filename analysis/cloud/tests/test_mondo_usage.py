@@ -772,3 +772,59 @@ def test_chain_ignores_off_shortest_parent():
     # 1 -> 5 is a parent but sits 2 levels from the target (a longer route); skip it
     parents = {1: [5, 2], 2: [3], 5: [6], 6: [3]}
     assert m.shortest_climb_chain(1, 3, 2, parents, {2: 1, 5: 2, 6: 1}) == ([1, 2, 3], False)
+
+
+def test_build_climb_paths_groups_by_target():
+    # std 10 climbs to Mondo X via anc 30 (10 -> 20 -> 30) and to Mondo Y via anc 40 (10 -> 40)
+    pairs = [(10, "MONDO:X", 30, 2), (10, "MONDO:Y", 40, 1)]
+    ca_rows = [(20, 30, 1)]
+    isa = [(10, 20), (20, 30), (10, 40)]
+    out = m.build_climb_paths(pairs, ca_rows, isa)
+    assert out[(10, "MONDO:X")] == ([10, 20, 30], False)
+    assert out[(10, "MONDO:Y")] == ([10, 40], False)
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.slow
+def test_catalog_steps_lowest_wins_and_named_counts(spark):
+    rows = [  # person, mondo, origin, via, k_src, k_std
+        (1, "T", 100, "standard_exact", 100, 7),   # code C=100 direct for p1
+        (2, "T", 100, "climbed", 100, 8),          # ...climbs for p2 (other Maps-to target)
+        (2, "T", 100, "climbed", 100, 8),
+        (3, "T", 200, "climbed", 200, 9),          # code D=200 only climbs (p3)
+        (4, "T", 100, "standard_exact", 100, 7),
+        (5, "T", 100, "standard_exact", 100, 6),
+    ]
+    att = spark.createDataFrame(rows, "person_id long, mondo_id string, origin_cid long, "
+                                      "via string, k_src long, k_std long")
+    steps = {(r.mondo_id, r.origin_cid): r.step for r in m.catalog_steps_df(att).collect()}
+    assert steps == {("T", 100): 2, ("T", 200): 4}
+    named = {r.mondo_id: r.n_named for r in m.named_counts_df(att, m.catalog_steps_df(att)).collect()}
+    assert named == {"T": 4}            # p1, p2 (climb row of a step-2 code), p4, p5; not p3
+    std = {(r.mondo_id, r.origin_cid): (r.std_cid, r.multi_std)
+           for r in m.code_std_df(att, m.catalog_steps_df(att)).collect()}
+    assert std[("T", 100)] == (7, True)   # majority std among the code's step-2 rows
+    assert std[("T", 200)] == (9, False)
+    rolled = m.rolled_up_only_persons(att, m.catalog_steps_df(att))
+    assert rolled == 1                    # only p3 reaches T purely through climb-only codes
+
+
+@pytest.mark.slow
+def test_collect_climb_paths_end_to_end(spark):
+    import pandas as pd
+    # std 11 climbs 11 -> 20 -> 30 (30 carries MONDO:X); std 10 climbs 10 -> 40 (MONDO:Y)
+    ca = spark.createDataFrame([(20, 11, 1), (30, 11, 2), (30, 20, 1), (40, 10, 1)],
+                               "ancestor_concept_id long, descendant_concept_id long, "
+                               "min_levels_of_separation long")
+    ca_f = spark.createDataFrame([(11, 30, 2), (10, 40, 1)], "std_cid long, anc_cid long, lev long")
+    nearest = ca_f.select("std_cid", "anc_cid")
+    anc_map = spark.createDataFrame([(30, "MONDO:X"), (40, "MONDO:Y")],
+                                    "anc_cid long, anc_mondo string")
+    reduced = pd.DataFrame({"std_cid": [11, 10], "mondo_id": ["MONDO:X", "MONDO:Y"]})
+    isa = spark.createDataFrame([(11, 20), (20, 30), (10, 40), (99, 98)],
+                                "concept_id_1 long, concept_id_2 long")
+    paths, n = m.collect_climb_paths(spark, ca, ca_f, nearest, anc_map, reduced, isa)
+    assert paths == {(11, "MONDO:X"): ([11, 20, 30], False), (10, "MONDO:Y"): ([10, 40], False)}
+    assert n == 5                                   # {10, 11, 20, 30, 40}
