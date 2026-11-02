@@ -645,6 +645,58 @@ Consumes `RDD[BOWDocument]`. Provides `infer_local` for per-document theta
 inference; combinable with `VIRunner.transform` to score new documents
 under trained global params.
 
+### `DagGatedLDAEstimator`: defaults and the recommended preset
+
+The MLlib shim over the DAG-gated LDA engine (`spark_vi.mllib.topic.dag_gated_lda`,
+ADR 0050; user API spec 2026-10-30). The user gives a label DAG (`setDag`), a
+labels column (`labelsCol`, the nodes each document attests, in the user's own
+ids) and one vector column per domain (`featuresCol` or `featuresCols`, optionally
+with `vocabularies`); `DagGatedFeaturizer` builds these from array or long tables.
+`fit` learns the node set (`minDocsPerNode`), gives each kept node `gateTpn` topics
+beside `gateNBg` shared background topics, and restricts each document's E-step to
+its nodes' blocks and their ancestors'. Every plain Param has MLlib's `setX` /
+`getX`, and each Param's help text states its default.
+
+**Defaults are MLlib's** where a Param has an analogue on
+`pyspark.ml.clustering.LDA`: `maxIter` 20, `learningOffset` 1024, `learningDecay`
+0.51, `subsamplingRate` 0.05, `docConcentration` and `topicConcentration` unset
+(1/K). The one exception is `optimizeDocConcentration`, False here (MLlib: True),
+because learned alpha starves deep blocks on deep DAGs (table below). The gate Params default to the simplest
+working layout: `gateNBg` 10 (with `gateTpn` 0 the model is plain LDA at MLlib's
+k = 10), `gateTpn` 1, `gateWarm` 0 (every block open from the first iteration),
+`minDocsPerNode` 1, `unknownLabels` 'error'.
+
+**The recommended preset** is the working configuration for a deep DAG on a large
+corpus: `RECOMMENDED_PARAMS`, built with
+`DagGatedLDAEstimator.recommended(dag=..., labelsCol=..., **overrides)`:
+
+| Param | default | preset | why |
+|---|---|---|---|
+| `gateNBg` | 10 | 200 | a wide shared background absorbs the words common to all documents, so node blocks learn what distinguishes theirs |
+| `gateTpn` | 1 | 1 | |
+| `maxIter` | 20 | 60 | |
+| `learningOffset` | 1024 | 64 | the topics move within tens of mini-batch iterations, not hundreds |
+| `learningDecay` | 0.51 | 0.51 | |
+| `subsamplingRate` | 0.05 | 0.1 | |
+| `docConcentration` | 1/K | [0.5] | 1/K is tiny when K is in the thousands |
+| `optimizeDocConcentration` | False | False | (MLlib: True) learned alpha collapses towards 1/K; a document's words then go to the ancestor and background blocks and deep blocks stay empty |
+| `gammaShape`, `caviMaxIter`, `caviTol` | 100, 100, 1e-3 | same | |
+| `gateWarm` | 0 | 2 | leaves-first: each height level trains 2 iterations before the next opens |
+| `gateOpenSeed` | True | True | a block opens seeded from the term counts of the documents it admits |
+| `gateSeedMode` | 'balanced' | 'balanced' | each child subtree weighs equally in a parent's seed |
+| `gateSeedLeaves` | False | True | leaf blocks start from their own documents' term counts |
+
+Not in the preset: `minDocsPerNode` (scale it to the corpus; a block needs enough
+documents to estimate a topic, ~100 on large corpora), `seed`, and the column / DAG
+Params. Which consuming-package configuration the preset reproduces is recorded on
+that package's driver side, not here.
+
+`resumeFrom` resumes only a checkpoint whose node set (kept nodes, kept DAG,
+`gateNBg` / `gateTpn`) equals the one learned from the data given; otherwise `fit`
+refuses before training, naming the nodes added / removed. `describeNodes()` gains a
+`terms` column (the top terms' ids from `vocabularies`, `"<featureColumn>:<term>"`
+when there are several feature columns; null without vocabularies).
+
 ### Third Model (TBD)
 
 Chosen during implementation based on which dimension of the abstraction feels

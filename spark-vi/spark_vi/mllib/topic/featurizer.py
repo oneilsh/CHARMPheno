@@ -52,11 +52,12 @@ Example::
             .setLabelsTable(labels_long, nodeCol="node"))
     prep = feat.fit(docs)
     data = prep.transform(docs)
-    est = (DagGatedLDAEstimator()
+    est = (DagGatedLDAEstimator()        # or DagGatedLDAEstimator.recommended()
+           .setDag(dag)                   # {child: parent | [parents]} in label ids
            .setFeaturesCols(prep.featuresCols())
            .setVocabularies(prep.vocabularies())
            .setLabelsCol(prep.labelsCol()))
-    # ... the DAG setter, then est.fit(data)
+    model = est.fit(data)
 
 Persistence: both stages are ``MLWritable`` / ``MLReadable`` (``Pipeline.save`` /
 ``PipelineModel.load`` work). The model writes the standard Params metadata plus its
@@ -110,41 +111,47 @@ class _DagGatedFeaturizerParams(Params):
     docIdCol = Param(
         Params._dummy(), "docIdCol",
         "document id column on the documents DataFrame (and the default document id "
-        "column of every long table); needed only when a long table is registered",
+        "column of every long table); needed only when a long table is registered. "
+        "Default 'doc_id'.",
         typeConverter=TypeConverters.toString)
     domainSpecs = Param(
         Params._dummy(), "domainSpecs",
         "JSON list of the ordered domains: name, kind ('array' or 'table'), input "
-        "column(s), output vector column. Set via addArrayDomain / addTableDomain",
+        "column(s), output vector column. Set via addArrayDomain / addTableDomain. "
+        "Default '[]' (no domains).",
         typeConverter=TypeConverters.toString)
     labelsSpec = Param(
         Params._dummy(), "labelsSpec",
         "JSON description of the labels source (array column or long table), or "
-        "'null' for none. Set via setLabelsInputCol / setLabelsTable",
+        "'null' for none. Set via setLabelsInputCol / setLabelsTable. Default "
+        "'null'.",
         typeConverter=TypeConverters.toString)
     labelsOutputCol = Param(
         Params._dummy(), "labelsOutputCol",
-        "output column: array of node ids per document (empty = background)",
+        "output column: array of node ids per document (empty = background). "
+        "Default 'labels' (the estimator's default labelsCol).",
         typeConverter=TypeConverters.toString)
     minDF = Param(
         Params._dummy(), "minDF",
         "per domain: minimum number (>= 1) or fraction (< 1) of documents a term must "
-        "appear in to enter the vocabulary (CountVectorizer semantics)",
+        "appear in to enter the vocabulary (CountVectorizer semantics). Default 1.",
         typeConverter=TypeConverters.toFloat)
     maxDF = Param(
         Params._dummy(), "maxDF",
         "per domain: maximum number (>= 1) or fraction (< 1) of documents a term may "
-        "appear in (CountVectorizer semantics)",
+        "appear in (CountVectorizer semantics). Default 2^63 - 1 (no limit).",
         typeConverter=TypeConverters.toFloat)
     minTF = Param(
         Params._dummy(), "minTF",
         "per document: a term counted fewer than this many times (>= 1) or below this "
         "fraction of the document's domain length (< 1) is dropped from that "
-        "document's vector (CountVectorizer semantics; applied at transform)",
+        "document's vector (CountVectorizer semantics; applied at transform). "
+        "Default 1.",
         typeConverter=TypeConverters.toFloat)
     vocabSize = Param(
         Params._dummy(), "vocabSize",
-        "per domain: maximum vocabulary size, the most frequent terms kept",
+        "per domain: maximum vocabulary size, the most frequent terms kept. "
+        "Default 2^18.",
         typeConverter=TypeConverters.toInt)
 
     def __init__(self, *args):

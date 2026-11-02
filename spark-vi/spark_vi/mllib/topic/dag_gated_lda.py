@@ -33,8 +33,14 @@ all K topics (labels are unknown at scoring time) and appends
 
 The fitted model answers in user ids (R5): ``dag()``, ``prunedNodes()``,
 ``splicedNodes()``, ``nodeSupport()``, ``nodeTopics(node)``, ``backgroundTopics()``,
-``describeNodes()``. The node set rides the VIResult's metadata
-(``dag_node_set``), so ``save`` / ``load`` keep it.
+``describeNodes()`` (with the term ids when ``vocabularies`` are set). The node set
+rides the VIResult's metadata (``dag_node_set``), so ``save`` / ``load`` keep it, and
+``resumeFrom`` refuses a checkpoint whose node set differs from the one learned from
+the data it is given.
+
+Defaults are MLlib LDA's where a Param has an analogue; ``RECOMMENDED_PARAMS`` /
+``DagGatedLDAEstimator.recommended(...)`` is the documented working preset (see the
+estimator's docstring).
 """
 from __future__ import annotations
 
@@ -179,60 +185,95 @@ class _DagGatedLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
 
     The DAG Param is ``dagEdges``, not ``dag``: the fitted model's ``dag()`` method
     (the KEPT DAG, R5) owns that name. The constructor / ``setParams`` keyword is
-    ``dag`` (routed through ``setDag``)."""
+    ``dag`` (routed through ``setDag``).
 
+    Every plain Param has MLlib's ``setX`` / ``getX`` pair (``setLabelsCol``,
+    ``setFeaturesCols``, ``setGateNBg``, ...); the structured ones are set through
+    ``setDag``, ``setVocabularies``, ``setNodeTerms`` and ``setGateSeedProfile``.
+    Each Param's help text states its default."""
+
+    # The shared Params (featuresCol, maxIter, seed) are re-declared so their help
+    # text states this shim's defaults (R11); the names and semantics are MLlib's.
+    featuresCol = Param(
+        Params._dummy(), "featuresCol",
+        "the one vector column of term counts, used when featuresCols is empty. "
+        "Default 'features'.",
+        typeConverter=TypeConverters.toString,
+    )
+    maxIter = Param(
+        Params._dummy(), "maxIter",
+        "number of SVI iterations (>= 0); a resumed fit runs this many more. "
+        "Default 20 (MLlib LDA).",
+        typeConverter=TypeConverters.toInt,
+    )
+    seed = Param(
+        Params._dummy(), "seed",
+        "random seed for the initialization and the mini-batch sampling. Default "
+        "unset: nondeterministic (only an explicitly set seed reaches the fit).",
+        typeConverter=TypeConverters.toInt,
+    )
     topicDistributionCol = Param(
         Params._dummy(), "topicDistributionCol",
-        "output column with the topic mixture (theta) for each document",
+        "output column of transform: each document's topic mixture theta (length K). "
+        "Default 'topicDistribution'.",
         typeConverter=TypeConverters.toString,
     )
     learningOffset = Param(
         Params._dummy(), "learningOffset",
-        "tau0 in the Robbins-Monro step rho_t = (tau0 + t)^-kappa",
+        "tau0 in the Robbins-Monro step rho_t = (tau0 + t)^-kappa; larger damps the "
+        "early iterations. Default 1024 (MLlib LDA); the recommended preset uses 64.",
         typeConverter=TypeConverters.toFloat,
     )
     learningDecay = Param(
         Params._dummy(), "learningDecay",
-        "kappa in the Robbins-Monro step rho_t = (tau0 + t)^-kappa",
+        "kappa in the Robbins-Monro step rho_t = (tau0 + t)^-kappa, in (0.5, 1]. "
+        "Default 0.51 (MLlib LDA).",
         typeConverter=TypeConverters.toFloat,
     )
     subsamplingRate = Param(
         Params._dummy(), "subsamplingRate",
-        "fraction of corpus sampled per mini-batch (<= 0 or >= 1 = full batch)",
+        "fraction of the documents sampled per mini-batch (<= 0 or >= 1 = full "
+        "batch). Default 0.05 (MLlib LDA); the recommended preset uses 0.1.",
         typeConverter=TypeConverters.toFloat,
     )
     docConcentration = Param(
         Params._dummy(), "docConcentration",
-        "Dirichlet concentration alpha on theta; scalar (symmetric) or length-K "
-        "vector. Unset = 1/K, which is razor-small when K is in the thousands "
-        "(0.5 is a sensible start there).",
+        "Dirichlet concentration alpha on each document's theta: a scalar "
+        "(symmetric) or a length-K vector. Default unset = 1/K (MLlib LDA), which "
+        "is very small when K is in the thousands; the recommended preset uses 0.5.",
         typeConverter=TypeConverters.toListFloat,
     )
     topicConcentration = Param(
         Params._dummy(), "topicConcentration",
         "Dirichlet concentration eta on each topic's term distribution (the prior on "
-        "lambda; one scalar for every domain). Unset = 1/K, as MLlib's online LDA.",
+        "lambda; one scalar for every domain), > 0. Default unset = 1/K (MLlib LDA).",
         typeConverter=TypeConverters.toFloat,
     )
     optimizeDocConcentration = Param(
         Params._dummy(), "optimizeDocConcentration",
-        "learn the per-node tied empirical-Bayes alpha (the gated Newton step) "
-        "from the static frontier histogram. Default False.",
+        "learn alpha by empirical Bayes during the fit: one Newton step per "
+        "iteration, alpha tied within each node's block, from the histogram of the "
+        "documents' gates. Default False, unlike MLlib LDA (True): on deep DAGs "
+        "learned alpha tends to 1/K and can leave deep nodes' blocks without "
+        "words, so alpha is held fixed unless asked.",
         typeConverter=TypeConverters.toBoolean,
     )
     gammaShape = Param(
         Params._dummy(), "gammaShape",
-        "shape parameter for the Gamma init of gamma/lambda (ADR 0008 default 100.0)",
+        "shape of the Gamma(shape, 1/shape) draw that initializes the per-document "
+        "gamma and the topics' lambda. Default 100.",
         typeConverter=TypeConverters.toFloat,
     )
     caviMaxIter = Param(
         Params._dummy(), "caviMaxIter",
-        "max iterations for the inner CAVI loop per document",
+        "maximum iterations of the per-document coordinate-ascent (CAVI) loop, at "
+        "fit and at transform. Default 100.",
         typeConverter=TypeConverters.toInt,
     )
     caviTol = Param(
         Params._dummy(), "caviTol",
-        "relative tolerance on gamma for CAVI early stop",
+        "relative tolerance on gamma that stops the per-document CAVI loop early. "
+        "Default 0.001.",
         typeConverter=TypeConverters.toFloat,
     )
     dagEdges = Param(
@@ -240,14 +281,14 @@ class _DagGatedLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         "the label DAG, set with setDag (a dict {child: parent | [parents]}, or a "
         "pandas / Spark DataFrame (child, parent)); stored validated as a JSON edge "
         "list [[child, parent | null], ...] in the user's ids. Parentless nodes hang "
-        "from a synthetic root. Required.",
+        "from a synthetic root. Required: no default.",
         typeConverter=TypeConverters.toString,
     )
     labelsCol = Param(
         Params._dummy(), "labelsCol",
         "array<string> or array<int> column of the DAG nodes each document attests "
-        "(any nodes: ancestors and duplicates allowed; empty or null = background). "
-        "The element type must match the DAG's ids. Default 'labels'.",
+        "(any nodes: ancestors and duplicates allowed; empty or null = a background "
+        "document). The element type must match the DAG's ids. Default 'labels'.",
         typeConverter=TypeConverters.toString,
     )
     minDocsPerNode = Param(
@@ -259,85 +300,93 @@ class _DagGatedLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
     )
     unknownLabels = Param(
         Params._dummy(), "unknownLabels",
-        "a label that is not a DAG node: 'error' (default; refused by name) or "
-        "'ignore' (dropped; a document left with no label is background).",
+        "a label that is not a DAG node: 'error' (refused by name) or 'ignore' "
+        "(dropped; a document left with no label is background). Default 'error'.",
         typeConverter=TypeConverters.toString,
     )
     gateNBg = Param(
         Params._dummy(), "gateNBg",
-        "number of shared background topics. Default 2.",
+        "number of shared background topics, open to every document; "
+        "K = gateNBg + kept nodes * gateTpn. Default 10 (with gateTpn=0 the model is "
+        "plain LDA with MLlib's default k=10); the recommended preset uses 200.",
         typeConverter=TypeConverters.toInt,
     )
     gateTpn = Param(
         Params._dummy(), "gateTpn",
-        "topics per DAG node (0 = a flat layout: K == gateNBg, plain LDA). Default 1.",
+        "topics per kept DAG node (0 = a flat layout: K = gateNBg, plain LDA). "
+        "Default 1.",
         typeConverter=TypeConverters.toInt,
     )
     gateWarm = Param(
         Params._dummy(), "gateWarm",
         "leaves-first gate schedule: iterations per node-height level before the "
-        "next level opens; 0 (default) = the single-round gate. See "
-        "DagGatedOnlineLDA.set_gate_schedule.",
+        "next level's blocks open (leaves first, the top-level nodes last); 0 = the "
+        "single-round gate (every block open from iteration 0). Default 0; the "
+        "recommended preset uses 2.",
         typeConverter=TypeConverters.toInt,
     )
     gateOpenSeed = Param(
         Params._dummy(), "gateOpenSeed",
-        "with gateWarm > 0: seed each block the moment it opens from the term counts "
-        "of the documents its gate admits (one pass before the fit). Default True; "
-        "False leaves late blocks at their init (they die on arrival in simulation).",
+        "with gateWarm > 0: seed each block, the moment it opens, from the term "
+        "counts of the documents its gate admits (one pass before the fit); False "
+        "leaves late blocks at their random init, where they tend to stay empty. "
+        "Default True.",
         typeConverter=TypeConverters.toBoolean,
     )
     gateSeedMode = Param(
         Params._dummy(), "gateSeedMode",
-        "with gateWarm > 0: the open-time seed — 'balanced' (default; each child's "
-        "subtree share equally plus the documents labelled at the node itself, with "
-        "the descendants' nodeTerms removed) or 'subtree' (the term counts of the "
-        "documents a block admits).",
+        "with gateWarm > 0 and gateOpenSeed: the open-time seed. 'balanced': each "
+        "child subtree's documents weighted equally, plus the documents labelled at "
+        "the node itself, with the descendants' nodeTerms removed; 'subtree': the "
+        "term counts of every document the block admits. Default 'balanced'.",
         typeConverter=TypeConverters.toString,
     )
     gateSeedLeaves = Param(
         Params._dummy(), "gateSeedLeaves",
         "with gateWarm > 0 and gateOpenSeed: also seed every LEAF block at iteration "
-        "0 from the term counts of its own documents. Default False.",
+        "0 from the term counts of its own documents (otherwise leaves start from the "
+        "random init). Default False; the recommended preset uses True.",
         typeConverter=TypeConverters.toBoolean,
     )
     featuresCols = Param(
         Params._dummy(), "featuresCols",
         "ordered list of per-domain vector columns. When set, each row's per-domain "
-        "vectors are concatenated into the engine's single token-id space and the "
+        "vectors are concatenated into the engine's single term-index space and the "
         "engine carries a per-domain lambda {m: (K, V_m)}; a domain's width is its "
         "vectors' size (the column's ML attribute size when present, else the first "
-        "row's), and every row is checked against it. Empty (default) = the single "
-        "featuresCol.",
+        "row's), and every row is checked against it. Default [] (use the single "
+        "featuresCol).",
         typeConverter=TypeConverters.toListString,
     )
     vocabularies = Param(
         Params._dummy(), "vocabularies",
-        "optional, set with setVocabularies: one list of term ids (str or int) per "
-        "feature column (featuresCols, else [featuresCol]), aligned with the vector "
-        "indices (length = that column's vector size). Needed only by nodeTerms / "
-        "gateSeedProfile, which name terms. Terms are matched exactly as given, like "
-        "node ids: vectorizer vocabularies hold strings, so int term ids are passed "
-        "as their strings there. Stored as JSON.",
+        "set with setVocabularies: one list of term ids (str or int) per feature "
+        "column (featuresCols, else [featuresCol]), aligned with the vector indices "
+        "(length = that column's vector size). Used by nodeTerms / gateSeedProfile, "
+        "which name terms, and by describeNodes' terms column. Terms are matched "
+        "exactly as given, like node ids: vectorizer vocabularies hold strings, so "
+        "int term ids are passed as their strings there. Stored as JSON. Default "
+        "unset.",
         typeConverter=TypeConverters.toString,
     )
     nodeTerms = Param(
         Params._dummy(), "nodeTerms",
-        "optional, set with setNodeTerms: {node: [term]}, the terms that attest each "
-        "node (user node ids, term ids of the vocabularies). With "
-        "gateSeedMode='balanced', a node's terms are removed from its ancestors' "
-        "open-time seeds. A term in two vocabularies must be qualified as "
-        "(featureColumn, term). Entries of nodes not kept by the fit, and terms in no "
-        "vocabulary, are dropped (counted in the log). Stored as JSON.",
+        "set with setNodeTerms: {node: [term]}, the terms that attest each node (user "
+        "node ids, term ids of the vocabularies). With gateSeedMode='balanced', a "
+        "node's terms are removed from its ancestors' open-time seeds. A term in two "
+        "vocabularies must be qualified as (featureColumn, term). Entries of nodes "
+        "not kept by the fit, and terms in no vocabulary, are dropped (counted in the "
+        "log). Stored as JSON. Default unset.",
         typeConverter=TypeConverters.toString,
     )
     gateSeedProfile = Param(
         Params._dummy(), "gateSeedProfile",
-        "optional, set with setGateSeedProfile: {node: {term: weight}}, an external "
-        "per-node term profile. With gateWarm > 0 it REPLACES a profiled node's seed "
-        "in the domains its terms belong to (leaves at iteration 0, later blocks when "
-        "they open); other domains and unprofiled nodes keep the count seed. Same id, "
-        "qualification and dropping rules as nodeTerms. Stored as JSON.",
+        "set with setGateSeedProfile: {node: {term: weight}}, an external per-node "
+        "term profile. With gateWarm > 0 it REPLACES a profiled node's seed in the "
+        "domains its terms belong to (leaves at iteration 0, later blocks when they "
+        "open); other domains and unprofiled nodes keep the count seed. Same id, "
+        "qualification and dropping rules as nodeTerms. Stored as JSON. Default "
+        "unset.",
         typeConverter=TypeConverters.toString,
     )
 
@@ -444,6 +493,48 @@ class _DagGatedLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         return [self.getOrDefault("featuresCol")], False
 
 
+# Plain Params get MLlib's setX / getX pair (generated below; a getter the shared
+# mixins already define is kept). The structured Params have hand-written ones
+# (setDag / setVocabularies / setNodeTerms / setGateSeedProfile), and there is no
+# setDagEdges: the DAG is only ever set through setDag's validation.
+_PLAIN_PARAMS = (
+    "featuresCol", "maxIter", "seed", "topicDistributionCol", "learningOffset",
+    "learningDecay", "subsamplingRate", "docConcentration", "topicConcentration",
+    "optimizeDocConcentration", "gammaShape", "caviMaxIter", "caviTol", "labelsCol",
+    "minDocsPerNode", "unknownLabels", "gateNBg", "gateTpn", "gateWarm",
+    "gateOpenSeed", "gateSeedMode", "gateSeedLeaves", "featuresCols",
+)
+
+
+def _add_plain_accessors(cls, names):
+    for name in names:
+        cap = name[0].upper() + name[1:]
+
+        def setter(self, value, _n=name):
+            return self._set(**{_n: value})
+
+        def getter(self, _n=name):
+            return self.getOrDefault(_n)
+
+        setter.__name__, getter.__name__ = f"set{cap}", f"get{cap}"
+        setter.__doc__ = f"Set {name}: see the Param's help text (explainParam)."
+        getter.__doc__ = f"The value (or default) of {name}."
+        if f"set{cap}" not in vars(cls):
+            setattr(cls, f"set{cap}", setter)
+        if not hasattr(cls, f"get{cap}"):
+            setattr(cls, f"get{cap}", getter)
+
+
+_add_plain_accessors(_DagGatedLDAParams, _PLAIN_PARAMS)
+
+
+# MLlib-like defaults (spec decision 1): every Param with an analogue on
+# pyspark.ml.clustering.LDA takes LDA's default (maxIter 20, learningOffset 1024,
+# learningDecay 0.51, subsamplingRate 0.05, docConcentration / topicConcentration
+# unset = 1/K) except optimizeDocConcentration, False here (True in MLlib: learned
+# alpha starves deep blocks on deep DAGs); gateNBg = 10 makes the flat layout
+# (gateTpn = 0) LDA's k = 10; the other gate Params are the simplest working ones
+# (one topic per node, the single-round gate).
 _DAG_GATED_LDA_DEFAULTS = dict(
     maxIter=20,
     featuresCol="features", topicDistributionCol="topicDistribution",
@@ -451,10 +542,34 @@ _DAG_GATED_LDA_DEFAULTS = dict(
     optimizeDocConcentration=False,
     gammaShape=100.0, caviMaxIter=100, caviTol=1e-3,
     dagEdges="", labelsCol="labels", minDocsPerNode=1, unknownLabels="error",
-    gateNBg=2, gateTpn=1,
+    gateNBg=10, gateTpn=1,
     gateWarm=0, gateOpenSeed=True, gateSeedMode="balanced", gateSeedLeaves=False,
     featuresCols=[], vocabularies="", nodeTerms="", gateSeedProfile="",
-    # docConcentration / topicConcentration: no default (isSet; unset = 1/K).
+    # docConcentration / topicConcentration / seed: no default (isSet; unset = 1/K,
+    # 1/K, nondeterministic).
+)
+
+# The working preset (spec R10, decision 1): the configuration that trains every
+# block of a deep DAG on a large corpus. Departures from the defaults, and why:
+# - gateNBg 200: a wide shared background soaks up the words common to all
+#   documents, so node blocks learn what distinguishes their documents;
+# - learningOffset 64, subsamplingRate 0.1, maxIter 60: the topics move within a
+#   few dozen mini-batch iterations rather than hundreds;
+# - docConcentration 0.5 held fixed (optimizeDocConcentration False): learned alpha
+#   collapses towards 1/K, where a document's words go to its ancestors' and the
+#   background's blocks and deep blocks stay empty;
+# - gateWarm 2 with the balanced open-time seed and leaf seeds: blocks open leaves
+#   first, each starting from the term counts of the documents it admits, so a
+#   deep block does not start flat against sharp ancestor topics.
+# Not in the preset: minDocsPerNode (scale it to the corpus: a block needs enough
+# documents to estimate a topic; ~100 on large corpora), seed, and the column /
+# DAG Params.
+RECOMMENDED_PARAMS = dict(
+    gateNBg=200, gateTpn=1,
+    maxIter=60, learningOffset=64.0, learningDecay=0.51, subsamplingRate=0.1,
+    docConcentration=[0.5], optimizeDocConcentration=False,
+    gammaShape=100.0, caviMaxIter=100, caviTol=1e-3,
+    gateWarm=2, gateOpenSeed=True, gateSeedMode="balanced", gateSeedLeaves=True,
 )
 
 # Params whose setter encodes structured input; routed through it from kwargs.
@@ -546,7 +661,44 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator):
 
     Required: a DAG (``setDag``) and, on the fit DataFrame, ``labelsCol`` plus the
     feature column(s). The node set (which nodes get a topic block) is learned from
-    that DataFrame; there is no train/test notion here (split before ``fit``)."""
+    that DataFrame; there is no train/test notion here (split before ``fit``).
+
+    Defaults are MLlib's where a Param has an analogue on
+    ``pyspark.ml.clustering.LDA`` (maxIter 20, learningOffset 1024, learningDecay
+    0.51, subsamplingRate 0.05, docConcentration and topicConcentration 1/K,
+    but optimizeDocConcentration False: MLlib's True starves deep blocks on deep
+    DAGs); the gate's are simple: 10 background topics (the
+    flat layout, ``gateTpn=0``, is then LDA's k=10), one topic per node, every block
+    open from the first iteration. Each Param's help text (``explainParams()``)
+    states its default.
+
+    The **recommended preset** (``RECOMMENDED_PARAMS``; build with
+    ``DagGatedLDAEstimator.recommended(dag=..., **overrides)``) is the working
+    configuration for a deep DAG on a large corpus::
+
+        gateNBg=200, gateTpn=1, maxIter=60, learningOffset=64, learningDecay=0.51,
+        subsamplingRate=0.1, docConcentration=[0.5], optimizeDocConcentration=False,
+        gammaShape=100, caviMaxIter=100, caviTol=1e-3,
+        gateWarm=2, gateOpenSeed=True, gateSeedMode='balanced', gateSeedLeaves=True
+
+    i.e. a wide background, a short Robbins-Monro warm-up, a fixed alpha, and the
+    leaves-first schedule with every block seeded from its documents' term counts
+    when it opens. Set ``minDocsPerNode`` for the corpus alongside it (a block needs
+    enough documents to estimate a topic; ~100 on large corpora).
+
+    ``resumeFrom`` continues a checkpoint only when the node set learned from the
+    given DataFrame is the checkpoint's (same kept nodes, kept DAG and layout);
+    otherwise ``fit`` refuses before training, naming the difference."""
+
+    @classmethod
+    def recommended(cls, **overrides) -> "DagGatedLDAEstimator":
+        """An estimator with the recommended preset (``RECOMMENDED_PARAMS``) set, then
+        ``overrides`` on top (any constructor keyword: ``dag``, ``labelsCol``,
+        ``minDocsPerNode``, ``seed``, a preset value to change, ...)."""
+        kw = {k: (list(v) if isinstance(v, list) else v)
+              for k, v in RECOMMENDED_PARAMS.items()}
+        kw.update(overrides)
+        return cls(**kw)
 
     @keyword_only
     def __init__(
@@ -569,7 +721,7 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator):
         labelsCol: str = "labels",
         minDocsPerNode: int = 1,
         unknownLabels: str = "error",
-        gateNBg: int = 2,
+        gateNBg: int = 10,
         gateTpn: int = 1,
         gateWarm: int = 0,
         gateOpenSeed: bool = True,
@@ -757,6 +909,59 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator):
                       "count seed elsewhere" if prof else ""))
         return seed, init, summary
 
+    # ---- resume -------------------------------------------------------------------
+
+    def _check_resume_node_set(self, ns: NodeSet, n_bg: int, tpn: int) -> None:
+        """With ``resumeFrom`` set: refuse, before any training, a checkpoint whose
+        node set is not the one just learned from the data.
+
+        The checkpoint's lambda rows are topic blocks of ITS kept nodes, in its
+        engine-id order; continuing them on another node set would train each block
+        on another node's documents (or fail on a shape inside the engine). So the
+        kept nodes, their engine order and kept parents, and the layout (gateNBg,
+        gateTpn) must all match. Only the manifest is read (no arrays). A missing
+        manifest is left to ``apply_persistence_params``, which names it."""
+        resume = str(self.getOrDefault("resumeFrom") or "")
+        if not resume:
+            return
+        from spark_vi.io import fs
+        mpath = fs.join(resume, "manifest.json")
+        if not fs.exists(mpath):
+            return
+        md = (json.loads(fs.read_text(mpath)).get("metadata") or {})
+        saved = md.get(_NODE_SET_KEY)
+        where = f"resumeFrom={resume!r}"
+        if not saved:
+            raise ValueError(f"{where}: the checkpoint carries no node set "
+                             f"(metadata {_NODE_SET_KEY!r}); it was not written by "
+                             f"DagGatedLDAEstimator, so it cannot be resumed here")
+        old = NodeSet.from_dict(saved)
+        old_ids, new_ids = old.user_ids[1:], ns.user_ids[1:]
+        fix = ("resume on the data, DAG, minDocsPerNode and unknownLabels the "
+               "checkpoint was fitted with, or fit without resumeFrom")
+        if set(old_ids) != set(new_ids):
+            added = sorted(set(new_ids) - set(old_ids), key=node_sort_key)
+            removed = sorted(set(old_ids) - set(new_ids), key=node_sort_key)
+            raise ValueError(
+                f"{where}: the node set learned from this data is not the "
+                f"checkpoint's: {len(added)} kept node(s) added (e.g. {added[:5]}), "
+                f"{len(removed)} removed (e.g. {removed[:5]}); the checkpoint keeps "
+                f"{len(old_ids)}, this data {len(new_ids)}. Its topic blocks belong to "
+                f"its nodes: {fix}")
+        if old_ids != new_ids or old.engine_parents != ns.engine_parents:
+            moved = [n for n in new_ids
+                     if tuple(old.parents.get(n, ())) != tuple(ns.parents[n])]
+            raise ValueError(
+                f"{where}: the same {len(new_ids)} nodes are kept, but the kept DAG "
+                f"differs from the checkpoint's ({len(moved)} node(s) with other kept "
+                f"parents, e.g. {moved[:5]}): {fix}")
+        lay_old = (int(saved.get("n_bg", -1)), int(saved.get("tpn", -1)))
+        if lay_old != (n_bg, tpn):
+            raise ValueError(
+                f"{where}: the checkpoint's layout is gateNBg={lay_old[0]}, "
+                f"gateTpn={lay_old[1]}; this estimator has gateNBg={n_bg}, "
+                f"gateTpn={tpn}. Set them to the checkpoint's to resume.")
+
     # ---- fit --------------------------------------------------------------------
 
     def _fit(self, dataset) -> "DagGatedLDAModel":
@@ -788,6 +993,7 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator):
               f"(minDocsPerNode={ns.min_docs_per_node})", flush=True)
 
         n_bg, tpn = int(self.getOrDefault("gateNBg")), int(self.getOrDefault("gateTpn"))
+        self._check_resume_node_set(ns, n_bg, tpn)
         lay = DagLayout(ns.engine_parents, n_bg=n_bg, tpn=tpn)
         doc_conc = (self.getOrDefault("docConcentration")
                     if self.isSet("docConcentration") else None)
@@ -956,13 +1162,21 @@ class DagGatedLDAModel(_DagGatedLDAParams, _PersistableModel, Model):
         return list(range(self._n_bg))
 
     def describeNodes(self, maxTermsPerTopic: int = 10):
-        """DataFrame ``(node, topic, termIndices, termWeights)``: one row per topic
-        (background topics have a null node), top terms as in ``describeTopics``.
+        """DataFrame ``(node, topic, termIndices, termWeights, terms)``: one row per
+        topic (background topics have a null node), top terms as in
+        ``describeTopics``.
 
         ``node`` is a LONG column when every kept node id is an int, a STRING column
         when every one is a str, and a STRING column (ints written in decimal) when
         the ids are mixed; there ``1`` and ``"1"`` render alike, so use ``nodeTopics``
-        to tell them apart."""
+        to tell them apart.
+
+        ``terms`` (``array<string>``, aligned with ``termIndices``) names each term
+        from ``vocabularies``: the term id as a string with one feature column, and
+        ``"<featureColumn>:<term>"`` with several (``termIndices`` index the
+        concatenated vocabulary, so the column says which domain a term is from;
+        split at the first ``:`` when column names have none). Null on every row
+        when ``vocabularies`` is not set."""
         from pyspark.sql import SparkSession
         from pyspark.sql.types import (ArrayType, DoubleType, IntegerType, LongType,
                                        StringType, StructField, StructType)
@@ -975,14 +1189,36 @@ class DagGatedLDAModel(_DagGatedLDAParams, _PersistableModel, Model):
         for n in ids:
             for k in self.nodeTopics(n):
                 owner[k] = n if (all_int or all_str) else str(n)
-        rows = [(owner.get(k),) + r for k, r in enumerate(self._top_terms(maxTermsPerTopic))]
+        names = self._term_names()
+        rows = [(owner.get(k),) + r
+                + ((None,) if names is None else ([names[i] for i in r[1]],))
+                for k, r in enumerate(self._top_terms(maxTermsPerTopic))]
         schema = StructType([
             StructField("node", node_type, True),
             StructField("topic", IntegerType(), False),
             StructField("termIndices", ArrayType(IntegerType(), False), False),
             StructField("termWeights", ArrayType(DoubleType(), False), False),
+            StructField("terms", ArrayType(StringType(), False), True),
         ])
         return SparkSession.builder.getOrCreate().createDataFrame(rows, schema=schema)
+
+    def _term_names(self):
+        """The concatenated vocabulary as display strings (see ``describeNodes``), or
+        None without ``vocabularies``. Checked against the trained widths."""
+        vocabs = self.getVocabularies()
+        if not vocabs:
+            return None
+        fcols, _ = self._feature_columns()
+        if len(vocabs) != len(fcols):
+            raise ValueError(f"vocabularies has {len(vocabs)} list(s) for "
+                             f"{len(fcols)} feature column(s) {fcols}")
+        if sum(len(v) for v in vocabs) != self.vocabSize():
+            raise ValueError(f"the vocabularies hold {sum(len(v) for v in vocabs)} "
+                             f"terms but the model's vocabulary size is "
+                             f"{self.vocabSize()}")
+        multi = len(fcols) > 1
+        return [f"{c}:{t}" if multi else str(t)
+                for c, v in zip(fcols, vocabs) for t in v]
 
     # ---- topic-indexed outputs ---------------------------------------------------
 

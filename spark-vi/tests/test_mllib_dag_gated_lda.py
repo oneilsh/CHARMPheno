@@ -43,6 +43,7 @@ def _est(**kw):
     kw.setdefault("maxIter", 3)
     kw.setdefault("seed", 0)
     kw.setdefault("subsamplingRate", 1.0)
+    kw.setdefault("optimizeDocConcentration", False)   # fixed alpha unless asked
     kw.setdefault("dag", PARENT)
     return DagGatedLDAEstimator(gateNBg=2, gateTpn=1, **kw)
 
@@ -98,6 +99,7 @@ def _str_est(**kw):
     kw.setdefault("maxIter", 3)
     kw.setdefault("seed", 0)
     kw.setdefault("subsamplingRate", 1.0)
+    kw.setdefault("optimizeDocConcentration", False)   # fixed alpha unless asked
     kw.setdefault("minDocsPerNode", 2)
     kw.setdefault("dag", STR_DAG)
     # String term ids throughout, as a vectorizer's vocabularies are.
@@ -115,7 +117,8 @@ def test_defaults_and_removed_params():
     assert est.getOrDefault("gateSeedMode") == "balanced"      # ADR 0050 default
     assert est.getOrDefault("gateWarm") == 0
     assert est.getOrDefault("gateOpenSeed") is True
-    assert est.getOrDefault("optimizeDocConcentration") is False
+    assert est.getOrDefault("optimizeDocConcentration") is False     # not MLlib's True: deep blocks
+    assert est.getOrDefault("gateNBg") == 10 and est.getOrDefault("gateTpn") == 1
     assert est.getOrDefault("labelsCol") == "labels"
     assert est.getOrDefault("minDocsPerNode") == 1
     assert est.getOrDefault("unknownLabels") == "error"
@@ -569,3 +572,156 @@ def test_minibatch_resume_with_a_gate_schedule_is_the_continuous_fit(tmp_path, s
     np.testing.assert_allclose(got.global_params["lambda"], want.global_params["lambda"],
                                rtol=1e-10)
     np.testing.assert_allclose(got.elbo_trace, want.elbo_trace, rtol=1e-10)
+
+
+# --------------------------------------------------------------------------- #
+# Defaults, the recommended preset, help text (spec R10, R11, decision 1).     #
+# --------------------------------------------------------------------------- #
+
+def test_mllib_like_defaults():
+    """Where a Param has an analogue on pyspark.ml.clustering.LDA, its default is
+    LDA's, except optimizeDocConcentration (False: learned alpha starves deep blocks);
+    gateNBg=10 makes the flat layout LDA's k=10."""
+    from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
+    est = DagGatedLDAEstimator()
+    want = dict(maxIter=20, learningOffset=1024.0, learningDecay=0.51,
+                subsamplingRate=0.05, optimizeDocConcentration=False,
+                featuresCol="features", topicDistributionCol="topicDistribution",
+                gateNBg=10, gateTpn=1, gateWarm=0)
+    assert {k: est.getOrDefault(k) for k in want} == want
+    for unset in ("docConcentration", "topicConcentration"):
+        assert not est.isSet(unset) and not est.hasDefault(unset), unset
+    assert not est.isSet("seed")      # HasSeed's hash default is not used by fit
+
+
+def test_help_text_states_defaults_and_is_domain_neutral():
+    from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
+    est = DagGatedLDAEstimator()
+    for p in est.params:
+        assert "default" in p.doc.lower(), p.name
+        for word in ("mondo", "hpo", "omop", "clinical", "patient", "condition",
+                     "diagnos", "exp 0", "adr "):
+            assert word not in p.doc.lower(), (p.name, word)
+
+
+def test_plain_params_have_mllib_setters_and_getters():
+    """Every plain Param has setX / getX; the featurizer's hand-off chain works."""
+    from spark_vi.mllib.topic.dag_gated_lda import (_PLAIN_PARAMS,
+                                                    DagGatedLDAEstimator,
+                                                    DagGatedLDAModel)
+    est = DagGatedLDAEstimator()
+    for name in _PLAIN_PARAMS:
+        cap = name[0].upper() + name[1:]
+        assert callable(getattr(est, f"set{cap}")), name
+        assert callable(getattr(est, f"get{cap}")), name
+        assert hasattr(DagGatedLDAModel, f"set{cap}"), name
+    assert not hasattr(est, "setDagEdges")          # only via setDag's validation
+    out = (est.setFeaturesCols(["f0", "f1"]).setVocabularies([["a"], ["b"]])
+           .setLabelsCol("nodes").setGateNBg(3).setMaxIter(7).setSeed(4))
+    assert out is est
+    assert est.getFeaturesCols() == ["f0", "f1"] and est.getLabelsCol() == "nodes"
+    assert est.getGateNBg() == 3 and est.getMaxIter() == 7 and est.getSeed() == 4
+
+
+def test_recommended_preset_and_overrides():
+    from spark_vi.mllib.topic.dag_gated_lda import (RECOMMENDED_PARAMS,
+                                                    DagGatedLDAEstimator)
+    assert RECOMMENDED_PARAMS == dict(
+        gateNBg=200, gateTpn=1, maxIter=60, learningOffset=64.0, learningDecay=0.51,
+        subsamplingRate=0.1, docConcentration=[0.5], optimizeDocConcentration=False,
+        gammaShape=100.0, caviMaxIter=100, caviTol=1e-3, gateWarm=2,
+        gateOpenSeed=True, gateSeedMode="balanced", gateSeedLeaves=True)
+    est = DagGatedLDAEstimator.recommended()
+    for k, v in RECOMMENDED_PARAMS.items():
+        assert est.isSet(k) and est.getOrDefault(k) == v, k
+    est2 = DagGatedLDAEstimator.recommended(dag=PARENT, gateNBg=4, minDocsPerNode=3,
+                                            labelsCol="nodes")
+    assert est2.getGateNBg() == 4 and est2.getMinDocsPerNode() == 3
+    assert est2.getLabelsCol() == "nodes" and est2.getDag()[3] == [1]
+    assert est2.getLearningOffset() == 64.0          # the rest of the preset kept
+    est2.getDocConcentration().append(9.0)            # no shared mutable state
+    assert RECOMMENDED_PARAMS["docConcentration"] == [0.5]
+
+
+def test_recommended_preset_fits(spark):
+    from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
+    df = _df(spark, n=60)
+    model = DagGatedLDAEstimator.recommended(
+        dag=PARENT, gateNBg=2, maxIter=4, seed=0, subsamplingRate=1.0).fit(df)
+    gp = model.result.global_params
+    assert int(gp["gate_iter"]) == 4 and (np.asarray(gp["gate_open_at"]) >= 0).all()
+    np.testing.assert_allclose(model.trainedAlpha(), 0.5)    # held fixed
+
+
+# --------------------------------------------------------------------------- #
+# resumeFrom checks the node set (WP5 follow-up).                              #
+# --------------------------------------------------------------------------- #
+
+def test_resume_refuses_a_different_node_set(tmp_path, spark):
+    df = _df(spark)
+    ck = str(tmp_path / "ck")
+    a = _est(maxIter=1, seed=1)
+    a.setSaveDir(ck)
+    a.fit(df)
+
+    def resume(data=df, **kw):
+        b = _est(maxIter=1, seed=1, **kw)
+        b.setResumeFrom(ck)
+        return b.fit(data)
+
+    # Fewer kept nodes: minDocsPerNode prunes leaves (~10 docs each).
+    with pytest.raises(ValueError, match=r"0 kept node\(s\) added \(e\.g\. \[\]\), "
+                                         r"[1-6] removed \(e\.g\. \[3, 4"):
+        resume(minDocsPerNode=15)
+    # More kept nodes: a new DAG node with documents of its own.
+    df7 = df.union(spark.createDataFrame(
+        [(Vectors.sparse(30, [0, 1], [1.0, 1.0]), [7])] * 3, df.schema))
+    with pytest.raises(ValueError, match=r"1 kept node\(s\) added \(e\.g\. \[7\]\), "
+                                         r"0 removed"):
+        resume(data=df7, dag={**PARENT, 7: 2})
+    # Same nodes, other parents (4 gains a second parent).
+    with pytest.raises(ValueError, match="kept DAG differs"):
+        resume(dag={**PARENT, 4: [1, 2]})
+    # Same node set, other layout.
+    with pytest.raises(ValueError, match="layout is gateNBg=2, gateTpn=1"):
+        _est(maxIter=1, seed=1, resumeFrom=ck).setGateNBg(3).fit(df)
+    # The matching node set resumes.
+    assert resume().result.n_iterations == 2
+
+
+def test_resume_refuses_a_checkpoint_without_a_node_set(tmp_path, spark):
+    d = tmp_path / "other"
+    (d / "params").mkdir(parents=True)
+    np.save(d / "params" / "lambda.npy", np.zeros((8, 30)))
+    (d / "manifest.json").write_text(json.dumps({
+        "format_version": 1, "elbo_trace": [], "n_iterations": 0,
+        "converged": False, "metadata": {"model_class": "DagGatedOnlineLDA"},
+        "param_names": ["lambda"], "diagnostic_traces": {}}))
+    with pytest.raises(ValueError, match="carries no node set"):
+        _est(maxIter=1, resumeFrom=str(d)).fit(_df(spark))
+
+
+# --------------------------------------------------------------------------- #
+# describeNodes names the terms (WP5 follow-up).                               #
+# --------------------------------------------------------------------------- #
+
+def test_describe_nodes_terms_single_domain(spark):
+    df = _df(spark)
+    vocab = [f"w{i}" for i in range(30)]
+    model = _est(maxIter=1, vocabularies=[vocab]).fit(df)
+    assert dict(model.describeNodes().dtypes)["terms"] == "array<string>"
+    for r in model.describeNodes(4).collect():
+        assert r.terms == [vocab[i] for i in r.termIndices]
+    plain = _est(maxIter=1).fit(df).describeNodes(4).collect()
+    assert all(r.terms is None for r in plain)
+
+
+def test_describe_nodes_terms_multi_domain(spark):
+    df = _str_dag_df(spark)
+    model = _str_est().fit(df)
+    names = [f"f0:{t}" for t in V0_TERMS] + [f"f1:{t}" for t in V1_TERMS]
+    rows = model.describeNodes(13).collect()
+    for r in rows:
+        assert len(r.terms) == 13
+        assert r.terms == [names[i] for i in r.termIndices]
+    assert {t.split(":", 1)[0] for r in rows for t in r.terms} == {"f0", "f1"}
