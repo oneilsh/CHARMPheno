@@ -699,6 +699,33 @@ def _forced_lower(total_lo, total_hi, source_bands, min_cell: int = _MIN_CELL):
 
 _BIG = 10 ** 12   # finite stand-in for the open-ended ``>100k`` band's upper edge
 
+# Banded TERM TOTALS use a finer 1-2-5 ladder than the per-code decade bands: a total
+# is banded only when its whole band could box a ≤floor code, and is then shown as that
+# band, so finer bands both band fewer terms and show narrower (2-2.5x) ranges. The
+# selection-free argument is unchanged — the decision and the display are functions of
+# the band alone. Per-code volume bands stay decadal.
+_TOTAL_EDGES = [50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000, 20_000, 50_000,
+                100_000, 200_000, 500_000]
+
+
+def _fmt_edge(n: int) -> str:
+    return f"{n // 1000}k" if n >= 1000 else str(n)
+
+
+def total_band(n, min_cell: int = _MIN_CELL):
+    """``(label, lo, hi)`` of the 1-2-5 band containing a reported total ``n`` (> floor),
+    e.g. ``("101–200", 101, 200)``, ``("1k–2k", 1001, 2000)``, ``(">500k", 500001, inf)``.
+    Labels follow the per-code band style (lower edge shown as the previous edge once in
+    thousands). Pure."""
+    n = int(n)
+    lo, prev = min_cell + 1, None
+    for up in _TOTAL_EDGES:
+        if n <= up:
+            left = _fmt_edge(prev) if prev and prev >= 1000 else str(lo)
+            return f"{left}–{_fmt_edge(up)}", lo, up
+        lo, prev = up + 1, up
+    return f">{_fmt_edge(_TOTAL_EDGES[-1])}", _TOTAL_EDGES[-1] + 1, float("inf")
+
 
 def _max_forced_exact(lo, hi, source_bands, min_cell: int = _MIN_CELL) -> int:
     """Max of ``_forced_lower(x, x, ...)`` over integer totals x in [lo, hi].
@@ -729,13 +756,12 @@ def safe_total_band(n_persons, source_bands, min_cell: int = _MIN_CELL):
     a ≤floor code >= 2.
 
     When banding, return the finest STANDARD display that removes the narrowing: the
-    containing two-sided band (e.g. ``21–100``) when it suffices, else the first
+    containing 1-2-5 band (`total_band`, e.g. ``21–50``) when it suffices, else the first
     ceiling (``≤100``, ``≤1k``, ...) that does. A reported term is publicly > floor,
     so every published lower bound is at least ``min_cell + 1`` and the checks use it.
     Standard buckets only — never a bespoke tight range. Pure."""
     N = int(n_persons)
-    lbl = volume_band(N, min_cell)                   # containing two-sided band
-    lo, hi = _band_bounds(lbl, min_cell)
+    lbl, lo, hi = total_band(N, min_cell)            # containing 1-2-5 band
     if _max_forced_exact(lo, hi, source_bands, min_cell) < 2:
         return False, str(N), (N, N)
     floor_lo = min_cell + 1
@@ -747,19 +773,6 @@ def safe_total_band(n_persons, source_bands, min_cell: int = _MIN_CELL):
     return True, f">{min_cell}", (floor_lo, float("inf"))   # widest: only 'reported' itself
 
 
-def _node_total_bounds(nd, min_cell: int = _MIN_CELL):
-    """Public (lo, hi) of a node's total: exact count, its banded range, [1, floor] for a
-    used-small term, (0, 0) when unused."""
-    if nd.get("count") is not None:
-        return int(nd["count"]), int(nd["count"])
-    if nd.get("state") == "used_small":
-        return 1, min_cell
-    rng = nd.get("count_range")
-    if rng:
-        return int(rng[0]), (float("inf") if rng[1] is None else int(rng[1]))
-    return 0, 0
-
-
 def _band_lo_hi(bands, min_cell: int = _MIN_CELL):
     """Expand a band histogram into one (lo, hi) per code."""
     out = []
@@ -767,104 +780,6 @@ def _band_lo_hi(bands, min_cell: int = _MIN_CELL):
         lo, hi = _band_bounds(b["band"], min_cell)
         out += [(int(lo), hi)] * int(b["codes"])
     return out
-
-
-def _frac_bounds(nd, min_cell: int = _MIN_CELL):
-    """Public thresholds ``(T, L)`` for a term's published frac interval: its upper end
-    must be >= T and its lower end <= L; ``None`` when the term has no ≤floor cell for
-    frac to narrow. Depends only on published fields (bands, total, split).
-
-    Two inequalities link frac to the hidden cells, each tightest when every diagnosis
-    has m = 1 and every code one standard concept (the attacker's best case):
-      * frac >= Σ_codes |c|      (each person-code pair is >= 1 diagnosis), so frac's
-        UPPER end caps a ≤floor code c at frac_hi - LB(Σ other codes), and caps a small
-        person cell U (a union of codes C_U) at frac_hi - LB(Σ codes outside C_U);
-      * frac <= Σ_codes |c|      (k = 1, 1/m <= 1), so frac's LOWER end forces
-        |c| >= frac_lo - Σ_{d != c} cap_d, and U >= max_{C_U} |c| >= (frac_lo - Σ_{outside}
-        cap) / |C_U|.
-    The lower bounds on sums of other codes use the split when it is published (a named
-    part's codes sum to >= its lower end; the climbed codes' union is >= the rolled part),
-    and code caps use the part's upper end for named codes (each is a subset of the named
-    union) and the total's upper end otherwise. Small person cells: a used-small total,
-    and the ≤floor part of a ranged split."""
-    sp = nd.get("split") or {}
-    n_lo, n_hi = _node_total_bounds(nd, min_cell)
-    informative = sp.get("status") in ("exact", "ranged")
-    if informative:
-        parts = {"named": _band_lo_hi(sp.get("named_bands") or [], min_cell),
-                 "rolled": _band_lo_hi(sp.get("rolled_bands") or [], min_cell)}
-        part_lo = {k: int(sp[k]["range"][0]) for k in ("named", "rolled")}
-        cap_of = {"named": int(sp["named"]["range"][1]), "rolled": n_hi}
-    else:
-        parts = {"all": _band_lo_hi(nd.get("source_bands") or [], min_cell)}
-        part_lo = {"all": 0}
-        cap_of = {"all": n_hi}
-    small_cells = []                                  # (part key or None for all codes)
-    if nd.get("state") == "used_small":
-        small_cells.append(None)
-    if sp.get("status") == "ranged":
-        small_cells.append("named" if sp["named"]["range"][1] <= min_cell else "rolled")
-    has_small_code = any(lo == 1 and hi == min_cell for cs in parts.values() for lo, hi in cs)
-    if not has_small_code and not small_cells:
-        return None
-    lows = {k: sum(lo for lo, _ in cs) for k, cs in parts.items()}
-    caps = {k: sum(min(hi, cap_of[k]) for _, hi in cs) for k, cs in parts.items()}
-    lb_sum = {k: max(part_lo[k], lows[k]) for k in parts}   # LB of Σ|c| over a part's codes
-    T, L = min_cell, float("inf")
-    for k, cs in parts.items():
-        others = sum(lb_sum[q] for q in parts if q != k)
-        outside_caps = sum(caps[q] for q in parts if q != k)
-        for lo, hi in cs:
-            if lo == 1 and hi == min_cell:              # a ≤floor code
-                T = max(T, others + lows[k] - 1 + min_cell)
-                cap_c = min(min_cell, cap_of[k])
-                L = min(L, outside_caps + caps[k] - cap_c + 1)
-    for k in small_cells:
-        if k is None:                                   # used-small total: all codes
-            L = min(L, sum(len(cs) for cs in parts.values()))
-            continue
-        others = sum(lb_sum[q] for q in parts if q != k)
-        T = max(T, others + min_cell)
-        if k == "named":                                # rolled-only has no union bound
-            L = min(L, sum(caps[q] for q in parts if q != k) + len(parts[k]))
-    return T, L
-
-
-def safe_frac(frac, nd, min_cell: int = _MIN_CELL, grid: int = 10):
-    """``(value, display, range)`` for a term's fractional (1/m) count ``frac`` on the
-    already-suppressed node ``nd`` (its total and split decided first) — two-sided and
-    selection-free (Phase 0, 2026-11-02).
-
-    The old rule published frac exactly whenever it cleared the floor, which let frac cap
-    a ≤floor code from above (to exactly 1 on the live payload). Now, with ``(T, L)`` from
-    ``_frac_bounds`` (public information only):
-      * no ≤floor cell on the term: exact above the floor, ``≤floor`` otherwise;
-      * else a ``grid``-wide bucket, with every bucket ending at or below ``T`` (rounded
-        up to the grid) merged into ``≤Tg`` and every bucket starting above ``L``
-        (rounded down to a bucket start) merged into ``≥Ls``. The published upper end is
-        then >= T and the lower end <= L. When those two regions would overlap
-        (``Ls <= Tg``) frac is withheld — decided from T and L, never from frac itself.
-    ``value`` is the exact int only in the exact case, else None. Pure."""
-    F = int(round(float(frac)))
-    if F <= 0:
-        return 0, "0", [0, 0]
-    bounds = _frac_bounds(nd, min_cell)
-    if bounds is None:
-        if F > min_cell:
-            return F, str(F), [F, F]
-        return None, f"≤{min_cell}", [1, min_cell]
-    T, L = bounds
-    tg = -(-int(T) // grid) * grid                     # ceil to the grid
-    ls = float("inf") if L == float("inf") else ((int(L) - 1) // grid) * grid + 1
-    if ls <= tg:
-        return None, "—", None
-    blo = ((F - 1) // grid) * grid + 1
-    bhi = blo + grid - 1
-    if bhi <= tg:
-        return None, f"≤{tg}", [1, tg]
-    if blo >= ls:
-        return None, f"≥{ls}", [ls, None]
-    return None, f"{blo}–{bhi}", [blo, bhi]
 
 
 # --- named / rolled-up-only split of a term's count ------------------------------------
@@ -1049,7 +964,7 @@ def assert_diff_safe(nodes, min_cell: int = _MIN_CELL) -> None:
             lo = hi = int(nd["count"])
             # selection-free: an exact total is only legal if its whole containing band is
             # (otherwise the exact/band decision itself leaks the threshold).
-            blo, bhi = _band_bounds(volume_band(lo, min_cell), min_cell)
+            _lbl, blo, bhi = total_band(lo, min_cell)
             fb = _max_forced_exact(blo, bhi, bands, min_cell)
             if fb >= 2:
                 raise AssertionError(
@@ -1066,27 +981,11 @@ def assert_diff_safe(nodes, min_cell: int = _MIN_CELL) -> None:
                 f"to >= {f} (within-term roll-up narrowing not suppressed)")
     for nd in nodes:                                 # named / rolled-up-only split
         _check_split(nd, min_cell)
-    for nd in nodes:                                 # frac: both ends (two-sided)
-        if nd.get("kind") == "root" or "frac_range" not in nd:
-            continue
-        bounds = _frac_bounds(nd, min_cell)
-        if bounds is None:
-            continue
-        T, L = bounds
-        if nd.get("frac") is not None:
+    for nd in nodes:                                 # frac is no longer published
+        if nd.get("frac") is not None or nd.get("frac_display") or nd.get("frac_range"):
             raise AssertionError(
-                f"diff-unsafe term {nd.get('id')}: exact frac beside a ≤{min_cell} cell")
-        rng = nd.get("frac_range")
-        if rng is None or rng == [0, 0]:
-            continue                                 # withheld / genuinely zero
-        if rng[1] is not None and int(rng[1]) < T:
-            raise AssertionError(
-                f"diff-unsafe term {nd.get('id')}: frac upper end {rng[1]} caps a "
-                f"≤{min_cell} cell below the floor (needs >= {T})")
-        if int(rng[0]) > L:
-            raise AssertionError(
-                f"diff-unsafe term {nd.get('id')}: frac lower end {rng[0]} forces a "
-                f"≤{min_cell} cell above 1 (needs <= {L})")
+                f"diff-unsafe term {nd.get('id')}: frac published (it leaks code overlaps "
+                f"and caps ≤{min_cell} codes; removed 2026-11-02)")
 
 
 
@@ -1359,9 +1258,6 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
             "state": state,
             "display": display,
             "count": public,                 # None when withheld
-            "frac": None,                    # set by `safe_frac` once total + split are final
-            "frac_display": "",
-            "frac_range": None,
             "collision": bool(siblings),
             "collision_siblings": siblings,
             "collision_kind": ckind,
@@ -1418,13 +1314,6 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
             named_bands=r.get("named_bands") or [], rolled_bands=r.get("rolled_bands") or [],
             min_cell=min_cell)
 
-    # fractional (1/m) count — patient-derived, so it gets its own gate, decided LAST:
-    # its safe interval depends on everything else published for the term (the
-    # suppressed total, the split and the per-code bands; see `_frac_bounds`).
-    for r, nd in zip(term_rows, nodes):
-        frac_val = r.get("n_frac")
-        frac_val = r["n_persons"] if frac_val is None else frac_val
-        nd["frac"], nd["frac_display"], nd["frac_range"] = safe_frac(frac_val, nd, min_cell)
 
     n_terms = len(term_rows)
     n_used = counts["used_small"] + counts["reported"]
@@ -1452,7 +1341,7 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
     root = {"id": _ROOT_ID, "label": "Mondo disease (mapped-term view)",
             "kind": "root", "parents": [], "std_concepts": [], "state": "root",
             "category": "root", "display": "", "count": None,
-            "frac": None, "frac_display": "", "frac_range": None, "collision": False,
+            "collision": False,
             "collision_siblings": [], "collision_kind": "", "rare": False, "rare_src": [],
             "codes": [], "n_codes": 0, "codes_by_vocab": {},
             "source_codes": [], "n_source_codes": 0, "source_bands": [], "depth": 0}
@@ -1642,7 +1531,6 @@ def main(argv: list[str]) -> int:
         source_codes_of: dict[str, dict] = {}   # source_climb catalog (empty otherwise)
         survey: dict = {}                       # source_climb tier coverage (empty otherwise)
         collision_kind_of: dict[str, str] = {}  # source_climb collision mechanism per term
-        frac_of: dict[str, float] = {}          # source_climb fractional (1/m) term count
 
         def assemble_axis(attribution, parent_adj, has_child, label_of, rare_of,
                           out_name, axis_label, paths_of=None):
@@ -1652,7 +1540,7 @@ def main(argv: list[str]) -> int:
             k_std — the source_climb attribution for Mondo, ``t_hpo`` for HPO) plus the
             axis's OWN DAG structures (``parent_adj``/``has_child``/``label_of``/``rare_of``,
             passed in — NOT the Mondo ones) into the written payload ``<out>/<out_name>``
-            and its ``_nodes.tsv``. Computes, per axis: the fractional (1/m) count, the
+            and its ``_nodes.tsv``. Computes, per axis: the per-term counts, the step-tagged
             source-code catalog + volume bands, the collision split, the term universe and
             term_rows, then ``assemble_payload`` + write.
 
@@ -1666,22 +1554,6 @@ def main(argv: list[str]) -> int:
             from collections import Counter
             is_mondo = axis_label == "mondo"
             hit = attribution.select("person_id", "mondo_id")
-
-            # FRACTIONAL (1/m) per-term count — the addable, de-double-counted number.
-            # A condition keyed by (person, source concept, standard concept) maps to m
-            # terms via its resolved tier (the collision); credit 1/m to each so the shares
-            # add back to 1 and summed / rolled-up counts never double-count the map
-            # ambiguity. m is a property of the condition (person-independent).
-            attr_k = attribution.select(
-                "person_id", "mondo_id",
-                F.coalesce(F.col("k_src"), F.lit(-1)).alias("k_src"),
-                F.coalesce(F.col("k_std"), F.lit(-1)).alias("k_std"))
-            m_of = (attr_k.select("k_src", "k_std", "mondo_id").distinct()
-                    .groupBy("k_src", "k_std").agg(F.count(F.lit(1)).alias("m")))
-            frac_pd = (attr_k.distinct().join(m_of, ["k_src", "k_std"])
-                       .groupBy("mondo_id")
-                       .agg(F.sum(F.lit(1.0) / F.col("m")).alias("frac")).toPandas())
-            frac_of = {str(r["mondo_id"]): float(r["frac"]) for _, r in frac_pd.iterrows()}
 
             # per-term catalog of ORIGINATING source codes, each tagged with its ladder STEP
             # for the term (lowest wins: a code reaching the term directly on some rows and by
@@ -1828,7 +1700,6 @@ def main(argv: list[str]) -> int:
                     "rolled_bands": catrec.get("rolled_bands", []),
                     "n_persons": count_of.get(mid, 0),
                     "n_named": named_of.get(mid, 0),
-                    "n_frac": frac_of.get(mid, float(count_of.get(mid, 0))),
                     "collision_siblings": siblings.get(mid, []),
                     "collision_kind": collision_kind_of.get(mid, ""),
                     "rare": rare_of.get(mid, False),
@@ -1904,7 +1775,6 @@ def main(argv: list[str]) -> int:
                 "mondo_id": nd["id"], "label": nd["label"], "kind": nd["kind"],
                 "depth": nd["depth"], "state": nd["state"], "category": nd["category"],
                 "n_patients": nd["display"],
-                "n_frac": nd.get("frac_display", ""),
                 "collision": int(nd["collision"]),
                 "collision_siblings": "|".join(nd["collision_siblings"]),
                 "n_codes": nd["n_codes"],
@@ -2106,7 +1976,7 @@ def main(argv: list[str]) -> int:
                            .select(F.col("concept_id").alias("origin_cid"),
                                    "vocabulary_id", "concept_code"))
 
-            # The per-term assembly (fractional 1/m count, source-code catalog + bands,
+            # The per-term assembly (counts, named split, source-code catalog + bands,
             # collision split, term_rows, assemble_payload, write) is factored into
             # assemble_axis and run once per axis (Mondo below, then HPO). Only the
             # source_climb SURVEY inputs are computed here (Mondo-axis-only): tier person
@@ -2271,9 +2141,6 @@ def main(argv: list[str]) -> int:
                 "n_source_codes": cat["n"],
                 "source_bands": cat.get("bands", []),
                 "n_persons": count_of.get(mid, 0),
-                # fractional (1/m) de-double-counted count; falls back to the exact count
-                # for spaces without collisions (source) or that don't compute it.
-                "n_frac": frac_of.get(mid, float(count_of.get(mid, 0))),
                 "collision_siblings": siblings.get(mid, []),
                 "collision_kind": collision_kind_of.get(mid, ""),
                 "rare": rare_of.get(mid, False),
@@ -2310,7 +2177,6 @@ def main(argv: list[str]) -> int:
             "mondo_id": nd["id"], "label": nd["label"], "kind": nd["kind"],
             "depth": nd["depth"], "state": nd["state"], "category": nd["category"],
             "n_patients": nd["display"],
-            "n_frac": nd.get("frac_display", ""),
             "collision": int(nd["collision"]),
             "collision_siblings": "|".join(nd["collision_siblings"]),
             "n_codes": nd["n_codes"],

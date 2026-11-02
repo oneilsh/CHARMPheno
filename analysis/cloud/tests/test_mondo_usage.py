@@ -132,27 +132,18 @@ def test_assemble_payload_states_stats_and_root():
     assert s["internal_terms"] == 1 and s["internal_used_terms"] == 1
 
 
-def test_fractional_count_suppressed_independently():
-    # frac is patient-derived: it can dip below the floor even when the EXACT count
-    # clears it (a term whose patients arrive via shared codes), so it gets its own gate.
-    rows = [
-        # exact 30 (reported) but fractional 12.4 -> must suppress the frac to ≤20
-        {"mondo_id": "MONDO:A", "label": "a", "is_internal": False, "parents": [],
-         "std_concepts": [1], "n_persons": 30, "n_frac": 12.4, "collision_siblings": []},
-        # exact and frac both clear the floor; frac rounds to int
-        {"mondo_id": "MONDO:B", "label": "b", "is_internal": False, "parents": [],
-         "std_concepts": [2], "n_persons": 5000, "n_frac": 2500.6, "collision_siblings": []},
-        # no n_frac supplied -> falls back to the exact count
-        {"mondo_id": "MONDO:C", "label": "c", "is_internal": False, "parents": [],
-         "std_concepts": [3], "n_persons": 90, "collision_siblings": []},
-    ]
+def test_frac_is_never_published():
+    # the 1/m fractional count leaked code overlaps (frac - N) and capped ≤20 codes from
+    # both ends; it was dropped from the export (2026-11-02). The roll-up is built
+    # client-side from the published per-term counts instead.
+    rows = [{"mondo_id": "MONDO:A", "label": "a", "is_internal": False, "parents": [],
+             "std_concepts": [1], "n_persons": 30, "n_frac": 12.4, "collision_siblings": []}]
     by = {n["id"]: n for n in m.assemble_payload(meta={}, term_rows=rows)["nodes"]}
-    assert by["MONDO:A"]["count"] == 30 and by["MONDO:A"]["frac"] is None      # frac withheld
-    assert by["MONDO:A"]["frac_display"] == "≤20" and by["MONDO:A"]["frac_range"] == [1, 20]
-    assert by["MONDO:B"]["frac"] == 2501 and by["MONDO:B"]["frac_display"] == "2501"
-    assert by["MONDO:C"]["frac"] == 90                                          # fell back to exact
-    assert by["root"]["frac"] is None and by["root"]["frac_display"] == ""
-    assert by["root"]["frac_range"] is None
+    for nd in by.values():
+        assert "frac" not in nd and "frac_display" not in nd and "frac_range" not in nd
+    import pytest
+    with pytest.raises(AssertionError):
+        m.assert_diff_safe([{"id": "X", "state": "reported", "count": 500, "frac": 510}])
 
 
 def test_rare_flag_passthrough_and_stats():
@@ -522,7 +513,7 @@ def test_forced_lower_inclusion_exclusion():
 def test_safe_total_band_picks_finest_boring_band():
     # flagged -> the small two-sided CONTAINING band already removes the narrowing.
     need, disp, (lo, hi) = m.safe_total_band(32, [{"band": "≤20", "codes": 2}])
-    assert need and disp == "21–100" and (lo, hi) == (21, 100)
+    assert need and disp == "21–50" and (lo, hi) == (21, 50)
     # once banded, differencing can no longer force the <=20 code >= 2.
     assert m._forced_lower(lo, hi, [{"band": "≤20", "codes": 2}]) <= 1
     # a safe term is left exact (no banding).
@@ -544,7 +535,7 @@ def test_complementary_suppress_bands_only_the_unsafe_and_assert_passes():
     by = {n["id"]: n for n in p["nodes"]}
     scar = by["MONDO:SCAR"]
     assert scar["total_banded"] is True and scar["count"] is None
-    assert scar["display"] == "21–100" and scar["count_range"] == [21, 100]
+    assert scar["display"] == "21–50" and scar["count_range"] == [21, 50]
     assert scar["state"] == "reported"
     assert by["MONDO:BIG"]["count"] == 5000 and not by["MONDO:BIG"].get("total_banded")
     assert p["stats"]["total_banded_terms"] == 1
@@ -567,8 +558,8 @@ def test_total_banding_is_band_decided():
     sb = [{"band": "21–100", "codes": 1}, {"band": "≤20", "codes": 1}]
     # the old rule published 101 exactly (forced==1) but banded 102, so a band leaked ">=102".
     need, disp, (lo, hi) = m.safe_total_band(101, sb)
-    assert need and disp == "101–1k" and (lo, hi) == (101, 1000)
-    assert m.safe_total_band(102, sb)[1] == "101–1k"          # same outcome across the band
+    assert need and disp == "101–200" and (lo, hi) == (101, 200)
+    assert m.safe_total_band(102, sb)[1] == "101–200"         # same outcome across the band
 
 
 def test_total_ceiling_fallback_respects_reported_floor():
@@ -592,85 +583,6 @@ def test_assert_diff_safe_rejects_exact_total_with_unsafe_band():
     sb = [{"band": "21–100", "codes": 1}, {"band": "≤20", "codes": 1}]
     with pytest.raises(AssertionError):
         m.assert_diff_safe([{"id": "X", "state": "reported", "count": 101, "source_bands": sb}])
-
-
-# --- Phase 0: two-sided frac publication ----------------------------------------------
-def _banded(lo, hi, bands, **kw):
-    return dict({"id": "X", "state": "reported", "count": None, "count_range": [lo, hi],
-                 "total_banded": True, "source_bands": bands}, **kw)
-
-
-def test_safe_frac_exact_without_small_codes():
-    nd = {"state": "reported", "count": 5000, "source_bands": [{"band": "1k–10k", "codes": 2}]}
-    assert m.safe_frac(2500.6, nd) == (2501, "2501", [2501, 2501])
-    assert m.safe_frac(12.4, {"state": "reported", "count": 30})[1:] == ("≤20", [1, 20])
-    assert m.safe_frac(0, nd) == (0, "0", [0, 0])
-
-
-SB = [{"band": "101–1k", "codes": 1}, {"band": "≤20", "codes": 1}]
-
-
-def test_safe_frac_upper_bound_never_narrows():
-    # frac >= Σ per-code persons (m = 1), so frac_hi - Σ(other codes' band lows) caps the
-    # ≤20 code: T = 101 + 1 - 1 + 20 = 121 -> the upper end never drops below it.
-    nd = _banded(101, 1000, SB)
-    assert m._frac_bounds(nd) == (121, 1001)
-    assert m.safe_frac(108, nd) == (None, "≤130", [1, 130])   # the measured live-leak shape
-    assert m.safe_frac(555, nd) == (None, "551–560", [551, 560])
-    for F in range(1, 3000):
-        _, _, rng = m.safe_frac(F, nd)
-        assert rng[1] is None or rng[1] - (101 + 1 - 1) >= 20
-
-
-def test_safe_frac_lower_end_never_forces_a_small_code():
-    # frac <= Σ per-code persons (k = 1), so frac_lo - Σ(other codes' caps) forces the
-    # ≤20 code up: L = 1000 + 20 - 20 + 1 = 1001 -> buckets above merge into "≥1001".
-    nd = _banded(101, 1000, SB)
-    assert m.safe_frac(1234, nd) == (None, "≥1001", [1001, None])
-    for F in range(1, 3000):
-        _, _, (lo, _hi) = m.safe_frac(F, nd)
-        assert lo - 1000 <= 1
-
-
-def test_safe_frac_withheld_on_used_small_union():
-    # review #2: used-small term, two ≤20 codes (an ICD9/ICD10 pair on the same patients),
-    # frac 33 -> "31–40" forced each code >= 11 and the total >= 16. Now withheld, decided
-    # from public facts (T = 21 -> 30 overlaps L = 2), so it is withheld for every frac.
-    nd = {"id": "S", "state": "used_small", "count": None, "display": "≤20",
-          "source_bands": [{"band": "≤20", "codes": 2}]}
-    for F in (3, 15, 33, 40):
-        assert m.safe_frac(F, nd) == (None, "—", None)
-
-
-def test_safe_frac_accounts_for_published_split():
-    # review #3: N=130 exact; named = one 21–100 code, a = 90 (exact); rolled = one 101–1k
-    # code + one ≤20 code R1, b = 40 (exact); frac 196 was "191–200", so
-    # |R1| <= 200 - 90 - 101 = 9. The split raises the public lower bound on the named
-    # codes' sum to 90, so T = 90 + 102 - 1 + 20 = 211 (-> 220).
-    nb = [{"band": "21–100", "codes": 1}]
-    rb = [{"band": "101–1k", "codes": 1}, {"band": "≤20", "codes": 1}]
-    sp = m.split_parts({"state": "reported", "count": 130, "display": "130"},
-                       n_total=130, n_named=90, named_bands=nb, rolled_bands=rb)
-    assert sp["status"] == "exact"
-    nd = {"id": "Q", "state": "reported", "count": 130, "source_bands": nb + rb, "split": sp}
-    T, L = m._frac_bounds(nd)
-    assert T == 211
-    v, d, (lo, hi) = m.safe_frac(196, nd)
-    assert hi >= 211 and hi - 90 - 101 >= 20
-    m.assert_diff_safe([dict(nd, frac=v, frac_display=d, frac_range=[lo, hi])])
-
-
-def test_assert_diff_safe_rejects_unsafe_frac():
-    import pytest
-    base = _banded(101, 1000, SB)
-    with pytest.raises(AssertionError):                          # exact frac beside a ≤20 code
-        m.assert_diff_safe([dict(base, frac=108, frac_range=[108, 108])])
-    with pytest.raises(AssertionError):                          # range top below T
-        m.assert_diff_safe([dict(base, frac=None, frac_range=[101, 110])])
-    with pytest.raises(AssertionError):                          # range bottom above L
-        m.assert_diff_safe([dict(base, frac=None, frac_range=[1011, 1020])])
-    m.assert_diff_safe([dict(base, frac=None, frac_range=[1, 130])])
-    m.assert_diff_safe([dict(base, frac=None, frac_range=[1001, None])])
 
 
 # --- named / rolled-up-only split -----------------------------------------------------
@@ -917,3 +829,13 @@ def test_mirror_tripwire_rejects_hidden_zero():
            "rolled_bands": [{"band": "21–100", "codes": 1}]}
     with pytest.raises(AssertionError):
         m.assert_diff_safe([dict(_rep(55), id="M", source_bands=[], split=bad)])
+
+
+
+def test_total_band_ladder_is_1_2_5():
+    labs = [m.total_band(n)[0] for n in (21, 50, 51, 150, 300, 999, 1500, 4000, 7000,
+                                            15000, 30000, 80000, 150000, 300000, 600000)]
+    assert labs == ["21–50", "21–50", "51–100", "101–200", "201–500", "501–1k", "1k–2k",
+                    "2k–5k", "5k–10k", "10k–20k", "20k–50k", "50k–100k", "100k–200k",
+                    "200k–500k", ">500k"]
+    assert m.total_band(1500)[1:] == (1001, 2000)
