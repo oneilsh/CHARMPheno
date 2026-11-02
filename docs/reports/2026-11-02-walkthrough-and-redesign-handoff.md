@@ -8,10 +8,10 @@ This file holds what those two do not.
 
 ## Where things stand
 
-- Done this session: the post-0167 cleanup (`ee72d88b`), a maintainer-led walkthrough of
+- Done this session: the post-0167 cleanup (`57026136`), a maintainer-led walkthrough of
   the generic code (core, dag, the DAG-gated model and shim, readout, eval.metrics,
   DagHeads) with fixes landed as it went, then plan WPs 1, 2, 13.
-- **WP2 (`566db2b6`) was committed before its spark-vi slow tier finished** (the stop
+- **WP2 (`bbb5a5d7`) was committed before its spark-vi slow tier finished** (the stop
   hook forbids idling with uncommitted work). Its log:
   `/tmp/claude-0/-home-user-CHARMPheno/7ca57e7e-dd57-5d96-b2f7-642d51809940/scratchpad/wp2_slow.log`
   (if the container was recycled, rerun `PYTHONPATH=.:spark-vi:charmpheno poetry run
@@ -24,14 +24,14 @@ This file holds what those two do not.
 
 After WP14, the maintainer walks through the redesign's changes with the agent (a
 second walkthrough). BOTH walkthroughs go in ONE dated REVIEW_LOG entry, written at the
-end of the second. The first walkthrough's part (keep it; commit hashes as on the
-remote after the 2026-11-02 history scrub may differ from the ones below, so cite by
-subject if a hash does not resolve):
+end of the second. The first walkthrough's part (keep it; hashes are the
+remote's after the 2026-11-02 history scrub; if one stops resolving, find it by
+subject):
 - **Areas reviewed:** spark_vi.core (model, loop, config, result, runner, local_runner,
   retry, broadcast), dag (layout, ops), models/topic/dag_gated_lda, the DAG-gated MLlib
   shim, readout (solver, kernels, heads, spark, local, stacked, evaluate), eval.metrics,
   mllib/readout (DagHeads).
-- **Shipped in passing** (commits `d62b280d` .. `cd6be3ff`, list above in `git log`):
+- **Shipped in passing** (commits `fb6d0fcb` .. `57f9c9f5`, list above in `git log`):
   resume continues the seed stream and diagnostics; empty minibatch records NaN; E-step
   retry; atomic checkpoints; DAG-gated resume (`fit_ckpt`, identity file,
   `--fresh-fit`); ancestor-walk `frontier_from_coded`; dead `allowed(v)`;
@@ -40,10 +40,10 @@ subject if a hash does not resolve):
   mass selection and coverage removed; distributed unit-pooled detection;
   `merge_all`; domain-neutral wording across spark_vi; scikit-learn a dev dependency.
 - **Pre-existing bugs caught:** gated alpha step used full sub-simplices during
-  leaves-first warm rounds (`dac75728`); `infer_local` drew from the global RNG,
-  breaking VIModel purity (`9f7225ba`); readout packed projection built outside retry
-  (`96a0f4cf`); unbounded per-unit collect in detection (`15bbe7c7`); O(P n log n)
-  tally merges (`cd6be3ff`); `save_result` not atomic (`47f7e941`).
+  leaves-first warm rounds (`e8ad2516`); `infer_local` drew from the global RNG,
+  breaking VIModel purity (`74bf66bf`); readout packed projection built outside retry
+  (`9800a844`); unbounded per-unit collect in detection (`f1b171a8`); O(P n log n)
+  tally merges (`57f9c9f5`); `save_result` not atomic (`22034230`).
 - **Threads parked:** pooled multi-domain normalization and token weighting; a held-out
   ELBO for mini-batch early stop (declined: current behaviour is fine); optimize_eta
   (declined); the readout's home (spark-vi vs charmpheno, still to decide; lean:
