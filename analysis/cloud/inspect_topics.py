@@ -895,7 +895,7 @@ def _trunc(s, n):
 
 def _digest_words(t, lams, sh, inv_maps, names, name_by_id, dom_names, *,
                   k=6, maxlen=40, profile_idx=None, own_idx=None, pws=None,
-                  rel_lambda=None):
+                  rel_lambda=None, tail_domains=("drug",), tail_k=3):
     """One compact line summarising a topic as a PHENOTYPE SIGNATURE: the
     condition-domain top-k names, then the top-3 drug names after `//`. Leads
     with conditions (the disease identity) rather than the dominant domain,
@@ -927,11 +927,15 @@ def _digest_words(t, lams, sh, inv_maps, names, name_by_id, dom_names, *,
     lead = cond_d if cond_d is not None else int(np.argmax(sh["dom_mass"][t]))
     main = render(lead, k, mark=(lead == cond_d))
     parts = "·".join(main) if main else "(flat)"
-    drug_d = next((i for i, n in enumerate(dom_names) if "drug" in n.lower()), None)
-    if drug_d is not None and drug_d != lead:
-        dr = render(drug_d, 3)
-        if dr:
-            parts += " // " + "·".join(dr)
+    # After `//`, the top `tail_k` names of each of `tail_domains` (matched by
+    # substring on the domain names, in the order given; default: drugs).
+    for want in tail_domains:
+        d = next((i for i, n in enumerate(dom_names) if want.lower() in n.lower()),
+                 None)
+        if d is not None and d != lead:
+            dr = render(d, tail_k)
+            if dr:
+                parts += " // " + "·".join(dr)
     return parts
 
 
@@ -992,8 +996,11 @@ def _own_codes_path(args, run_dir):
 def build_digest(run_dir, *, exemplars=8, t_words=6, bundle_meta_path=None,
                  vocab_path=None, names_path=None, readout_label="gated_pc",
                  grep_pattern=None, redundancy=False, profile_file=None,
-                 own_codes_path=None):
+                 own_codes_path=None, digest_domains=("drug",)):
     """A COMPACT single-block digest -- the copy-paste-to-chat view.
+
+    `digest_domains`: the domains whose top names follow the condition names on each
+    topic line, after `//` (default drugs; e.g. ("drug", "measurement")).
 
     Same inputs as build_report, but emits only: a one-line header (K / starved%
     / evidence spread / decoder), the sharpness-by-depth table with an auto
@@ -1065,7 +1072,8 @@ def build_digest(run_dir, *, exemplars=8, t_words=6, bundle_meta_path=None,
         oidx = (own_idx.get(eng) or None) if (own_idx is not None
                                                and eng is not None) else None
         wl = _digest_words(t, lams, sh, inv_maps, names, name_by_id, dom_names,
-                           k=t_words, profile_idx=pidx, own_idx=oidx)
+                           k=t_words, profile_idx=pidx, own_idx=oidx,
+                           tail_domains=tuple(digest_domains))
         return (" | " + wl) if wl else ""
 
     def line(t):
@@ -2017,6 +2025,10 @@ def main():
                          "--bundle-meta (depth+words), --grep, --redundancy, "
                          "--top-words; writes <run-dir>/topics_digest.md by "
                          "default. Suppresses the verbose report.")
+    ap.add_argument("--digest-domains", default="drug", metavar="LIST",
+                    help="Comma list of domains whose top names follow the condition "
+                         "names on each --digest topic line, after `//` (default "
+                         "drug; e.g. drug,measurement).")
     ap.add_argument("--digest-exemplars", type=int, default=8, metavar="N",
                     help="How many best-fed topics to line-detail in --digest "
                          "(default 8).")
@@ -2124,7 +2136,8 @@ def main():
             names_path=args.concept_names, readout_label=args.readout_label,
             grep_pattern=args.grep, redundancy=bool(args.redundancy),
             profile_file=args.credited_file,
-            own_codes_path=_own_codes_path(args, run_dir))
+            own_codes_path=_own_codes_path(args, run_dir),
+            digest_domains=tuple(d for d in args.digest_domains.split(",") if d))
         default_out = "topics_digest.md"
     else:
         report = build_report(

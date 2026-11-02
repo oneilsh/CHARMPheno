@@ -28,7 +28,7 @@ filled in as packages land.
 | 10 | **MLlib persistence**: `MLWritable` / `MLReadable` for both models (DefaultParamsWriter metadata + our data files through WP1); `Pipeline.save` / `PipelineModel.load` round trip. | R13 L2 | yes | |
 | 11 | **charmpheno: the Mondo build hands over the subgraph** (coded terms + ancestors, labels at most-specific terms); powering and `collapse` leave the build. **Bundle** stores attested node-id arrays (gate and label-year) instead of `frontier` / `label` / `labelMask`. Hashed-module edit: ONE announced full cache drop, tripwires re-pinned. | "outside spark-vi" | partly (tripwires, unit) | |
 | 12 | **Drivers**: fit driver sets the new Params (`minDocsPerNode=100`), saves the fitted DAG and id map; readout driver builds DagHeads inputs from the model; readout DAG, framings member lists, own codes and sidecar mappings read the model's node set. Workup / conversion sidecars follow by ancestry. | "outside spark-vi" | driver tier | |
-| 13 | **Digest measurement domain** (`inspect_topics --digest-domains`). | parked | yes | |
+| 13 | **Digest measurement domain** (`inspect_topics --digest-domains`). | parked | yes | done |
 | 14 | **Full test tier** (`make test-all` equivalent), docs (SPARK_VI_FRAMEWORK, LABEL_RULES, AGENTS), then the **cluster validation** below. | | | |
 
 Dependencies: 4 before 5, 6, 8, 11, 12; 5 before 6, 8, 9, 10; 1 before 8 and 10;

@@ -933,3 +933,19 @@ def test_init_provenance_fallbacks():
         "seed_profile": {"path": "/x/marks.tsv"}}})
     assert "gate seed balanced + leaves" in line
     assert "HPO: profile seed (marks.tsv)" in line
+
+
+def test_digest_words_tail_domains_add_measurements_after_drugs():
+    import numpy as np
+    import inspect_topics as it
+    lams = [np.array([[5.0, 1.0, 1.0]]), np.array([[1.0, 4.0]]), np.array([[3.0, 1.0]])]
+    inv = [{0: 10, 1: 11, 2: 12}, {0: 20, 1: 21}, {0: 30, 1: 31}]
+    names = {10: "cond A", 11: "cond B", 12: "cond C", 20: "drug A", 21: "drug B",
+             30: "lab A [high]", 31: "lab B [low]"}
+    sh = {"dom_mass": np.array([[0.2, 0.2, 0.6]])}
+    doms = ["condition", "drug", "measurement"]
+    base = it._digest_words(0, lams, sh, inv, names, {}, doms, k=2)
+    assert base.startswith("cond A") and "drug B" in base and "lab A" not in base
+    both = it._digest_words(0, lams, sh, inv, names, {}, doms, k=2,
+                            tail_domains=("drug", "measurement"))
+    assert both.index("drug B") < both.index("lab A [high]")
