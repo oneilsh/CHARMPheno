@@ -65,8 +65,8 @@ After the redesign lands and its changes are re-reviewed, write ONE dated entry
 - **Any edit under `spark-vi/spark_vi/dag/` (even a docstring) moves the native-Mondo
   key** (`layout.py` moves every bundle key). Run
   `tests/scripts/test_case_finding_cache_mondo.py` before pushing; re-pin and label the
-  commit "CACHE DROP". Current pins: SNOMED c90bbd9e8a763d48 / 08ad48499f5b3541 /
-  4144be6f22528291, native Mondo 14e647862c6f1301.
+  commit "CACHE DROP". Current pins (after WP4): SNOMED 7ae90c671efc1b0a / 867b7b9b4c7373e0 /
+  dcfbbc2052b41078, native Mondo b7e1f8c795568d57.
 - **Do not edit spark-vi while its slow tier runs**: Spark workers re-import modules.
 - Never wrap a URI in `pathlib.Path` (collapses `gs://b` to `gs:/b`); use `spark_vi.io.fs.join`.
 - Monkeypatching `time.sleep` globally in a Spark test catches pyspark's own sleeps;
