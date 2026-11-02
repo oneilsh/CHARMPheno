@@ -780,6 +780,15 @@ Most VI models produce additive sufficient statistics. The default `combine_stat
 sums arrays elementwise via `treeAggregate`. Models with non-additive aggregation
 override `combine_stats`.
 
+A model whose partitions touch only some rows of a large statistic can ship it
+row-sparse: `spark_vi.core.row_sparse.RowSparseStats` stores just the touched rows
+(full width), supports the runners' scalar scaling (`v * s`, `s * v`), and
+`add_row_sparse` sums it with another partial, turning dense once a union covers half
+the rows, so the driver holds at most one dense array. The gated LDA does this for
+`lambda_stats` (a partition touches the background block and its documents' closure
+blocks only); its `combine_stats` and `update_global` handle the type, and the values
+are bit-identical to the dense accumulation. Other models keep dense partials.
+
 ### Long-format DataFrames as user convention
 
 Pre-built models accept long-format DataFrames with column name kwargs. This is the

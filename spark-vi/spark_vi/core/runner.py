@@ -55,10 +55,14 @@ _AGG_DEPTH_THRESHOLD_BYTES = 128 * 1024 * 1024
 def _agg_depth(global_params: dict) -> int:
     """treeReduce depth for the stats aggregate, sized from the params payload.
 
-    Each per-partition sufficient-stats partial has (at least) the dense shape
-    of the global params — for the topic models, a lambda-shaped (K, V) dict —
-    so the params' ndarray bytes are a driver-side proxy for the partial size
-    the reduce will ship. At depth d over P partitions the driver receives
+    A per-partition sufficient-stats partial is at most the dense shape of the
+    global params — for the topic models, a lambda-shaped (K, V) dict — so the
+    params' ndarray bytes are a driver-side proxy (an upper bound) for the
+    partial size the reduce will ship. Most models ship exactly that; the gated
+    LDA ships row-sparse partials (`spark_vi.core.row_sparse`) whose combine
+    turns dense once a union covers half of K, so they are smaller below the top
+    of the tree and the dense bound is what they grow to as unions widen. At
+    depth d over P partitions the driver receives
     ~P^(1/d) partials in one burst: fine at 41 MB/partial (K=444), too much for
     an 8 GB driver heap at 355 MB/partial (K~3,800, V~11,600) under depth 2.
     Above the threshold, depth 3 trades one extra executor combine round for a
@@ -199,10 +203,12 @@ class VIRunner:
                 # holds one merged stats dict, not the per-partition list.
                 # Requires combine_stats to be associative + commutative (already
                 # required by the VIModel contract for additive statistics).
-                # Depth is sized from the stats payload (see _agg_depth): each
-                # per-partition partial is a DENSE lambda-shaped dict (~355 MB at
-                # K~3,800 x V~11,600), and depth 3 moves one more combine round
-                # onto the executors so fewer of them land on the driver at once.
+                # Depth is sized from the stats payload (see _agg_depth): a
+                # per-partition partial is at most a dense lambda-shaped dict
+                # (~355 MB at K~3,800 x V~11,600; dense for most models, row-sparse
+                # for the gated LDA until its combine densifies the union), and
+                # depth 3 moves one more combine round onto the executors so fewer
+                # of them land on the driver at once.
                 try:
                     return batch_rdd.mapPartitions(_local).treeReduce(
                         model.combine_stats, depth=_agg_depth(global_params))

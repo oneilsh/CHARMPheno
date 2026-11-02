@@ -35,6 +35,7 @@ def test_tpn0_gated_e_step_touches_every_topic_for_every_doc():
                              counts=np.array([1.0, 3.0, 2.0]), length=6,
                              frontier=frozenset())]
     out = m.local_update(docs, gp)
-    assert out["lambda_stats"].shape == (6, 12)
-    assert (out["lambda_stats"].sum(axis=1) > 0).all()     # no topic is gated out
+    stats = np.asarray(out["lambda_stats"])
+    assert stats.shape == (6, 12)
+    assert (stats.sum(axis=1) > 0).all()     # no topic is gated out
 

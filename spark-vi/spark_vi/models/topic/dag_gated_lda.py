@@ -25,8 +25,17 @@ constructor arg (a sequence of per-domain vocab sizes summing to vocab_size): gl
 ["lambda"] becomes a per-domain dict {m: (K, V_m)} instead of one (K, V) array, each block
 row-normalized on its own under the one scalar eta prior. The gated CAVI never changes —
 it sees one concatenated (K, V) expElogbeta and per-doc concatenated indices — so the
-sufficient statistics stay one concatenated array (combine_stats and the runners are
-untouched).
+sufficient statistic stays one concatenated (K, V) matrix.
+
+PARTITION STATISTICS ARE ROW-SPARSE. A partition's `lambda_stats` touches only the
+rows of the topics its documents may use (the background block plus their closure
+blocks), each over the full vocabulary, so local_update returns a
+`spark_vi.core.row_sparse.RowSparseStats` holding just those rows; a dense (K, V)
+partial would cost K * V * 8 bytes of executor heap and executor -> driver traffic
+per partition however few topics were touched. `combine_stats` takes the row union
+and densifies once it covers more than half of K, so the top of the reduce tree and
+the driver hold one plain array; update_global densifies before its arithmetic. The
+values are bit-identical to the dense accumulation.
 
 VALIDATED against a collapsed-Gibbs sampler of the same gated model (the test-suite
 oracle `_gibbs_oracle.fit_gated`): placement (node AUC by depth, MRR, top-2) matches at
@@ -42,6 +51,7 @@ from typing import Any, Iterable
 import numpy as np
 from scipy.special import digamma
 
+from spark_vi.core.row_sparse import RowSparseStats, add_row_sparse, as_dense
 from spark_vi.inference.concentration_optimization import gated_alpha_newton_step
 from spark_vi.dag import DagLayout
 from spark_vi.models.topic.domains import domains_to_bounds
@@ -333,18 +343,29 @@ class DagGatedOnlineLDA(OnlineLDA):
         contributes to the background only). Letting background docs go full-K instead
         lets the large background population train the node topics, collapsing them into
         generic comorbidity and destroying node specificity. Cost is O(|allowed|) per
-        token = the doc's frontier closure (bounded by DAG depth), not K."""
+        token = the doc's frontier closure (bounded by DAG depth), not K.
+
+        `lambda_stats` comes back ROW-SPARSE (`RowSparseStats`): only the rows of topics
+        some document here was allowed, each full-V wide, accumulated in first-touch
+        order in a growing buffer and sorted at the end. A partition's memory is then
+        n_touched * V rather than K * V; each cell receives exactly the additions, in
+        the same order, that the dense (K, V) accumulation would give it."""
         alpha = global_params["alpha"]
         # Leaves-first schedule round (None = the production gate).
         gate_level = (self._gate_level(int(global_params["gate_iter"]))
                       if "gate_iter" in global_params else None)
         # Multi-domain: the gated CAVI only ever sees a concatenated (K, V)
-        # expElogbeta and each doc's concatenated token indices; lambda_stats stays a
-        # single concatenated (K, V) array so VIRunner's mini-batch scaling /
-        # combine_stats / broadcast are untouched.
+        # expElogbeta and each doc's concatenated token indices; lambda_stats is one
+        # concatenated (K, V) statistic either way.
         expElogbeta = (global_params["expElogbeta"] if "expElogbeta" in global_params
                        else expElogbeta_from_lambda(global_params["lambda"]))
-        lambda_stats = np.zeros((self.K, self.V), dtype=np.float64)
+        # Row-sparse accumulator: slot[k] is topic k's row in `buf` (-1 = untouched).
+        # `buf` grows by doubling; every document touches the background block, so it
+        # starts with room for that block and as many rows again.
+        slot = np.full(self.K, -1, dtype=np.int64)
+        n_touched = 0
+        buf = np.zeros((min(self.K, max(2 * self.lay.n_bg, 8)), self.V),
+                       dtype=np.float64)
 
         doc_loglik_sum = 0.0
         doc_theta_kl_sum = 0.0
@@ -384,7 +405,17 @@ class DagGatedOnlineLDA(OnlineLDA):
                 tol=self.cavi_tol,
             )
             sstats_row = np.outer(expElogthetad, doc.counts / phi_norm)
-            lambda_stats[np.ix_(allowed, doc.indices)] += sstats_row
+            new = allowed[slot[allowed] < 0]
+            if new.size:
+                if n_touched + new.size > buf.shape[0]:
+                    grown = np.zeros((min(self.K, max(2 * buf.shape[0],
+                                                      n_touched + new.size)), self.V),
+                                     dtype=np.float64)
+                    grown[:n_touched] = buf[:n_touched]
+                    buf = grown
+                slot[new] = np.arange(n_touched, n_touched + new.size)
+                n_touched += new.size
+            buf[np.ix_(slot[allowed], doc.indices)] += sstats_row
             doc_loglik_sum += float(np.sum(doc.counts * np.log(phi_norm)))
             # Gated posterior KL: KL(q(theta_d) || p(theta_d)) restricted to the doc's
             # allowed sub-simplex (gamma and alpha[allowed] are both length-|allowed|),
@@ -401,6 +432,9 @@ class DagGatedOnlineLDA(OnlineLDA):
                 e_log_theta_d = digamma(gamma) - digamma(gamma.sum())
                 np.add.at(node_theta_sum, self._topic_to_tied[allowed], e_log_theta_d)
 
+        rows = np.flatnonzero(slot >= 0)                   # sorted topic ids
+        # Fancy indexing copies just the touched rows, releasing the spare capacity.
+        lambda_stats = RowSparseStats(rows, buf[slot[rows]], self.K)
         result = {
             "lambda_stats": lambda_stats,
             "doc_loglik_sum": np.array(doc_loglik_sum),
@@ -410,6 +444,25 @@ class DagGatedOnlineLDA(OnlineLDA):
         if node_theta_sum is not None:
             result["e_log_theta_node_sum"] = node_theta_sum
         return result
+
+    def combine_stats(self, a, b):
+        """Sum two statistic dicts; `lambda_stats` may be row-sparse on either side.
+
+        `lambda_stats` is added by `add_row_sparse`: the row union of two row-sparse
+        partials stays row-sparse until it covers more than half of K, then becomes a
+        plain (K, V) array, as does any sum with a dense side. So a reduce tree's lower
+        levels ship small partials and its upper levels (and the driver) hold at most
+        one dense array each. Every other key is the inherited dense sum. The result
+        equals, value for value, the dense sum of the densified inputs."""
+        la, lb = a.get("lambda_stats"), b.get("lambda_stats")
+        out = super().combine_stats(
+            {k: v for k, v in a.items() if k != "lambda_stats"},
+            {k: v for k, v in b.items() if k != "lambda_stats"})
+        if la is not None and lb is not None:
+            out["lambda_stats"] = add_row_sparse(la, lb)
+        elif la is not None or lb is not None:
+            out["lambda_stats"] = la if la is not None else lb
+        return out
 
     def update_global(self, global_params, target_stats, learning_rate):
         """SVI natural-gradient λ step (inherited form) + gated per-node α step.
@@ -425,17 +478,22 @@ class DagGatedOnlineLDA(OnlineLDA):
         the concatenated lambda_stats sufficient statistic, plus the eta
         intercept), then split back into a per-domain dict and blended per domain
         — same (1-rho)*old + rho*target form as the single-array path.
+
+        `lambda_stats` may arrive row-sparse (local_update's partials, or a reduce
+        that never densified); it is densified first, so all arithmetic below is on
+        plain (K, V) arrays.
         """
         lam = global_params["lambda"]
         alpha = global_params["alpha"]
         eta = global_params["eta"]
+        stats = as_dense(target_stats["lambda_stats"])
         if self.domains is None:
             expElogbeta = expElogbeta_from_lambda(lam)
-            target_lam = eta + expElogbeta * target_stats["lambda_stats"]
+            target_lam = eta + expElogbeta * stats
             new_lam = (1.0 - learning_rate) * lam + learning_rate * target_lam
         else:
             expElogbeta = self._assemble_expElogbeta(lam)
-            target = eta + expElogbeta * target_stats["lambda_stats"]
+            target = eta + expElogbeta * stats
             target_dict = self._split_to_domains(target)
             new_lam = {
                 m: (1.0 - learning_rate) * lam[m] + learning_rate * target_dict[m]

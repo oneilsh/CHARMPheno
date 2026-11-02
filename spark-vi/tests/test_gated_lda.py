@@ -42,7 +42,7 @@ def test_local_update_gates_sstats_to_allowed_rows_only():
                            frontier=frozenset({3}))
     allowed = set(lay.allowed_set(frozenset({3})).tolist())
     out = m.local_update([doc], gp)
-    stats = out["lambda_stats"]
+    stats = np.asarray(out["lambda_stats"])
     disallowed = [k for k in range(lay.K) if k not in allowed]
     assert np.allclose(stats[disallowed], 0.0)          # gate: zero outside allowed
     assert stats[sorted(allowed)].sum() > 0.0           # allowed rows got mass
@@ -61,7 +61,7 @@ def test_local_update_empty_frontier_is_background_only():
                            counts=np.array([2.0, 1.0]), length=3,
                            frontier=frozenset())
     out = m.local_update([doc], gp)
-    stats = out["lambda_stats"]
+    stats = np.asarray(out["lambda_stats"])
     bg = list(range(lay.n_bg))
     node_rows = [k for k in range(lay.K) if k not in bg]
     assert np.allclose(stats[node_rows], 0.0)           # node topics get NOTHING
