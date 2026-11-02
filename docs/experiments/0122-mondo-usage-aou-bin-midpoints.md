@@ -1,7 +1,7 @@
 ---
 id: 122
 slug: mondo-usage-aou-bin-midpoints
-status: pending
+status: complete
 model_class: mondo_usage
 cohort: population_rare_priority
 source_table: condition_occurrence
@@ -31,4 +31,10 @@ make -C analysis/cloud exp ID=122
 
 ## Run log
 
-_(pending)_
+- **2026-11-02 — OK.** Both payloads pass `assert_cells_safe` (every cell on the 10, 30, 50, …
+  grid). Every cell equals the midpoint of its 0121 value's bin. Bias check against 0121's
+  exact cells: Mondo root roll-up 16,513,890 vs 16,512,215 (+0.01%); HPO 4,948,200 vs
+  4,948,540 (−0.01%). Mondo: 63,189 cells; 4,822 used terms (2,882 with at least one cell above
+  the first bin, 1,940 with only 1–20 codes). HPO: 4,885 cells; 1,347 used terms. Examples:
+  capillary hemangioma 30 + 10 = 40; acute thyroiditis 130; lower respiratory tract disorder
+  4,750 (4,740 climbed).
