@@ -532,24 +532,54 @@ def _forced_lower(total_lo, total_hi, source_bands, min_cell: int = _MIN_CELL):
     return total_lo - (others_max - min_cell)       # drop one ≤floor code (its cap = min_cell)
 
 
+_BIG = 10 ** 12   # finite stand-in for the open-ended ``>100k`` band's upper edge
+
+
+def _max_forced_exact(lo, hi, source_bands, min_cell: int = _MIN_CELL) -> int:
+    """Max of ``_forced_lower(x, x, ...)`` over integer totals x in [lo, hi].
+
+    As a function of an exact total x, the forced bound is piecewise linear with
+    breakpoints at the code bands' upper edges (each ``min(band_hi, x)`` term bends
+    there), so its maximum over an interval sits at an endpoint or a breakpoint. This
+    is what makes a banding decision SELECTION-FREE: deciding from the max over the
+    whole containing band (public) instead of the exact total (hidden) means the
+    decision itself reveals nothing beyond the band. Pure."""
+    hi = _BIG if hi == float("inf") else int(hi)
+    xs = {int(lo), hi}
+    for b in source_bands:
+        _, bh = _band_bounds(b["band"], min_cell)
+        if bh != float("inf") and lo <= bh <= hi:
+            xs.add(int(bh))
+    return max(_forced_lower(x, x, source_bands, min_cell) for x in xs)
+
+
 def safe_total_band(n_persons, source_bands, min_cell: int = _MIN_CELL):
     """``(needs_banding, display, (lo, hi))`` for a reported term's total.
 
-    If publishing the EXACT total would let differencing box a ≤floor code >= 2 into
-    the suppressed interior, return the finest STANDARD band that removes it: the
-    two-sided band CONTAINING the total when that already suffices (small, boring,
-    e.g. ``21–100``), else its ceiling (``≤100``), whose published lower bound is 1
-    and so is always safe. Standard buckets only — never a bespoke tight range.
-    Deterministic and one-shot (no retry loop). Pure."""
+    SELECTION-FREE (Phase 0, 2026-11-02): the exact-vs-band choice is made from the
+    total's CONTAINING band, not its exact value — exact only if NO total anywhere in
+    that band would let differencing box a ≤floor code >= 2 (``_max_forced_exact``).
+    Deciding on the exact value leaked through the decision: a band shown where its
+    neighbour would have been exact proved the total sat above the threshold, forcing
+    a ≤floor code >= 2.
+
+    When banding, return the finest STANDARD display that removes the narrowing: the
+    containing two-sided band (e.g. ``21–100``) when it suffices, else the first
+    ceiling (``≤100``, ``≤1k``, ...) that does. A reported term is publicly > floor,
+    so every published lower bound is at least ``min_cell + 1`` and the checks use it.
+    Standard buckets only — never a bespoke tight range. Pure."""
     N = int(n_persons)
-    if _forced_lower(N, N, source_bands, min_cell) < 2:
-        return False, str(N), (N, N)
     lbl = volume_band(N, min_cell)                   # containing two-sided band
     lo, hi = _band_bounds(lbl, min_cell)
-    if _forced_lower(lo, hi, source_bands, min_cell) <= 1:
-        return True, lbl, (int(lo), int(hi))         # small two-sided band suffices
-    up = lbl.split("–")[1] if "–" in lbl else lbl.lstrip("≤")
-    return True, f"≤{up}", (1, int(hi) if hi != float("inf") else hi)  # ceiling fallback
+    if _max_forced_exact(lo, hi, source_bands, min_cell) < 2:
+        return False, str(N), (N, N)
+    floor_lo = min_cell + 1
+    if _forced_lower(max(int(lo), floor_lo), hi, source_bands, min_cell) <= 1:
+        return True, lbl, (int(lo), int(hi) if hi != float("inf") else hi)
+    for up_lab, up in (("100", 100), ("1k", 1_000), ("10k", 10_000), ("100k", 100_000)):
+        if up >= hi and _forced_lower(floor_lo, up, source_bands, min_cell) <= 1:
+            return True, f"≤{up_lab}", (floor_lo, up)       # ceiling fallback
+    return True, f">{min_cell}", (floor_lo, float("inf"))   # widest: only 'reported' itself
 
 
 def complementary_suppress(nodes, min_cell: int = _MIN_CELL) -> int:
@@ -580,12 +610,22 @@ def assert_diff_safe(nodes, min_cell: int = _MIN_CELL) -> None:
     for nd in nodes:
         if nd.get("state") != "reported":
             continue
+        bands = nd.get("source_bands") or []
         if nd.get("count") is not None:
             lo = hi = int(nd["count"])
+            # selection-free: an exact total is only legal if its whole containing band is
+            # (otherwise the exact/band decision itself leaks the threshold).
+            blo, bhi = _band_bounds(volume_band(lo, min_cell), min_cell)
+            fb = _max_forced_exact(blo, bhi, bands, min_cell)
+            if fb >= 2:
+                raise AssertionError(
+                    f"diff-unsafe term {nd.get('id')}: exact total published although its "
+                    f"containing band can box a ≤{min_cell} code to >= {fb}")
         else:
             rng = nd.get("count_range") or [1, None]
             lo, hi = rng[0], (rng[1] if rng[1] is not None else float("inf"))
-        f = _forced_lower(lo, hi, nd.get("source_bands") or [], min_cell)
+            lo = max(int(lo), min_cell + 1)          # 'reported' publicly implies > floor
+        f = _forced_lower(lo, hi, bands, min_cell)
         if f >= 2:
             raise AssertionError(
                 f"diff-unsafe term {nd.get('id')}: a ≤{min_cell} source code is boxed "

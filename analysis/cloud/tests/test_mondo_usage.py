@@ -559,3 +559,35 @@ def test_assert_diff_safe_catches_an_unsuppressed_narrowing():
     ok = [{"id": "X", "state": "reported", "count": None, "count_range": [101, 1000],
            "source_bands": [{"band": "21–100", "codes": 1}, {"band": "≤20", "codes": 1}]}]
     m.assert_diff_safe(ok)
+
+
+# --- Phase 0: selection-free total banding --------------------------------------------
+def test_total_banding_is_band_decided():
+    sb = [{"band": "21–100", "codes": 1}, {"band": "≤20", "codes": 1}]
+    # the old rule published 101 exactly (forced==1) but banded 102, so a band leaked ">=102".
+    need, disp, (lo, hi) = m.safe_total_band(101, sb)
+    assert need and disp == "101–1k" and (lo, hi) == (101, 1000)
+    assert m.safe_total_band(102, sb)[1] == "101–1k"          # same outcome across the band
+
+
+def test_total_ceiling_fallback_respects_reported_floor():
+    # inconsistent-on-purpose histogram so the containing band itself boxes the code
+    need, disp, (lo, hi) = m.safe_total_band(150, [{"band": "≤20", "codes": 5}])
+    assert need and disp == "≤1k" and lo == 21 and hi == 1000  # 'reported' already implies >=21
+    assert m._forced_lower(21, 1000, [{"band": "≤20", "codes": 5}]) <= 1
+
+
+def test_max_forced_exact_finds_interior_breakpoint():
+    sb = [{"band": "21–100", "codes": 1}, {"band": "≤20", "codes": 1}]
+    assert m._max_forced_exact(21, 1000, sb) == m._forced_lower(1000, 1000, sb)
+    # with a code whose band reaches the top, the max sits at that code's lower breakpoint
+    sb2 = [{"band": "101–1k", "codes": 1}, {"band": "≤20", "codes": 1}]
+    assert m._max_forced_exact(21, 1000, sb2) == max(
+        m._forced_lower(x, x, sb2) for x in range(21, 1001))
+
+
+def test_assert_diff_safe_rejects_exact_total_with_unsafe_band():
+    import pytest
+    sb = [{"band": "21–100", "codes": 1}, {"band": "≤20", "codes": 1}]
+    with pytest.raises(AssertionError):
+        m.assert_diff_safe([{"id": "X", "state": "reported", "count": 101, "source_bands": sb}])
