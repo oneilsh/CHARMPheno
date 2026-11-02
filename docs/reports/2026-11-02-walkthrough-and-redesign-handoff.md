@@ -22,8 +22,11 @@ This file holds what those two do not.
 
 ## The REVIEW_LOG entry (NOT yet written; maintainer asked to wait)
 
-After the redesign lands and its changes are re-reviewed, write ONE dated entry
-(maintainer-led walkthrough, so allowed) covering:
+After WP14, the maintainer walks through the redesign's changes with the agent (a
+second walkthrough). BOTH walkthroughs go in ONE dated REVIEW_LOG entry, written at the
+end of the second. The first walkthrough's part (keep it; commit hashes as on the
+remote after the 2026-11-02 history scrub may differ from the ones below, so cite by
+subject if a hash does not resolve):
 - **Areas reviewed:** spark_vi.core (model, loop, config, result, runner, local_runner,
   retry, broadcast), dag (layout, ops), models/topic/dag_gated_lda, the DAG-gated MLlib
   shim, readout (solver, kernels, heads, spark, local, stacked, evaluate), eval.metrics,
