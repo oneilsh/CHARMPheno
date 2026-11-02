@@ -106,6 +106,14 @@ class LocalReadoutData:
         return cls(rows, C, K, topm=topm)
 
     @classmethod
+    def from_labels(cls, theta, docs_labels, labeler, ids=None, *, topm=0):
+        """`theta (D,K)` and each document's labels in user node ids, the targets
+        built by a `readout.labels.NodeLabeler`: the same logical inputs the Spark
+        path (`DagHeadsEstimator`) takes."""
+        label, mask = labeler.dense(docs_labels)
+        return cls.from_arrays(theta, label, mask, ids, topm=topm)
+
+    @classmethod
     def from_spark(cls, df, C, K, *, topm=0, topic_col="topicDistribution",
                    label_col="label", mask_col="labelMask", id_col="doc_key"):
         """Collect a scored frame in compact form: the executors pack (and truncate)

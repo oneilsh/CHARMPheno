@@ -133,6 +133,40 @@ def _sort_refs(refs):
                                        else (0, "") + node_sort_key(r)))
 
 
+def check_labels_column(dataset, labels_col, node_ids):
+    """Up front, before any Spark job: `labelsCol` exists, is an array of
+    strings or integers, and its element type is one the DAG's ids (`node_ids`) have
+    (ids are matched exactly, so an array<string> column against an all-int DAG
+    would match nothing). Shared with the readout heads (`DagHeadsEstimator`)."""
+    from pyspark.sql.types import (ArrayType, ByteType, IntegerType, LongType,
+                                   ShortType, StringType)
+    if labels_col not in dataset.columns:
+        raise ValueError(f"labelsCol={labels_col!r} is not a column of the input "
+                         f"(columns: {dataset.columns})")
+    dt = dataset.schema[labels_col].dataType
+    if not isinstance(dt, ArrayType):
+        raise ValueError(f"labelsCol={labels_col!r} must be an array<string> or "
+                         f"array<int> column of node ids; it is {dt.simpleString()}")
+    et = dt.elementType
+    has_int = any(isinstance(n, int) for n in node_ids)
+    has_str = any(isinstance(n, str) for n in node_ids)
+    if isinstance(et, StringType):
+        if not has_str:
+            raise ValueError(
+                f"labelsCol={labels_col!r} is array<string> but every DAG node id "
+                f"is an int; ids are matched exactly (1 and '1' are different "
+                f"nodes): cast the labels or give the DAG string ids")
+    elif isinstance(et, (IntegerType, LongType, ShortType, ByteType)):
+        if not has_int:
+            raise ValueError(
+                f"labelsCol={labels_col!r} is {dt.simpleString()} but every DAG "
+                f"node id is a str; ids are matched exactly (1 and '1' are "
+                f"different nodes): cast the labels or give the DAG int ids")
+    else:
+        raise ValueError(f"labelsCol={labels_col!r} must be array<string> or "
+                         f"array<int>; it is {dt.simpleString()}")
+
+
 class _DagGatedLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams):
     """Shared Param surface for DagGatedLDAEstimator and DagGatedLDAModel.
 
@@ -582,39 +616,6 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator):
 
     # ---- input checks -----------------------------------------------------------
 
-    def _check_labels_column(self, dataset, labels_col, parsed):
-        """Up front, before any Spark job: `labelsCol` exists, is an array of
-        strings or integers, and its element type is one the DAG's ids have (ids are
-        matched exactly, so an array<string> column against an all-int DAG would
-        match nothing)."""
-        from pyspark.sql.types import (ArrayType, ByteType, IntegerType, LongType,
-                                       ShortType, StringType)
-        if labels_col not in dataset.columns:
-            raise ValueError(f"labelsCol={labels_col!r} is not a column of the input "
-                             f"(columns: {dataset.columns})")
-        dt = dataset.schema[labels_col].dataType
-        if not isinstance(dt, ArrayType):
-            raise ValueError(f"labelsCol={labels_col!r} must be an array<string> or "
-                             f"array<int> column of node ids; it is {dt.simpleString()}")
-        et = dt.elementType
-        has_int = any(isinstance(n, int) for n in parsed.nodes)
-        has_str = any(isinstance(n, str) for n in parsed.nodes)
-        if isinstance(et, StringType):
-            if not has_str:
-                raise ValueError(
-                    f"labelsCol={labels_col!r} is array<string> but every DAG node id "
-                    f"is an int; ids are matched exactly (1 and '1' are different "
-                    f"nodes): cast the labels or give the DAG string ids")
-        elif isinstance(et, (IntegerType, LongType, ShortType, ByteType)):
-            if not has_int:
-                raise ValueError(
-                    f"labelsCol={labels_col!r} is {dt.simpleString()} but every DAG "
-                    f"node id is a str; ids are matched exactly (1 and '1' are "
-                    f"different nodes): cast the labels or give the DAG int ids")
-        else:
-            raise ValueError(f"labelsCol={labels_col!r} must be array<string> or "
-                             f"array<int>; it is {dt.simpleString()}")
-
     def _domain_sizes(self, dataset, fcols):
         """Each feature column's width: its ML attribute size when the column
         carries one (vectorizer output does), else the first row's vector size.
@@ -767,7 +768,7 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator):
             raise ValueError(f"unknownLabels must be one of {UNKNOWN_LABEL_POLICIES}; "
                              f"got {policy!r}")
         labels_col = str(self.getOrDefault("labelsCol"))
-        self._check_labels_column(dataset, labels_col, parsed)
+        check_labels_column(dataset, labels_col, parsed.nodes)
         fcols, multi = self._feature_columns()
         sizes = self._domain_sizes(dataset, fcols)
         vocabs = self._checked_vocabularies(fcols, sizes)

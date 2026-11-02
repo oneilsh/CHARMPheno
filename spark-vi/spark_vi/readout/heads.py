@@ -261,7 +261,7 @@ def read_heads(run_dir, label, *, C=None, K=None, theta_topm=None):
 
 def fit_heads(data, *, l2=1.0, gtol=READOUT_GTOL, max_iter=READOUT_MAX_ITER,
               history=6, label="", warm_start=None, checkpoint_path=None,
-              checkpoint_every=10):
+              checkpoint_every=10, resume=True, resume_path=None):
     """Fit all C per-node readout heads with ONE batched L-BFGS.
 
     `data` is the TRAIN split on either backend -- `readout.spark.SparkReadoutData`
@@ -333,6 +333,13 @@ def fit_heads(data, *, l2=1.0, gtol=READOUT_GTOL, max_iter=READOUT_MAX_ITER,
     When BOTH `warm_start` and a matching checkpoint are present the checkpoint
     wins: it is a point on THIS problem's own optimization path, strictly further
     along than another fit's answer mapped in.
+
+    Where a resume is READ from: by default the checkpoint file itself
+    (`checkpoint_path`), so a re-run of a crashed solve picks up where it stopped. A
+    caller whose resume source is explicit (the `DagHeadsEstimator` shim's
+    `resumeFrom`, which may name another directory than the one it checkpoints to)
+    passes `resume_path` (read there, written to `checkpoint_path`, possibly None)
+    or `resume=False` (never read: a fresh solve that only writes checkpoints).
     """
     C, K, theta_topm = int(data.C), int(data.K), int(data.topm)
     tag = f"{label}: " if label else ""
@@ -347,13 +354,16 @@ def fit_heads(data, *, l2=1.0, gtol=READOUT_GTOL, max_iter=READOUT_MAX_ITER,
         W0, b0 = unfold_standardization(warm_start[0], warm_start[1], mu, sd)
         x0 = (np.where(keep[:, None], W0, 0.0), np.where(keep, b0, 0.0))
     ckpt_path = str(checkpoint_path) if checkpoint_path is not None else None
+    read_path = None
+    if resume:
+        read_path = str(resume_path) if resume_path is not None else ckpt_path
     fingerprint = None
-    if ckpt_path is not None:
+    if ckpt_path is not None or read_path is not None:
         # Derived AFTER the moments pass because the counts come from it —
         # exact-integer sums, the reproducible identity of this arm's problem
         # (see ckpt_fingerprint for why mu/sd bytes are NOT hashed).
         fingerprint = ckpt_fingerprint(C, K, n_obs, n_pos, theta_topm)
-        resumed = read_ckpt(ckpt_path, fingerprint)
+        resumed = read_ckpt(read_path, fingerprint) if read_path is not None else None
         if resumed is not None:
             W_ck, b_ck, ck_iter = resumed
             # Same zeroing rule as the warm-start path above, for the same reason:
