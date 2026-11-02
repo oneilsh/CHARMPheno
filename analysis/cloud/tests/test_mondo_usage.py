@@ -839,3 +839,16 @@ def test_total_band_ladder_is_1_2_5():
                     "2k–5k", "5k–10k", "10k–20k", "20k–50k", "50k–100k", "100k–200k",
                     "200k–500k", ">500k"]
     assert m.total_band(1500)[1:] == (1001, 2000)
+
+
+# --- HPO release pinning --------------------------------------------------------------
+def test_hpo_cache_name_is_keyed_by_url():
+    a = m.hpo_cache_name("http://purl.obolibrary.org/obo/hp.obo")
+    b = m.hpo_cache_name("http://purl.obolibrary.org/obo/hp/releases/2026-06-23/hp.obo")
+    assert a != b and a.endswith(".obo") and b.startswith("hp-")
+
+
+def test_hpo_data_version():
+    obo = "format-version: 1.2\ndata-version: hp/releases/2026-06-23\n\n[Term]\nid: HP:1\n"
+    assert m.hpo_data_version(obo) == "hp/releases/2026-06-23"
+    assert m.hpo_data_version("format-version: 1.2\n") is None

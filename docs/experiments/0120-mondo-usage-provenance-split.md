@@ -10,6 +10,8 @@ min_cell: 20
 mondo_version: "2026-06-02"
 mondo_cache_dir: "data/mondo"
 with_hpo: true
+# pinned: the live purl moved to HPO 2026-09-01, which carries no SNOMED xrefs
+hpo_obo_url: "http://purl.obolibrary.org/obo/hp/releases/2026-06-23/hp.obo"
 ---
 
 # 0120 — Mondo/HPO usage re-export: two-sided disclosure fix + mapping provenance
@@ -53,4 +55,15 @@ make -C analysis/cloud exp ID=120
 
 ## Run log
 
-_(pending first cluster run)_
+- **2026-11-02, run 1 — HPO axis empty; superseded.** The driver fetched the live
+  `hp.obo` purl, which now serves HPO **2026-09-01**: that release carries **no SNOMED
+  cross-references** (654 xrefs total, mostly Fyler/NCIT/MedDRA; v2026-06-23 has 3,439
+  SNOMED-xref'd terms). The HPO axis came out with 0 terms and HPO claimed nothing, so
+  Mondo's climb tier absorbed the phenotype codes (persons climbed 329,296 vs 322,454 in
+  0109). The Mondo-side features otherwise validated: tripwire passes on the downloaded
+  payload; 46,856 / 46,873 climbed catalog entries got a reconstructed SNOMED chain
+  (7,071 one-of-several); split statuses exact 5,662 · mirror 2,589 · ranged 419 ·
+  withheld 1,257; no frac. Fixes: pin `hpo_obo_url` (above); cache `hp.obo` by URL; fail
+  loudly when `--with-hpo` loads 0 SNOMED xrefs; record `meta.hpo_version`. Also trimmed
+  redundant catalog fields (`via`, `std` when `path` present): 19.0 -> ~17.1 MB.
+- **run 2** — _(pending)_

@@ -1041,6 +1041,24 @@ def parse_hpo_xrefs(obo_text: str) -> "list[tuple]":
     return rows
 
 
+def hpo_cache_name(url: str) -> str:
+    """Cache filename for an hp.obo, keyed by its URL, so pinning a different release
+    never silently reuses a previously cached file. Pure."""
+    import hashlib
+    return f"hp-{hashlib.sha256(url.encode()).hexdigest()[:12]}.obo"
+
+
+def hpo_data_version(obo_text: str):
+    """The ``data-version`` header of an hp.obo (e.g. ``hp/releases/2026-06-23``), or
+    None. Recorded in the payload meta as the HPO provenance. Pure."""
+    for line in obo_text.splitlines():
+        if line.startswith("data-version:"):
+            return line.split(":", 1)[1].strip()
+        if line.startswith("[Term]"):
+            break
+    return None
+
+
 def parse_hpo_dag(obo_text: str) -> "tuple[dict, dict]":
     """Parse ``hp.obo`` into ``(labels, parents)``: ``labels`` maps ``HP:id`` -> name,
     ``parents`` maps ``HP:id`` -> list of ``is_a`` parent ids. Obsolete terms are dropped.
@@ -1489,12 +1507,15 @@ def main(argv: list[str]) -> int:
     hpo_parent_adj: dict[str, list[str]] = {}
     hpo_has_child: set = set()
     hpo_cid_rows: "list[tuple]" = []
+    hpo_version = None
     if args.hpo_obo_url and args.count_space in ("source_climb", "all"):
         try:
-            dest = cache / "hp.obo"
+            dest = cache / hpo_cache_name(args.hpo_obo_url)
             if not (dest.exists() and dest.stat().st_size > 0):
                 sys.stderr.write(f"[hpo] downloading {args.hpo_obo_url}\n")
                 urllib.request.urlretrieve(args.hpo_obo_url, dest)  # noqa: S310
+            hpo_version = hpo_data_version(dest.read_text())
+            sys.stderr.write(f"[hpo] release {hpo_version}\n")
             for hp_id, hp_label, vocab, code in parse_hpo_xrefs(dest.read_text()):
                 if vocab == "SNOMED":
                     hpo_by_snomed.setdefault(code, (hp_id, hp_label))
@@ -1522,6 +1543,12 @@ def main(argv: list[str]) -> int:
                                  f"{len(hpo_cid_rows)} concept ids mapped\n")
         except Exception as e:                          # noqa: BLE001 — probe is best-effort
             sys.stderr.write(f"[hpo] probe skipped: {e}\n")
+    if args.with_hpo and not hpo_by_snomed:
+        # An HPO axis with no SNOMED xrefs is silently empty (the 2026-09-01 HPO release
+        # dropped them; exp 0120's first run). Fail before the expensive Spark work.
+        sys.exit(f"[hpo] --with-hpo but 0 SNOMED xrefs loaded from {args.hpo_obo_url} "
+                 f"(release {hpo_version}); pin a release that carries them via "
+                 f"--hpo-obo-url (e.g. .../obo/hp/releases/2026-06-23/hp.obo)")
 
     def run_space(space):
         """Count + assemble ONE count space; write its payload + TSV; return a summary
@@ -1587,8 +1614,9 @@ def main(argv: list[str]) -> int:
                     vocab = str(r.vocabulary_id) if pd.notna(r.vocabulary_id) else "?"
                     code = str(r.concept_code) if pd.notna(r.concept_code) else str(cid)
                     band = volume_band(np_of.get((str(mid), cid)), min_cell)
-                    rec = {"id": cid, "vocab": vocab, "code": code,
-                           "via": "climbed" if step == 4 else "exact", "step": step,
+                    # `step` supersedes the old exact/climbed `via` (dropped to keep the
+                    # payload small); `std` is omitted when `path` carries it as path[0].
+                    rec = {"id": cid, "vocab": vocab, "code": code, "step": step,
                            "band": band}
                     std = int(r.std_cid) if pd.notna(r.std_cid) else None
                     if step > 1 and std is not None:          # step 1: source -> Mondo directly
@@ -1601,6 +1629,7 @@ def main(argv: list[str]) -> int:
                         rec["path"] = chain                   # None -> hover shows "SNOMED"
                         if chain:
                             concept_ids.update(chain)
+                            rec.pop("std", None)              # == path[0]
                         if amb:
                             rec["path_ambiguous"] = True
                     recs.append(rec)
@@ -1761,6 +1790,8 @@ def main(argv: list[str]) -> int:
                 "count_rule": meta_rule,
                 "generated_utc": generated_utc,
             }
+            if args.with_hpo and hpo_version:
+                meta["hpo_version"] = hpo_version
             if survey:
                 meta["survey"] = survey
             payload = assemble_payload(meta=meta, term_rows=term_rows, min_cell=min_cell,
@@ -1782,7 +1813,7 @@ def main(argv: list[str]) -> int:
                 "codes": "|".join(f"{c['vocab']}:{c['code']}" for c in nd["codes"]),
                 "n_source_codes": nd.get("n_source_codes", 0),
                 "source_codes": "|".join(
-                    f"{c['vocab']}:{c['code']}:{c.get('step', c['via'])}:{c.get('band','')}"
+                    f"{c['vocab']}:{c['code']}:{c.get('step') or c.get('via', '')}:{c.get('band','')}"
                     for c in nd.get("source_codes", [])),
                 "source_bands": ";".join(f"{b['band']}:{b['codes']}"
                                          for b in nd.get("source_bands", [])),
