@@ -360,15 +360,6 @@ def catalog_steps_df(attribution):
             .groupBy("mondo_id", "origin_cid").agg(F.min("step").alias("step")))
 
 
-def named_counts_df(attribution, steps):
-    """(mondo_id, n_named): distinct persons with >= 1 attribution to the term through a
-    code whose (term, code) step is 1-3. Rolled-up-only = total - n_named."""
-    from pyspark.sql import functions as F
-    return (attribution.join(steps, ["mondo_id", "origin_cid"])
-            .where(F.col("step") <= 3).groupBy("mondo_id")
-            .agg(F.countDistinct("person_id").alias("n_named")))
-
-
 def code_std_df(attribution, steps):
     """(mondo_id, origin_cid, std_cid, multi_std): the standard concept a code went
     through for a term, among its rows AT the winning step — the one carrying the most
@@ -593,400 +584,120 @@ def suppress_count(n, min_cell: int = _MIN_CELL) -> str:
     return f"≤{min_cell}" if n <= min_cell else str(n)
 
 
-# Log-decade volume bands for per-source-code magnitude. A code's exact person
-# count NEVER leaves the cluster (differencing risk vs the per-term union total);
-# instead each code is tagged with the RANGE it falls in. Ranges are
-# differencing-proof by construction — the difference of two ranges is a range,
-# never a person — so bands compose safely with the exact per-term totals, across
-# count-spaces, and up/down the roll-up. The bottom band is the small-cell floor
-# itself, so a rare code reads "≤{floor}" exactly as a suppressed cell does.
-# Order is heavy -> light (canonical display order).
-_BAND_UPPERS = [100, 1_000, 10_000, 100_000]     # decade edges above the floor
-
 # The export carries code IDENTITIES only (vocab + code), never concept names: name text
 # would be egress from the workbench, and SNOMED/CPT4/etc. names are licensed. The
 # dashboard resolves human-readable names client-side for the public-domain vocabularies
 # (ICD-9-CM, ICD-10-CM, HCPCS) from a public terminology service (NIH Clinical Tables);
-# licensed vocabularies keep code-only display + an Athena click-through, covered by a
-# SNOMED CT sub-license disclaimer in the UI.
+# licensed vocabularies keep code-only display + an Athena click-through.
 
 
-def _band_label(min_cell: int) -> "list[str]":
-    """Canonical band labels, heaviest first, for a given small-cell floor."""
-    lo = [f"≤{min_cell}", f"{min_cell + 1}–100", "101–1k", "1k–10k", "10k–100k", ">100k"]
-    return list(reversed(lo))
+# --- additive diagnosis cells (spec Revision 2, 2026-11-02) -----------------------------
+# Every published patient figure is built from per-(term, source code) CELLS: the number of
+# distinct patients with that source code attributed to the term — a "diagnosis" is a
+# (patient, source code) pair, counted once however many rows the patient has for it. A
+# cell is published exactly above the floor and as IMPUTED (10) for 1..floor. Every
+# aggregate — term count, named / climbed-only split, subtree roll-up — is a SUM OF
+# PUBLISHED CELLS, never a separately computed true number, so arithmetic on the payload
+# can only recover the imputed 10s: a masked cell's true value enters no published figure.
+# (Rounding exact aggregates separately would let the two roundings constrain each other;
+# summing published cells cannot.)
+IMPUTED = 10
 
 
-def volume_band(n, min_cell: int = _MIN_CELL) -> str:
-    """Map a per-code patient count to a log-decade band label (a RANGE, never the
-    number). ``None`` -> ``"n/a"``, ``<=0`` -> ``"0"``, ``1..floor`` -> ``"≤{floor}"``
-    (identical to a suppressed cell), then ``21–100 / 101–1k / 1k–10k / 10k–100k /
-    >100k`` for ``floor == 20``. Pure; disclosure-safe (emits no exact patient count)."""
-    if n is None:
-        return "n/a"
-    n = int(n)
+def publish_cell(n, min_cell: int = _MIN_CELL) -> int:
+    """Published value of one cell: 0 stays 0, 1..floor becomes IMPUTED, above the floor
+    is exact. Pure."""
+    n = int(n or 0)
     if n <= 0:
-        return "0"
-    if n <= min_cell:
-        return f"≤{min_cell}"
-    labels = [f"{min_cell + 1}–100", "101–1k", "1k–10k", "10k–100k"]
-    for up, lab in zip(_BAND_UPPERS, labels):
-        if n <= up:
-            return lab
-    return ">100k"
-
-
-def band_histogram(bands, min_cell: int = _MIN_CELL) -> "list[dict]":
-    """Given the band label of every source code on a term (the FULL set, before any
-    display cap), return the distribution as ``[{"band": label, "codes": k}, ...]`` in
-    canonical heavy->light order, omitting empty bands. The ``codes`` figure counts
-    CODES (public non-personal identities), never persons — so it is safe at any value
-    (no small-cell suppression applies to a code count). This is the "where's the
-    weight" shape: e.g. ``>100k:2 · ≤20:184`` reads as Mondo-thin-but-heavy. Pure."""
-    from collections import Counter
-    c = Counter(bands)
-    out = []
-    for lab in _band_label(min_cell):
-        if c.get(lab):
-            out.append({"band": lab, "codes": int(c[lab])})
-    return out
-
-
-# --- complementary suppression: the source-code -> term roll-up marginal ------------
-# A term's total N_T is the union of its source codes' person sets, so it is a
-# roll-up MARGINAL over its per-code cells. That within-term roll-up (NOT any
-# term-to-term one — those don't exist here) lets inclusion-exclusion narrow a
-# suppressed cell: with two codes and N_T=115 where one code caps at 100,
-# |other| >= 115 - 100 = 15, boxing a <=floor code into [15,20] even though no exact
-# small count is published. So per-code bands do NOT compose safely with an EXACT
-# total for near-floor terms (correcting the note above): we complementary-suppress
-# the marginal — publish such a term's total as a STANDARD band instead of the exact
-# number. Because the only differencing channel is within a single term (no global
-# per-code count and no rolled-up term-to-term total are published), per-term safety
-# implies whole-file safety, and banding is information-removing, so ONE pass with no
-# recheck suffices. `assert_diff_safe` re-checks only as a redundant tripwire that
-# fires if those two structural preconditions are ever violated.
-def _band_bounds(label: str, min_cell: int = _MIN_CELL):
-    """(lo, hi) integer bounds for a standard band label. Pure."""
-    for lab, lo, hi in [
-        (f"≤{min_cell}", 1, min_cell), (f"{min_cell + 1}–100", min_cell + 1, 100),
-        ("101–1k", 101, 1000), ("1k–10k", 1001, 10000),
-        ("10k–100k", 10001, 100000), (">100k", 100001, float("inf")),
-    ]:
-        if lab == label:
-            return lo, hi
-    return 1, float("inf")
-
-
-def _forced_lower(total_lo, total_hi, source_bands, min_cell: int = _MIN_CELL):
-    """Tightest lower bound sound differencing can place on a ≤floor source code of a
-    term whose published total lies in ``[total_lo, total_hi]`` and whose per-code band
-    histogram is ``source_bands`` (``[{"band", "codes"}]``, the FULL set).
-
-    From |c| >= N - Σ_{k≠c} min(band_hi(k), N): the attacker uses the smallest total
-    (total_lo) and each OTHER code's largest possible count (min(band_hi(k), total_hi)).
-    Returns the forced lower bound; >= 2 means a ≤floor cell is boxed into the
-    suppressed interior [2, floor]. 0 when the term carries no ≤floor code. Pure."""
-    floor = f"≤{min_cell}"
-    if not any(b["band"] == floor for b in source_bands):
         return 0
-    others_max = 0
-    for b in source_bands:
-        _, hi = _band_bounds(b["band"], min_cell)
-        others_max += min(hi, total_hi) * int(b["codes"])
-    return total_lo - (others_max - min_cell)       # drop one ≤floor code (its cap = min_cell)
+    return IMPUTED if n <= min_cell else n
 
 
-_BIG = 10 ** 12   # finite stand-in for the open-ended ``>100k`` band's upper edge
-
-# Banded TERM TOTALS use a finer 1-2-5 ladder than the per-code decade bands: a total
-# is banded only when its whole band could box a ≤floor code, and is then shown as that
-# band, so finer bands both band fewer terms and show narrower (2-2.5x) ranges. The
-# selection-free argument is unchanged — the decision and the display are functions of
-# the band alone. Per-code volume bands stay decadal.
-_TOTAL_EDGES = [50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000, 20_000, 50_000,
-                100_000, 200_000, 500_000]
-
-
-def _fmt_edge(n: int) -> str:
-    return f"{n // 1000}k" if n >= 1000 else str(n)
-
-
-def total_band(n, min_cell: int = _MIN_CELL):
-    """``(label, lo, hi)`` of the 1-2-5 band containing a reported total ``n`` (> floor),
-    e.g. ``("101–200", 101, 200)``, ``("1k–2k", 1001, 2000)``, ``(">500k", 500001, inf)``.
-    Labels follow the per-code band style (lower edge shown as the previous edge once in
-    thousands). Pure."""
-    n = int(n)
-    lo, prev = min_cell + 1, None
-    for up in _TOTAL_EDGES:
-        if n <= up:
-            left = _fmt_edge(prev) if prev and prev >= 1000 else str(lo)
-            return f"{left}–{_fmt_edge(up)}", lo, up
-        lo, prev = up + 1, up
-    return f">{_fmt_edge(_TOTAL_EDGES[-1])}", _TOTAL_EDGES[-1] + 1, float("inf")
-
-
-def _max_forced_exact(lo, hi, source_bands, min_cell: int = _MIN_CELL) -> int:
-    """Max of ``_forced_lower(x, x, ...)`` over integer totals x in [lo, hi].
-
-    As a function of an exact total x, the forced bound is piecewise linear with
-    breakpoints at the code bands' upper edges (each ``min(band_hi, x)`` term bends
-    there), so its maximum over an interval sits at an endpoint or a breakpoint. This
-    is what makes a banding decision SELECTION-FREE: deciding from the max over the
-    whole containing band (public) instead of the exact total (hidden) means the
-    decision itself reveals nothing beyond the band. Pure."""
-    hi = _BIG if hi == float("inf") else int(hi)
-    xs = {int(lo), hi}
-    for b in source_bands:
-        _, bh = _band_bounds(b["band"], min_cell)
-        if bh != float("inf") and lo <= bh <= hi:
-            xs.add(int(bh))
-    return max(_forced_lower(x, x, source_bands, min_cell) for x in xs)
-
-
-def safe_total_band(n_persons, source_bands, min_cell: int = _MIN_CELL):
-    """``(needs_banding, display, (lo, hi))`` for a reported term's total.
-
-    SELECTION-FREE (Phase 0, 2026-11-02): the exact-vs-band choice is made from the
-    total's CONTAINING band, not its exact value — exact only if NO total anywhere in
-    that band would let differencing box a ≤floor code >= 2 (``_max_forced_exact``).
-    Deciding on the exact value leaked through the decision: a band shown where its
-    neighbour would have been exact proved the total sat above the threshold, forcing
-    a ≤floor code >= 2.
-
-    When banding, return the finest STANDARD display that removes the narrowing: the
-    containing 1-2-5 band (`total_band`, e.g. ``21–50``) when it suffices, else the first
-    ceiling (``≤100``, ``≤1k``, ...) that does. A reported term is publicly > floor,
-    so every published lower bound is at least ``min_cell + 1`` and the checks use it.
-    Standard buckets only — never a bespoke tight range. Pure."""
-    N = int(n_persons)
-    lbl, lo, hi = total_band(N, min_cell)            # containing 1-2-5 band
-    if _max_forced_exact(lo, hi, source_bands, min_cell) < 2:
-        return False, str(N), (N, N)
-    floor_lo = min_cell + 1
-    if _forced_lower(max(int(lo), floor_lo), hi, source_bands, min_cell) <= 1:
-        return True, lbl, (int(lo), int(hi) if hi != float("inf") else hi)
-    for up_lab, up in (("100", 100), ("1k", 1_000), ("10k", 10_000), ("100k", 100_000)):
-        if up >= hi and _forced_lower(floor_lo, up, source_bands, min_cell) <= 1:
-            return True, f"≤{up_lab}", (floor_lo, up)       # ceiling fallback
-    return True, f">{min_cell}", (floor_lo, float("inf"))   # widest: only 'reported' itself
-
-
-def _band_lo_hi(bands, min_cell: int = _MIN_CELL):
-    """Expand a band histogram into one (lo, hi) per code."""
-    out = []
-    for b in bands:
-        lo, hi = _band_bounds(b["band"], min_cell)
-        out += [(int(lo), hi)] * int(b["codes"])
+def cell_sums(cells) -> dict:
+    """Sums over one term's PUBLISHED cells (dicts with ``n`` and ``step``):
+    ``{"all", "named", "climbed", "imputed", "n_cells"}`` where named = steps 1-3,
+    climbed = step 4 (named + climbed == all) and ``imputed`` counts the 10s. Pure."""
+    out = {"all": 0, "named": 0, "climbed": 0, "imputed": 0, "n_cells": 0}
+    for c in cells:
+        n = int(c["n"])
+        out["all"] += n
+        out["n_cells"] += 1
+        out["climbed" if int(c.get("step") or 0) == 4 else "named"] += n
+        out["imputed"] += int(n == IMPUTED)
     return out
 
 
-# --- named / rolled-up-only split of a term's count ------------------------------------
-# A term's patients partition into NAMED (>= 1 attribution through a code whose step for
-# this term is 1-3: same-as, via SNOMED, or HPO) and ROLLED-UP ONLY (every attribution is
-# through codes that only CLIMBED to it, step 4). Named is exactly the union of the named
-# codes' patients, so it is >= 1 whenever the term has a named code (public); rolled-up
-# only is the climbed codes' union MINUS the named patients, so it can be anything in
-# [0, union] — including 0 — even when climbed codes exist, and its codes can exceed it.
-# Two parts that sum to a published total leave one differencing channel plus each part's
-# per-code bands, and every publish/withhold choice must itself be decided from public
-# information or the choice leaks. So eligibility is checked over EVERY hypothesis about
-# the hidden parts that is consistent with the public bands, and the term is withheld
-# unless all of them would publish safely. Spec: docs/superpowers/specs/2026-11-02-mondo-
-# usage-mapping-provenance-design.md (D3/D4), plan Task A3.
-def _caps(bands, cap, min_cell: int = _MIN_CELL) -> int:
-    """Upper bound on the union of a part's codes: Σ min(band_hi, cap)."""
-    return int(sum(min(hi, cap) for _, hi in _band_lo_hi(bands, min_cell)))
+def rollup_cells(cells_of: dict, parents_of: dict) -> dict:
+    """Subtree roll-up for every node, from PUBLISHED cells only.
 
+    ``cells_of[term]`` lists the term's published cells (``id`` = source concept, ``n``,
+    ``step``); ``parents_of[term]`` its DAG parents. A node's roll-up covers its whole
+    descendant closure (each term once, however many paths reach it) and counts each
+    DISTINCT source code once: a code attributed to several terms in the subtree would
+    otherwise count its patients twice, so it contributes its largest cell there, in the
+    part given by its lowest step (lowest step wins, as within a term). Returns
+    ``{node: {"all", "named", "climbed", "imputed"}}`` with named + climbed == all, for
+    nodes with a non-empty subtree. Pure."""
+    memo: dict = {}
 
-def _max_lo(bands, min_cell: int = _MIN_CELL) -> int:
-    """Lower bound on the union of a part's codes: its largest code's band floor."""
-    return max((lo for lo, _ in _band_lo_hi(bands, min_cell)), default=0)
+    def closure(t):                                  # t and all its ancestors
+        if t in memo:
+            return memo[t]
+        out = memo[t] = {t}
+        for p in parents_of.get(t, []):
+            out |= closure(p)
+        return out
 
-
-def _split_eligible(N, named_bands, rolled_bands, min_cell: int = _MIN_CELL) -> bool:
-    """True iff EVERY hypothesis about the hidden (named, rolled) consistent with the
-    public bands would publish without narrowing a ≤floor cell. Requires N > 2·floor."""
-    caps_n = _caps(named_bands, N, min_cell)            # named = union of named codes
-    caps_r = _caps(rolled_bands, N, min_cell)           # rolled <= union of climbed codes
-    lo_n, lo_r = _max_lo(named_bands, min_cell), _max_lo(rolled_bands, min_cell)
-    # (i) both > floor: exact parts. Named = its codes' union (codes capped by it);
-    #     rolled only lower-bounds its codes' union (codes capped by N).
-    if caps_n > min_cell and caps_r > min_cell:
-        hi_n = min(N - min_cell - 1, caps_n)
-        if hi_n >= min_cell + 1 and _max_forced_exact(min_cell + 1, hi_n, named_bands,
-                                                      min_cell) >= 2:
-            return False
-        if _forced_lower(N - min_cell - 1, N, rolled_bands, min_cell) >= 2:
-            return False
-    # (ii) named in [1, floor], rolled large: shows named [1, floor], rolled [N-floor, N-1]
-    if lo_n <= min_cell and caps_r >= N - min_cell:
-        if N - caps_r > 1:                              # forces named >= 2
-            return False
-        if _forced_lower(max(N - min_cell, lo_r), N, rolled_bands, min_cell) >= 2:
-            return False
-    # (iii) rolled in [0, floor], named large: shows rolled [0, floor], named [N-floor, N]
-    if caps_n >= N - min_cell:
-        if N - caps_n > 1:                              # forces rolled >= 2
-            return False
-        if _forced_lower(max(N - min_cell, lo_n), min(N, caps_n), named_bands,
-                         min_cell) >= 2:
-            return False
-    return True
-
-
-def split_parts(node, *, n_total, n_named, named_bands, rolled_bands,
-                min_cell: int = _MIN_CELL) -> dict:
-    """Publishable form of a term's named / rolled-up-only split. ``node`` is the
-    already-suppressed term node (its displayed total); ``n_total`` the true total.
-
-    Returns ``{"status", "named", "rolled", "named_bands", "rolled_bands"}`` with each
-    part ``{"count", "display", "range"}``. Status:
-      * ``mirror``   — a part is PUBLICLY zero (it has no codes), so the other part IS the
-                       total: copy the total's display
-      * ``exact``    — both parts exact and > floor (or the term is unused)
-      * ``ranged``   — named ``≤floor`` [1, floor] with rolled [N-floor, N-1], or rolled
-                       ``≤floor`` [0, floor] with named [N-floor, N]
-      * ``withheld`` — total not exact, total <= 2·floor, or some consistent hypothesis
-                       would narrow a ≤floor cell. Every branch condition is public, so the
-                       status itself leaks nothing.
-    Pure."""
-    N, a = int(n_total), int(n_named)
-    b = N - a
-    P = lambda c, d, r: {"count": c, "display": d, "range": r}
-    out = lambda st, nm, rl: {"status": st, "named": nm, "rolled": rl,
-                              "named_bands": list(named_bands),
-                              "rolled_bands": list(rolled_bands)}
-    zero, hidden = P(0, "0", [0, 0]), P(None, "—", None)
-    if N == 0:
-        return out("exact", zero, zero)
-    if not named_bands or not rolled_bands:             # a part is publicly empty
-        cnt, rng = node.get("count"), node.get("count_range")
-        if rng is None:
-            rng = [cnt, cnt] if cnt is not None else [1, min_cell]
-        full = P(cnt, node.get("display"), list(rng))
-        return out("mirror", zero if not named_bands else full,
-                   full if not named_bands else zero)
-    if node.get("count") is None or node.get("state") != "reported" or N <= 2 * min_cell:
-        return out("withheld", hidden, hidden)
-    if not _split_eligible(N, named_bands, rolled_bands, min_cell):
-        return out("withheld", hidden, hidden)
-    if a > min_cell and b > min_cell:
-        return out("exact", P(a, str(a), [a, a]), P(b, str(b), [b, b]))
-    if a <= min_cell:
-        return out("ranged", P(None, f"≤{min_cell}", [1, min_cell]),
-                   P(None, f"{N - min_cell}–{N - 1}", [N - min_cell, N - 1]))
-    return out("ranged", P(None, f"{N - min_cell}–{N}", [N - min_cell, N]),
-               P(None, f"≤{min_cell}", [0, min_cell]))
-
-
-def _check_split(nd, min_cell: int = _MIN_CELL) -> None:
-    """Tripwire for one node's split, written independently of `split_parts`."""
-    sp = nd.get("split")
-    if not sp:
-        return
-    st, nm, rl = sp["status"], sp["named"], sp["rolled"]
-    nb, rb = sp.get("named_bands") or [], sp.get("rolled_bands") or []
-
-    def fail(why):
-        raise AssertionError(f"diff-unsafe split on {nd.get('id')}: {why}")
-    N = nd.get("count")
-    if st == "withheld":
-        if nm["count"] is not None or rl["count"] is not None or nm["range"] or rl["range"]:
-            fail("withheld split carries values")
-    elif st == "mirror":
-        if not ((nm["count"] == 0 and not nb) or (rl["count"] == 0 and not rb)):
-            fail("mirror split whose zero part has codes (a hidden zero)")
-    elif st == "exact":
-        if nm["count"] is None or rl["count"] is None:
-            fail("exact split with a missing part")
-        if N is not None and nm["count"] + rl["count"] != N:
-            fail("exact parts do not sum to the total")
-        for c in (nm["count"], rl["count"]):
-            if 0 < c <= min_cell:
-                fail(f"exact part {c} inside 1..{min_cell}")
-        if nm["count"] and _forced_lower(nm["count"], nm["count"], nb, min_cell) >= 2:
-            fail("exact named part boxes a ≤floor code")
-        if rl["count"] and _forced_lower(rl["count"], N or rl["count"], rb, min_cell) >= 2:
-            fail("exact rolled part boxes a ≤floor code")
-    elif st == "ranged":
-        if N is None:
-            fail("ranged split beside a non-exact total")
-        if nm["range"] == [1, min_cell] and rl["range"] == [N - min_cell, N - 1]:
-            if N - _caps(rb, N, min_cell) > 1:
-                fail("rolled part caps force the ≤floor named part >= 2")
-            if _forced_lower(max(N - min_cell, _max_lo(rb, min_cell)), N, rb, min_cell) >= 2:
-                fail("rolled part's range boxes a ≤floor code")
-        elif rl["range"] == [0, min_cell] and nm["range"] == [N - min_cell, N]:
-            caps = _caps(nb, N, min_cell)
-            if N - caps > 1:
-                fail("named part caps force the ≤floor rolled part >= 2")
-            if _forced_lower(max(N - min_cell, _max_lo(nb, min_cell)), min(N, caps), nb,
-                             min_cell) >= 2:
-                fail("named part's range boxes a ≤floor code")
-        else:
-            fail("ranged parts not in canonical form")
-    else:
-        fail(f"unknown status {st!r}")
-
-
-def complementary_suppress(nodes, min_cell: int = _MIN_CELL) -> int:
-    """Band the total of any reported node whose exact total + per-code bands would
-    box a ≤floor code into the suppressed interior. Mutates nodes in place (count ->
-    None, display -> band label, adds ``count_range`` + ``total_banded``); keeps
-    state/category/per-code bands untouched. Returns how many nodes were banded."""
-    banded = 0
-    for nd in nodes:
-        if nd.get("state") != "reported" or nd.get("count") is None:
+    agg: dict = {}
+    for t, cells in cells_of.items():
+        if not cells:
             continue
-        need, disp, (lo, hi) = safe_total_band(
-            nd["count"], nd.get("source_bands") or [], min_cell)
-        if need:
-            nd["count"] = None
-            nd["display"] = disp
-            nd["count_range"] = [lo, hi if hi != float("inf") else None]
-            nd["total_banded"] = True
-            banded += 1
-    return banded
+        for a in closure(t):
+            codes = agg.setdefault(a, {})
+            for c in cells:
+                st, n = int(c.get("step") or 0), int(c["n"])
+                cur = codes.get(c["id"])
+                codes[c["id"]] = (min(cur[0], st), max(cur[1], n)) if cur else (st, n)
+    out = {}
+    for a, codes in agg.items():
+        r = {"all": 0, "named": 0, "climbed": 0, "imputed": 0}
+        for st, n in codes.values():
+            r["all"] += n
+            r["climbed" if st == 4 else "named"] += n
+            r["imputed"] += int(n == IMPUTED)
+        out[a] = r
+    return out
 
 
-def assert_diff_safe(nodes, min_cell: int = _MIN_CELL) -> None:
-    """Post-condition tripwire: no published node lets sound differencing box a ≤floor
-    source code into a strict sub-interval of [1, floor]. Redundant given
-    ``complementary_suppress`` + within-term independence; it fires only if those
-    structural preconditions are broken later (e.g. a rolled-up total is added)."""
+def assert_cells_safe(nodes, cells_of: "dict | None" = None,
+                      min_cell: int = _MIN_CELL) -> None:
+    """Post-condition tripwire for the published payload: every cell is 0, IMPUTED, or
+    above the floor; every aggregate equals the sum of the published cells it is built
+    from (term count vs ALL its cells when ``cells_of`` is given; split parts vs the
+    count; roll-up parts vs each other); no ``frac``; legacy (no-cell) totals are masked
+    or above the floor."""
+    def fail(nd, why):
+        raise AssertionError(f"unsafe node {nd.get('id')}: {why}")
     for nd in nodes:
-        if nd.get("state") != "reported":
+        if nd.get("kind") == "root":
             continue
-        bands = nd.get("source_bands") or []
-        if nd.get("count") is not None:
-            lo = hi = int(nd["count"])
-            # selection-free: an exact total is only legal if its whole containing band is
-            # (otherwise the exact/band decision itself leaks the threshold).
-            _lbl, blo, bhi = total_band(lo, min_cell)
-            fb = _max_forced_exact(blo, bhi, bands, min_cell)
-            if fb >= 2:
-                raise AssertionError(
-                    f"diff-unsafe term {nd.get('id')}: exact total published although its "
-                    f"containing band can box a ≤{min_cell} code to >= {fb}")
-        else:
-            rng = nd.get("count_range") or [1, None]
-            lo, hi = rng[0], (rng[1] if rng[1] is not None else float("inf"))
-            lo = max(int(lo), min_cell + 1)          # 'reported' publicly implies > floor
-        f = _forced_lower(lo, hi, bands, min_cell)
-        if f >= 2:
-            raise AssertionError(
-                f"diff-unsafe term {nd.get('id')}: a ≤{min_cell} source code is boxed "
-                f"to >= {f} (within-term roll-up narrowing not suppressed)")
-    for nd in nodes:                                 # named / rolled-up-only split
-        _check_split(nd, min_cell)
-    for nd in nodes:                                 # frac is no longer published
         if nd.get("frac") is not None or nd.get("frac_display") or nd.get("frac_range"):
-            raise AssertionError(
-                f"diff-unsafe term {nd.get('id')}: frac published (it leaks code overlaps "
-                f"and caps ≤{min_cell} codes; removed 2026-11-02)")
-
+            fail(nd, "frac published")
+        for c in nd.get("source_codes") or []:
+            if "n" in c and not (c["n"] in (0, IMPUTED) or c["n"] > min_cell):
+                fail(nd, f"cell {c.get('vocab')} {c.get('code')} = {c['n']}")
+        if nd.get("cells"):
+            cnt = nd.get("count")
+            if cells_of is not None and cnt != cell_sums(cells_of.get(nd["id"], []))["all"]:
+                fail(nd, "count != sum of its cells")
+            sp = nd.get("split")
+            if sp and sp["named"] + sp["climbed"] != cnt:
+                fail(nd, "split parts do not sum to the count")
+            ro = nd.get("roll")
+            if ro and (ro["named"] + ro["climbed"] != ro["all"] or ro["all"] < (cnt or 0)):
+                fail(nd, "roll-up parts inconsistent")
+        elif nd.get("count") is not None and 0 < nd["count"] <= min_cell:
+            fail(nd, f"legacy count {nd['count']} inside 1..{min_cell}")
 
 
 # HPO (Human Phenotype Ontology) cross-reference vocab prefixes -> the OMOP vocabulary_id
@@ -1165,9 +876,6 @@ def build_safe_summary(results: list[dict]) -> str:
               f"{suppress_count(sv.get('persons_climbed'), min_cell)}",
               f"- persons reaching ≥1 term ONLY through climbed codes (≤-suppressed): "
               f"{(lambda v: v if isinstance(v, str) else suppress_count(v, min_cell))(sv.get('persons_rolled_up_only'))}",
-              "- named / rolled-up-only split, **terms** by publication status: " +
-              (", ".join(f"{k}={v}" for k, v in sorted(
-                  (sv.get("split_terms_by_status") or {}).items())) or "(none)"),
               "- unmatched **source codes** by vocabulary (distinct code counts, not "
               "patients — the vocabularies the SNOMED climb can't reach): " +
               (", ".join(f"{v}={n}" for v, n in sorted(
@@ -1223,40 +931,58 @@ def build_safe_summary(results: list[dict]) -> str:
     return "\n".join(L)
 
 
-def assemble_payload(*, meta: dict, term_rows: list[dict],
-                     min_cell: int = _MIN_CELL, concepts: "dict | None" = None) -> dict:
-    """Build the dashboard JSON. ``term_rows`` is one dict per mapped Mondo term:
+def assemble_payload(*, meta: dict, term_rows: list[dict], min_cell: int = _MIN_CELL,
+                     concepts: "dict | None" = None, catalog_cap: int = 400) -> dict:
+    """Build the dashboard JSON. ``term_rows`` is one dict per mapped term:
     ``mondo_id, label, is_internal(bool), parents(list[mondo_id]), std_concepts
-    (list[int]), n_persons(int raw), collision_siblings(list[mondo_id])``.
+    (list[int]), n_persons(int raw), collision_siblings(list[mondo_id])`` and, in the
+    source_climb space, ``source_codes``: the term's FULL list of catalogued codes, each
+    with its published cell ``n`` (see `publish_cell`) and ladder ``step``.
 
-    Pure and time-free (the driver stamps ``meta['generated_utc']``). Each node
-    carries a three-state ``state`` (unused/used_small/reported) AND a four-way
-    display ``category`` for the dashboard's show/hide layers:
-      * ``reported``     — exact count (>= floor)
-      * ``used_small``   — used, 0<count<floor (count withheld)
-      * ``used_branch``  — 0 direct count but an ANCESTOR of a used node (a branch
-                           point on the used skeleton — kept, structurally relevant)
-      * ``other``        — 0 count and NOT above any used node (the rest of Mondo)
-    Headline stats are exact term counts (terms are not patients).
+    CELL MODE (rows carry cells): every patient figure is a sum of published cells (spec
+    Revision 2) — ``count`` = Σ the term's cells (diagnoses), ``split`` = its step-1-3 /
+    step-4 sums, ``roll`` = `rollup_cells` over the subtree; ``imputed`` counts the 10s in
+    the term's own cells. No distinct-patient term total is published. The code list is
+    published heavy-first, capped at ``catalog_cap`` (the sums cover the full list).
+    LEGACY MODE (standard / source spaces, no cells): the term's distinct-patient total,
+    masked to ``≤floor`` by `usage_state`.
 
-    A final `complementary_suppress` pass bands the total (``count`` -> None,
-    ``display`` -> a standard band, ``count_range`` + ``total_banded`` added) for any
-    reported term whose exact total + per-code bands would let differencing box a
-    ≤floor source code into the suppressed interior; `assert_diff_safe` then re-checks
-    as a redundant post-condition. Such terms stay ``reported``/used in the stats."""
+    Pure and time-free (the driver stamps ``meta['generated_utc']``). Each node carries a
+    ``state`` (unused / used_small / reported) and a display ``category``:
+      * ``reported``    — a count with at least one exact cell (legacy: > floor)
+      * ``used_small``  — every cell imputed (legacy: masked ≤ floor)
+      * ``used_branch`` — 0 itself but an ANCESTOR of a used node (a structural branch point)
+      * ``other``       — 0 and not above any used node
+    `assert_cells_safe` re-checks the result as a post-condition."""
+    cell_mode = any("n" in c for r in term_rows for c in (r.get("source_codes") or []))
     nodes: list[dict] = []
     parents_of: dict[str, list[str]] = {_ROOT_ID: []}
     state_of: dict[str, str] = {}
     counts = {"unused": 0, "used_small": 0, "reported": 0}
-    n_internal_used = n_collision = 0
+    n_internal_used = n_collision = n_imputed = 0
     collision_kind_counts = {"shared_concept": 0, "climb_tie": 0, "mixed": 0}
+    cells_of = {r["mondo_id"]: list(r.get("source_codes") or []) for r in term_rows} \
+        if cell_mode else None
 
     for r in term_rows:
-        state, display, public = usage_state(r["n_persons"], min_cell)
+        mid = r["mondo_id"]
+        extra: dict = {}
+        if cell_mode:
+            sm = cell_sums(cells_of[mid])
+            public = sm["all"]
+            state = ("unused" if public == 0 else
+                     "used_small" if sm["imputed"] == sm["n_cells"] else "reported")
+            display = str(public)
+            n_imputed += sm["imputed"]
+            extra = {"cells": True, "imputed": sm["imputed"]}
+            if public:
+                extra["split"] = {"named": sm["named"], "climbed": sm["climbed"]}
+        else:
+            state, display, public = usage_state(r["n_persons"], min_cell)
         counts[state] += 1
-        state_of[r["mondo_id"]] = state
+        state_of[mid] = state
         parents = r["parents"] or [_ROOT_ID]
-        parents_of[r["mondo_id"]] = parents
+        parents_of[mid] = parents
         siblings = r.get("collision_siblings") or []
         # collision mechanism: source_climb sets it explicitly; other spaces' collisions
         # are all shared-concept (Maps-to coarsening), so default to that when flagged.
@@ -1267,36 +993,35 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
                 collision_kind_counts[ckind] += 1
         if state != "unused" and r["is_internal"]:
             n_internal_used += 1
+        codes_full = list(r.get("source_codes") or [])
+        if cell_mode:   # heavy-first, so the cap keeps the high-volume codes
+            codes_full.sort(key=lambda c: (-int(c["n"]), int(c.get("step") or 0),
+                                           str(c.get("vocab")), str(c.get("code"))))
         nodes.append({
-            "id": r["mondo_id"],
+            "id": mid,
             "label": r["label"],
             "kind": "internal" if r["is_internal"] else "leaf",
             "parents": parents,
             "std_concepts": [int(c) for c in r["std_concepts"]],
             "state": state,
             "display": display,
-            "count": public,                 # None when withheld
+            "count": public,                 # None only for a masked legacy total
             "collision": bool(siblings),
             "collision_siblings": siblings,
             "collision_kind": ckind,
             "rare": bool(r.get("rare")),
             "rare_src": list(r.get("rare_src") or []),
-            # code multiplicity (exact COUNTS of source/target ids — not patient
-            # counts, so unsuppressed and un-differenceable): how many distinct ids
-            # roll into this term, by vocabulary, plus the ids themselves.
+            # code multiplicity (exact COUNTS of source/target ids — not patient counts).
             "codes": list(r.get("codes") or []),
             "n_codes": int(r.get("n_codes") or len(r.get("codes") or [])),
             "codes_by_vocab": dict(r.get("codes_by_vocab") or {}),
-            # source_climb catalog: the ORIGINATING source codes (ICD etc.) whose
-            # conditions were attributed to this term, by any tier (source-exact /
-            # standard-exact / climbed) — identity only (vocab+code+name+via), never
-            # per-code patient counts. Empty for the exact-map count spaces.
-            "source_codes": list(r.get("source_codes") or []),
-            "n_source_codes": int(r.get("n_source_codes") or len(r.get("source_codes") or [])),
-            # per-term magnitude histogram over the source codes: how many CODES fall in
-            # each volume band (a count of codes, never patients — safe at any value).
-            # The "where's the weight" shape; empty for the exact-map count spaces.
-            "source_bands": list(r.get("source_bands") or []),
+            # source_climb catalog: the ORIGINATING source codes attributed to this term,
+            # each with its step, mapping path and published cell. Empty for the exact-map
+            # count spaces.
+            "source_codes": codes_full[:catalog_cap] if cell_mode else codes_full,
+            "n_source_codes": len(codes_full) if cell_mode
+                              else int(r.get("n_source_codes") or len(codes_full)),
+            **extra,
         })
 
     depth = _depths(parents_of)
@@ -1316,22 +1041,13 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
         nd["category"] = cat
         cat_counts[cat] += 1
 
-    # Complementary suppression of the source-code -> term roll-up marginal: band the
-    # total of any term whose exact total + per-code bands would box a ≤floor code into
-    # the suppressed interior. One pass suffices (within-term independence; see the note
-    # by `complementary_suppress`); category/state/stats are unaffected (banded terms are
-    # still reported & used — only their exact number becomes a standard band).
-    n_total_banded = complementary_suppress(nodes, min_cell)
-
-    # named / rolled-up-only split, decided against the SUPPRESSED total (what is public).
-    for r, nd in zip(term_rows, nodes):
-        if r.get("n_named") is None:
-            continue
-        nd["split"] = split_parts(
-            nd, n_total=int(r["n_persons"]), n_named=int(r["n_named"]),
-            named_bands=r.get("named_bands") or [], rolled_bands=r.get("rolled_bands") or [],
-            min_cell=min_cell)
-
+    root_roll = None
+    if cell_mode:   # subtree roll-ups, from published cells only
+        roll = rollup_cells(cells_of, parents_of)
+        for nd in nodes:
+            if nd["id"] in roll:
+                nd["roll"] = roll[nd["id"]]
+        root_roll = roll.get(_ROOT_ID)
 
     n_terms = len(term_rows)
     n_used = counts["used_small"] + counts["reported"]
@@ -1340,7 +1056,7 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
         "used_terms": n_used,
         "used_small_terms": counts["used_small"],
         "reported_terms": counts["reported"],
-        "total_banded_terms": n_total_banded,
+        "imputed_cells": n_imputed,
         "unused_terms": counts["unused"],
         "used_branch_terms": cat_counts["used_branch"],
         "other_terms": cat_counts["other"],
@@ -1362,8 +1078,10 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
             "collision": False,
             "collision_siblings": [], "collision_kind": "", "rare": False, "rare_src": [],
             "codes": [], "n_codes": 0, "codes_by_vocab": {},
-            "source_codes": [], "n_source_codes": 0, "source_bands": [], "depth": 0}
-    assert_diff_safe(nodes, min_cell)     # redundant post-condition; see the note above
+            "source_codes": [], "n_source_codes": 0, "depth": 0}
+    if root_roll:
+        root["roll"] = root_roll
+    assert_cells_safe(nodes, cells_of, min_cell)     # post-condition
     out = {"meta": meta, "stats": stats, "nodes": [root] + nodes}
     if concepts:
         # identity table for every concept a catalog entry's ``std`` / ``path`` names:
@@ -1595,15 +1313,13 @@ def main(argv: list[str]) -> int:
                                  "vocabulary_id", "concept_code")
                          .toPandas())
             cat_named["via"] = [VIA_OF_STEP[int(x)] for x in cat_named["step"]]
-            named_of = {str(r.mondo_id): int(r.n_named)
-                        for r in named_counts_df(attribution, steps).toPandas().itertuples()}
-            # per-(term, code) distinct-person volume -> a differencing-safe magnitude BAND
-            # per code (never the exact count) + a per-term band histogram.
+            # per-(term, code) distinct-person count = one diagnosis CELL; only its
+            # published value (exact above the floor, IMPUTED at 1..floor) leaves the
+            # cluster, and every aggregate is built from those (spec Revision 2).
             code_counts = (attribution.groupBy("mondo_id", "origin_cid")
                            .agg(F.countDistinct("person_id").alias("np")).toPandas())
             np_of = {(str(r.mondo_id), int(r.origin_cid)): int(r.np)
                      for r in code_counts.itertuples()}
-            band_rank = {lab: i for i, lab in enumerate(_band_label(min_cell))}  # heavy=0
             source_codes_of: dict[str, dict] = {}
             code_disp = {}       # origin_cid -> "VOCAB code" for examples
             concept_ids: set = set()   # every std / path concept, resolved to identities below
@@ -1613,11 +1329,10 @@ def main(argv: list[str]) -> int:
                     cid, step = int(r.origin_cid), int(r.step)
                     vocab = str(r.vocabulary_id) if pd.notna(r.vocabulary_id) else "?"
                     code = str(r.concept_code) if pd.notna(r.concept_code) else str(cid)
-                    band = volume_band(np_of.get((str(mid), cid)), min_cell)
                     # `step` supersedes the old exact/climbed `via` (dropped to keep the
                     # payload small); `std` is omitted when `path` carries it as path[0].
                     rec = {"id": cid, "vocab": vocab, "code": code, "step": step,
-                           "band": band}
+                           "n": publish_cell(np_of.get((str(mid), cid)), min_cell)}
                     std = int(r.std_cid) if pd.notna(r.std_cid) else None
                     if step > 1 and std is not None:          # step 1: source -> Mondo directly
                         rec["std"] = std
@@ -1634,17 +1349,8 @@ def main(argv: list[str]) -> int:
                             rec["path_ambiguous"] = True
                     recs.append(rec)
                     code_disp[cid] = f"{vocab} {code}"
-                # histograms over the FULL set (before the display cap), overall and per part
-                # of the named / rolled-up-only split; sort heavy-first so the cap keeps the
-                # heavy hitters and the light tail collapses in the UI.
-                hist = band_histogram([c["band"] for c in recs], min_cell)
-                named_hist = band_histogram([c["band"] for c in recs if c["step"] <= 3], min_cell)
-                rolled_hist = band_histogram([c["band"] for c in recs if c["step"] == 4], min_cell)
-                recs.sort(key=lambda c: (band_rank.get(c["band"], 99),
-                                         c["step"], c["vocab"], c["code"]))
-                source_codes_of[str(mid)] = {"list": recs[:CATALOG_CAP], "n": len(recs),
-                                             "bands": hist, "named_bands": named_hist,
-                                             "rolled_bands": rolled_hist}
+                # the FULL list: assemble_payload sums every cell, then caps the display
+                source_codes_of[str(mid)] = {"list": recs, "n": len(recs)}
             concepts = {}
             if concept_ids:
                 ids_sdf = broadcast(spark.createDataFrame(
@@ -1712,7 +1418,7 @@ def main(argv: list[str]) -> int:
             for mid in sorted(keep_ids):
                 cids = sorted({int(c) for c in tm.get(mid, [])})
                 codes = codes_map.get(mid, [])
-                catrec = source_codes_of.get(mid) or {"list": [], "n": 0, "bands": []}
+                catrec = source_codes_of.get(mid) or {"list": [], "n": 0}
                 term_rows.append({
                     "mondo_id": mid,
                     "label": label_of.get(mid, mid),
@@ -1724,11 +1430,7 @@ def main(argv: list[str]) -> int:
                     "codes_by_vocab": codesbyvocab_map.get(mid, {}),
                     "source_codes": catrec["list"],
                     "n_source_codes": catrec["n"],
-                    "source_bands": catrec.get("bands", []),
-                    "named_bands": catrec.get("named_bands", []),
-                    "rolled_bands": catrec.get("rolled_bands", []),
                     "n_persons": count_of.get(mid, 0),
-                    "n_named": named_of.get(mid, 0),
                     "collision_siblings": siblings.get(mid, []),
                     "collision_kind": collision_kind_of.get(mid, ""),
                     "rare": rare_of.get(mid, False),
@@ -1795,10 +1497,7 @@ def main(argv: list[str]) -> int:
             if survey:
                 meta["survey"] = survey
             payload = assemble_payload(meta=meta, term_rows=term_rows, min_cell=min_cell,
-                                       concepts=concepts)
-            if survey:   # counts of TERMS by split status (term counts, not patients)
-                survey["split_terms_by_status"] = dict(Counter(
-                    nd["split"]["status"] for nd in payload["nodes"] if nd.get("split")))
+                                       concepts=concepts, catalog_cap=CATALOG_CAP)
 
             (out / out_name).write_text(json.dumps(payload))
             tsv_name = (out_name[:-5] if out_name.endswith(".json") else out_name) + "_nodes.tsv"
@@ -1813,13 +1512,12 @@ def main(argv: list[str]) -> int:
                 "codes": "|".join(f"{c['vocab']}:{c['code']}" for c in nd["codes"]),
                 "n_source_codes": nd.get("n_source_codes", 0),
                 "source_codes": "|".join(
-                    f"{c['vocab']}:{c['code']}:{c.get('step') or c.get('via', '')}:{c.get('band','')}"
+                    f"{c['vocab']}:{c['code']}:{c.get('step', '')}:{c.get('n', '')}"
                     for c in nd.get("source_codes", [])),
-                "source_bands": ";".join(f"{b['band']}:{b['codes']}"
-                                         for b in nd.get("source_bands", [])),
-                "split_status": (nd.get("split") or {}).get("status", ""),
-                "named": ((nd.get("split") or {}).get("named") or {}).get("display", ""),
-                "rolled_up_only": ((nd.get("split") or {}).get("rolled") or {}).get("display", ""),
+                "imputed_cells": nd.get("imputed", 0),
+                "named": (nd.get("split") or {}).get("named", ""),
+                "climbed": (nd.get("split") or {}).get("climbed", ""),
+                "rollup": (nd.get("roll") or {}).get("all", ""),
                 "rare": int(nd["rare"]), "rare_src": "|".join(nd["rare_src"]),
                 "parents": "|".join(nd["parents"]),
             } for nd in payload["nodes"] if nd["kind"] != "root"]
@@ -2158,7 +1856,7 @@ def main(argv: list[str]) -> int:
         for mid in sorted(mapped_ids):
             cids = sorted({int(c) for c in term_match.get(mid, [])})
             codes = codes_of.get(mid, [])
-            cat = source_codes_of.get(mid) or {"list": [], "n": 0, "bands": []}
+            cat = source_codes_of.get(mid) or {"list": [], "n": 0}
             term_rows.append({
                 "mondo_id": mid,
                 "label": label_of.get(mid, mid),
@@ -2170,7 +1868,6 @@ def main(argv: list[str]) -> int:
                 "codes_by_vocab": codesbyvocab_of.get(mid, {}),
                 "source_codes": cat["list"],
                 "n_source_codes": cat["n"],
-                "source_bands": cat.get("bands", []),
                 "n_persons": count_of.get(mid, 0),
                 "collision_siblings": siblings.get(mid, []),
                 "collision_kind": collision_kind_of.get(mid, ""),
@@ -2216,8 +1913,6 @@ def main(argv: list[str]) -> int:
             "n_source_codes": nd.get("n_source_codes", 0),
             "source_codes": "|".join(f"{c['vocab']}:{c['code']}:{c['via']}:{c.get('band','')}"
                                      for c in nd.get("source_codes", [])),
-            "source_bands": ";".join(f"{b['band']}:{b['codes']}"
-                                     for b in nd.get("source_bands", [])),
             "rare": int(nd["rare"]), "rare_src": "|".join(nd["rare_src"]),
             "parents": "|".join(nd["parents"]),
         } for nd in payload["nodes"] if nd["kind"] != "root"]

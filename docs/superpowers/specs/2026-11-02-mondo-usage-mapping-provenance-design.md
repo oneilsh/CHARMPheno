@@ -254,3 +254,27 @@ byte-for-byte today's behavior.
 - Toggle placement and wording, as long as "All" stays the default.
 - Docs: experiment entry, README for the dashboard (`mondo-usage-dashboard/README.md`) and the
   Methods tooltip text updated for the split and its suppression.
+
+## Revision 2 (2026-11-02, user decision): additive diagnosis cells
+
+Supersedes the publication rules above (D3's split, D4, the 1-2-5 total bands, per-code volume
+bands). Mapping provenance (steps, `std`, paths, `concepts`, dialog) is unchanged.
+
+- **Unit = diagnosis**: a (patient, source code) pair, each counted once — a patient's repeated
+  rows for one code count once. Every published patient figure is built from per-(term, source
+  code) **cells**: the number of distinct patients with that code attributed to the term.
+- **Cells**: published exactly when > 20; **1–20 is published as 10** (an imputed value, marked
+  in the UI); 0 is 0. The true value of a masked cell is used nowhere else.
+- **Every aggregate is a sum of published cells, never a separately computed true number**:
+  term count = Σ its cells; named / climbed-only = Σ its step-1–3 / step-4 cells (they add up to
+  the term count); roll-up = Σ over the **distinct** source codes in the subtree (a code under
+  several terms counts once, at its largest cell, in the part given by its lowest step there).
+  No distinct-patient term total is published. Hence any arithmetic on published numbers can only
+  recover the 10s. (Rounding exact aggregates separately would let the two roundings constrain
+  each other; summing published cells avoids that.)
+- **Tripwire**: every published cell is 0, 10, or > 20; every aggregate equals the sum of the
+  published cells it is built from; no `frac`. The cohort-wide survey person counts are
+  unaffected (single distinct counts, ≤-suppressed).
+- **Precision note**: cells > 20 are exact, finer than the Data Browser's 20-grid (user's call).
+- Removed: per-code bands and histograms, `total_band`/`safe_total_band`/complementary
+  suppression, `split_parts` and its hypotheses, the roll-up ±.

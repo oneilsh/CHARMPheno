@@ -227,3 +227,24 @@ Plus `assert_diff_safe` negatives: an exact split part in 1..20; a `ranged` spli
 
 ### Task B4: Local preview, then publish
 - Copy the downloaded `mondo_usage.json` / `hpo_usage.json` into `mondo-usage-dashboard/`; set `meta.cdr` to the release-only string if the export carries a workspace name (user confirms); run `assert_diff_safe` over both files via a one-off script; serve with `python3 -m http.server` and preview; user decides on commit/push/merge.
+
+---
+
+## Part C — additive diagnosis cells (spec Revision 2)
+
+### Task C1: cells, sums, roll-ups, tripwire (driver, pure)
+- `publish_cell(n, min_cell=20) -> int` (0 / 10 / exact); `IMPUTED = 10`.
+- `rollup_cells(cells_of: dict[str, list[(cid, step, n)]], parents_of: dict[str, list[str]]) -> dict[str, dict]`
+  — per node over its DAG descendant closure (incl. itself): distinct codes, each at max cell and
+  lowest step; returns `{"all", "named", "climbed", "imputed"}` with named + climbed == all.
+- `assemble_payload` takes each row's FULL `source_codes` (entries carry `n` = published cell and
+  `step`), computes count / split / roll from them, caps the published list at `catalog_cap`,
+  and calls `assert_cells_safe` (cells ∈ {0, 10} ∪ (20, ∞); count == Σ cells; named + climbed ==
+  count; roll.all ≥ count; no frac). Rows without cells (standard / source spaces) keep the
+  usage_state path.
+- Tests: the 456 + ≤20 example (cell 10, term 466); roll-up dedup of a code under two terms;
+  split partition; tripwire negatives; legacy rows.
+### Task C2: wiring — per-(term, code) exact counts → `n`; drop bands / split_parts / n_named; TSV.
+### Task C3: page — integers, `10*` marks + footnote, roll-up from `node.roll`, split from
+`node.split`, Methods text; legacy (sample) payload still renders.
+### Task C4: exp 0121 (same config) → cluster run → validate → publish.
