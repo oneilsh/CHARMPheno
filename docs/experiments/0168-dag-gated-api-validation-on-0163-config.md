@@ -146,6 +146,20 @@ comparison, census, NPMI, conversion sidecar (key moved: rebuilds), ribbon reado
 long step, 0163: 5.5 h), detection and new-diagnosis comparisons, workup sidecar
 (rebuilds), framing-1 survey, workup survey.
 
+The job body is also committed as [`scripts/jobs/exp_0168.sh`](../../scripts/jobs/exp_0168.sh) (same steps); the launch that chains 0168 and then [0169](0169-descriptive-model-of-record-0163-config-long-fit.md) is:
+
+```bash
+cd ~/repos/CHARMPheno && git fetch origin claude/dismech-ribbon && git checkout claude/dismech-ribbon && git pull --ff-only
+RUNS=/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs
+mkdir -p $RUNS/0168-dag-gated-api-validation-on-0163-config $RUNS/0169-descriptive-model-of-record-0163-config-long-fit
+L8=$RUNS/0168-dag-gated-api-validation-on-0163-config/job_log.md
+L9=$RUNS/0169-descriptive-model-of-record-0163-config-long-fit/job_log.md
+nohup bash -c 'bash scripts/jobs/exp_0168.sh > "'$L8'" 2>&1; bash scripts/jobs/exp_0169.sh > "'$L9'" 2>&1' > /dev/null 2>&1 &
+sleep 5; ls -la "$L8"; tail -f "$L8"
+```
+
+The original inline form:
+
 ```bash
 cd ~/repos/CHARMPheno && git fetch origin claude/dismech-ribbon && git checkout claude/dismech-ribbon && git pull --ff-only
 RUNS=/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs
