@@ -714,3 +714,26 @@ def test_describe_nodes_terms_multi_domain(spark):
         assert len(r.terms) == 13
         assert r.terms == [names[i] for i in r.termIndices]
     assert {t.split(":", 1)[0] for r in rows for t in r.terms} == {"f0", "f1"}
+
+
+@pytest.mark.parametrize("gate_warm", [0, 1])
+def test_local_engine_matches_the_spark_engine_in_full_batch(spark, gate_warm):
+    """engine='local' runs the same model, schedule and seeds in the driver's memory
+    (LocalRunner over forked workers); in full batch the fit equals the Spark fit up
+    to summation order, and the model and its node set are the same."""
+    df = _df(spark)
+    kw = dict(maxIter=4, gateWarm=gate_warm, gateSeedLeaves=bool(gate_warm))
+    a = _est(**kw).fit(df)
+    b = _est(engine="local", localProcesses=2, **kw).fit(df)
+    la, lb = a.result.global_params["lambda"], b.result.global_params["lambda"]
+    np.testing.assert_allclose(lb, la, rtol=1e-9, atol=1e-12)
+    np.testing.assert_allclose(b.result.elbo_trace, a.result.elbo_trace, rtol=1e-9)
+    assert b.dag() == a.dag() and b.nodeTopics(3) == a.nodeTopics(3)
+    assert b.getOrDefault("engine") == "local"
+
+
+def test_engine_is_validated():
+    from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
+    est = DagGatedLDAEstimator(engine="gpu")
+    with pytest.raises(ValueError, match="engine must be one of"):
+        est._fit(None)

@@ -163,3 +163,74 @@ def test_broadcast_params_ship_expelogbeta_and_give_identical_stats():
         b = model.local_update(iter(rows), shipped)
         for k in a:
             np.testing.assert_allclose(a[k], b[k], rtol=0, atol=0)
+
+
+def _gated_fixture(n=60, V=24):
+    from spark_vi.dag.layout import DagLayout
+    from spark_vi.models.topic.types import GatedBOWDocument
+    lay = DagLayout({1: 0, 2: 0, 3: 1, 4: 1, 5: 2}, n_bg=2, tpn=1)
+    rng = np.random.default_rng(3)
+    docs = []
+    for i in range(n):
+        idx, cnt = np.unique(rng.integers(0, V, size=12), return_counts=True)
+        fr = frozenset() if i % 5 == 0 else frozenset({[3, 4, 5, 2][i % 4]})
+        docs.append(GatedBOWDocument(idx.astype(np.int32), cnt.astype(np.float64),
+                                     int(cnt.sum()), frontier=fr))
+    return lay, V, docs
+
+
+@pytest.mark.parametrize("minibatch", [None, 0.5])
+def test_processes_give_the_serial_fit_bit_for_bit(minibatch):
+    """Forked workers run the same chunks; merged in chunk order, the multi-process
+    fit equals the serial one exactly, through the leaves-first gate and the seeds."""
+    from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
+    lay, V, docs = _gated_fixture()
+    cfg = VIConfig(max_iterations=4, mini_batch_fraction=minibatch, random_seed=1,
+                   convergence_tol=1e-12)
+
+    def fit(processes):
+        m = DagGatedOnlineLDA(lay, V, domains=[16, 8], random_seed=0)
+        m.set_gate_schedule(warm=1)
+        return LocalRunner(m, cfg, chunk_size=9, processes=processes).fit(docs)
+
+    a, b = fit(1), fit(3)
+    for m in a.global_params["lambda"]:
+        np.testing.assert_array_equal(a.global_params["lambda"][m],
+                                      b.global_params["lambda"][m])
+    np.testing.assert_array_equal(a.elbo_trace, b.elbo_trace)
+
+
+def test_processes_without_chunk_size_split_the_batch_evenly():
+    """chunk_size=None with N processes = N contiguous chunks; the fit matches the
+    serial fit to summation order."""
+    from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
+    lay, V, docs = _gated_fixture()
+    cfg = VIConfig(max_iterations=3, random_seed=1, convergence_tol=1e-12)
+    r = LocalRunner(DagGatedOnlineLDA(lay, V, random_seed=0), cfg, processes=4)
+    assert r._chunks(60) == [(0, 15), (15, 30), (30, 45), (45, 60)]
+    a = LocalRunner(DagGatedOnlineLDA(lay, V, random_seed=0), cfg).fit(docs)
+    b = r.fit(docs)
+    np.testing.assert_allclose(a.global_params["lambda"], b.global_params["lambda"],
+                               rtol=1e-12)
+
+
+def test_forked_workers_do_not_share_the_global_rng():
+    """A model without a content seed draws from np.random; each forked worker is
+    reseeded, so two chunks of identical documents get different gamma inits."""
+    from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
+    from spark_vi.core.local_runner import _forked_local_updates
+    lay, V, docs = _gated_fixture(n=1)
+    m = DagGatedOnlineLDA(lay, V, random_seed=None, cavi_max_iter=1)
+    params = m.broadcast_params(m.initialize_global(None))
+    rows = docs * 2
+    s1, s2 = _forked_local_updates(m, params, rows, [(0, 1), (1, 2)], 2)
+    assert not np.array_equal(np.asarray(s1["lambda_stats"]),
+                              np.asarray(s2["lambda_stats"]))
+
+
+def test_processes_zero_means_one_per_cpu_and_negative_is_refused():
+    import os
+    from spark_vi.models.topic.counting import CountingModel
+    assert LocalRunner(CountingModel(), processes=0).processes == (os.cpu_count() or 1)
+    with pytest.raises(ValueError):
+        LocalRunner(CountingModel(), processes=-1)

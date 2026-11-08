@@ -374,7 +374,7 @@ produce a clear NotImplementedError when the resulting RDD is collected.
 
 ### The LocalRunner (in-memory engine)
 
-`LocalRunner(model, config, chunk_size=None)` runs the same `VIModel` without
+`LocalRunner(model, config, chunk_size=None, processes=1)` runs the same `VIModel` without
 Spark, over a Python sequence of rows held in memory (ADR 0051 §2): a corpus that
 fits in one large machine's memory needs no cluster. Steps 5–9 above, and all
 bookkeeping (resume, checkpoint, diagnostics, the `on_iteration` hook, the
@@ -393,6 +393,19 @@ batches than Spark's per-partition samplers). One `@pytest.mark.slow` test,
 `tests/test_local_runner_agreement.py`, checks both on the DAG-gated LDA with the
 leaves-first schedule. `LocalRunner.transform(rows, global_params)` maps
 `infer_local` eagerly and returns a list.
+
+**Processes.** `processes > 1` (0 = one per CPU) runs the chunks' `local_update` in
+worker processes, the local analogue of executors. The pool is forked once per E-step,
+right after the iteration's `broadcast_params`, so the model, the shipped parameters and
+the corpus are shared copy-on-write; only each chunk's statistics are pickled back, and
+they are merged in chunk order, so a fit is bit-identical to `processes=1` at the same
+`chunk_size` (`chunk_size=None` with N processes = N even chunks). Fork is Linux-only in
+practice; elsewhere it runs serially. Why it pays: at the whole-Mondo scale (K ≈ 3,000,
+V ≈ 11,600) one core does the gated E-step at ~2–5 ms per document, so a Spark iteration
+over a 22k-document mini-batch is mostly overhead (shipping the topic matrix, scheduling,
+merging). `DagGatedLDAEstimator(engine="local", localProcesses=N)` uses it: the node set
+and the seed passes run on Spark, the documents are collected to the driver once, and the
+SVI loop runs here (exp 0170).
 
 ### The readout (`spark_vi.readout`)
 

@@ -81,6 +81,8 @@ from spark_vi.models.topic.dag_gated_lda import (
 from spark_vi.models.topic.types import GatedBOWDocument
 
 _LOG = "[dag-gated-lda]"
+# Where the fit's E-step runs (the `engine` Param).
+FIT_ENGINES = ("spark", "local")
 _NODE_SET_KEY = "dag_node_set"
 
 
@@ -307,6 +309,22 @@ class _DagGatedLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         "(dropped; a document left with no label is background). Default 'error'.",
         typeConverter=TypeConverters.toString,
     )
+    engine = Param(
+        Params._dummy(), "engine",
+        "where the fit's E-step runs: 'spark' (the executors: VIRunner) or 'local' "
+        "(the training documents are collected to the driver once and the fit runs "
+        "in memory: LocalRunner, over localProcesses forked processes). The node set, "
+        "the seed passes and transform stay on Spark either way. 'local' pays off "
+        "when the corpus fits the driver's memory and a Spark iteration is mostly "
+        "overhead (shipping the topic matrix, scheduling, merging). Default 'spark'.",
+        typeConverter=TypeConverters.toString,
+    )
+    localProcesses = Param(
+        Params._dummy(), "localProcesses",
+        "with engine 'local': worker processes for the E-step (0 = one per CPU of "
+        "the driver). Default 0.",
+        typeConverter=TypeConverters.toInt,
+    )
     gateNBg = Param(
         Params._dummy(), "gateNBg",
         "number of shared background topics, open to every document; "
@@ -505,7 +523,8 @@ _PLAIN_PARAMS = (
     "learningDecay", "subsamplingRate", "docConcentration", "topicConcentration",
     "optimizeDocConcentration", "gammaShape", "caviMaxIter", "caviTol", "labelsCol",
     "minDocsPerNode", "unknownLabels", "gateNBg", "gateTpn", "gateWarm",
-    "gateOpenSeed", "gateSeedMode", "gateSeedLeaves", "featuresCols",
+    "gateOpenSeed", "gateSeedMode", "gateSeedLeaves", "featuresCols", "engine",
+    "localProcesses",
 )
 
 
@@ -548,6 +567,7 @@ _DAG_GATED_LDA_DEFAULTS = dict(
     gateNBg=10, gateTpn=1,
     gateWarm=0, gateOpenSeed=True, gateSeedMode="balanced", gateSeedLeaves=False,
     featuresCols=[], vocabularies="", nodeTerms="", gateSeedProfile="",
+    engine="spark", localProcesses=0,
     # docConcentration / topicConcentration / seed: no default (isSet; unset = 1/K,
     # 1/K, nondeterministic).
 )
@@ -739,6 +759,8 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator, DriverParamsWritable):
         vocabularies=None,
         nodeTerms=None,
         gateSeedProfile=None,
+        engine: str = "spark",
+        localProcesses: int = 0,
         # _PersistenceParams kwargs — see that mixin's docstring; these MUST
         # appear here explicitly (not just on the mixin) for kwarg-style
         # construction.
@@ -972,9 +994,32 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator, DriverParamsWritable):
 
     # ---- fit --------------------------------------------------------------------
 
+    def _fit_local(self, engine, config, rdd, resume_path):
+        """The SVI loop in the driver's memory (engine 'local'): the documents are
+        collected once (``toLocalIterator``: a partition at a time, so
+        ``spark.driver.maxResultSize`` does not apply) and fitted by ``LocalRunner``
+        over ``localProcesses`` forked workers. The same model, schedule, seeds and
+        loop as the Spark engine; the mini-batches are drawn by NumPy instead of
+        ``RDD.sample``, so the fit agrees in distribution, not bit for bit."""
+        import time
+
+        from spark_vi.core.local_runner import LocalRunner
+        t0 = time.perf_counter()
+        rows = list(rdd.toLocalIterator())
+        runner = LocalRunner(engine, config=config,
+                             processes=int(self.getOrDefault("localProcesses")))
+        print(f"{_LOG} local engine: {len(rows)} documents collected to the driver in "
+              f"{time.perf_counter() - t0:.1f}s; E-step over {runner.processes} "
+              f"process(es)", flush=True)
+        return runner.fit(rows, resume_from=resume_path,
+                          on_iteration=self._on_iteration)
+
     def _fit(self, dataset) -> "DagGatedLDAModel":
         from spark_vi.core.runner import VIRunner
 
+        fit_engine = str(self.getOrDefault("engine"))
+        if fit_engine not in FIT_ENGINES:
+            raise ValueError(f"engine must be one of {FIT_ENGINES}; got {fit_engine!r}")
         parsed = self._parsed_dag()
         policy = str(self.getOrDefault("unknownLabels"))
         if policy not in UNKNOWN_LABEL_POLICIES:
@@ -1066,8 +1111,11 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator, DriverParamsWritable):
                 engine.set_alpha_policy(hist, optimize=True)
                 print(f"{_LOG} empirical-Bayes alpha on ({len(hist)} "
                       f"frontier groups)", flush=True)
-            result = VIRunner(engine, config=config).fit(
-                rdd, resume_from=resume_path, on_iteration=self._on_iteration)
+            if fit_engine == "local":
+                result = self._fit_local(engine, config, rdd, resume_path)
+            else:
+                result = VIRunner(engine, config=config).fit(
+                    rdd, resume_from=resume_path, on_iteration=self._on_iteration)
         finally:
             rdd.unpersist(blocking=False)
             frontier_bc.unpersist(blocking=False)

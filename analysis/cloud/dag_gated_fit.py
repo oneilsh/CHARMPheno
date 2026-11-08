@@ -413,7 +413,10 @@ FIT_CKPT_DIR = "fit_ckpt"
 FIT_IDENTITY_FILE = "fit_identity.json"
 # Estimator Params that may differ between the interrupted run and its resume:
 # the iteration budget (a resume finishes or extends it) and the persistence plumbing.
-_RESUME_FREE_PARAMS = frozenset({"maxIter", "saveDir", "saveInterval", "resumeFrom"})
+# Where the E-step runs (`engine`, `localProcesses`) changes no model: a fit
+# checkpointed on one engine resumes on the other.
+_RESUME_FREE_PARAMS = frozenset({"maxIter", "saveDir", "saveInterval", "resumeFrom",
+                                 "engine", "localProcesses"})
 
 
 def fit_identity(est, bundle_key):
@@ -918,6 +921,7 @@ _FLAG_TO_PARAM = (
     ("gate_warm", "gateWarm", int), ("gate_seed_mode", "gateSeedMode", str),
     ("gate_seed_leaves", "gateSeedLeaves", bool),
     ("gate_open_seed", "gateOpenSeed", bool),
+    ("fit_engine", "engine", str), ("fit_processes", "localProcesses", int),
 )
 # The clinical driver's node-set threshold: a node gets a topic block when at least
 # this many TRAINING documents' label closures reach it (>= the egress floor, so a
@@ -1403,6 +1407,14 @@ def parse_args(argv=None):
     p.add_argument("--gate-open-seed", action=argparse.BooleanOptionalAction,
                    default=None,
                    help="gateOpenSeed: seed each block when it opens (preset on).")
+    p.add_argument("--fit-engine", choices=("spark", "local"), default=None,
+                   help="engine: where the fit's E-step runs. 'local' collects the "
+                        "training documents to the driver once and fits in memory "
+                        "over --fit-processes forked processes (the bundle, the node "
+                        "set and the seed passes stay on Spark). Default spark.")
+    p.add_argument("--fit-processes", type=int, default=None, metavar="N",
+                   help="localProcesses: E-step worker processes with --fit-engine "
+                        "local (0 = one per driver CPU; default 0).")
     p.add_argument("--gate-seed-profile", default="", metavar="TSV",
                    help="With gateWarm > 0: an external phenotype profile table "
                         "(mondo_id, concept_id, neg; e.g. hpo_profile_marks.py output) "

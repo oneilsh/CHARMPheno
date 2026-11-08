@@ -755,6 +755,10 @@ def build_dag_gated_args(
         args.extend(["--gate-attestation", str(effective["gate_attestation"])])
     # Leaves-first gate schedule (exp 0153/0154). Each knob is emitted only when
     # the front matter sets it; an unset one is the recommended preset's.
+    if effective.get("fit_engine"):
+        args.extend(["--fit-engine", str(effective["fit_engine"])])
+    if effective.get("fit_processes") is not None:
+        args.extend(["--fit-processes", str(int(effective["fit_processes"]))])
     if effective.get("gate_warm") is not None:
         args.extend(["--gate-warm", str(int(effective["gate_warm"]))])
     if effective.get("gate_seed_leaves") is not None:
