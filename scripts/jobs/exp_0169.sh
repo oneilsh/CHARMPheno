@@ -21,5 +21,5 @@ ls -la "$R169"/topics_report.md
 echo "### npmi 169"
 make -C analysis/cloud dag-gated-readout ID=169 DGR_SPARK_CONF=spark.eventLog.enabled=false DGR_ARGS="--npmi --npmi-top 10 --npmi-domains 0,2 --acq-tag top10" || echo "WARN: npmi failed"
 R168=$(ls -d "$RUNS"/0168-* 2>/dev/null | head -1)
-if [ -n "$R168" ] && [ -f "$R168"/npmi_top10.json ]; then echo "### npmi 0168 vs 0169"; python3 analysis/cloud/topic_npmi.py compare "$R168" "$R169" top10; fi
+if [ -n "$R168" ] && [ -f "$R168"/npmi_top10.json ]; then echo "### npmi 0168 vs 0169"; PYTHONPATH="$PWD:$PWD/spark-vi:$PWD/charmpheno" python3 analysis/cloud/topic_npmi.py compare "$R168" "$R169" top10; fi
 echo "### DONE 169"

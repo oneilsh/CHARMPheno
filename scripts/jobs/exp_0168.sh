@@ -54,7 +54,7 @@ for R in "$R168" "$R163"; do echo "-- $(basename $R)"; sed -n "/^block topics/p;
 echo "### npmi 168"
 make -C analysis/cloud dag-gated-readout ID=168 DGR_SPARK_CONF=spark.eventLog.enabled=false DGR_ARGS="--npmi --npmi-top 10 --npmi-domains 0,2 --acq-tag top10" || { echo "FAILED: npmi 168"; exit 1; }
 echo "### npmi 0163 vs 0168"
-[ -e "$R163"/npmi_top10.json ] && python3 analysis/cloud/topic_npmi.py compare "$R163" "$R168" top10
+[ -e "$R163"/npmi_top10.json ] && PYTHONPATH="$PWD:$PWD/spark-vi:$PWD/charmpheno" python3 analysis/cloud/topic_npmi.py compare "$R163" "$R168" top10
 echo "### conversion sidecar 168 (key moved: rebuilds)"
 make -C analysis/cloud build-conversion-sidecar ID=168 || { echo "FAILED: conversion sidecar 168"; exit 1; }
 echo "### ribbon readout 168 (stacked, top-m 100)"
@@ -63,17 +63,17 @@ echo "### stacked detection 0163 vs 0168"
 grep -h -m1 -A6 -F "[stacked readout: gated_pc_stacked_nodes_mass99]" "$R163"/readout_log.md "$R163"/job_log.md | cut -c1-220
 grep -h -m1 -A6 -F "[stacked readout: gated_pc_stacked_nodes]" "$R168"/readout_log.md | cut -c1-220
 echo "### new diagnoses 0163 (A) vs 0168 (B), ribbon nodes by Mondo id"
-[ -e "$R163"/prevalence_check_stacked_nodes_mass99.json ] && python3 analysis/cloud/compare_incident_runs.py "$R163" prevalence_check_stacked_nodes_mass99.json "$R168" prevalence_check_stacked_nodes.json | cut -c1-220
+[ -e "$R163"/prevalence_check_stacked_nodes_mass99.json ] && PYTHONPATH="$PWD:$PWD/spark-vi:$PWD/charmpheno" python3 analysis/cloud/compare_incident_runs.py "$R163" prevalence_check_stacked_nodes_mass99.json "$R168" prevalence_check_stacked_nodes.json | cut -c1-220
 echo "### workup sidecar 168 (keyed on the conversion key: rebuilds)"
 make -C analysis/cloud build-workup-sidecar ID=168 || { echo "FAILED: workup sidecar 168"; exit 1; }
 BASE="--differential . --diff-survey 25 --diff-members top --diff-incident --diff-groups-like $R152/groups_4b.json --acq-heads stacked_nodes --diff-max-patients 1500 --diff-crossfit"
 echo "### survey (9 same-question groups) 168"
 make -C analysis/cloud dag-gated-readout ID=168 DGR_SPARK_CONF=spark.eventLog.enabled=false DGR_ARGS="$BASE --acq-tag survey_0168" || { echo "FAILED: survey 168"; exit 1; }
 echo "### framings 0168 vs 0163 (same-question groups)"
-[ -e "$R163"/differential_survey_inc_top.json ] && python3 analysis/cloud/survey_analysis.py "$R168" survey_0168 "$R163" survey_inc_top | cut -c1-220
+[ -e "$R163"/differential_survey_inc_top.json ] && PYTHONPATH="$PWD:$PWD/spark-vi:$PWD/charmpheno" python3 analysis/cloud/survey_analysis.py "$R168" survey_0168 "$R163" survey_inc_top | cut -c1-220
 echo "### workup survey 168 (strict window, new facts only)"
 make -C analysis/cloud dag-gated-readout ID=168 DGR_SPARK_CONF=spark.eventLog.enabled=false DGR_ARGS="$BASE --diff-workup --acq-tag survey_0168_workup" || { echo "FAILED: workup 168"; exit 1; }
-python3 analysis/cloud/survey_analysis.py "$R168" survey_0168_workup | sed -n "/## workup/,/^E5 reasons/p" | cut -c1-260
+PYTHONPATH="$PWD:$PWD/spark-vi:$PWD/charmpheno" python3 analysis/cloud/survey_analysis.py "$R168" survey_0168_workup | sed -n "/## workup/,/^E5 reasons/p" | cut -c1-260
 echo "-- 0163 workup surveys on record (newest first; compare with the newest)"
 ls -t "$R163"/differential_survey_0167_*.json | head -3
 echo "### DONE"
