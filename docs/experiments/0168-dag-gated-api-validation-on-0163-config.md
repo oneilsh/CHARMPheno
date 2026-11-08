@@ -305,6 +305,9 @@ the workspace.
   gate and the node set (spec R3); to revisit in the walkthrough.
 - The framings are a tie (median difference 0); two groups swing by about ±0.35 in
   opposite directions, the size of the noise at these group sizes.
-- The workup survey (strict window, new facts only) is as flat as 0167's: E6 top-1 minus
-  random −0.001 / +0.001 / +0.002 over 9 groups, top-1 / oracle 0.03.
+- The workup survey (strict window, new facts only) tells 0167 run 2's story: the
+  ranking does not work. E6 R1 median over groups +0.00 (quartiles −0.30 / +0.00 /
+  +0.32; 0167 run 2: −0.38 / +0.08 / +0.56), still strongly negative in heart septal
+  defect (−0.85) and phobic disorder (−0.37); top-1 beats random in 5 of 9 groups by
+  about 0.001 nats; top-1 reaches 3% of the hindsight-best fact.
 
