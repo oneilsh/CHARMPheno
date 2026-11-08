@@ -1590,6 +1590,15 @@ def main() -> int:
                 pc_model = pc_est.fit(bundle.train_df)
                 if action == "resume":
                     pc_model.setMaxIter(max_iter)
+                # Park the FINISHED fit as a resumable checkpoint before any post-fit
+                # write: if one of them fails (a save, a disk, a preempted master), a
+                # re-run of the same command finds the checkpoint at its full budget
+                # ("done" above) and does not refit. Removed once every save succeeded.
+                from spark_vi.io.export import save_result
+                save_result(pc_model.result, str(ckpt))
+                (ckpt / FIT_IDENTITY_FILE).write_text(json.dumps(identity, indent=1))
+                _cprint(f"[driver]   parked the finished fit in {ckpt} (resumable "
+                        "until the saves below succeed)", flush=True)
 
             lay = pc_model._layout()
             br = node_bridge(pc_model, bundle.name_by_id)
@@ -1669,8 +1678,9 @@ def main() -> int:
             _cprint(f"[driver]   saved FIT-ONLY result to {out} (readout pending; "
                     "re-scoreable with dag_gated_readout)", flush=True)
             if ckpt.exists():
-                # The finished fit is durable in <run>/model; the resume checkpoint
-                # has done its job (and is another lambda-sized copy on disk).
+                # Every post-fit save succeeded: the finished fit is durable in
+                # <run>/model and the npz, so the resume checkpoint has done its job
+                # (and is another lambda-sized copy on disk).
                 import shutil
                 shutil.rmtree(ckpt, ignore_errors=True)
             # The fit ends here (cleanup 2026-10): every readout and evaluation is

@@ -163,7 +163,7 @@ The original inline form:
 ```bash
 cd ~/repos/CHARMPheno && git fetch origin claude/dismech-ribbon && git checkout claude/dismech-ribbon && git pull --ff-only
 RUNS=/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs
-RIBBON=$HOME/repos/CHARMPheno/analysis/cloud/anchor_selection_data/dismech_ribbon.tsv
+RIBBON=$HOME/repos/CHARMPheno/analysis/cloud/label_sets/dismech_ribbon.tsv
 R152=$(ls -d $RUNS/0152-*); R163=$(ls -d $RUNS/0163-*)
 ls -la $RIBBON $R152/groups_4b.json $R163/bundle_meta.json $R163/census_own10.md $R163/npmi_top10.json $R163/prevalence_check_stacked_nodes_mass99.json $R163/differential_survey_inc_top.json
 mkdir -p $RUNS/0168-dag-gated-api-validation-on-0163-config

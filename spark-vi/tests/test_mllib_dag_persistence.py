@@ -313,3 +313,60 @@ def test_pipeline_and_pipeline_model_round_trip(spark, tmp_path):
 
 
 PARENT_AS_GIVEN = {1: [], 2: [], 3: [1], 4: [1], 5: [2], 6: [2]}
+
+
+# --------------------------------------------------------------------------- #
+# Local paths are written and read on the driver: no Spark job                 #
+# --------------------------------------------------------------------------- #
+
+def _jobs_in(sc, group, fn):
+    """Run fn() under a job group; return how many Spark jobs it started."""
+    sc.setJobGroup(group, group)
+    try:
+        fn()
+    finally:
+        sc.setLocalProperty("spark.jobGroup.id", None)
+    return len(sc.statusTracker().getJobIdsForGroup(group))
+
+
+def test_local_save_and_load_run_no_spark_job(spark, tmp_path):
+    """A `file://` path exists on the driver's machine only (a run dir on the master's
+    workspace mount); MLlib's DefaultParamsWriter writes its metadata through a
+    one-task Spark job, i.e. on an executor, which fails on a cluster. Every stage
+    here must save and load such a path without a Spark job, and leave MLlib's own
+    metadata layout (metadata/part-00000 + _SUCCESS)."""
+    from spark_vi.mllib.topic.dag_gated_lda import (DagGatedLDAEstimator,
+                                                    DagGatedLDAModel)
+    from spark_vi.mllib.topic.featurizer import (DagGatedFeaturizer,
+                                                 DagGatedFeaturizerModel)
+    sc = spark.sparkContext
+    df = _df(spark)
+    est = _est(maxIter=2)
+    model = est.fit(df)
+    fz = (DagGatedFeaturizer(docIdCol="id")
+          .addArrayDomain("a", "terms").setLabelsInputCol("labs"))
+    fdf = spark.createDataFrame([(1, ["x", "y"], [1]), (2, ["y"], [])],
+                                "id int, terms array<string>, labs array<int>")
+    fmodel = fz.fit(fdf)
+    for name, stage, cls in [("est", est, DagGatedLDAEstimator),
+                             ("model", model, DagGatedLDAModel),
+                             ("fz", fz, DagGatedFeaturizer),
+                             ("fzm", fmodel, DagGatedFeaturizerModel)]:
+        uri = _uri(tmp_path, name)
+        assert _jobs_in(sc, f"save-{name}", lambda: stage.write().overwrite().save(uri)) == 0
+        md = os.listdir(tmp_path / name / "metadata")
+        assert "part-00000" in md and "_SUCCESS" in md, (name, md)
+        back = {}
+        assert _jobs_in(sc, f"load-{name}", lambda: back.setdefault("s", cls.load(uri))) == 0
+        assert back["s"].uid == stage.uid
+    assert fmodel.vocabularies() == DagGatedFeaturizerModel.load(_uri(tmp_path, "fzm")).vocabularies()
+
+
+def test_metadata_written_by_mllib_still_loads(spark, tmp_path):
+    """The driver-side reader reads MLlib's own writer's files too."""
+    from pyspark.ml.util import DefaultParamsWriter
+    from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
+    est = _est(maxIter=3)
+    DefaultParamsWriter.saveMetadata(est, str(tmp_path / "e"), spark.sparkContext)
+    back = DagGatedLDAEstimator.load(_uri(tmp_path, "e"))
+    assert back.getOrDefault("maxIter") == 3 and back.getDag() == est.getDag()

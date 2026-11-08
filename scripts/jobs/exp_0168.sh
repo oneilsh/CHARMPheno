@@ -3,7 +3,7 @@
 # Run from the repo root on the cluster (docs/experiments/0168-*.md has the launch line).
 set -o pipefail
 RUNS=${RUNS:-/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs}
-RIBBON=${RIBBON:-$PWD/analysis/cloud/anchor_selection_data/dismech_ribbon.tsv}
+RIBBON=${RIBBON:-$PWD/analysis/cloud/label_sets/dismech_ribbon.tsv}
 R152=$(ls -d "$RUNS"/0152-*); R163=$(ls -d "$RUNS"/0163-*)
 # Required inputs stop the job; 0163's comparison files only skip their comparison.
 for f in "$RIBBON" "$R152"/groups_4b.json; do

@@ -204,6 +204,80 @@ class _PersistableModel:
 # --------------------------------------------------------------------------- #
 # MLlib persistence (spec R13 Level 2): Params metadata + our own data files.  #
 # --------------------------------------------------------------------------- #
+def write_params_metadata(instance, uri: str, sc, extra_metadata=None) -> None:
+    """Write MLlib's standard Params metadata for ``instance`` under ``<uri>/metadata``
+    FROM THE DRIVER (``spark_vi.io.fs``), in the file layout
+    ``DefaultParamsWriter.saveMetadata`` produces (one JSON line in ``part-00000``,
+    plus ``_SUCCESS``), so MLlib's own readers still read it.
+
+    Why not ``DefaultParamsWriter.saveMetadata``: it writes through a one-task Spark
+    job (``sc.parallelize([json], 1).saveAsTextFile``), i.e. on an EXECUTOR. For a
+    ``file://`` path that is a directory on the driver's machine only (a run dir on
+    the master's workspace mount), so every task attempt fails on the workers and a
+    finished fit cannot be saved. Writing from the driver works for local paths and
+    any Hadoop URI alike, and runs no job."""
+    from spark_vi.io import fs
+    md = fs.join(uri, "metadata")
+    text = DefaultParamsWriter._get_metadata_to_save(instance, sc, extra_metadata)
+    fs.write_text(fs.join(md, "part-00000"), text + "\n")
+    fs.write_bytes(fs.join(md, "_SUCCESS"), b"")
+
+
+def read_params_metadata(uri: str, expected_class: str = "") -> dict:
+    """Read the Params metadata under ``<uri>/metadata`` from the driver: the
+    counterpart of ``write_params_metadata``, and of ``DefaultParamsReader.loadMetadata``
+    without its executor-side ``sc.textFile`` (same failure for a driver-local path).
+    Reads either writer's files (the first non-empty line of the first ``part-*``)."""
+    from spark_vi.io import fs
+    md = fs.join(uri, "metadata")
+    parts = [n for n in fs.listdir(md) if n.startswith("part-")]
+    if not parts:
+        raise FileNotFoundError(f"{uri}: no saved stage here (no metadata/part-*)")
+    line = next((ln for ln in fs.read_text(fs.join(md, parts[0])).splitlines()
+                 if ln.strip()), None)
+    if line is None:
+        raise ValueError(f"{fs.join(md, parts[0])} is empty")
+    return DefaultParamsReader._parseMetaData(line, expected_class)
+
+
+class DriverParamsWriter(DefaultParamsWriter):
+    """``DefaultParamsWriter`` whose metadata is written from the driver
+    (``write_params_metadata``), for stages whose whole state is their Params."""
+
+    def saveImpl(self, path: str) -> None:
+        from spark_vi.io import fs
+        write_params_metadata(self.instance, fs.qualify(path), self.sc)
+
+
+class DriverParamsReader(MLReader):
+    """Loads a Params-only stage saved by ``DriverParamsWriter`` (or MLlib's own
+    writer), reading its metadata from the driver."""
+
+    def __init__(self, cls):
+        super().__init__()
+        self.cls = cls
+
+    def load(self, path: str):
+        from spark_vi.io import fs
+        metadata = read_params_metadata(fs.qualify(path), _class_name(self.cls))
+        instance = self.cls()
+        instance._resetUid(metadata["uid"])
+        DefaultParamsReader.getAndSetParams(instance, metadata)
+        return instance
+
+
+class DriverParamsWritable(MLWritable, MLReadable):
+    """``DefaultParamsWritable`` / ``DefaultParamsReadable`` with driver-side metadata
+    I/O (see ``write_params_metadata`` for why)."""
+
+    def write(self):
+        return DriverParamsWriter(self)
+
+    @classmethod
+    def read(cls):
+        return DriverParamsReader(cls)
+
+
 class _StagePersistence(MLWritable, MLReadable):
     """``MLWritable`` / ``MLReadable`` for a stage whose state is Params plus data.
 
@@ -279,8 +353,8 @@ class _StageWriter(MLWriter):
                                   f"write().overwrite().save(path)")
         self.instance._save_data(uri)
         # Metadata last: it is what a reader looks for (object-store atomicity).
-        DefaultParamsWriter.saveMetadata(self.instance, uri, self.sc,
-                                         extraMetadata=self.instance._extra_metadata())
+        write_params_metadata(self.instance, uri, self.sc,
+                              extra_metadata=self.instance._extra_metadata())
 
 
 def save_stage_in_place(stage, path: str) -> None:
@@ -301,7 +375,7 @@ class _StageReader(MLReader):
     def load(self, path: str):
         from spark_vi.io import fs
         uri = fs.qualify(path)
-        metadata = DefaultParamsReader.loadMetadata(uri, self.sc)
+        metadata = read_params_metadata(uri)
         if metadata["class"] != _class_name(self.cls):
             raise ValueError(f"{path} holds a {metadata['class']}, not a "
                              f"{_class_name(self.cls)}")

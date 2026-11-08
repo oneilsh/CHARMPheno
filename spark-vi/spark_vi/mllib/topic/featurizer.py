@@ -61,15 +61,14 @@ Example::
 
 Persistence: both stages are ``MLWritable`` / ``MLReadable`` (``Pipeline.save`` /
 ``PipelineModel.load`` work). The model writes the standard Params metadata plus its
-vocabularies as a small parquet ``(domain, index, term)`` under ``<path>/data``,
-through Spark, so any Hadoop-filesystem URI works.
+vocabularies as ``<path>/data/vocabularies.json``, both written from the driver through
+``spark_vi.io.fs``, so a local path or any Hadoop-filesystem URI works.
 
 Domain-neutral: nothing here knows what a document, term or node means.
 """
 from __future__ import annotations
 
 import json
-import os
 from typing import Dict, List, Optional
 
 from pyspark import keyword_only
@@ -77,10 +76,7 @@ from pyspark.ml.base import Estimator, Model
 from pyspark.ml.feature import CountVectorizer, CountVectorizerModel
 from pyspark.ml.param import Param, Params, TypeConverters
 from pyspark.ml.util import (
-    DefaultParamsReadable,
     DefaultParamsReader,
-    DefaultParamsWritable,
-    DefaultParamsWriter,
     MLReadable,
     MLReader,
     MLWritable,
@@ -92,9 +88,10 @@ from pyspark.sql.types import (
     ArrayType,
     IntegerType,
     StringType,
-    StructField,
-    StructType,
 )
+
+from spark_vi.mllib._common import (DriverParamsWritable, read_params_metadata,
+                                     write_params_metadata)
 
 _TERMS_TMP = "__dgf_terms_{}"
 _DOC_TMP = "__dgf_doc"
@@ -338,8 +335,7 @@ def _table_to_arrays(table: DataFrame, spec: dict, doc_id: str, tmp: str) -> Dat
             .agg(F.flatten(F.collect_list(tmp)).alias(tmp)))
 
 
-class DagGatedFeaturizer(_DagGatedFeaturizerParams, Estimator, DefaultParamsReadable,
-                         DefaultParamsWritable):
+class DagGatedFeaturizer(_DagGatedFeaturizerParams, Estimator, DriverParamsWritable):
     """Learn per-domain vocabularies and build vector + label columns (spec R12).
 
     See the module docstring for the input kinds and the example. ``fit(docs)``
@@ -472,27 +468,22 @@ class DagGatedFeaturizerModel(_DagGatedFeaturizerParams, Model, MLReadable, MLWr
         return _FeaturizerModelReader(cls)
 
 
-_VOCAB_SCHEMA = StructType([
-    StructField("domain", IntegerType(), False),
-    StructField("index", IntegerType(), False),
-    StructField("term", StringType(), False),
-])
-
-
 class _FeaturizerModelWriter(MLWriter):
-    """Params metadata (``<path>/metadata``) + vocabularies parquet (``<path>/data``)."""
+    """Params metadata (``<path>/metadata``) + vocabularies JSON (``<path>/data/
+    vocabularies.json``), both written from the driver through ``spark_vi.io.fs``
+    (any local path or Hadoop URI; a Spark write job would put a driver-local path on
+    the executors' disks). Metadata last."""
 
     def __init__(self, instance: DagGatedFeaturizerModel):
         super().__init__()
         self.instance = instance
 
     def saveImpl(self, path: str) -> None:
-        DefaultParamsWriter.saveMetadata(self.instance, path, self.sc)
-        rows = [(m, j, t) for m, v in enumerate(self.instance._vocabularies)
-                for j, t in enumerate(v)]
-        spark = self.sparkSession
-        (spark.createDataFrame(rows, _VOCAB_SCHEMA).coalesce(1)
-         .write.parquet(os.path.join(path, "data")))
+        from spark_vi.io import fs
+        uri = fs.qualify(path)
+        fs.write_text(fs.join(uri, "data", "vocabularies.json"),
+                      json.dumps([list(v) for v in self.instance._vocabularies]))
+        write_params_metadata(self.instance, uri, self.sc)
 
 
 class _FeaturizerModelReader(MLReader):
@@ -501,13 +492,11 @@ class _FeaturizerModelReader(MLReader):
         self.cls = cls
 
     def load(self, path: str) -> DagGatedFeaturizerModel:
-        metadata = DefaultParamsReader.loadMetadata(path, self.sc)
-        n = len(json.loads(metadata["paramMap"].get(
-            "domainSpecs", metadata.get("defaultParamMap", {}).get("domainSpecs", "[]"))))
-        vocabs: List[List[str]] = [[] for _ in range(n)]
-        for r in (self.sparkSession.read.parquet(os.path.join(path, "data"))
-                  .orderBy("domain", "index").collect()):
-            vocabs[r["domain"]].append(r["term"])
+        from spark_vi.io import fs
+        uri = fs.qualify(path)
+        metadata = read_params_metadata(uri)
+        vocabs: List[List[str]] = json.loads(
+            fs.read_text(fs.join(uri, "data", "vocabularies.json")))
         model = self.cls(vocabs)
         model._resetUid(metadata["uid"])
         DefaultParamsReader.getAndSetParams(model, metadata)

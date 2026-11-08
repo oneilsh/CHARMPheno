@@ -66,9 +66,9 @@ from spark_vi.dag.nodeset import (
     node_sort_key,
     parse_dag,
 )
-from pyspark.ml.util import DefaultParamsReadable, DefaultParamsWritable
 
 from spark_vi.mllib._common import (
+    DriverParamsWritable,
     _PersistenceParams,
     _StagePersistence,
     apply_persistence_params,
@@ -659,8 +659,7 @@ class _TermIndex:
         return self.by_col[cols[0]][ref]
 
 
-class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator, DefaultParamsReadable,
-                           DefaultParamsWritable):
+class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator, DriverParamsWritable):
     """MLlib-shaped Estimator wrapping ``DagGatedOnlineLDA``.
 
     Required: a DAG (``setDag``) and, on the fit DataFrame, ``labelsCol`` plus the
@@ -694,8 +693,8 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator, DefaultParamsReadable,
     given DataFrame is the checkpoint's (same kept nodes, kept DAG and layout);
     otherwise ``fit`` refuses before training, naming the difference.
 
-    Persistence: ``save`` / ``load`` (MLlib's ``DefaultParamsWritable`` /
-    ``DefaultParamsReadable``) keep every Param, the structured ones (the DAG,
+    Persistence: ``save`` / ``load`` (MLlib's Params metadata, written and read on
+    the driver: ``spark_vi.mllib._common.DriverParamsWritable``) keep every Param, the structured ones (the DAG,
     vocabularies, nodeTerms, gateSeedProfile) as the JSON they are stored as, so
     str / int ids survive; the ``setOnIteration`` callback is not persisted."""
 
