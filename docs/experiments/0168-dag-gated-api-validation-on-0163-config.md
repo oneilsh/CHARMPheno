@@ -1,7 +1,7 @@
 ---
 id: 168
 slug: dag-gated-api-validation-on-0163-config
-status: planned
+status: done
 model_class: dag_gated
 # The cluster validation of the DAG-gated user API redesign (plan 2026-11-02, WP 14):
 # 0163's configuration, re-fit on the new estimator. Every key below is read by
@@ -265,3 +265,46 @@ sleep 2; ls -la "$L"; tail -f "$L"
   rows; `survey_analysis.py`'s paired table and the workup section.
 
 ## Run log
+
+- 2026-11-08, one cluster: 0169's job first (its fit built the bundle), then this job.
+  The fit, sidecars, readout and both surveys ran; the two helper-script comparisons
+  (`topic_npmi.py compare`, `survey_analysis.py` workup) crashed on a missing
+  `PYTHONPATH` (they import `charmpheno`; fixed in `bc9aa79`) and were re-run by hand
+  from the saved outputs.
+
+## Results
+
+**The redesign reproduces 0163.** Pooled figures; per-node and per-group tables stay in
+the workspace.
+
+| check | 0163 | 0168 |
+|---|---|---|
+| vocabularies (condition / measurement / drug) | 5000 / 5000 / 1601 | identical, term for term and index for index |
+| test documents (label year) | 57,819 | 57,819 |
+| fitted nodes (Mondo ids) | 2,694 | 2,845: 2,573 shared, 121 only 0163, 272 only 0168 |
+| census: signature / stratum / starved blocks | 95% / 5% / 0 | 96% / 4% / 0 |
+| detection, root head = stacked (AUC / AP) | 0.8636 / 0.9919 | 0.8610 / 0.9917 |
+| detection, flat max over node heads (AUC) | 0.628 | 0.610 |
+| ranking within parent cohort, macro AUC / AP | 0.7275 / 0.4526 (906 nodes) | 0.7322 / 0.4573 (932 nodes) |
+| new-diagnosis AUC, stacked, 814 shared ribbon nodes | 0.7100 | 0.7134 (median B − A +0.0027; B better on 478) |
+| new-diagnosis AUC, flat, same nodes | 0.6057 | 0.6075 (median +0.0010) |
+| gated NPMI (condition domain), 2,442 shared nodes | +0.187 | +0.176 (median B − A −0.006) |
+| all-document NPMI, 2,515 shared nodes | +0.238 | +0.231 (median B − A 0.000) |
+| framings: kappa quartiles, 9 groups | 0.00 / 0.18 / 0.46 | 0.07 / 0.18 / 0.33 (median A − B 0.000; A better in 2 of 9) |
+
+- Per-node new-diagnosis accuracy improves slightly in every incident-count band
+  (median +0.001 to +0.011), so the read at top-m 100 (0163: full K) costs nothing and
+  no full-K re-readout is needed. The flat detection read drops 0.018: it is the max over
+  more node heads (2,845 vs 2,694); the root and stacked reads, which the readout
+  reports, move by 0.003.
+- **The node set is larger, not smaller,** although support is now counted on the
+  training documents only: 0168 counts support on the gate attestation (`gate_labels`,
+  all-ever, as `gate_attestation: ever` sets), where 0163's Mondo-build powering counted
+  label-year positives. All-ever attestation reaches more nodes past
+  `minDocsPerNode=100`. A deliberate consequence of one labels column driving both the
+  gate and the node set (spec R3); to revisit in the walkthrough.
+- The framings are a tie (median difference 0); two groups swing by about ±0.35 in
+  opposite directions, the size of the noise at these group sizes.
+- The workup survey (strict window, new facts only) is as flat as 0167's: E6 top-1 minus
+  random −0.001 / +0.001 / +0.002 over 9 groups, top-1 / oracle 0.03.
+

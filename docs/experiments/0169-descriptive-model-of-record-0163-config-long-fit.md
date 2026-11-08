@@ -1,7 +1,7 @@
 ---
 id: 169
 slug: descriptive-model-of-record-0163-config-long-fit
-status: planned
+status: done
 model_class: dag_gated
 # The descriptive model of record: 0168's configuration (0163's, on the new API) with a
 # longer fit, for the topic descriptions themselves (eventual export; no readout).
@@ -60,7 +60,7 @@ spark_conf:
 
 # 0169 — The descriptive model of record (0163's configuration, long fit)
 
-**Status:** planned. **Date:** 2026-11-07. **Follows:** [0168](0168-dag-gated-api-validation-on-0163-config.md).
+**Status:** done. **Date:** 2026-11-07. **Follows:** [0168](0168-dag-gated-api-validation-on-0163-config.md).
 
 ## Why
 
@@ -102,4 +102,26 @@ In the fit log: the `[dag-gated-lda] node set:` line should match 0168's (same d
 
 ## Results
 
-(pending)
+Ran 2026-11-08 (bundle a cache HIT; fit 8,253 s, 150 iterations at ~50 s; the node set
+identical to 0168's: 6,024 given / 2,845 kept / 3,027 pruned / 152 spliced). An earlier
+attempt (2026-11-07) fitted all 150 iterations and then failed to save the model: MLlib's
+metadata writer runs a Spark job, so an executor tried to write the master-only run dir.
+Fixed in `3d45004` (metadata written and read on the driver; the fit now parks its result
+in `fit_ckpt` before any post-fit write).
+
+| | 0168 (60 iterations) | 0169 (150 iterations) |
+|---|---|---|
+| ELBO, last iteration (mini-batch estimate) | −64.2M | −31.7M (−37.1M at 100, −33.7M at 120, −32.1M at 140) |
+| census: signature / stratum / starved blocks | 96% / 4% / 0 | 90% / 3% / **189 (7%)** |
+| gated NPMI, condition domain | +0.184 | +0.190 (median B − A +0.001, 2,828 nodes) |
+| all-document NPMI | +0.236 | +0.247 (median B − A +0.002, 2,845 nodes) |
+
+- **Longer training is more coherent but starves some blocks.** NPMI rises a little at
+  every depth, and the ELBO roughly halves (still falling ~1% per 10 iterations at 150,
+  so not converged). But 189 node blocks are starved where 0168 has none, and the share
+  grows with depth (5% at depth 4-6, 7-10% at depth 7-12). A starved block's description
+  is close to its prior, so it describes nothing.
+- **Not yet the model of record.** Before exporting either: find why blocks starve
+  between iteration 60 and 150 (likely the 200 background topics absorbing words from
+  deep blocks once the step size has decayed), and decide whether the record is 0168,
+  0169 with its starved nodes flagged, or a refit with that cause addressed.
