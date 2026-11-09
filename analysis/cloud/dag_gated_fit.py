@@ -1407,6 +1407,11 @@ def parse_args(argv=None):
     p.add_argument("--gate-open-seed", action=argparse.BooleanOptionalAction,
                    default=None,
                    help="gateOpenSeed: seed each block when it opens (preset on).")
+    p.add_argument("--trace-flat-every", type=int, default=0, metavar="N",
+                   help="every N iterations (and the first), print how many node "
+                        "topics are starved (flat at the prior: the census's "
+                        "definition) and the node topics' share of the lambda mass "
+                        "(analysis/cloud/starvation.py). 0 = off.")
     p.add_argument("--fit-engine", choices=("spark", "local"), default=None,
                    help="engine: where the fit's E-step runs. 'local' collects the "
                         "training documents to the driver once and fits in memory "
@@ -1570,6 +1575,18 @@ def main() -> int:
         if args._gate_seed_profile and int(g("gateWarm")) <= 0:
             raise ValueError("--gate-seed-profile requires gateWarm > 0")
         n_bg, tpn, max_iter = int(g("gateNBg")), int(g("gateTpn")), int(g("maxIter"))
+        if args.trace_flat_every > 0:
+            # Every N iterations: how many node topics sit at the flat prior (the
+            # census's "starved") and the node topics' share of the lambda mass, so a
+            # fit shows WHEN starvation sets in (exp 0171). Driver-side numpy over
+            # lambda, a fraction of a second at whole-Mondo size.
+            from starvation import trace_line
+            _every, _nbg = int(args.trace_flat_every), n_bg
+
+            def _trace(it, gp, _elbo):
+                if it % _every == 0 or it == 1:
+                    _cprint(trace_line(it, gp["lambda"], _nbg), flush=True)
+            pc_est.setOnIteration(_trace)
         with _phase(f"gated_pc fit (DagGatedLDAEstimator: the node set is learned "
                     f"from the train split, minDocsPerNode={g('minDocsPerNode')})"):
             # Resume (the engine's own checkpoint, <out>/fit_ckpt): a re-run of the
