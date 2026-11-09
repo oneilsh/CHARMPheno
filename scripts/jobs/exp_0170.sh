@@ -12,11 +12,13 @@ echo "### receipts"
 grep -h -E "\[dag-gated-lda\] (node set|leaves-first gate|local engine)|case-finding-cache (HIT|MISS)|<<< gated_pc fit|saved the fitted model" "$R170"/driver_log.md | cut -c1-240
 echo "### iteration wall time: 0168 (spark) vs 0170 (local)"
 for R in "$R168" "$R170"; do
-  [ -n "$R" ] && [ -f "$R"/driver_log.md ] || continue
-  T=$(grep -E "^\[driver\]   iter [0-9]+/" "$R"/driver_log.md | sed -E 's/.*, ([0-9.]+)s$/\1/')
-  n=$(echo "$T" | grep -c .); med=$(echo "$T" | sort -n | sed -n "$(( (n + 1) / 2 ))p")
+  [ -n "$R" ] || continue
+  # The SVI loop's iteration lines land in the job log (the driver log tees phases).
+  T=$(cat "$R"/job_log.md "$R"/driver_log.md 2>/dev/null | grep -E "^\[driver\]   iter [0-9]+/" | sort -u | sed -E 's/.*, ([0-9.]+)s$/\1/')
+  n=$(echo "$T" | grep -c .); [ "$n" -gt 0 ] || { echo "$(basename "$R"): no iteration lines"; continue; }
+  med=$(echo "$T" | sort -n | sed -n "$(( (n + 1) / 2 ))p")
   echo "$T" | awk -v r="$(basename "$R")" -v med="$med" '{s+=$1; n++} END {printf "%s: %d iters, mean %.1fs, median %ss, total %.0fs\n", r, n, s/n, med, s}'
-  grep -E "^\[driver\]   iter (1|30|60)/" "$R"/driver_log.md | cut -c1-110
+  cat "$R"/job_log.md "$R"/driver_log.md 2>/dev/null | grep -E "^\[driver\]   iter (1|30|60)/" | sort -u | cut -c1-110
 done
 echo "### census 170 (then 0168)"
 make -s -C analysis/cloud inspect-topics ID=170 RESOLVE_NAMES=1 INSPECT_ARGS="--profile-census --own-codes --own-top 10 --out $R170/census_own10.md" > /dev/null || echo "WARN: census failed"
