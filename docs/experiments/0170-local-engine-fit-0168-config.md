@@ -1,7 +1,7 @@
 ---
 id: 170
 slug: local-engine-fit-0168-config
-status: planned
+status: done
 model_class: dag_gated
 # 0168's configuration with the fit's E-step on the driver: LocalRunner over forked
 # processes (engine 'local'). The bundle, node set, seed passes and NPMI stay on Spark.
@@ -59,7 +59,7 @@ spark_conf:
 
 # 0170 — The fit on the local engine (0168's configuration)
 
-**Status:** planned. **Date:** 2026-11-08. **Compares with:** [0168](0168-dag-gated-api-validation-on-0163-config.md).
+**Status:** done. **Date:** 2026-11-08. **Compares with:** [0168](0168-dag-gated-api-validation-on-0163-config.md).
 
 ## Why
 
@@ -104,4 +104,32 @@ E-step over 8 process(es)`, then the iteration lines (their last field is the wa
 
 ## Results
 
-(pending)
+Ran 2026-11-08/09 on an n2-standard-8 master (8 vCPU, 31 GB; 9 GB used during the fit)
+with **2 executors** (0168: 20), on a fresh cluster (bundle rebuilt).
+
+**The local engine is correct but slower at 8 cores.**
+
+| | 0168 (Spark, 40 executor cores) | 0170 (local, 8 processes) |
+|---|---|---|
+| wall time per iteration, median / mean | 54.0 / 58.8 s | 239.6 / 236.7 s |
+| SVI loop total (60 iterations) | 3,530 s | 14,203 s |
+| core-seconds per iteration | ~2,160 | ~1,900 |
+| documents collected to the driver | n/a | 220,160 in 8.5 s |
+| ELBO at iteration 60 | −64.16M | −64.18M |
+| node set | 6,024 / 2,845 / 3,027 / 152 | identical |
+| census: signature / stratum / starved | 96% / 4% / 0 | 97% / 3% / 0 |
+| NPMI, median paired difference (both domains, gated and all) | | +0.0000 |
+
+- **Both engines are compute-bound.** The two spend about the same core time per
+  iteration, so 0168's Spark iteration was NOT mostly overhead, as this doc's Why
+  assumed. That assumption came from a synthetic benchmark with one or two labels per
+  document; real documents under the all-ever gate carry large frontiers, so their
+  allowed sets (200 background topics plus their closure blocks) are wide, and the
+  E-step costs about 70 ms of core time per document, not 2-5 ms.
+- **The local fit reproduces the Spark fit** in distribution (different mini-batches,
+  the same ELBO trajectory, node set, census and coherence).
+- **When local pays:** with as many cores as the cluster. By the same arithmetic a
+  single 64-vCPU machine would run about 25-30 s per iteration, with no executors and no
+  topic-matrix broadcast. At 8 cores, Spark stays the engine for fits this size.
+- The Spark phases outside the loop (bundle rebuild, support count, seed passes, NPMI
+  2,531 s vs 0168's 622 s) ran on 2 executors and are not comparable with 0168's.
