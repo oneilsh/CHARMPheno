@@ -82,6 +82,29 @@ Two questions:
    points at competition at the full gate (a later leaves-first re-pass, or a cap on
    the background's share, are the candidates).
 
+## The offline report (2026-11-09, before the refit)
+
+Which of 0169's 189 starved blocks (pooled counts; `starvation.py` over 0168, 0170, 0169):
+- **Support decides it:** starved 11% of nodes with 100-200 documents, 20% at 200-500,
+  8% at 500-1,000, 1 of 1,507 above 1,000 (starved median 275 documents, fed 1,430).
+- Small niches: median 0.07 of the parent's documents (fed 0.25), at most 2 kept
+  children (3+ children: 2 of 512); depth adds little once support is fixed (5-7% at
+  every depth from 4 down).
+- **Already marginal at 60 iterations, the same in 0168 and 0170** (different batches):
+  support fraction median 0.24 (the other 2,656: 0.01), λ mass / parent's 0.0067 (0.22).
+
+Reading: the data never sustained these blocks; the open-time and leaf seeds' β did, and
+SVI keeps only the product of (1 - ρ) of an unrenewed λ (about e^-7 between iterations
+60 and 150 here). Every DAG-gated fit before 0169 stopped at 60 iterations or fewer,
+which is why none showed this (0163: "starved 15 -> 0" from the leaf seed). Consistent
+with insight 0091 (the word competition is decided on β: only the β start fed deep
+blocks; α, learned or held, does not and is not a lever). Prediction for this trace:
+near zero through the leaves-first rounds, then a steady climb through the full gate;
+0172 (slower opening) ends about the same. Candidate fix on the β side: keep a seeded
+block's seed as its prior (anchored / seeded topics), so an unrenewed block decays to its
+seed rather than to flat η; or minDocsPerNode about 1,000; or 0168 (60 iterations) as the
+record with weak blocks flagged.
+
 ## Run
 
 Chained with 0172 (one job):
