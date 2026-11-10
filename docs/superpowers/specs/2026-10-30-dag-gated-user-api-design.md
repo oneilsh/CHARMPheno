@@ -183,6 +183,39 @@ Two levels, built in this order (maintainer, 2026-10-30):
   works but saving it does not: the models' `save(path)` is custom). Built once, on the
   redesigned estimators.
 
+**R14. Node statistics, and dropping the nodes the data did not sustain** (addendum
+2026-11-10, maintainer; evidence: exps 0169 / 0171). A fit long enough to forget its
+seeds leaves some node blocks flat at the η prior: blocks seeded at opening that the
+data never renews (0171: none starved from iteration 30 to 70, then 205 of 2,845 cross
+together 45-60 iterations after the full gate opens, then the count plateaus; support
+decides it, 100-1,000 documents). Whether to act on that is the user's call, as with the
+other models, whose topic statistics are reported (the dashboard build's prevalence and
+coherence) and nothing is removed. So:
+1. **Reporting, by default.** The fitted model gets `nodeStatistics(flatThreshold=0.5)`:
+   a DataFrame, one row per kept node (node id typed as in `describeNodes`): `depth`,
+   `support` (documents whose labels' closure reaches it, as in `nodeSupport()`),
+   `supportFraction` (the block's effective support exp(H(β)) over its dominant
+   domain's vocabulary, 0 = sharp, 1 = flat; the minimum over the block's topics when
+   `gateTpn > 1`), `mass` (the block's λ mass), `massToParent` (its mass over its
+   heaviest kept parent's; null for a top-level node) and `flat` (`supportFraction >
+   flatThreshold`). Domain-neutral; the census's "starved" is `flat` at 0.5. The model
+   and its node set are unchanged; nothing is dropped. No iteration-count warning:
+   whether a fit has settled is read off its standard diagnostics (the ELBO trace).
+2. **Dropping, explicitly.** `model.dropUnsupportedNodes(maxSupportFraction=0.5)`
+   returns a NEW model without the flat nodes, built with the node-set machinery of R3
+   so it means the same thing as pruning there: each dropped node's labels land on its
+   nearest kept ancestors (background when none); its kept children are re-attached to
+   its nearest kept ancestors and the kept DAG is re-reduced; pruned and spliced nodes
+   that landed on a dropped node land further up; engine ids are renumbered and every
+   K-sized fitted array (λ per domain, α, the gate state) keeps only the surviving
+   topics, in the new order. No re-splice and no refit: only blocks the data did not
+   sustain are removed. The new model reports them in `unsupportedNodes()` -> `{node:
+   [landing nodes]}` beside `prunedNodes()` / `splicedNodes()`, persisted with the node
+   set (R13). A dropped node gets no topic block, no gate and no readout head
+   (DagHeads built from the cleaned model by `setTopicModel` uses its node set, R6).
+   Because a starved node may have fed children, the kept set is no longer closed
+   upward; the landing and reduction must not assume it is.
+
 ## What changes outside spark-vi
 
 - **The bundle** stores the attested node ids per document (two columns when R8 is
