@@ -1,7 +1,7 @@
 ---
 id: 172
 slug: starvation-gate-warm4
-status: planned
+status: done
 model_class: dag_gated
 # 0171 with twice as many iterations per level while the leaves-first gate opens
 # (gate_warm 4: 60 iterations of rounds over heights 0..14, then 90 at the full gate),
@@ -58,7 +58,7 @@ spark_conf:
 
 # 0172 — More iterations per level while the gate opens (gate_warm 4)
 
-**Status:** planned. **Date:** 2026-11-09. **Compares with:** [0171](0171-starvation-trace-0169-config.md).
+**Status:** done. **Date:** 2026-11-09. **Compares with:** [0171](0171-starvation-trace-0169-config.md).
 
 ## Why
 
@@ -73,4 +73,29 @@ Chained after 0171 (see 0171's Run).
 
 ## Results
 
-(pending)
+Ran 2026-11-10, chained after 0171 (same cluster, same bundle). Full gate from iteration
+56 (0171: 28). **168 of 2,845 node blocks starved (5.9%)** at 150 iterations (0171: 205).
+
+| iteration | 1 | 10 | 20 | 30 | 40 | 55 | 60-70 | 75 | 80 | 90 | 100 | 105-150 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| starved (0172) | 1,435 | 465 | 76 | 21 | 5 | 1 | **0** | 29 | 61 | 131 | 160 | 167-168 |
+| starved (0171) | 1,435 | 76 | 5 | 0 | 0 | 0 | 0 | 40 | 111 | 192 | 197 | 199-205 |
+
+- **The cliff starts at iteration 75 in both runs**, not at a fixed delay after the full
+  gate (the prediction in 0171 was ~120 here). The leaf blocks are seeded at iteration 0
+  in both, so their seeds decay on the same clock: Σ ρ_t over iterations 0-75 is about
+  7, leaving ~e^-7 of the seed. Half of 0171's starved nodes are leaves. This sharpens
+  the seed-decay reading: a block's decay clock starts when it is seeded.
+- Slower opening helps a little (168 vs 205), plausibly because non-leaf blocks are
+  seeded later and have decayed less by iteration 150.
+- **Which nodes starve varies run to run:** 101 of 0172's 168 were starved in 0171 (and
+  all 168 sit in 0171's near-flat band, support fraction median 0.999). A core of about
+  100 starves every time, inside a marginal pool of about 300 small nodes whose crossing
+  depends on the mini-batches. So a single fit's flat set is partly arbitrary at the
+  edge; `nodeStatistics`' continuous `supportFraction` shows how marginal a node is, and a
+  stricter drop threshold (e.g. 0.9) would keep a drop to the stable core.
+- The node topics' λ-mass share drifts down as in 0171 (93.5% → 73.7%).
+
+**Conclusion (0169-0172):** the schedule knobs (gate_warm here; α, insight 0091) do not
+change the mechanism. Keep R14: fit past the cliff, report `nodeStatistics`, drop only
+by explicit choice.
