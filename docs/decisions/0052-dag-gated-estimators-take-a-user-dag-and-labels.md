@@ -49,3 +49,9 @@ chains lived in `charmpheno.mondo` although it is generic DAG work. Spec
   stores attested node ids. One full cache drop (bundle and sidecar keys).
 - Node sets are counted on training documents only, so they shift slightly from runs
   before this ADR; comparisons go by user node id over the shared nodes.
+- Addendum (spec R14, 2026-11-10): the fitted node set is no longer always closed
+  upward. `dropUnsupportedNodes` (explicit; `nodeStatistics` reports by default)
+  removes nodes whose blocks are flat with the same landing and re-reduction as
+  pruning, so a dropped node may have kept children; `NodeSet.unsupported` records
+  them. Code reading the node set may not assume a kept node's ancestors in the
+  GIVEN DAG are kept (the kept DAG itself holds only kept nodes, as before).

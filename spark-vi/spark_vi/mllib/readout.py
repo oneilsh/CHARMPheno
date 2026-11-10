@@ -442,7 +442,9 @@ class DagHeadsModel(_DagHeadsParams, _StagePersistence, Model):
         e = ns.engine_id.get(node)
         if e is None:
             why = ("was pruned" if node in ns.pruned else
-                   "was spliced" if node in ns.spliced else "is not a DAG node")
+                   "was spliced" if node in ns.spliced else
+                   "was dropped as unsupported" if node in ns.unsupported else
+                   "is not a DAG node")
             raise KeyError(f"node {node!r} has no head: it {why}")
         return int(e)
 
@@ -465,6 +467,11 @@ class DagHeadsModel(_DagHeadsParams, _StagePersistence, Model):
 
     def splicedNodes(self) -> list:
         return list(self._node_set.spliced)
+
+    def unsupportedNodes(self) -> dict:
+        """``{dropped node: [landing nodes]}`` for the nodes the topic model dropped
+        as unsupported (see DagGatedLDAModel.dropUnsupportedNodes): no head."""
+        return {n: list(ls) for n, ls in self._node_set.unsupported.items()}
 
     def _labeler(self) -> NodeLabeler:
         return NodeLabeler.from_node_set(

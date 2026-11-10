@@ -683,6 +683,9 @@ def build_dag_gated_args(
     documents by the estimator); a front matter that predates it gives
     `min_positives`, the Mondo build's old powering threshold, whose number is
     passed on (spec 2026-10-30: the threshold moved into the estimator).
+    `drop_unsupported: true` drops the flat node blocks after the fit (spec R14.2;
+    `drop_max_support_fraction` sets the threshold, default the driver's 0.5); both
+    are emitted only when set.
 
     `resume_from` is not used: with `fit_save_interval` > 0
     the driver checkpoints to <out>/fit_ckpt and a re-run resumes from it by
@@ -757,6 +760,12 @@ def build_dag_gated_args(
     # the front matter sets it; an unset one is the recommended preset's.
     if effective.get("trace_flat_every"):
         args.extend(["--trace-flat-every", str(int(effective["trace_flat_every"]))])
+    # Spec R14.2: drop the flat node blocks after the fit (off unless asked).
+    if effective.get("drop_unsupported"):
+        args.append("--drop-unsupported")
+    if effective.get("drop_max_support_fraction") is not None:
+        args.extend(["--drop-max-support-fraction",
+                     str(float(effective["drop_max_support_fraction"]))])
     if effective.get("fit_engine"):
         args.extend(["--fit-engine", str(effective["fit_engine"])])
     if effective.get("fit_processes") is not None:

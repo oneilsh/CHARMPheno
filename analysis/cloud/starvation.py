@@ -3,7 +3,9 @@
 A node topic is STARVED (the census's word, `inspect_topics.classify_block_topics`)
 when its word distribution in its dominant domain spreads its effective support
 (exp of the entropy) over more than half that domain's vocabulary: it sits near the
-flat η prior, so it describes nothing. Under SVI a block whose documents stop sending
+flat η prior, so it describes nothing. The measure is spark-vi's
+(`spark_vi.eval.topic.sharpness.support_fraction`, re-exported here); the fitted
+model's `nodeStatistics()` reports it per node, `flat` there being "starved" here. Under SVI a block whose documents stop sending
 it words decays back toward η, so a topic can be fed at one iteration and starved later
 (exp 0169: none at 60 iterations, 189 of 2,845 at 150).
 
@@ -27,42 +29,17 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from spark_vi.eval.topic.sharpness import support_fraction  # noqa: F401 (re-export)
 
 STARVED_FRAC = 0.5      # the census's threshold (inspect_topics, classify_block_topics)
+# Bands of a node's document support, shared by the report and the fit driver's
+# node-statistics log line.
+SUPPORT_BANDS = [0, 100, 200, 500, 1000, 5000, np.inf]
 
 
 # --------------------------------------------------------------------------- #
-# Per-topic flatness                                                           #
+# Per-topic flatness (the measure, `support_fraction`, is spark-vi's: R14.1)   #
 # --------------------------------------------------------------------------- #
-def _domains(lam) -> list:
-    """λ as a list of (K, V_m) arrays (a single array is one domain)."""
-    if isinstance(lam, dict):
-        return [np.asarray(lam[k], dtype=np.float64)
-                for k in sorted(lam, key=lambda k: int(k))]
-    return [np.asarray(lam, dtype=np.float64)]
-
-
-def support_fraction(lam) -> tuple[np.ndarray, np.ndarray]:
-    """`(support_frac, mass)` per topic: the effective support exp(H(β)) of the topic's
-    row in its dominant domain (the domain holding most of its λ mass) over that
-    domain's vocabulary size, and the topic's total λ mass. Same quantity as
-    `inspect_topics.topic_sharpness`, vectorized over topics."""
-    doms = _domains(lam)
-    sums = np.stack([d.sum(axis=1) for d in doms], axis=1)          # (K, M)
-    mass = sums.sum(axis=1)
-    dom = np.argmax(sums, axis=1)
-    frac = np.empty(sums.shape[0])
-    for m, d in enumerate(doms):
-        rows = np.flatnonzero(dom == m)
-        if rows.size == 0:
-            continue
-        sub = d[rows]
-        p = sub / np.maximum(sub.sum(axis=1, keepdims=True), 1e-300)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            h = -np.where(p > 0, p * np.log(p), 0.0).sum(axis=1)
-        frac[rows] = np.exp(h) / d.shape[1]
-    return frac, mass
-
 
 def flat_topics(lam, n_bg: int, *, frac: float = STARVED_FRAC):
     """`(n_flat_node_topics, n_node_topics, node_mass_share)` for the node topics
@@ -129,7 +106,7 @@ def node_table(lam, ns, n_bg, tpn) -> dict:
 
 
 _BINS = {
-    "support": ([0, 100, 200, 500, 1000, 5000, np.inf], "documents reaching the node"),
+    "support": (SUPPORT_BANDS, "documents reaching the node"),
     "parent_share": ([0, 0.1, 0.3, 0.5, 0.8, 0.95, 1.0001],
                      "node's documents / its parent's (max over parents)"),
     "n_kids": ([0, 1, 2, 3, 6, np.inf], "kept children"),

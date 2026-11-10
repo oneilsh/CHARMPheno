@@ -13,7 +13,12 @@ The fitted model is the run's node set of record: it is saved MLlib-style to
 `<run>/model`, with `<run>/label_dag.json` (the DAG given, the node set learned),
 `<run>/bundle_meta.json` and the manifest's `corpus_manifest.int2cid` (the integer
 bridge the run dir's readers key by, DERIVED from the model) and `<run>/code_map.tsv`
-(the code ladder landed on the kept nodes). The λ / α also go to
+(the code ladder landed on the kept nodes). `<run>/node_statistics.tsv` reports how
+well the data sustains each node's topic block (`DagGatedLDAModel.nodeStatistics`, of
+the model AS FITTED; workspace-internal: per-node rows) and the log carries its pooled
+counts; `--drop-unsupported` then drops the flat blocks (`dropUnsupportedNodes`)
+BEFORE any of the saves above, so every saved artifact describes the cleaned model.
+The λ / α also go to
 `<run>/gated_pc_result.npz` for the readers that take the arrays. The fit ends at
 that save; every readout and evaluation is `dag_gated_readout.py` against it.
 Experiment front matter says `model_class: dag_gated` (or the old `gated_pc`).
@@ -674,8 +679,55 @@ def node_set_counts(model, n_given) -> dict:
     ns = model._ns()
     return {"n_given": int(n_given), "n_kept": len(ns.nodes),
             "n_pruned": len(ns.pruned), "n_spliced": len(ns.spliced),
+            "n_unsupported": len(ns.unsupported),
             "min_docs_per_node": int(ns.min_docs_per_node),
             "n_train_docs": int(ns.n_docs)}
+
+
+NODE_STATISTICS_FILE = "node_statistics.tsv"
+NODE_STATISTICS_COLUMNS = ("node", "depth", "support", "supportFraction", "mass",
+                           "massToParent", "flat")
+DEFAULT_DROP_MAX_SUPPORT_FRACTION = 0.5     # the census's "starved" (spec R14)
+
+
+def write_node_statistics(run_dir, rows, name=NODE_STATISTICS_FILE):
+    """`<run>/node_statistics.tsv`: one row per kept node of the fitted model
+    (`DagGatedLDAModel.nodeStatistics()` rows, or dicts with its columns): node id,
+    depth, support, supportFraction, mass, massToParent, flat. Per-node document
+    counts, so WORKSPACE-INTERNAL: never commit it or copy it out. Null cells are
+    empty."""
+    def cell(v):
+        if v is None:
+            return ""
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        if isinstance(v, float):
+            return f"{v:.6g}"
+        return str(v)
+    p = Path(run_dir) / name
+    lines = ["\t".join(NODE_STATISTICS_COLUMNS)]
+    lines += ["\t".join(cell(r[c]) for c in NODE_STATISTICS_COLUMNS) for r in rows]
+    p.write_text("\n".join(lines) + "\n")
+    return p
+
+
+def node_statistics_line(rows, flat_threshold) -> str:
+    """The pooled receipt of the node statistics: the flat node count and share, and
+    the flat count per support band (`starvation.SUPPORT_BANDS`). Counts of nodes
+    only (egress-safe)."""
+    from starvation import SUPPORT_BANDS
+    sup = np.asarray([int(r["support"]) for r in rows], dtype=float)
+    flat = np.asarray([bool(r["flat"]) for r in rows], dtype=bool)
+    n, n_flat = int(sup.size), int(flat.sum())
+    bands = []
+    for lo, hi in zip(SUPPORT_BANDS[:-1], SUPPORT_BANDS[1:]):
+        sel = (sup >= lo) & (sup < hi)
+        if sel.any():
+            hi_s = "inf" if np.isinf(hi) else f"{hi:g}"
+            bands.append(f"[{lo:g}, {hi_s}) {int(flat[sel].sum())}/{int(sel.sum())}")
+    return (f"node statistics (the model as fitted, before any drop): {n_flat} of {n} "
+            f"node blocks flat ({100 * n_flat / max(n, 1):.1f}%; supportFraction > "
+            f"{flat_threshold:g}); flat / nodes by support: " + " · ".join(bands))
 
 
 def landed_code_map(model, code_map, int2cid) -> list:
@@ -1412,6 +1464,20 @@ def parse_args(argv=None):
                         "topics are starved (flat at the prior: the census's "
                         "definition) and the node topics' share of the lambda mass "
                         "(analysis/cloud/starvation.py). 0 = off.")
+    p.add_argument("--drop-unsupported", action="store_true",
+                   help="after the fit, drop the nodes whose topic block is flat "
+                        "(DagGatedLDAModel.dropUnsupportedNodes, spec R14.2: their "
+                        "labels land on their nearest kept ancestors, their kept "
+                        "children re-attach, no refit) BEFORE the model, "
+                        "label_dag.json, bundle_meta.json and the code map are "
+                        "written. Off (default): the node statistics are only "
+                        "reported.")
+    p.add_argument("--drop-max-support-fraction", type=float,
+                   default=DEFAULT_DROP_MAX_SUPPORT_FRACTION, metavar="F",
+                   help="a node block is flat when its supportFraction exceeds F (the "
+                        "node statistics' flatThreshold and the drop's "
+                        "maxSupportFraction). Default "
+                        f"{DEFAULT_DROP_MAX_SUPPORT_FRACTION} (the census's 'starved').")
     p.add_argument("--fit-engine", choices=("spark", "local"), default=None,
                    help="engine: where the fit's E-step runs. 'local' collects the "
                         "training documents to the driver once and fits in memory "
@@ -1629,13 +1695,31 @@ def main() -> int:
                 _cprint(f"[driver]   parked the finished fit in {ckpt} (resumable "
                         "until the saves below succeed)", flush=True)
 
+            # Spec R14: how well the data sustains each node's block, of the model AS
+            # FITTED (per node: workspace-internal TSV; pooled counts in the log).
+            _thr = float(args.drop_max_support_fraction)
+            _stats = pc_model.nodeStatistics(flatThreshold=_thr).collect()
+            _sp = write_node_statistics(out, _stats)
+            _cprint(f"[driver]   {node_statistics_line(_stats, _thr)} -> {_sp.name} "
+                    "(per node, workspace-internal)", flush=True)
+            if args.drop_unsupported:
+                # Before every save below: the run's node set of record is the cleaned
+                # one (the parked checkpoint keeps the model as fitted; a "done"
+                # re-run drops again, deterministically).
+                pc_model = pc_model.dropUnsupportedNodes(maxSupportFraction=_thr)
+                _cprint(f"[driver]   dropped {len(pc_model.unsupportedNodes())} "
+                        f"unsupported node(s) (supportFraction > {_thr:g}); "
+                        f"{len(pc_model._ns().nodes)} kept. {_sp.name} describes the "
+                        "model before the drop", flush=True)
+
             lay = pc_model._layout()
             br = node_bridge(pc_model, bundle.name_by_id)
             C = len(br["int2cid"])           # readout heads = kept nodes + root
             counts = node_set_counts(pc_model, len(bundle.dag))
             _cprint(f"[driver]   node set: {counts['n_given']} given / "
                     f"{counts['n_kept']} kept / {counts['n_pruned']} pruned / "
-                    f"{counts['n_spliced']} spliced (minDocsPerNode="
+                    f"{counts['n_spliced']} spliced / {counts['n_unsupported']} "
+                    f"unsupported (minDocsPerNode="
                     f"{counts['min_docs_per_node']}, counted on "
                     f"{counts['n_train_docs']} train docs); K={lay.K} ({n_bg} bg + "
                     f"{len(lay.nodes)} nodes x {tpn}), C={C} heads", flush=True)
@@ -1677,6 +1761,10 @@ def main() -> int:
                     and (pc_est.isSet(p) or pc_est.hasDefault(p))},
                 "labels_col": args._labels_col,
                 "node_set": counts,
+                "node_statistics": {
+                    "file": NODE_STATISTICS_FILE, "flat_threshold": _thr,
+                    "n_flat_as_fitted": int(sum(bool(r["flat"]) for r in _stats)),
+                    "dropped": bool(args.drop_unsupported)},
                 "dag_source": args.dag_source,
                 "extra_domains": list(extra_domains),
                 "domain_names": args._domain_names,

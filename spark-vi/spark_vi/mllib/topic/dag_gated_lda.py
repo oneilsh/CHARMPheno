@@ -33,7 +33,10 @@ all K topics (labels are unknown at scoring time) and appends
 
 The fitted model answers in user ids (R5): ``dag()``, ``prunedNodes()``,
 ``splicedNodes()``, ``nodeSupport()``, ``nodeTopics(node)``, ``backgroundTopics()``,
-``describeNodes()`` (with the term ids when ``vocabularies`` are set). The node set
+``describeNodes()`` (with the term ids when ``vocabularies`` are set), and
+``nodeStatistics()``, how well the data sustains each node's block (R14.1). Dropping
+the flat blocks is explicit: ``dropUnsupportedNodes()`` returns a new model without
+them (R14.2), reported in ``unsupportedNodes()``. The node set
 rides the VIResult's metadata (``dag_node_set``), so ``save`` / ``load`` (MLlib
 persistence: Params metadata + the VIResult, any Hadoop URI, ``Pipeline`` too) keep it, and
 ``resumeFrom`` refuses a checkpoint whose node set differs from the one learned from
@@ -62,6 +65,7 @@ from spark_vi.dag.nodeset import (
     NodeSet,
     _coerce_id,
     count_support_spark,
+    drop_nodes,
     learn_node_set,
     node_sort_key,
     parse_dag,
@@ -176,6 +180,19 @@ def check_labels_column(dataset, labels_col, node_ids):
     else:
         raise ValueError(f"labelsCol={labels_col!r} must be array<string> or "
                          f"array<int>; it is {dt.simpleString()}")
+
+
+def _node_column(ids):
+    """`(Spark type, cell)` for a column of user node ids (``describeNodes``,
+    ``nodeStatistics``): LONG when every id is an int, STRING when every one is a str,
+    and STRING with the ints written in decimal when they are mixed (there ``1`` and
+    ``"1"`` render alike; ``nodeTopics`` tells them apart)."""
+    from pyspark.sql.types import LongType, StringType
+    all_int = bool(ids) and all(isinstance(n, int) for n in ids)
+    all_str = all(isinstance(n, str) for n in ids)
+    if all_int or all_str:
+        return (LongType() if all_int else StringType()), (lambda n: n)
+    return StringType(), str
 
 
 class _DagGatedLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams):
@@ -1135,8 +1152,10 @@ class DagGatedLDAModel(_DagGatedLDAParams, _StagePersistence, Model):
     ``transform`` appends ``topicDistributionCol`` (theta) by folding each
     document in UNGATED over all K topics with the same CAVI the engine uses at
     train time. The node-keyed accessors (``dag``, ``prunedNodes``, ``splicedNodes``,
-    ``nodeSupport``, ``nodeTopics``, ``backgroundTopics``, ``describeNodes``) answer
-    in the user's node ids; engine ids stay internal.
+    ``unsupportedNodes``, ``nodeSupport``, ``nodeTopics``, ``backgroundTopics``,
+    ``describeNodes``, ``nodeStatistics``) answer in the user's node ids; engine ids
+    stay internal. ``dropUnsupportedNodes`` returns a new model without the nodes
+    whose blocks are flat (spec R14).
 
     Persistence (MLlib's, spec R13): ``save`` / ``write().overwrite().save`` /
     ``load`` and inside a ``PipelineModel``, on any Hadoop-filesystem URI. Layout::
@@ -1224,6 +1243,13 @@ class DagGatedLDAModel(_DagGatedLDAParams, _StagePersistence, Model):
         data); their labels land on their nearest kept ancestors."""
         return list(self._ns().spliced)
 
+    def unsupportedNodes(self) -> dict:
+        """``{dropped node: [landing nodes]}`` for the nodes removed by
+        ``dropUnsupportedNodes`` (their blocks were flat: the data did not sustain
+        them); their labels land on their nearest kept ancestors, ``[]`` = nowhere.
+        Empty on a model never cleaned."""
+        return {n: list(ls) for n, ls in self._ns().unsupported.items()}
+
     def nodeSupport(self) -> dict:
         """``{kept node: number of training documents whose label closure reaches
         it}``."""
@@ -1236,7 +1262,9 @@ class DagGatedLDAModel(_DagGatedLDAParams, _StagePersistence, Model):
         e = ns.engine_id.get(node)
         if e is None:
             why = ("was pruned" if node in ns.pruned else
-                   "was spliced" if node in ns.spliced else "is not a DAG node")
+                   "was spliced" if node in ns.spliced else
+                   "was dropped as unsupported" if node in ns.unsupported else
+                   "is not a DAG node")
             raise KeyError(f"node {node!r} has no topic block: it {why}")
         lo = self._n_bg + (e - 1) * self._tpn
         return list(range(lo, lo + self._tpn))
@@ -1263,17 +1291,14 @@ class DagGatedLDAModel(_DagGatedLDAParams, _StagePersistence, Model):
         split at the first ``:`` when column names have none). Null on every row
         when ``vocabularies`` is not set."""
         from pyspark.sql import SparkSession
-        from pyspark.sql.types import (ArrayType, DoubleType, IntegerType, LongType,
-                                       StringType, StructField, StructType)
+        from pyspark.sql.types import (ArrayType, DoubleType, IntegerType, StringType,
+                                       StructField, StructType)
         ns = self._ns()
-        ids = ns.nodes
-        all_int = bool(ids) and all(isinstance(n, int) for n in ids)
-        all_str = all(isinstance(n, str) for n in ids)
-        node_type = LongType() if all_int else StringType()
+        node_type, as_cell = _node_column(ns.nodes)
         owner = {}
-        for n in ids:
+        for n in ns.nodes:
             for k in self.nodeTopics(n):
-                owner[k] = n if (all_int or all_str) else str(n)
+                owner[k] = as_cell(n)
         names = self._term_names()
         rows = [(owner.get(k),) + r
                 + ((None,) if names is None else ([names[i] for i in r[1]],))
@@ -1286,6 +1311,140 @@ class DagGatedLDAModel(_DagGatedLDAParams, _StagePersistence, Model):
             StructField("terms", ArrayType(StringType(), False), True),
         ])
         return SparkSession.builder.getOrCreate().createDataFrame(rows, schema=schema)
+
+    # ---- node statistics and dropping unsupported nodes (R14) -------------------
+
+    def _node_stat_rows(self, flatThreshold) -> list:
+        """One tuple per kept node, in engine order: ``(node, depth, support,
+        supportFraction, mass, massToParent, flat)`` (see ``nodeStatistics``)."""
+        from spark_vi.eval.topic.sharpness import support_fraction
+        thr = float(flatThreshold)
+        ns, lay = self._ns(), self._layout()
+        sf, mass = support_fraction(self._result.global_params["lambda"])
+        bmass = {e: float(sum(mass[t] for t in lay.block[e])) for e in lay.nodes}
+        rows = []
+        for e, u in enumerate(ns.nodes, start=1):
+            blk = lay.block[e]
+            frac = float(min(sf[t] for t in blk)) if blk else None
+            par = [p for p in ns.engine_parents[e] if p != 0]
+            heaviest = max((bmass[p] for p in par), default=None)
+            m2p = (bmass[e] / heaviest if heaviest else None)
+            rows.append((u, int(lay.depth(e)), int(ns.support[u]), frac, bmass[e], m2p,
+                         bool(frac is not None and frac > thr)))
+        return rows
+
+    def nodeStatistics(self, flatThreshold: float = 0.5):
+        """DataFrame, one row per kept node in engine order (spec R14.1): how well the
+        data sustains each node's topic block. Reporting only: the model is
+        unchanged (``dropUnsupportedNodes`` acts on it).
+
+        - ``node``: the node id, typed as in ``describeNodes`` (long when every id is
+          an int, string otherwise);
+        - ``depth`` (int): the longest path from the synthetic root (top level = 1);
+        - ``support`` (long): training documents whose labels' closure reaches the
+          node (``nodeSupport()``);
+        - ``supportFraction`` (double): the block's effective support exp(H(β)) over
+          its dominant domain's vocabulary (``spark_vi.eval.topic.sharpness``): about
+          0 = sharp, 1 = flat at the topicConcentration prior. With ``gateTpn > 1``
+          the MINIMUM over the block's topics (a block is flat only when every topic
+          in it is). Null when the layout gives nodes no topics (``gateTpn`` 0);
+        - ``mass`` (double): the block's λ mass (pseudo-counts plus prior);
+        - ``massToParent`` (double): ``mass`` over its heaviest kept parent's; null
+          for a top-level node;
+        - ``flat`` (boolean): ``supportFraction > flatThreshold``.
+
+        A flat block is one the data did not renew: under SVI an unrenewed block
+        decays to the prior, whatever it was seeded with."""
+        from pyspark.sql import SparkSession
+        from pyspark.sql.types import (BooleanType, DoubleType, IntegerType,
+                                       LongType, StructField, StructType)
+        ns = self._ns()
+        node_type, as_cell = _node_column(ns.nodes)
+        rows = [(as_cell(r[0]),) + r[1:] for r in self._node_stat_rows(flatThreshold)]
+        schema = StructType([
+            StructField("node", node_type, False),
+            StructField("depth", IntegerType(), False),
+            StructField("support", LongType(), False),
+            StructField("supportFraction", DoubleType(), True),
+            StructField("mass", DoubleType(), False),
+            StructField("massToParent", DoubleType(), True),
+            StructField("flat", BooleanType(), False),
+        ])
+        return SparkSession.builder.getOrCreate().createDataFrame(rows, schema=schema)
+
+    def dropUnsupportedNodes(self, maxSupportFraction: float = 0.5) -> "DagGatedLDAModel":
+        """A NEW model without the nodes whose block is flat (``nodeStatistics(
+        flatThreshold=maxSupportFraction)``'s ``flat``); this model is unchanged
+        (spec R14.2).
+
+        The node set loses them as pruning would have removed them
+        (``spark_vi.dag.nodeset.drop_nodes``): their labels land on their nearest kept
+        ancestors (nowhere when none), their kept children re-attach to their nearest
+        kept ancestors and the kept DAG is re-reduced, pruned / spliced nodes that
+        landed on them land further up, and the engine ids are renumbered. Every
+        K-sized fitted array keeps only the surviving topics, background first, then
+        the surviving blocks in the NEW engine order: λ (per domain), α, the gate's
+        ``gate_open_at`` (and the α trace). Scalars (η, ``gate_iter``) are kept. No
+        refit and no re-splice: a surviving block is exactly as fitted, so the
+        cleaned model scores documents with the surviving topics' λ unchanged.
+
+        Reported by ``unsupportedNodes()`` and persisted with the node set; a dropped
+        node gets no topic block, no gate and no readout head (``DagHeadsEstimator.
+        setTopicModel`` reads this model's node set). With nothing flat, an
+        equivalent copy."""
+        flat = [r[0] for r in self._node_stat_rows(maxSupportFraction) if r[-1]]
+        return self._without_nodes(flat)
+
+    def _without_nodes(self, nodes) -> "DagGatedLDAModel":
+        """The model with the kept nodes `nodes` dropped (see
+        ``dropUnsupportedNodes``); any kept nodes, flat or not."""
+        from spark_vi.core.result import VIResult
+        ns = self._ns()
+        n_bg, tpn = self._n_bg, self._tpn
+        new_ns = drop_nodes(ns, nodes)
+        K_old = n_bg + len(ns.nodes) * tpn
+        keep = list(range(n_bg))
+        for u in new_ns.nodes:
+            lo = n_bg + (ns.engine_id[u] - 1) * tpn
+            keep.extend(range(lo, lo + tpn))
+        idx = np.asarray(keep, dtype=np.int64)
+
+        def topics(arr, what):
+            a = np.asarray(arr)
+            if a.ndim == 0:
+                return a.copy()
+            if a.shape[0] != K_old:
+                raise ValueError(f"{what} has leading size {a.shape[0]}, not the "
+                                 f"model's K={K_old}")
+            return a[idx]
+
+        gp = {}
+        for key, v in self._result.global_params.items():
+            if key == "lambda":
+                gp[key] = ({m: topics(lam, f"lambda[{m}]") for m, lam in v.items()}
+                           if isinstance(v, dict) else topics(v, "lambda"))
+            elif key in ("alpha", "gate_open_at"):
+                gp[key] = topics(v, key)
+            elif np.ndim(v) == 0:
+                gp[key] = np.array(v)                      # eta, gate_iter
+            else:
+                raise ValueError(f"global parameter {key!r} has shape {np.shape(v)}; "
+                                 "dropping nodes knows only lambda, alpha, "
+                                 "gate_open_at and scalars")
+        traces = dict(self._result.diagnostic_traces or {})
+        if "alpha" in traces:
+            traces["alpha"] = [topics(a, "the alpha trace")
+                               if np.ndim(a) == 1 and np.shape(a)[0] == K_old else a
+                               for a in traces["alpha"]]
+        md = dict(self._result.metadata or {})
+        md[_NODE_SET_KEY] = {**new_ns.to_dict(), "n_bg": n_bg, "tpn": tpn}
+        if "K" in md:
+            md["K"] = int(idx.size)
+        res = VIResult(global_params=gp, elbo_trace=list(self._result.elbo_trace),
+                       n_iterations=self._result.n_iterations,
+                       converged=self._result.converged, metadata=md,
+                       diagnostic_traces=traces)
+        return self._copyValues(DagGatedLDAModel(res))
 
     def _term_names(self):
         """The concatenated vocabulary as display strings (see ``describeNodes``), or

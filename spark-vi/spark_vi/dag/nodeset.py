@@ -18,6 +18,9 @@ the estimator so it is testable without Spark and reusable by the heads:
    engine ids `1..N` (root 0). Returns a `NodeSet`.
 4. `NodeSet.frontier`: a document's labels -> its engine-id frontier, the
    most-specific landed nodes (what the gate reads).
+5. `drop_nodes`: after a fit, remove kept nodes whose topic block the data did not
+   sustain (spec R14.2): the same landing and re-reduction as pruning, without
+   assuming the kept set stays closed upward; recorded in `NodeSet.unsupported`.
 
 Node ids are `str` or `int`, kept exactly as given: `1` and `"1"` are different nodes
 (spec decision 2). Nothing here knows what a node means.
@@ -528,6 +531,9 @@ class NodeSet:
                    background when it was their only one).
       `spliced`  — the kept-by-support nodes removed as single-child chain links.
       `support`  — `{kept node: documents reaching it}`; `n_docs` the documents seen.
+      `unsupported` — `{dropped node: tuple of landing nodes}` for kept nodes removed
+                   AFTER a fit because their topic block was flat (`drop_nodes`, spec
+                   R14.2); empty for a node set straight from `learn_node_set`.
     Engine ids (internal to the engine, R4): kept nodes are numbered `1..N` in
     TOPOLOGICAL order (by longest path from the root, then `node_sort_key`), the
     root is 0.
@@ -547,6 +553,7 @@ class NodeSet:
     engine_parents: dict
     frontier: FrontierFn
     min_docs_per_node: int = 1
+    unsupported: dict = field(default_factory=dict)
 
     @property
     def nodes(self) -> tuple:
@@ -588,6 +595,7 @@ class NodeSet:
             "landing": pairs(self.frontier.landing),
             "unknown_labels": self.frontier.unknown_labels,
             "min_docs_per_node": int(self.min_docs_per_node),
+            "unsupported": pairs(self.unsupported),
         }
 
     @classmethod
@@ -611,7 +619,10 @@ class NodeSet:
             frontier=FrontierFn(landing=landing,
                                 strict_anc=_strict_ancestors(engine_parents, len(nodes)),
                                 unknown_labels=d.get("unknown_labels", "error")),
-            min_docs_per_node=int(d.get("min_docs_per_node", 1)))
+            min_docs_per_node=int(d.get("min_docs_per_node", 1)),
+            # A node set saved before R14 was never cleaned: no key = nothing dropped.
+            unsupported={_coerce_id(n): tuple(_coerce_id(x) for x in ls)
+                         for n, ls in d.get("unsupported", [])})
 
 
 def _strict_ancestors(engine_parents, n):
@@ -660,6 +671,23 @@ def _longest_depth(parents):
                 stack.append((n, True))
                 stack.extend((p, False) for p in ps if p not in depth)
     return depth
+
+
+def _number_engine_ids(parents):
+    """Engine ids for a kept DAG `{node: tuple of kept parents | (ROOT,)}` (R4): the
+    kept nodes in TOPOLOGICAL order, by longest path from the root and then
+    `node_sort_key`, numbered 1..N (root 0). Returns `(order, engine_id, user_ids,
+    engine_parents)`. One rule for `learn_node_set` and `drop_nodes`, so a node set
+    renumbered after a drop is numbered as a fresh learn of the same kept DAG would
+    be."""
+    depth = _longest_depth(parents)
+    order = sorted(parents, key=lambda n: (depth[n], node_sort_key(n)))
+    engine_id = {n: i + 1 for i, n in enumerate(order)}
+    user_ids = (ROOT,) + tuple(order)
+    engine_parents = {engine_id[c]: sorted(0 if p is ROOT else engine_id[p]
+                                           for p in parents[c])
+                      for c in order}
+    return order, engine_id, user_ids, engine_parents
 
 
 def learn_node_set(dag, support, *, n_docs=None, min_docs_per_node=1,
@@ -721,14 +749,7 @@ def learn_node_set(dag, support, *, n_docs=None, min_docs_per_node=1,
 
     parents = {nodes[c]: tuple(nodes[p] for p in sorted(ps)) if ps else (ROOT,)
                for c, ps in red.items()}
-    depth = _longest_depth(parents)
-    order = sorted((nodes[i] for i in kept),
-                   key=lambda n: (depth[n], node_sort_key(n)))
-    engine_id = {n: i + 1 for i, n in enumerate(order)}
-    user_ids = (ROOT,) + tuple(order)
-    engine_parents = {engine_id[c]: sorted(0 if p is ROOT else engine_id[p]
-                                           for p in parents[c])
-                      for c in order}
+    order, engine_id, user_ids, engine_parents = _number_engine_ids(parents)
 
     memo: dict = {}
     landing_user = {n: tuple(nodes[a] for a in
@@ -759,3 +780,95 @@ def fit_node_set(dag, docs_labels, *, min_docs_per_node=1,
     return learn_node_set(dag, support, n_docs=n_docs,
                           min_docs_per_node=min_docs_per_node,
                           unknown_labels=unknown_labels)
+
+
+# --------------------------------------------------------------------------------
+# R14.2: dropping kept nodes after a fit
+# --------------------------------------------------------------------------------
+
+def drop_nodes(ns: NodeSet, nodes) -> NodeSet:
+    """A NEW node set without the kept nodes `nodes` (spec R14.2), recorded in
+    `unsupported`; `ns` is unchanged.
+
+    The same operations as pruning in `learn_node_set`, applied to the kept DAG:
+    LAND each dropped node's labels on its nearest surviving ancestors (none = the
+    label lands nowhere: background when it was a document's only one); RE-ATTACH its
+    surviving children to their nearest surviving ancestors and RE-REDUCE; RE-LAND every
+    label whose landing included a dropped node (pruned, spliced and earlier
+    unsupported nodes alike) further up; RENUMBER the engine ids with
+    `learn_node_set`'s rule. Support and `n_docs` are unchanged: landing a label on the
+    nearest surviving ancestors keeps every surviving node a document's closure
+    reached, and adds none. A landing is the first survivor on EVERY upward path, as a
+    pruned node's is in `learn_node_set` (not reduced to the most specific: one may be
+    an ancestor of another; the frontier drops the redundant one, so the gate is the
+    same).
+
+    Why the walk reads the kept DAG and not the full one: the full DAG is not part of a
+    node set. It does not need to be. The kept DAG is the transitive reduction of the
+    full DAG's order restricted to the kept nodes, so it has exactly the same
+    reachability among kept nodes, and "the first surviving node on every upward path"
+    and "is an ancestor of" (what the landing and the reduction read) come out the same
+    on either. The re-reduction (`transitive_reduction_parents` over the survivors)
+    reads ancestry from the ORIGINAL kept DAG, so no path through a dropped node is lost
+    and no redundant edge appears where a dropped node joined two paths.
+
+    No upward closure is assumed: a dropped node may have surviving children (a flat
+    block under a healthy one is common) and its parents may be dropped too (chained
+    drops in one call, or a later call on a node set already cleaned). Nothing is
+    re-spliced: removing a node can leave a surviving parent with a single child, but
+    the two blocks were trained on different data and both are kept.
+
+    Graph work runs on the OLD ENGINE IDS (ints), as `learn_node_set` runs on
+    positions: the `ops` helpers sort node lists, and mixed str / int ids cannot be
+    sorted natively. A `nodes` entry that is not a kept node raises `KeyError`; an
+    empty `nodes` returns `ns` itself."""
+    drop = set()
+    for n in nodes:
+        n = _coerce_id(n)
+        e = ns.engine_id.get(n)
+        if e is None:
+            why = ("was pruned" if n in ns.pruned else
+                   "was spliced" if n in ns.spliced else
+                   "was already dropped" if n in ns.unsupported else
+                   "is not a node of the node set")
+            raise KeyError(f"cannot drop {n!r}: it is not a kept node (it {why})")
+        drop.add(e)
+    if not drop:
+        return ns
+    n_old = len(ns.user_ids) - 1
+    P = {e: [p for p in ns.engine_parents[e] if p != 0] for e in range(1, n_old + 1)}
+    keep = set(range(1, n_old + 1)) - drop
+    red = transitive_reduction_parents(keep, P)
+    uid = ns.user_ids
+    parents = {uid[c]: (tuple(_sorted_ids(uid[p] for p in ps)) if ps else (ROOT,))
+               for c, ps in red.items()}
+    order, engine_id, user_ids, engine_parents = _number_engine_ids(parents)
+
+    memo: dict = {}
+
+    def relanded(old_engine_ids):
+        """Old engine ids -> the surviving nodes they land on, as user ids sorted by
+        `node_sort_key` (each survivor lands on itself)."""
+        out = set()
+        for e in old_engine_ids:
+            out.update(uid[a] for a in nearest_kept_ancestors(e, keep, P, memo))
+        return tuple(_sorted_ids(out))
+
+    landing_user = {lab: relanded(es) for lab, es in ns.frontier.landing.items()}
+    landing = {lab: tuple(sorted(engine_id[u] for u in t))
+               for lab, t in landing_user.items()}
+    dropped = _sorted_ids(uid[e] for e in drop)
+    unsupported = {n: landing_user[n] for n in ns.unsupported}
+    unsupported.update({n: landing_user[n] for n in dropped})
+    return NodeSet(
+        parents={n: parents[n] for n in order},
+        pruned={n: landing_user[n] for n in ns.pruned},
+        spliced=ns.spliced,
+        support={n: ns.support[n] for n in order},
+        n_docs=ns.n_docs, engine_id=engine_id, user_ids=user_ids,
+        engine_parents=engine_parents,
+        frontier=FrontierFn(landing=landing,
+                            strict_anc=_strict_ancestors(engine_parents, len(order)),
+                            unknown_labels=ns.frontier.unknown_labels),
+        min_docs_per_node=ns.min_docs_per_node,
+        unsupported=unsupported)

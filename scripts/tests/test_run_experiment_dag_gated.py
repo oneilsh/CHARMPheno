@@ -81,6 +81,27 @@ def test_dag_gated_store_true_flags(monkeypatch):
     assert "--optimize-doc-concentration" in a
 
 
+def test_drop_unsupported_is_emitted_only_when_set(monkeypatch):
+    """Spec R14.2: `drop_unsupported` / `drop_max_support_fraction` front matter ->
+    the driver's flags (absent = off, the driver's default threshold), parsed."""
+    mod = _run_exp(monkeypatch)
+    base = mod.build_dag_gated_args(_base_eff(), "/out")
+    assert "--drop-unsupported" not in base
+    assert "--drop-max-support-fraction" not in base
+    args = mod.build_dag_gated_args({**_base_eff(), "drop_unsupported": True,
+                                     "drop_max_support_fraction": 0.6}, "/out")
+    assert "--drop-unsupported" in args
+    assert args[args.index("--drop-max-support-fraction") + 1] == "0.6"
+    cloud = str(Path(mod.__file__).resolve().parent.parent / "analysis" / "cloud")
+    if cloud not in sys.path:
+        sys.path.insert(0, cloud)
+    import dag_gated_fit
+    parsed = dag_gated_fit.parse_args(args)
+    assert parsed.drop_unsupported is True and parsed.drop_max_support_fraction == 0.6
+    assert "--drop-unsupported" not in mod.build_dag_gated_args(
+        {**_base_eff(), "drop_unsupported": False}, "/out")
+
+
 def test_built_args_parse_through_driver(monkeypatch):
     """The argv run_experiment builds must parse cleanly through the driver's own
     parse_args — the contract between the config layer and the driver CLI."""

@@ -1,5 +1,6 @@
 """spark_vi.dag.nodeset: DAG parsing, label validation, support, prune / land /
-reduce / splice and engine ids (spec 2026-10-30, R1/R3/R4)."""
+reduce / splice and engine ids (spec 2026-10-30, R1/R3/R4); dropping kept nodes after
+a fit (`drop_nodes`, R14.2)."""
 import pickle
 import random
 
@@ -8,7 +9,7 @@ import pytest
 from spark_vi.dag.layout import DagLayout
 from spark_vi.dag.nodeset import (ROOT, FrontierFn, LabelIndex, ParsedDag,
                                   SupportCounts, count_support, doc_support,
-                                  fit_node_set, learn_node_set, node_sort_key,
+                                  drop_nodes, fit_node_set, learn_node_set, node_sort_key,
                                   parse_dag)
 
 
@@ -362,6 +363,192 @@ def test_frontier_gate_equals_closure_of_raw_labels(seed):
     for n, cs in ch.items():
         if len(cs) == 1:
             assert ns.support[n] > ns.support[cs[0]]
+
+
+# ---------------------------------------------------------------- R14.2 drop_nodes
+
+# r is top-level; x, y under r; m under x only; z under x AND y; w under m.
+# Labels make every node kept and none a splice candidate (each has its own docs).
+DROP_DAG = {"r": None, "x": "r", "y": "r", "m": "x", "z": ["x", "y"], "w": "m"}
+DROP_DOCS = [["r"], ["x"], ["y"], ["m"], ["z"], ["w"], ["w"], ["z", "m"], []]
+
+
+def _drop_ns():
+    ns = fit_node_set(DROP_DAG, DROP_DOCS)
+    assert set(ns.nodes) == set(DROP_DAG) and not ns.pruned and not ns.spliced
+    return ns
+
+
+def _check_engine_numbering(ns):
+    """Engine ids follow learn_node_set's rule: (longest depth, node_sort_key)."""
+    from spark_vi.dag.nodeset import _longest_depth
+    depth = _longest_depth(ns.parents)
+    keys = [(depth[n], node_sort_key(n)) for n in ns.nodes]
+    assert keys == sorted(keys)
+    assert ns.engine_id == {n: i + 1 for i, n in enumerate(ns.nodes)}
+    for n, ps in ns.parents.items():
+        assert ns.engine_parents[ns.engine_id[n]] == sorted(
+            0 if p is ROOT else ns.engine_id[p] for p in ps)
+
+
+def test_drop_a_leaf_lands_its_labels_on_its_parent():
+    ns = _drop_ns()
+    out = drop_nodes(ns, ["w"])
+    assert "w" not in out.engine_id and "w" not in out.support
+    assert out.unsupported == {"w": ("m",)}
+    assert out.frontier(["w"]) == {out.engine_id["m"]}
+    assert out.land(["w", "y"]) == ("y", "m")             # engine order
+    assert out.parents["m"] == ("x",)
+    assert ns.unsupported == {} and "w" in ns.engine_id   # the input is unchanged
+    _check_engine_numbering(out)
+
+
+def test_drop_a_node_with_kept_children_reattaches_and_rereduces():
+    """x has a single-parent child m and a multi-parent child z whose other parent y is
+    kept. m re-attaches to r; z's nearest survivors are r (through x) and y, and r is
+    an ancestor of y, so the re-reduction leaves z under y only."""
+    ns = _drop_ns()
+    out = drop_nodes(ns, ["x"])
+    assert out.parents["m"] == ("r",)
+    assert out.parents["z"] == ("y",)
+    assert out.parents["w"] == ("m",)
+    assert out.unsupported == {"x": ("r",)}
+    assert out.frontier(["x"]) == {out.engine_id["r"]}
+    lay = DagLayout(out.engine_parents, n_bg=0, tpn=1)
+    (fz,) = out.frontier(["z"])
+    assert {out.user_ids[e] for e in lay.closure(fz)} - {ROOT} == {"z", "y", "r"}
+    assert out.support == {n: ns.support[n] for n in out.nodes}
+    _check_engine_numbering(out)
+
+
+def test_drop_a_top_level_node():
+    ns = _drop_ns()
+    out = drop_nodes(ns, ["r"])
+    assert out.parents["x"] == (ROOT,) and out.parents["y"] == (ROOT,)
+    assert out.unsupported == {"r": ()}
+    assert out.frontier(["r"]) == frozenset()             # lands nowhere: background
+    assert out.land(["r"]) == ()
+    _check_engine_numbering(out)
+
+
+def test_chained_drops_equal_one_drop_and_reland_earlier_drops():
+    ns = _drop_ns()
+    step = drop_nodes(drop_nodes(ns, ["w"]), ["m"])
+    assert step.unsupported == {"w": ("x",), "m": ("x",)}  # w re-landed past m
+    assert step == drop_nodes(ns, ["m", "w"]) == drop_nodes(ns, ["w", "m"])
+    # a parent and its child dropped together: w falls to r, z to y
+    both = drop_nodes(ns, ["x", "m"])
+    assert both.parents["w"] == ("r",) and both.parents["z"] == ("y",)
+    assert both.unsupported == {"m": ("r",), "x": ("r",)}
+
+
+def test_drop_with_mixed_str_and_int_ids():
+    dag = {"A": None, 1: "A", "1": "A", 2: [1, "1"], 3: 2}
+    docs = [["A"], [1], ["1"], [2], [3], [3]]
+    ns = fit_node_set(dag, docs)
+    assert not ns.spliced and not ns.pruned
+    out = drop_nodes(ns, [1])
+    assert 1 not in out.engine_id and "1" in out.engine_id     # 1 and "1" apart
+    assert out.parents[2] == ("1",)                            # A is above "1"
+    assert out.unsupported == {1: ("A",)}
+    assert out.land([1]) == ("A",)
+    _check_engine_numbering(out)
+    with pytest.raises(KeyError, match="already dropped"):
+        drop_nodes(out, ["1", 1])                              # 1 is no longer kept
+
+
+def test_pruned_and_spliced_labels_that_landed_on_a_dropped_node_land_further_up():
+    # leaf is pruned (support 1 < 2) and lands on b; s is spliced (one kept child t,
+    # no documents of its own) and lands on b.
+    dag = {"a": None, "b": "a", "c": "a", "leaf": "b", "s": "b", "t": "s"}
+    docs = [["a"], ["b"], ["b"], ["c"], ["c"], ["leaf"], ["t"], ["t"]]
+    ns = fit_node_set(dag, docs, min_docs_per_node=2)
+    assert ns.pruned == {"leaf": ("b",)} and ns.spliced == ("s",)
+    assert ns.land(["s"]) == ("b",)
+    out = drop_nodes(ns, ["b"])
+    assert out.pruned == {"leaf": ("a",)}
+    assert out.spliced == ("s",) and out.land(["s"]) == ("a",)
+    assert out.parents["t"] == ("a",)
+    assert out.unsupported == {"b": ("a",)}
+
+
+def test_drop_refuses_a_node_that_is_not_kept_and_empty_is_identity():
+    ns = _drop_ns()
+    assert drop_nodes(ns, []) is ns
+    with pytest.raises(KeyError, match="not a kept node"):
+        drop_nodes(ns, ["nope"])
+    with pytest.raises(KeyError, match="already dropped"):
+        drop_nodes(drop_nodes(ns, ["w"]), ["w"])
+
+
+def test_drop_is_deterministic():
+    ns = _drop_ns()
+    a = drop_nodes(ns, ["x", "w"])
+    b = drop_nodes(fit_node_set(DROP_DAG, list(reversed(DROP_DOCS))), ["w", "x"])
+    assert a == b
+    assert a.to_dict() == b.to_dict()
+
+
+def test_node_set_json_round_trip_keeps_unsupported():
+    import json
+    from spark_vi.dag.nodeset import NodeSet
+    dag = {"A": None, 1: "A", "1": "A", 2: [1, "1"], 3: 2}
+    ns = fit_node_set(dag, [["A"], [1], ["1"], [2], [3], [3]])
+    out = drop_nodes(ns, [1, 2])
+    back = NodeSet.from_dict(json.loads(json.dumps(out.to_dict())))
+    assert back == out
+    # 2 lands on the first survivor of each upward path (through 1: A; through
+    # "1": "1"), as a pruned node's labels land in learn_node_set (not reduced: the
+    # frontier drops the redundant A, so the gate is the same)
+    assert back.unsupported == {1: ("A",), 2: ("1", "A")}
+    assert back.frontier([2]) == {back.engine_id["1"]}
+    # a node set saved before R14 has no key: never cleaned
+    d = ns.to_dict()
+    del d["unsupported"]
+    assert NodeSet.from_dict(d).unsupported == {}
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_drop_gate_equals_closure_of_raw_labels_over_survivors(seed):
+    """After dropping random kept nodes (in one or two calls; the kept set is then not
+    closed upward), allowed_set(frontier(labels)) is the gate over (closure of the raw
+    labels in the FULL DAG) ∩ survivors, reachability among survivors is the full
+    DAG's, support is unchanged, and the kept DAG is a transitive reduction."""
+    from spark_vi.dag.ops import ancestor_closure
+    rng = random.Random(100 + seed)
+    dag, ids = _random_dag(rng, 30)
+    docs = [rng.sample(ids, rng.choice([0, 1, 1, 2, 3])) for _ in range(60)]
+    ns = fit_node_set(dag, docs, min_docs_per_node=rng.choice([1, 2, 4]))
+    kept = list(ns.nodes)
+    k = rng.randint(1, max(1, len(kept) // 2))
+    gone = rng.sample(kept, k)
+    if seed % 2 and k > 1:
+        out = drop_nodes(drop_nodes(ns, gone[: k // 2]), gone[k // 2:])
+    else:
+        out = drop_nodes(ns, gone)
+    assert set(out.unsupported) == set(gone)
+    assert set(out.nodes) == set(kept) - set(gone)
+    _check_engine_numbering(out)
+    P = parse_dag(dag).parents
+    lay = DagLayout(out.engine_parents, n_bg=1, tpn=1)
+    surv = set(out.engine_id)
+    for labels in docs:
+        raw = set()
+        for lab in labels:
+            raw |= ancestor_closure(lab, P)
+        want = sorted({0} | {lay.block[out.engine_id[n]][0] for n in raw & surv})
+        f = out.frontier(labels)
+        assert sorted(lay.allowed_set(f).tolist()) == want
+        for e in f:
+            assert not (set(lay.closure(e)) - {e}) & f
+    full_anc = {n: ancestor_closure(n, P) - {n} for n in surv}
+    for n in surv:
+        new_anc = {out.user_ids[e] for e in lay.closure(out.engine_id[n])} - {n, ROOT}
+        assert new_anc == full_anc[n] & surv
+        ps = [p for p in out.parents[n] if p is not ROOT]   # reduced: no comparable pair
+        for p in ps:
+            assert not any(p in full_anc[q] for q in ps if q != p)
+    assert out.support == {n: ns.support[n] for n in out.nodes}
 
 
 # ---------------------------------------------------------------- Spark inputs (slow)

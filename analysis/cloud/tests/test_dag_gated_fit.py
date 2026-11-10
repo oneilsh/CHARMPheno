@@ -198,3 +198,76 @@ def test_plan_fit_resume_fresh_resume_done_and_refusals(tmp_path):
     with pytest.raises(SystemExit, match="--fresh-fit"):
         plan_fit_resume(d, ident, 100)
 
+
+# --------------------------------------------------------------------------- #
+# Node statistics and --drop-unsupported (spec 2026-10-30 R14)                 #
+# --------------------------------------------------------------------------- #
+
+def test_drop_flags_parse_with_defaults():
+    from dag_gated_fit import parse_args
+    base = ["--cdr", "p.d", "--billing", "b", "--out-dir", "/o"]
+    a = parse_args(base)
+    assert a.drop_unsupported is False and a.drop_max_support_fraction == 0.5
+    a = parse_args(base + ["--drop-unsupported", "--drop-max-support-fraction", "0.7"])
+    assert a.drop_unsupported is True and a.drop_max_support_fraction == 0.7
+
+
+def test_node_statistics_tsv_and_pooled_line(tmp_path):
+    from dag_gated_fit import (NODE_STATISTICS_COLUMNS, node_statistics_line,
+                               write_node_statistics)
+    rows = [
+        {"node": "MONDO:1", "depth": 1, "support": 5000, "supportFraction": 0.01,
+         "mass": 900.0, "massToParent": None, "flat": False},
+        {"node": "MONDO:2", "depth": 2, "support": 150, "supportFraction": 0.99,
+         "mass": 4.5, "massToParent": 0.005, "flat": True},
+        {"node": "MONDO:3", "depth": 2, "support": 180, "supportFraction": 0.2,
+         "mass": 40.0, "massToParent": 0.04, "flat": False},
+    ]
+    p = write_node_statistics(tmp_path, rows)
+    lines = p.read_text().splitlines()
+    assert lines[0].split("\t") == list(NODE_STATISTICS_COLUMNS)
+    assert lines[1].split("\t") == ["MONDO:1", "1", "5000", "0.01", "900", "", "false"]
+    assert lines[2].split("\t")[-1] == "true"
+    line = node_statistics_line(rows, 0.5)
+    assert "1 of 3 node blocks flat (33.3%" in line
+    assert "[100, 200) 1/2" in line and "[5000, inf) 0/1" in line
+    assert "MONDO" not in line                     # pooled: no node ids
+
+
+def test_dropping_before_the_saves_reaches_the_run_dir(spark, tmp_path):
+    """The driver's post-fit order: statistics of the model as fitted, the drop, then
+    the saves; the saved model, its node set receipt and its bridge are the cleaned
+    ones."""
+    from dag_gated_fit import (load_fitted_model, node_bridge, node_set_counts,
+                               save_fitted_model, write_node_statistics)
+    from spark_vi.core.result import VIResult
+    from spark_vi.dag.nodeset import fit_node_set
+    from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAModel
+    dag = {"MONDO:0000001": [], "MONDO:0000002": ["MONDO:0000001"],
+           "MONDO:0000003": ["MONDO:0000001"], "MONDO:0000004": ["MONDO:0000002"]}
+    ns = fit_node_set(dag, [["MONDO:0000002"], ["MONDO:0000003"], ["MONDO:0000004"]])
+    K, Vw = 2 + len(ns.nodes), 6
+    lam = np.full((K, Vw), 0.1)
+    for k in range(K):
+        lam[k, k % Vw] = 100.0                         # every topic sharp ...
+    flat_node = "MONDO:0000002"
+    lam[2 + ns.engine_id[flat_node] - 1] = 1.0         # ... but one block flat
+    res = VIResult(global_params={"lambda": lam, "alpha": np.full(K, 0.5),
+                                  "eta": np.array(0.1)},
+                   elbo_trace=[], n_iterations=1, converged=True,
+                   metadata={"model_class": "DagGatedOnlineLDA", "K": K,
+                             "dag_node_set": {**ns.to_dict(), "n_bg": 2, "tpn": 1}})
+    m = DagGatedLDAModel(res)
+    stats = m.nodeStatistics().collect()
+    write_node_statistics(tmp_path, stats)
+    assert [r["node"] for r in stats if r["flat"]] == [flat_node]
+    clean = m.dropUnsupportedNodes()
+    save_fitted_model(clean, tmp_path)
+    got = load_fitted_model(tmp_path)
+    assert got.unsupportedNodes() == {flat_node: ["MONDO:0000001"]}
+    assert got.dag()["MONDO:0000004"] == ["MONDO:0000001"]
+    assert node_set_counts(got, len(dag))["n_unsupported"] == 1
+    assert 2 not in node_bridge(got)["cid2int"]
+    tsv = (tmp_path / "node_statistics.tsv").read_text()
+    assert tsv.count("\n") == 1 + len(ns.nodes)
+

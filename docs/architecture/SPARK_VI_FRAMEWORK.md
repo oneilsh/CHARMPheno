@@ -733,6 +733,41 @@ refuses before training, naming the nodes added / removed. `describeNodes()` gai
 `terms` column (the top terms' ids from `vocabularies`, `"<featureColumn>:<term>"`
 when there are several feature columns; null without vocabularies).
 
+### `DagGatedLDAModel`: node statistics and dropping unsupported nodes
+
+A long fit can leave some node blocks flat at the η prior: blocks the open-time and
+leaf seeds started but the data never renews, which SVI decays back to η (exps 0169 /
+0171; spec 2026-10-30 R14). As with the other topic models, whose topic statistics
+are reported and nothing is removed, acting on that is the user's call:
+
+- **Reporting (always available).** `model.nodeStatistics(flatThreshold=0.5)` is a
+  DataFrame, one row per kept node: `node` (typed as in `describeNodes`), `depth`
+  (longest path from the root, top level 1), `support` (`nodeSupport()`),
+  `supportFraction`, `mass` (the block's λ mass), `massToParent` (over its heaviest
+  kept parent's; null at the top level) and `flat` (`supportFraction >
+  flatThreshold`). `supportFraction` is
+  `spark_vi.eval.topic.sharpness.support_fraction`: the effective support exp(H(β))
+  of the topic's row in its dominant domain (the one holding most of its λ mass) over
+  that domain's vocabulary, about 0 = sharp and 1 = flat (a topic that receives no
+  words keeps λ = η, uniform); with `gateTpn > 1` the minimum over the block. The
+  model is unchanged.
+- **Dropping (explicit).** `model.dropUnsupportedNodes(maxSupportFraction=0.5)`
+  returns a NEW model without the flat nodes, through
+  `spark_vi.dag.nodeset.drop_nodes`, which means what pruning means at fit time: a
+  dropped node's labels land on its nearest kept ancestors (nowhere when none), its
+  kept children re-attach to their nearest kept ancestors and the kept DAG is
+  re-reduced (from the reachability of the ORIGINAL kept DAG, so no path is lost),
+  pruned / spliced labels that landed on it land further up, and the engine ids are
+  renumbered by the fit's rule. The kept set need not stay closed upward (a flat node
+  may have healthy children). Every K-sized array (λ per domain, α, the gate's
+  `gate_open_at`, the α trace) keeps the background topics, then the surviving
+  blocks in the new engine order, each row exactly as fitted; scalars (η,
+  `gate_iter`) are kept. No refit and no re-splice. `unsupportedNodes()` -> `{node:
+  [landing nodes]}` (empty on a model never cleaned) is persisted with the node set
+  (`NodeSet.unsupported`); `transform`, `describe*`, `nodeStatistics`, MLlib
+  save / load and `DagHeadsEstimator.setTopicModel` all read the cleaned node set, so
+  a dropped node has no block, no gate and no readout head.
+
 ### Third Model (TBD)
 
 Chosen during implementation based on which dimension of the abstraction feels
@@ -768,7 +803,8 @@ spark_vi/
 │   ├── layout.py           # DagLayout (topic blocks over a DAG, the gate), frontier_from_coded
 │   │                       #   (internal: import from spark_vi.dag.layout; ADR 0052)
 │   ├── nodeset.py          # fit-time node-set learning: parse a user DAG, support, prune,
-│   │                       #   land, reduce, splice; user ids <-> engine ids (ADR 0052)
+│   │                       #   land, reduce, splice; user ids <-> engine ids (ADR 0052);
+│   │                       #   drop_nodes: post-fit removal of unsupported nodes (R14)
 │   └── ops.py              # closure, descendants, depth, transitive reduction, closure matrix
 ├── models/topic/           # LDA, HDP, STM, DAG-gated LDA; flat spectral init (STM);
 │                           #   gate seeds
@@ -781,7 +817,8 @@ spark_vi/
 │   ├── labels.py           # NodeLabeler: per-node targets / masks from user labels
 │   ├── stacked.py          # closure product over a label DAG
 │   └── evaluate.py         # the readout's metrics from score blocks (no collect)
-├── eval/topic/             # coherence, gated NPMI (gated_npmi.py), concentration
+├── eval/topic/             # coherence, gated NPMI (gated_npmi.py), concentration,
+│                           #   topic sharpness (sharpness.py: support fraction)
 ├── eval/metrics/           # exact AUC / AP / P@R / R@FDR / top-k / curves / ECE
 │   ├── core.py             #   from mergeable score tallies (pure numpy)
 │   ├── spark.py, local.py  #   per-key metrics: merged in the shuffle / in memory
