@@ -1,7 +1,7 @@
 ---
 id: 171
 slug: starvation-trace-0169-config
-status: planned
+status: done
 model_class: dag_gated
 # 0169's configuration (150 iterations) with the starved-topic trace on, to see WHEN
 # node blocks starve; the job first runs the offline starvation report on the fitted
@@ -58,7 +58,7 @@ spark_conf:
 
 # 0171 — When and why node blocks starve (0169's configuration, traced)
 
-**Status:** planned. **Date:** 2026-11-09. **Follows:** [0169](0169-descriptive-model-of-record-0163-config-long-fit.md).
+**Status:** done. **Date:** 2026-11-09. **Follows:** [0169](0169-descriptive-model-of-record-0163-config-long-fit.md).
 
 ## Why
 
@@ -121,4 +121,32 @@ sleep 5; ls -la "$L1"; tail -f "$L1"
 
 ## Results
 
-(pending)
+0171 reproduces 0169: **205 of 2,845 node blocks starved (7.2%)** at 150 iterations, the
+same profile (support decides: 23% starved at 200-500 documents, 1 of 1,507 above 1,000;
+small parent shares; at most 2 children; every depth from 4 down). 118 of the 205 were
+also starved in 0169, and all 205 sit in 0169's near-flat band (support fraction median
+0.999): which marginal blocks cross the threshold varies run to run.
+
+**When (the trace, starved node topics / 2,845):**
+
+| iteration | 1 | 5 | 10 | 20 | 30-70 | 75 | 80 | 85 | 90 | 95-150 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| starved | 1,435 | 465 | 76 | 5 | **0** | 40 | 111 | 169 | 192 | 197 → 205 |
+
+- Unopened blocks start flat; the leaves-first rounds open and seed them (0 starved from
+  iteration 30, when the full gate has opened at 28).
+- **A cliff, not an erosion:** the unsupported blocks cross together 45-60 iterations
+  after the full gate opens, then the count plateaus. That is when a seeded block's
+  seed mass, shrinking by (1 - ρ) each step (ρ ≈ 0.09), falls to the flat η floor;
+  blocks the data renews never cross. The 60-iteration fits (0163, 0168) stopped just
+  before the cliff.
+- The starved set is nearly final by iteration 95 (8 more in the last 55 iterations):
+  which blocks the data sustains is a stable question.
+- The node topics' share of the λ mass drifts steadily from 93.6% to 76.9% (the
+  background absorbs words slowly); a separate trend that starves nothing.
+
+**Next:** let the fit decide which nodes get a block (fit past the cliff, prune the flat
+blocks, re-land their labels and re-attach their kept children, continue to a fixpoint;
+report them beside pruned and spliced). A spec addendum first: about 100 of the 205 have
+kept children, so the kept set is no longer closed upward, and whether a node without a
+block keeps its readout head is open.
