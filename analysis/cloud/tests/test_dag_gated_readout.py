@@ -202,3 +202,38 @@ class TestMondoSpecMismatch:
         m = _manifest(int2cid={"0": "MONDO:0005267"})
         assert mondo_spec_mismatch({"dag_source": "snomed"}, m)
         assert not mondo_spec_mismatch({"dag_source": "snomed"}, _manifest())
+
+
+def test_cleaned_model_round_trips_and_bridges_the_reattached_child(spark, tmp_path):
+    """Spec R14.2 through the run dir: a model with a dropped node whose child is kept
+    saves, reloads, and bridges (the integer DAG the readout, framings and census read)
+    with the child re-attached to the dropped node's parent and the drop recorded."""
+    from dag_gated_fit import load_fitted_model, node_bridge, save_fitted_model
+    from spark_vi.core.result import VIResult
+    from spark_vi.dag.nodeset import fit_node_set
+    from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAModel
+    dag = {"MONDO:0000001": [], "MONDO:0000002": ["MONDO:0000001"],
+           "MONDO:0000003": ["MONDO:0000002"], "MONDO:0000004": ["MONDO:0000001"]}
+    ns = fit_node_set(dag, [["MONDO:0000003"], ["MONDO:0000004"], ["MONDO:0000002"]])
+    K = 2 + len(ns.nodes)
+    rng = np.random.default_rng(0)
+    lam = rng.gamma(0.2, 50.0, size=(K, 40))               # sharp rows
+    b = 2 + ns.engine_id["MONDO:0000002"] - 1
+    lam[b] = 1.0                                             # MONDO:0000002 flat
+    res = VIResult(global_params={"lambda": {0: lam[:, :30], 1: lam[:, 30:]},
+                                  "alpha": np.full(K, 0.5)},
+                   elbo_trace=[], n_iterations=1, converged=True,
+                   metadata={"model_class": "DagGatedOnlineLDA",
+                             "dag_node_set": {**ns.to_dict(), "n_bg": 2, "tpn": 1}})
+    m = DagGatedLDAModel(res)
+    m.setFeaturesCols(["features_0", "features_1"])
+    m.setDag(dag)
+    clean = m.dropUnsupportedNodes(maxSupportFraction=0.9)
+    assert list(clean.unsupportedNodes()) == ["MONDO:0000002"]
+    save_fitted_model(clean, tmp_path)
+    got = load_fitted_model(tmp_path)
+    assert got.unsupportedNodes() == clean.unsupportedNodes()
+    assert got.dag()["MONDO:0000003"] == ["MONDO:0000001"]
+    br = node_bridge(got, {})
+    assert sorted(br["int2cid"].values()) == [-1, 1, 3, 4]
+    assert br["parent_int"][br["cid2int"][3]] == [br["cid2int"][1]]
