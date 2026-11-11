@@ -1,7 +1,7 @@
 ---
 id: 173
 slug: cleaned-model-of-record-gate-warm4
-status: planned
+status: done
 model_class: dag_gated
 # The first cleaned model of record (spec R14): 0172's configuration (gate_warm 4,
 # 150 iterations: past the starvation cliff), then dropUnsupportedNodes at a strict
@@ -61,7 +61,7 @@ spark_conf:
 
 # 0173 — The first cleaned model of record (0172's configuration, unsupported nodes dropped)
 
-**Status:** planned. **Date:** 2026-11-10. **Follows:** [0172](0172-starvation-gate-warm4.md), spec R14.
+**Status:** done. **Date:** 2026-11-10. **Follows:** [0172](0172-starvation-gate-warm4.md), spec R14.
 
 ## Why
 
@@ -98,4 +98,33 @@ sleep 5; ls -la "$L"; tail -f "$L"
 
 ## Results
 
-(pending)
+Ran 2026-11-10/11 (fresh cluster: bundle and conversion sidecar rebuilt; fit phase
+13,784 s). The drivers ran end to end on the cleaned model (census, NPMI, sidecar, ribbon
+readout, comparisons).
+
+- **Dropped 150 of 2,845 node blocks; 2,695 kept** (`unsupportedNodes()`), flat by
+  support band: 28/432 at 100-200 documents, 104/548 at 200-500, 18/358 at 500-1,000,
+  none above. Trace: 0 starved from iteration 60, the cliff from ~75, plateau 150 by
+  iteration 120 (0172, same configuration: 168).
+- **No marginal band:** at iteration 150, 150 blocks have supportFraction > 0.5 and the
+  same 150 > 0.9; none lie between. Flatness is all-or-nothing (a block stays fed or
+  collapses to ~0.999), so the threshold choice does not matter in practice. What
+  varies between runs (205 / 168 / 150) is which small nodes collapse, not where a
+  borderline sits.
+
+| | 0168 (60 iterations) | 0173 (150, cleaned) |
+|---|---|---|
+| census: signature / stratum / starved | 96% / 4% / 0 | 97% / 3% / 0 |
+| NPMI condition domain, gated / all | +0.184 / +0.237 | +0.194 / +0.252 (median B − A +0.005) |
+| NPMI drug domain, gated / all | +0.286 / +0.296 | +0.283 / +0.290 (median −0.001 / −0.003) |
+| detection, root head = stacked (AUC / AP) | 0.8610 / 0.9917 | 0.8657 / 0.9920 |
+| detection, flat max (AUC) | 0.610 | 0.618 |
+| ranking within parent cohort, macro AUC / AP | 0.7322 / 0.4573 (932 nodes) | 0.7356 / 0.4699 (904 nodes) |
+| new-diagnosis AUC, stacked, 841 shared ribbon nodes | 0.7170 | 0.7145 (median −0.0007; B wins 400) |
+| new-diagnosis AUC, flat | 0.6104 | 0.6101 (median −0.0001) |
+
+**Reading:** the longer fit sharpens the condition topics (and detection with them),
+drug topics are level, per-node new-diagnosis accuracy is unchanged; dropped nodes have
+no head rather than a flat one. 0173 is the candidate model of record: no starved
+blocks by construction, and the 150 nodes the data did not sustain are named by the
+model.

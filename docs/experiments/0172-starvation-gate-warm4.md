@@ -91,9 +91,9 @@ Ran 2026-11-10, chained after 0171 (same cluster, same bundle). Full gate from i
 - **Which nodes starve varies run to run:** 101 of 0172's 168 were starved in 0171 (and
   all 168 sit in 0171's near-flat band, support fraction median 0.999). A core of about
   100 starves every time, inside a marginal pool of about 300 small nodes whose crossing
-  depends on the mini-batches. So a single fit's flat set is partly arbitrary at the
-  edge; `nodeStatistics`' continuous `supportFraction` shows how marginal a node is, and a
-  stricter drop threshold (e.g. 0.9) would keep a drop to the stable core.
+  depends on the mini-batches. (Corrected by 0173: there is no borderline band at the
+  end of a fit, supportFraction is all-or-nothing, so the variation is in which small
+  nodes collapse, not in a threshold; 0.5 and 0.9 select the same blocks.)
 - The node topics' λ-mass share drifts down as in 0171 (93.5% → 73.7%).
 
 **Conclusion (0169-0172):** the schedule knobs (gate_warm here; α, insight 0091) do not
