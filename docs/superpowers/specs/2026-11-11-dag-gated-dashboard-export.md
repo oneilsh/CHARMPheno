@@ -42,6 +42,7 @@ other arrays, never repeated strings.
  selection: {top_beta: 25, top_lift: 25, lift_pool: 200},
  weight_codec: {kind: "log-byte", per_domain: [{lo: float, hi: float}]},
  freq_codec:   {kind: "log-byte", per_domain: [{lo: float, hi: float}]},
+ min_docs_per_node: int,                                 # the fit's threshold (a pruned node's support is below it)
  disclosure: {min_cell: 20, support: "20-wide bands shown at the midpoint (1-20 -> 10 '<=20', 21-40 -> 30, ...)"},
  sizes: {"<file>": [raw_bytes, gzip_bytes]},
  notes: str}
@@ -53,10 +54,12 @@ other arrays, never repeated strings.
  name: [str],
  parents: [[int]],           # indices; [] = top level (the given DAG, not the kept one)
  kept_parents: [[int]|null], # the kept, reduced DAG for nodes with a topic; null otherwise
- depth: [int],
+ depth: [int],               # longest path from the top in the given DAG, top level = 1
  status: [int],              # 0 topic, 1 pruned, 2 spliced, 3 unsupported
  landing: [[int]|null],      # status 1-3: the nodes its labels land on ([] = background)
- support: [int],             # banded (midpoint), see disclosure
+ support: [int|null],        # banded (midpoint), see disclosure; null when not recorded:
+                             # pruned nodes (only known to be < min_docs_per_node), or a
+                             # spliced / unsupported node whose count cannot be derived
  support_frac: [int|null],   # supportFraction * 1000, rounded; null without a topic
  topic: [int|null]}          # index into topics.json; null without a topic
 ```

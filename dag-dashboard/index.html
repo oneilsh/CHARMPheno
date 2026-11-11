@@ -361,7 +361,7 @@ function decode(man,nodes,vocab,topics){
   for(let i=0;i<N;i++) NODES.push({ix:i, id:String(nodes.id[i]), label:String(nodes.name[i]||nodes.id[i]),
     pix:nodes.parents[i]||[], depth:nodes.depth[i], status:nodes.status[i],
     landing:nodes.landing?nodes.landing[i]:null, kept:nodes.kept_parents?nodes.kept_parents[i]:null,
-    support:nodes.support[i]||0, sfrac:nodes.support_frac?nodes.support_frac[i]:null,
+    support:nodes.support[i]==null?null:nodes.support[i], sfrac:nodes.support_frac?nodes.support_frac[i]:null,
     topic:nodes.topic[i]});
   for(const n of NODES) n.parents=n.pix.map(j=>NODES[j].id);
   byId=new Map(); for(const n of NODES) byId.set(n.id,n);
@@ -411,7 +411,7 @@ function renderMeta(){
   if(/synthetic|sample/i.test((m.run||"")+(m.mondo_version||"")+(m.cdr||""))) box.appendChild(el("span","badge-sample","SAMPLE DATA"));
   add("model run",esc(m.run||"—")); add("Mondo",esc(m.mondo_version||"—"));
   if(m.cdr) add("CDR",esc(m.cdr));
-  add("topics",`${fmt(m.tpn??(m.K-m.n_bg))} node + ${fmt(m.n_bg)} background`);
+  add("topics",`${fmt(m.K-m.n_bg)} node + ${fmt(m.n_bg)} background`);
   const cnt=[0,0,0,0]; for(const n of NODES) if(cnt[n.status]!=null) cnt[n.status]++;
   const st=el("span"); st.innerHTML=`nodes <b>${fmt(NODES.length)}</b>: `+STATUS.map((s,i)=>
     `<span class="stchip"><span class="sw" style="background:${s.color}"></span><b>${fmt(cnt[i])}</b> ${s.label}</span>`).join(" · ");
@@ -442,8 +442,15 @@ function renderLegend(){
 
 /* ============================== support ================================== */
 // support is the midpoint of a 20-wide band: 10 = 1..20 ("<=20"), 30 = 21..40, ...
-function supportText(s){ if(!s) return "0"; if(s<=10) return "≤20"; return fmt(s); }
+// A null support is not recorded in the export: a pruned node's count is only known to
+// be below the fit's minDocsPerNode (manifest.min_docs_per_node).
+function supportText(s){
+  if(s==null) return MAN&&MAN.min_docs_per_node?`< ${fmt(MAN.min_docs_per_node)}`:"not recorded";
+  if(!s) return "0"; if(s<=10) return "≤20"; return fmt(s); }
 function supportNote(s){
+  if(s==null) return MAN&&MAN.min_docs_per_node
+    ? `not recorded: below the fit's minimum of ${fmt(MAN.min_docs_per_node)} documents per node`
+    : "not recorded in this export";
   if(!s) return "no documents";
   if(s<=10) return "between 1 and 20 (not disclosable more finely)";
   return `banded: ${fmt(s-9)}–${fmt(s+10)}, shown at the midpoint`;
