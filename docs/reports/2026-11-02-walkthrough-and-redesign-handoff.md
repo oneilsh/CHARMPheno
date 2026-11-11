@@ -90,3 +90,23 @@ subject):
   edits); both rebuild once on the next cluster.
 - The Mondo-usage dashboard (gh-pages `/mondo-aou-usage/`) is being worked on from
   `main` in another session; nothing here touches it.
+
+## After the redesign (2026-11-03 .. 11-11), for the next session
+
+- **Experiments 0168-0173 are done:** 0168 validated the redesign on 0163's
+  configuration; 0169 was the first long fit; 0170 tried the local engine (correct,
+  compute-bound, so Spark stays the default at 8 cores); 0171-0172 settled why node
+  blocks starve (seed decay, about 75 iterations after seeding); 0173 is the first
+  cleaned model of record (150 unsupported nodes dropped, accuracy matches 0168).
+- **Spec R14 is built (WP15-16):** `nodeStatistics` by default, `dropUnsupportedNodes`
+  on request. The walkthrough should cover it along with the redesign.
+- **Export:** spec `specs/2026-11-11-dag-gated-dashboard-export.md` (`dag-gated-export/1`,
+  25 + 25 terms per domain, about 1.3 MB gzip at full scale). The exporter is
+  `charmpheno/export/dag_gated.py` with `analysis/cloud/export_dag_gated.py` and
+  `make export-dag-gated ID=N RESOLVE_NAMES=1`. The browser is `dag-dashboard/index.html`,
+  adapted from a copy of the Mondo usage dashboard's DAG engine. It is tested on the
+  exporter's fixture and on a full-scale synthetic export (0.8 s load, 19 MB heap) but has
+  not yet run on a real export. Next: run the exporter on 0173, check the sizes, view it,
+  then decide on the gh-pages deployment.
+- **The topic survey of 0173** (well-known and rarer diseases, the digest, a sample of
+  the dropped nodes) was handed over as a command; its output had not come back yet.
