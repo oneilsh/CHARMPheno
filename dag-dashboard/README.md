@@ -9,6 +9,17 @@ The DAG engine and drawer are copied from `mondo-usage-dashboard/index.html` on 
 (developed separately there, not shared); the relevance ranking is a port of the main
 dashboard's CodePanel (`dashboard/src/lib/inference.ts`, `relevance`).
 
+## Making an export (on the cluster, from a finished fit)
+
+```bash
+make -C analysis/cloud export-dag-gated ID=173 RESOLVE_NAMES=1   # writes <run>/dag_export/
+```
+
+It needs no Spark (it reads `<run>/model/result`, `label_dag.json`, `bundle_meta.json`;
+`RESOLVE_NAMES=1` names the terms through the CDR concept table) and prints each file's
+raw and gzip size. The export holds model parameters, names, and banded per-node support
+only; follow the workspace's egress rules before copying it out.
+
 ## Viewing an export locally
 
 ```bash
