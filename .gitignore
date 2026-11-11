@@ -63,3 +63,6 @@ notebooks/exploratory/
 
 # Root-level npm deps (dashboard npm run at repo root); regenerable, never track
 node_modules/
+
+# DAG-gated dashboard export (never commit; data/ above already covers it)
+dag-dashboard/data/

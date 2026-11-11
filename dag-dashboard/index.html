@@ -1,0 +1,1101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DAG-gated Topic Browser</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Serif:wght@500;600&display=swap">
+<!--
+  Browser for a `dag-gated-export/1` directory (docs/superpowers/specs/2026-11-11-dag-gated-dashboard-export.md).
+  Single file, vanilla JS, no build step. The DAG engine (lazy expansion, reachability edges,
+  caps, search, node menu, lineage highlight, pan/zoom, drag-to-reorder) and the docked
+  detail drawer are COPIED from mondo-usage-dashboard/index.html on main (developed
+  separately there; not shared). The relevance ranking is a port of the main dashboard's
+  CodePanel (dashboard/src/lib/inference.ts `relevance`, λ = 0.6 default).
+  Data: ./data/ by default, or ?data=<path>.
+-->
+<style>
+/* ---- tokens: light is the bare :root; dark redefines tokens only ---------- */
+:root{
+  --bg:#f4f6f7; --surface:#ffffff; --surface-2:#eef1f3; --surface-3:#e6eaed;
+  --border:#d8dee2; --border-strong:#c2cbd1;
+  --ink:#171e24; --ink-2:#51606c; --muted:#8592a0;
+  --accent:#00867e; --accent-ink:#ffffff; --desc:#2f6fed; --warn:#c9760a;
+  /* node status: 0 topic · 1 pruned · 2 spliced · 3 unsupported (always paired with a word) */
+  --st0:#0072b2; --st1:#9aa4b0; --st2:#6a55d6; --st3:#d55e00;
+  --bar:#0072b2;
+  --shadow:0 1px 2px rgba(20,30,40,.06),0 8px 24px rgba(20,30,40,.06);
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+  --serif:"IBM Plex Serif",Georgia,"Times New Roman",serif;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#111417; --surface:#191d22; --surface-2:#20262c; --surface-3:#272e35;
+  --border:#2c343c; --border-strong:#3a444d;
+  --ink:#e7ecef; --ink-2:#a6b1bc; --muted:#6d7883;
+  --accent:#2bb5aa; --accent-ink:#06201e; --desc:#6f9bff; --warn:#d59234;
+  --st0:#4a97d6; --st1:#6d7883; --st2:#9483ea; --st3:#f0713a;
+  --bar:#4a97d6;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 10px 30px rgba(0,0,0,.35);
+}}
+:root[data-theme="dark"]{
+  --bg:#111417; --surface:#191d22; --surface-2:#20262c; --surface-3:#272e35;
+  --border:#2c343c; --border-strong:#3a444d;
+  --ink:#e7ecef; --ink-2:#a6b1bc; --muted:#6d7883;
+  --accent:#2bb5aa; --accent-ink:#06201e; --desc:#6f9bff; --warn:#d59234;
+  --st0:#4a97d6; --st1:#6d7883; --st2:#9483ea; --st3:#f0713a;
+  --bar:#4a97d6;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 10px 30px rgba(0,0,0,.35);
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);
+  font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+h1,h2,h3{margin:0;text-wrap:balance}
+a{color:var(--accent)}
+button{font-family:inherit;cursor:pointer}
+.mono{font-family:var(--mono)}
+mark{background:color-mix(in srgb,var(--accent) 30%,transparent);color:inherit;font-weight:700;border-radius:2px;padding:0 1px}
+.gnode.match .glbl{fill:var(--accent);font-weight:800}
+
+/* ---- shell --------------------------------------------------------------- */
+.wrap{margin:0;padding:14px 18px 16px;min-height:100vh;display:flex;flex-direction:column}
+header.top{position:relative;padding:2px 0 10px;border-bottom:1px solid var(--border)}
+.brand{min-width:0;padding-right:44px}
+.brand h1{font-family:var(--serif);font-weight:600;font-size:27px;letter-spacing:-.01em;line-height:1.15}
+.brand p{margin:6px 0 0;color:var(--ink-2);max-width:110ch}
+.toolbar{display:flex;gap:8px;align-items:center;position:absolute;top:2px;right:0}
+.btn{background:var(--surface);border:1px solid var(--border);color:var(--ink-2);
+  border-radius:8px;padding:7px 11px;font-size:12.5px;font-weight:500;display:inline-flex;
+  gap:7px;align-items:center;white-space:nowrap}
+.btn:hover{border-color:var(--border-strong);color:var(--ink)}
+.btn svg{width:15px;height:15px}
+.btn.ic{padding:6px;border-radius:7px}
+.btn.ic svg{width:16px;height:16px}
+.meta{display:flex;flex-wrap:wrap;gap:6px 18px;align-items:center;margin:10px 0 0;
+  font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+.meta b{color:var(--ink-2);font-weight:500}
+.badge-sample{color:var(--warn);border:1px solid var(--warn);border-radius:5px;padding:1px 6px;font-weight:600;letter-spacing:.04em}
+.stchip{display:inline-flex;align-items:center;gap:5px}
+.stchip .sw{width:9px;height:9px;border-radius:50%}
+.tabs{display:flex;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;padding:3px}
+.tabs button{border:0;background:transparent;color:var(--ink-2);border-radius:6px;
+  padding:6px 13px;font-size:12.5px;font-weight:500}
+.tabs button[aria-selected="true"]{background:var(--surface);color:var(--ink);box-shadow:var(--shadow)}
+.viewtabs{margin-top:12px;align-self:flex-start}
+.search{display:flex;align-items:center;gap:7px;background:var(--surface);border:1px solid var(--border);
+  border-radius:8px;padding:5px 10px;width:220px;max-width:38vw}
+.search input{border:0;background:transparent;color:var(--ink);font-family:var(--sans);font-size:13px;outline:none;width:100%}
+.search svg{width:15px;height:15px;color:var(--muted);flex:0 0 auto}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);overflow:hidden}
+.hint{color:var(--muted);font-size:12px;padding:10px 16px;font-family:var(--mono)}
+
+/* ---- graph (DAG explorer) ------------------------------------------------ */
+#view-graph{position:relative;--dim:.2}
+.graph-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--border)}
+.graph-toolbar .grow{flex:1 1 auto}
+.tb-sep{width:1px;align-self:stretch;background:var(--border);margin:2px 4px}
+.g-hint{color:var(--muted);font-size:11px;font-family:var(--mono)}
+#graph{width:100%;flex:1 1 auto;min-height:320px;display:block;cursor:grab;touch-action:none;
+  background:radial-gradient(circle at 1px 1px, var(--surface-2) 1.1px, transparent 0) 0 0/24px 24px}
+#graph.grabbing{cursor:grabbing}
+.dim-ctl{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:10.5px;color:var(--muted);letter-spacing:.04em}
+.dim-ctl input[type=range]{width:84px;accent-color:var(--muted);cursor:pointer}
+.tb-check{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--ink-2);cursor:pointer;white-space:nowrap}
+.tb-check input{accent-color:var(--muted);cursor:pointer}
+.gnode,.gmore{cursor:pointer;transition:transform .4s cubic-bezier(.4,0,.2,1),opacity .3s ease}
+.gnode.dragging{cursor:grabbing}
+.gnode.dragging .gcirc{stroke:var(--accent);stroke-width:2.4}
+.gnode .gcirc{stroke:var(--surface);stroke-width:1.5;transition:r .4s cubic-bezier(.4,0,.2,1)}
+.gnode.notopic .gcirc{stroke:var(--ink-2);stroke-width:1.2;stroke-dasharray:3 2}
+.gnode.sel .gcirc{stroke:var(--accent);stroke-width:2.4;stroke-dasharray:none}
+.gnode text{font-family:var(--sans);paint-order:stroke;stroke:var(--surface);stroke-width:3.5px;stroke-linejoin:round}
+.gnode .glbl{fill:var(--ink);font-weight:600}
+.gnode .gsub{fill:var(--ink-2);font-family:var(--mono)}
+.gedge{fill:none;stroke:var(--ink-2);stroke-opacity:.5;stroke-width:1.5;stroke-linecap:round;
+  transition:d .4s cubic-bezier(.4,0,.2,1),opacity .3s ease}
+.gedge.via-hidden{stroke-opacity:.2;stroke-width:1}
+.gmore rect{fill:color-mix(in srgb,var(--accent) 20%,var(--surface));stroke:var(--accent);stroke-width:1.75}
+.gmore text{fill:var(--accent);font-family:var(--mono);font-weight:700}
+.gmore:hover rect{fill:color-mix(in srgb,var(--accent) 34%,var(--surface))}
+.gmenu{opacity:0;pointer-events:none;transition:opacity .12s;cursor:pointer}
+.gnode:hover .gmenu{opacity:1;pointer-events:auto}
+.gmenu-bg{fill:var(--surface);stroke:var(--border-strong);stroke-width:1.2}
+.gmenu-dots{fill:var(--ink-2)}
+.gmenu:hover .gmenu-bg{stroke:var(--accent)}
+.gplus{transition:opacity .2s;pointer-events:none}
+.gplus-bg{fill:var(--surface);stroke:var(--ink-2);stroke-width:1.3}
+.gplus-sign{stroke:var(--ink-2);stroke-width:1.7;stroke-linecap:round;fill:none}
+.ctx-menu{position:fixed;z-index:60;min-width:200px;background:var(--surface);
+  border:1px solid var(--border-strong);border-radius:10px;box-shadow:0 14px 40px rgba(10,15,20,.28);
+  padding:5px;font-size:13px;color:var(--ink)}
+.ctx-menu .ctx-title{font-family:var(--mono);font-size:10.5px;letter-spacing:.04em;color:var(--muted);
+  text-transform:uppercase;padding:6px 9px 4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px}
+.ctx-menu button{display:flex;width:100%;gap:10px;align-items:center;justify-content:space-between;
+  background:none;border:0;color:var(--ink);text-align:left;padding:7px 9px;border-radius:6px;cursor:pointer;font-size:13px}
+.ctx-menu button:hover:not(:disabled){background:var(--surface-2)}
+.ctx-menu button:disabled{color:var(--muted);cursor:default;opacity:.6}
+.ctx-menu .sep{height:1px;background:var(--border);margin:5px 4px}
+.sel-active .gnode:not(.hl):not(.hld){opacity:var(--dim,.2)}
+.sel-active .gmore{opacity:var(--dim,.2)}
+.sel-active .gedge:not(.hl):not(.hld){opacity:calc(var(--dim,.2)*0.35)}
+.gnode.hl .gcirc{stroke:var(--accent);stroke-width:2.1;stroke-dasharray:none}
+.gnode.hld .gcirc{stroke:var(--desc);stroke-width:1.9;stroke-dasharray:none}
+.gedge.hl{stroke:var(--accent);stroke-opacity:.95;stroke-width:1.9}
+.gedge.hld{stroke:var(--desc);stroke-opacity:.9;stroke-width:1.7}
+.peek-active .gnode:not(.pk):not(.pkd){opacity:var(--dim,.2)}
+.peek-active .gmore{opacity:var(--dim,.2)}
+.peek-active .gedge:not(.pk):not(.pkd){opacity:calc(var(--dim,.2)*0.35)}
+.gnode.pk .gcirc{stroke:var(--accent);stroke-width:1.8}
+.gnode.pkd .gcirc{stroke:var(--desc);stroke-width:1.7}
+.gedge.pk{stroke:var(--accent);stroke-opacity:.9;stroke-width:1.7}
+.gedge.pkd{stroke:var(--desc);stroke-opacity:.82;stroke-width:1.6}
+.g-legend{display:flex;flex-wrap:wrap;gap:5px 13px;padding:7px 14px 10px;border-bottom:1px solid var(--border);font-size:11px;color:var(--ink-2)}
+.g-legend .lg-item{display:flex;align-items:center;gap:5px}
+.g-legend .lg-sw{width:10px;height:10px;border-radius:50%;flex:0 0 auto}
+.g-focus-chip{display:none;align-items:center;gap:6px;background:var(--surface-2);border:1px solid var(--border-strong);border-radius:20px;padding:3px 5px 3px 11px;font-size:12px;color:var(--ink);font-family:var(--mono)}
+.g-focus-chip button{border:0;background:transparent;color:var(--ink-2);font-size:15px;line-height:1;padding:0 4px;cursor:pointer;border-radius:50%}
+.g-focus-chip button:hover{color:var(--ink);background:var(--surface-3)}
+@media(prefers-reduced-motion:reduce){.gnode,.gmore,.gedge,.gnode .gcirc{transition:none}}
+
+/* ---- stage: graph + docked drawer (stacked on narrow) -------------------- */
+.stage{display:flex;gap:14px;align-items:stretch;flex:1 1 auto;min-height:0;margin-top:12px}
+.stage[hidden]{display:none}
+.stage .panel{flex:1 1 auto;min-width:0;display:flex}
+#view-graph{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;min-width:0}
+.drawer{flex:0 0 clamp(400px,40vw,680px);display:flex;flex-direction:column;background:var(--surface);
+  border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);overflow:hidden;max-height:calc(100vh - 150px)}
+@media(max-width:900px){
+  .wrap{min-height:0}
+  .stage{flex-direction:column;flex:0 0 auto}
+  #graph{height:62vh;flex:0 0 auto;min-height:0}
+  .drawer{flex:0 0 auto;max-height:none}
+  .search{width:100%;max-width:none}
+}
+.drawer-scroll{flex:1 1 auto;overflow:auto;min-height:0}
+.drawer-foot{border-top:1px solid var(--border);padding:10px 16px;display:flex;flex-wrap:wrap;
+  gap:4px 14px;align-items:center;font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+.drawer-foot b{color:var(--ink-2);font-weight:500}
+.drawer .dh{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;
+  padding:18px 18px 14px;border-bottom:1px solid var(--border)}
+.drawer .dh h3{font-family:var(--serif);font-size:19px;font-weight:600;line-height:1.2}
+.drawer .close{border:0;background:var(--surface-2);border-radius:7px;width:30px;height:30px;
+  color:var(--ink-2);font-size:17px;flex:0 0 auto;cursor:pointer}
+.drawer .body{padding:16px 18px}
+.drawer-empty{padding:40px 18px;color:var(--muted);font-size:13px;text-align:center;line-height:1.6}
+.kv{display:grid;grid-template-columns:130px 1fr;gap:8px 12px;font-size:13px;margin:14px 0 16px}
+.kv dt{color:var(--muted);font-size:12px}
+.kv dd{margin:0;font-family:var(--mono);font-size:12.5px;word-break:break-word}
+.kv .note{font-family:var(--sans);font-size:11.5px;color:var(--muted);margin-top:2px;line-height:1.45}
+.pill{display:inline-flex;align-items:center;gap:6px;border-radius:20px;padding:3px 10px;font-size:12px;font-weight:600}
+.section-t{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600;margin:18px 0 8px}
+.section-sub{color:var(--muted);font-size:11.5px;margin:-4px 0 8px;line-height:1.45}
+.chiplist{display:flex;flex-wrap:wrap;gap:6px}
+.chiplist a,.chiplist span{font-size:12px;background:var(--surface-2);border:1px solid var(--border);
+  border-radius:6px;padding:3px 8px;text-decoration:none;color:var(--ink-2)}
+.chiplist a{cursor:pointer;color:var(--ink)}
+.chiplist a:hover{border-color:var(--accent)}
+.chiplist .sw{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;padding:0;border:0;vertical-align:1px}
+.explain{background:var(--surface-2);border:1px solid var(--border);border-left:3px solid var(--st-c,var(--muted));
+  border-radius:8px;padding:10px 12px;font-size:13px;color:var(--ink);margin:4px 0 12px;line-height:1.5}
+.fracbar{position:relative;height:6px;border-radius:3px;background:linear-gradient(90deg,var(--st0),var(--st3));opacity:.85;margin:6px 0 2px;width:180px}
+.fracbar i{position:absolute;top:-4px;width:3px;height:14px;border-radius:2px;background:var(--ink);transform:translateX(-1px)}
+.fracends{display:flex;justify-content:space-between;width:180px;font-size:10.5px;color:var(--muted);font-family:var(--sans)}
+
+/* relevance slider (port of the main dashboard's CodePanel slider-row) */
+.slider{display:flex;flex-direction:column;gap:3px;margin:6px 0 12px;max-width:340px;min-width:260px}
+.slider-head{display:flex;gap:12px;justify-content:space-between;align-items:baseline;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.slider-head .v{font-family:var(--mono);color:var(--ink);text-transform:none;letter-spacing:0;font-size:12px}
+.slider input{width:100%;accent-color:var(--accent)}
+.slider-ends{display:flex;justify-content:space-between;font-size:10.5px;color:var(--muted);font-family:var(--mono)}
+
+/* three domain columns of ranked terms */
+.termcols{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px 14px}
+.dcol h4{margin:0 0 4px;font-size:11.5px;font-weight:600;color:var(--ink-2);display:flex;justify-content:space-between;
+  border-bottom:1px solid var(--border);padding-bottom:3px}
+.dcol h4 small{font-family:var(--mono);font-weight:400;color:var(--muted)}
+.terms{list-style:none;margin:0;padding:0}
+.terms li{display:grid;grid-template-columns:18px minmax(0,1fr) 46px;gap:2px 6px;align-items:center;padding:2px 0;font-size:12px}
+.terms .rk{font-family:var(--mono);font-size:10px;color:var(--muted);text-align:right}
+.terms .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.terms .num{font-family:var(--mono);font-size:10.5px;color:var(--ink-2);text-align:right}
+.terms .spark{grid-column:2 / 4;height:3px;background:var(--surface-2);border-radius:2px;overflow:hidden;margin-top:-1px}
+.terms .spark i{display:block;height:100%;background:var(--bar);border-radius:2px}
+.terms .new{color:var(--warn);font-family:var(--mono);font-size:10px;margin-left:3px}
+.diffpar{margin:10px 0 4px;font-size:12.5px;color:var(--ink-2)}
+.diffpar a{cursor:pointer;font-weight:600}
+
+/* background view */
+#view-bg{margin-top:12px}
+#view-bg[hidden]{display:none}
+.bg-head{display:flex;flex-wrap:wrap;gap:12px 24px;align-items:flex-end;padding:14px 18px;border-bottom:1px solid var(--border)}
+.bg-head p{margin:0;color:var(--ink-2);font-size:13px;max-width:80ch}
+.bg-list{padding:6px 18px 18px}
+.bgcard{border-bottom:1px solid var(--border);padding:14px 0}
+.bgcard h3{font-size:14px;font-weight:600;margin:0 0 8px;font-family:var(--mono)}
+.tip{position:fixed;pointer-events:none;background:var(--ink);color:var(--bg);font-size:12px;
+  font-family:var(--mono);padding:6px 9px;border-radius:6px;z-index:40;opacity:0;transition:opacity .1s;max-width:440px;
+  white-space:pre-line;line-height:1.45}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <h1>DAG-gated topics on Mondo</h1>
+      <p>Each node is a Mondo label the model was given. A node <b>with a topic</b> has its own set of conditions, drugs and measurements; a node without one was <b>pruned</b> (too few documents), <b>spliced</b> into its child, or <b>unsupported</b> (its fitted topic was flat), and its labels land elsewhere. Supports are shown in 20-wide bands; no patient-level data is in this export.</p>
+    </div>
+    <div class="toolbar">
+      <button class="btn ic" id="theme" title="Toggle theme" aria-label="Toggle color theme">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v3M12 20v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M1 12h3M20 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg></button>
+    </div>
+    <div class="meta" id="meta"></div>
+  </header>
+
+  <div class="tabs viewtabs" id="viewtabs" role="tablist">
+    <button role="tab" data-view="graph" aria-selected="true">Label DAG</button>
+    <button role="tab" data-view="bg" aria-selected="false" id="tab-bg">Background topics</button>
+  </div>
+
+  <div class="stage" id="stage">
+    <div class="panel">
+      <div id="view-graph">
+        <div class="graph-toolbar">
+          <button class="btn ic" id="g-reset" title="Reset to starting view" aria-label="Reset view">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v4h4"/></svg></button>
+          <button class="btn ic" id="g-fit" title="Fit to view" aria-label="Fit to view">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+          <span class="tb-sep"></span>
+          <label class="search">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>
+            <input id="search" type="search" placeholder="Search label or ID…" autocomplete="off">
+          </label>
+          <div class="dim-ctl" title="Transparency of non-highlighted nodes when a selection or hover is active">
+            <span>dim</span>
+            <input type="range" id="dim-slider" min="0" max="4" step="1" value="1" aria-label="Dim level">
+          </div>
+          <label class="tb-check" title="Hide pruned, spliced and unsupported nodes; their topic descendants connect to the nearest shown ancestor by a faint shortcut edge">
+            <input type="checkbox" id="topic-only"> Only nodes with a topic
+          </label>
+          <span class="grow"></span>
+          <span class="g-focus-chip" id="g-focus-chip"><span></span><button id="g-focus-clear" title="Clear focus" aria-label="Clear focus">×</button></span>
+          <span class="g-focus-chip" id="g-sel-chip"><span></span><button id="g-sel-clear" title="Clear selection" aria-label="Clear selection">×</button></span>
+          <span class="g-hint" id="graph-hint"></span>
+        </div>
+        <div class="g-legend" id="g-legend"></div>
+        <svg id="graph" aria-label="Label DAG"></svg>
+      </div>
+    </div>
+    <aside class="drawer" id="drawer">
+      <div class="drawer-scroll" id="drawer-inner"></div>
+      <div class="drawer-foot" id="drawer-foot"></div>
+    </aside>
+  </div>
+
+  <div class="panel" id="view-bg" hidden>
+    <div class="bg-head">
+      <p id="bg-intro"></p>
+      <div id="bg-slider"></div>
+    </div>
+    <div class="bg-list" id="bg-list"></div>
+  </div>
+</div>
+<div class="ctx-menu" id="ctxmenu" hidden></div>
+<div class="tip" id="tip"></div>
+
+<script>
+"use strict";
+/* ============================== helpers ================================== */
+const $=(s,r=document)=>r.querySelector(s);
+const el=(t,c,txt)=>{const e=document.createElement(t);if(c)e.className=c;if(txt!=null)e.textContent=txt;return e;};
+const fmt=n=>n==null?"":n.toLocaleString("en-US");
+const fmtK=n=>{n=Math.round(n);return n<1000?(""+n):n<1e6?((n/1e3).toFixed(n<1e4?1:0)+"k"):((n/1e6).toFixed(1)+"M");};
+const fmtBytes=b=>b<1024?b+" B":b<1048576?(b/1024).toFixed(b<10240?1:0)+" KB":(b/1048576).toFixed(2)+" MB";
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const clip=(s,n)=>s.length>n?s.slice(0,n-1)+"…":s;
+
+/* Node status codes of dag-gated-export/1 (nodes.json `status`). */
+const STATUS=[
+  {key:"topic",       label:"topic",       color:"var(--st0)", why:""},
+  {key:"pruned",      label:"pruned",      color:"var(--st1)", why:"No topic: pruned (too few documents)."},
+  {key:"spliced",     label:"spliced",     color:"var(--st2)", why:"No topic: spliced into its child."},
+  {key:"unsupported", label:"unsupported", color:"var(--st3)", why:"No topic: unsupported (the fitted topic was flat)."},
+];
+const statusOf=n=>STATUS[n.status]||{label:"status "+n.status,color:"var(--muted)",why:""};
+
+/* ============================== data ===================================== */
+// Decoded export. Nodes keep their export index (`ix`) and are keyed by their user id
+// (Mondo CURIE) in byId, the shape the copied DAG engine works on.
+let MAN=null, NODES=[], TOPICS=[], VOCAB=null, DOMAINS=[];
+let byId=new Map(), dagKids=new Map(), gRootIds=[], SUPPORT_MAX=1;
+const ROOT_ID="__root__";
+
+function dataDir(){
+  const q=new URLSearchParams(location.search).get("data");
+  let d=q||"./data/"; if(!d.endsWith("/")) d+="/"; return d;
+}
+async function fetchJSON(u){const r=await fetch(u); if(!r.ok) throw new Error(`${u}: HTTP ${r.status}`); return r.json();}
+
+// log-byte codec: b in 0..255 -> exp(lo + (hi - lo) * b / 255), per-domain (lo, hi).
+const unbyte=(b,c)=>Math.exp(c.lo+(c.hi-c.lo)*b/255);
+
+function decode(man,nodes,vocab,topics){
+  if(man.schema!=="dag-gated-export/1") console.warn("[export] unexpected schema",man.schema);
+  MAN=man; DOMAINS=(man.domains||[]).map(d=>d.name);
+  const wc=man.weight_codec.per_domain, fc=man.freq_codec.per_domain;
+  // vocab: p(w) within its domain (the model's own marginal), decoded from log-bytes
+  const nv=vocab.domain.length, p=new Float64Array(nv);
+  for(let i=0;i<nv;i++) p[i]=unbyte(vocab.freq[i],fc[vocab.domain[i]]);
+  VOCAB={domain:vocab.domain, code:vocab.code, name:vocab.name, p};
+  // topics: per domain, delta-coded ascending term ids + log-byte E[beta] within the domain
+  TOPICS=topics.d.map((per,k)=>({k, node:topics.node[k], dom:per.map((pair,d)=>{
+    const delta=pair[0]||[], w=pair[1]||[], n=delta.length;
+    const ids=new Int32Array(n), beta=new Float64Array(n); let acc=0;
+    for(let i=0;i<n;i++){ acc+=delta[i]; ids[i]=acc; beta[i]=unbyte(w[i],wc[d]); }
+    return {ids,beta};
+  })}));
+  // nodes: columnar -> objects; integer references -> user ids for the DAG engine
+  const N=nodes.id.length; NODES=[];
+  for(let i=0;i<N;i++) NODES.push({ix:i, id:String(nodes.id[i]), label:String(nodes.name[i]||nodes.id[i]),
+    pix:nodes.parents[i]||[], depth:nodes.depth[i], status:nodes.status[i],
+    landing:nodes.landing?nodes.landing[i]:null, kept:nodes.kept_parents?nodes.kept_parents[i]:null,
+    support:nodes.support[i]||0, sfrac:nodes.support_frac?nodes.support_frac[i]:null,
+    topic:nodes.topic[i]});
+  for(const n of NODES) n.parents=n.pix.map(j=>NODES[j].id);
+  byId=new Map(); for(const n of NODES) byId.set(n.id,n);
+  // graph root: the single top-level node, or a synthetic root over several
+  const tops=NODES.filter(n=>!n.parents.length);
+  if(tops.length===1) gRootIds=[tops[0].id];
+  else { const r={ix:-1,id:ROOT_ID,label:"Label DAG",kind:"root",parents:[],pix:[],depth:-1,status:-1,support:0};
+    byId.set(ROOT_ID,r); for(const t of tops) t.parents=[ROOT_ID]; gRootIds=[ROOT_ID]; }
+  dagKids=new Map();
+  for(const [id,n] of byId) for(const p of n.parents){ if(!dagKids.has(p)) dagKids.set(p,[]); dagKids.get(p).push(id); }
+  // layout column = longest path from the root, so every edge points rightward
+  const lay=new Map(), order=topoOrder();
+  for(const id of order){ const n=byId.get(id); let c=0; for(const p of n.parents) c=Math.max(c,(lay.get(p)??0)+1); lay.set(id,c); n.lay=c; }
+  SUPPORT_MAX=1; for(const n of NODES) SUPPORT_MAX=Math.max(SUPPORT_MAX,n.support);
+  const rr=byId.get(ROOT_ID); if(rr) rr.support=SUPPORT_MAX;
+}
+function topoOrder(){
+  const indeg=new Map(), out=[];
+  for(const [id,n] of byId) indeg.set(id,n.parents.filter(p=>byId.has(p)).length);
+  const q=[...indeg].filter(([,d])=>d===0).map(([id])=>id);
+  while(q.length){ const id=q.shift(); out.push(id);
+    for(const c of (dagKids.get(id)||[])){ indeg.set(c,indeg.get(c)-1); if(indeg.get(c)===0) q.push(c); } }
+  if(out.length<byId.size) for(const id of byId.keys()) if(!out.includes(id)) out.push(id);   // cycle guard
+  return out;
+}
+
+async function boot(){
+  const dir=dataDir();
+  try{
+    const [man,nodes,vocab,topics]=await Promise.all(["manifest","nodes","vocab","topics"].map(f=>fetchJSON(dir+f+".json")));
+    decode(man,nodes,vocab,topics);
+  }catch(e){
+    console.warn("[export] load failed",e);
+    $(".stage .panel").innerHTML=`<div class="hint">Could not load a dag-gated-export/1 directory from <code>${esc(dir)}</code> (${esc(e.message)}).<br>Copy <code>&lt;run&gt;/dag_export</code> to <code>dag-dashboard/data/</code> and serve this folder with <code>python -m http.server</code>, or pass <code>?data=&lt;path&gt;</code>.</div>`;
+    return;
+  }
+  renderMeta(); renderFoot(); renderLegend();
+  initialGraphView(); renderDrawerDefault();
+  renderGraph(); requestAnimationFrame(graphFit);
+  window.__dagReady=true;
+}
+
+/* ============================== header =================================== */
+function renderMeta(){
+  const m=MAN, box=$("#meta"); box.innerHTML="";
+  const add=(k,v,title)=>{const w=el("span");w.innerHTML=`${k} <b>${v}</b>`; if(title) w.title=title; box.appendChild(w); return w;};
+  if(/synthetic|sample/i.test((m.run||"")+(m.mondo_version||"")+(m.cdr||""))) box.appendChild(el("span","badge-sample","SAMPLE DATA"));
+  add("model run",esc(m.run||"—")); add("Mondo",esc(m.mondo_version||"—"));
+  if(m.cdr) add("CDR",esc(m.cdr));
+  add("topics",`${fmt(m.tpn??(m.K-m.n_bg))} node + ${fmt(m.n_bg)} background`);
+  const cnt=[0,0,0,0]; for(const n of NODES) if(cnt[n.status]!=null) cnt[n.status]++;
+  const st=el("span"); st.innerHTML=`nodes <b>${fmt(NODES.length)}</b>: `+STATUS.map((s,i)=>
+    `<span class="stchip"><span class="sw" style="background:${s.color}"></span><b>${fmt(cnt[i])}</b> ${s.label}</span>`).join(" · ");
+  box.appendChild(st);
+  const sz=m.sizes||{}, files=Object.keys(sz);
+  if(files.length){
+    let raw=0,gz=0; for(const f of files){ raw+=sz[f][0]||0; gz+=sz[f][1]||0; }
+    add("export",`${fmtBytes(raw)} raw · ${fmtBytes(gz)} gzip`,
+      files.map(f=>`${f}: ${fmtBytes(sz[f][0])} raw, ${fmtBytes(sz[f][1])} gzip`).join("\n"));
+  }
+}
+function renderFoot(){
+  const m=MAN, s=$("#drawer-foot"); s.innerHTML="";
+  const add=(k,v)=>{const w=el("span");w.innerHTML=`${k} <b>${esc(v)}</b>`;s.appendChild(w);};
+  add("schema",m.schema||"—"); add("created",m.created_utc||"—");
+  const sel=m.selection||{};
+  add("terms/topic/domain",`top ${sel.top_beta??"?"} by β + ${sel.top_lift??"?"} by lift (of top ${sel.lift_pool??"?"})`);
+  add("support",`${(m.disclosure||{}).min_cell||20}-wide bands, midpoint`);
+}
+function renderLegend(){
+  const box=$("#g-legend"); box.innerHTML="";
+  STATUS.forEach(s=>{const it=el("span","lg-item");const d=el("span","lg-sw");d.style.background=s.color;
+    it.appendChild(d); it.appendChild(el("span",null,s.key==="topic"?"has a topic":s.label)); box.appendChild(it);});
+  const note=el("span","lg-item"); note.style.opacity=".75";
+  note.appendChild(el("span",null,"size = banded support · dashed ring = no topic · faint edge = path through hidden nodes"));
+  box.appendChild(note);
+}
+
+/* ============================== support ================================== */
+// support is the midpoint of a 20-wide band: 10 = 1..20 ("<=20"), 30 = 21..40, ...
+function supportText(s){ if(!s) return "0"; if(s<=10) return "≤20"; return fmt(s); }
+function supportNote(s){
+  if(!s) return "no documents";
+  if(s<=10) return "between 1 and 20 (not disclosable more finely)";
+  return `banded: ${fmt(s-9)}–${fmt(s+10)}, shown at the midpoint`;
+}
+
+/* ============================== relevance ================================ */
+// Port of dashboard/src/lib/inference.ts `relevance` (the CodePanel ranking, LDAvis):
+//   relevance = λ log p(w|k) + (1 − λ) log(p(w|k) / p(w)).
+// λ = 1 ranks by frequency within the topic; λ = 0 by lift over the term's marginal.
+// Here both p(w|k) and p(w) are within the term's domain, and only the topic's shipped
+// terms are ranked (the export ships top-β plus top-lift terms per domain).
+function relevance(pwk,pw,lambda){
+  if(pwk<=0) return -Infinity;
+  if(pw<=0) return lambda*Math.log(pwk)+(1-lambda)*Infinity;
+  return lambda*Math.log(pwk)+(1-lambda)*Math.log(pwk/pw);
+}
+const state={view:"graph",q:"",lambda:0.6,topicOnly:false};
+const TOP_N=15;
+function rankedTerms(k,d,lambda,n){
+  const t=TOPICS[k].dom[d]; if(!t) return [];
+  const out=[];
+  for(let i=0;i<t.ids.length;i++){ const w=t.ids[i];
+    out.push({w, pwk:t.beta[i], pw:VOCAB.p[w], rel:relevance(t.beta[i],VOCAB.p[w],lambda)}); }
+  out.sort((a,b)=>b.rel-a.rel || b.pwk-a.pwk);
+  return out.slice(0,n);
+}
+const termTitle=r=>`${VOCAB.name[r.w]}\ncode ${VOCAB.code[r.w]}\nβ (share of the topic in this domain) ${(r.pwk*100).toFixed(2)}%\np (marginal in this domain) ${(r.pw*100).toFixed(3)}%\nlift β/p ${(r.pwk/r.pw).toFixed(1)}`;
+function termColsHTML(k){
+  const cols=DOMAINS.map((dn,d)=>{
+    const t=TOPICS[k].dom[d], rows=rankedTerms(k,d,state.lambda,TOP_N);
+    const maxB=t&&t.beta.length?Math.max(...t.beta):1;
+    const lis=rows.map((r,i)=>`<li title="${esc(termTitle(r))}"><span class="rk">${i+1}</span><span class="nm">${esc(VOCAB.name[r.w])}</span>`+
+      `<span class="num">${(r.pwk*100).toFixed(r.pwk>=0.1?1:2)}%</span><span></span><span class="spark"><i style="width:${(100*r.pwk/maxB).toFixed(1)}%"></i></span></li>`).join("");
+    return `<div class="dcol"><h4><span>${esc(dn)}</span><small>${t?t.ids.length:0} shipped</small></h4><ol class="terms">${lis||'<li><span></span><span class="nm" style="color:var(--muted)">none</span></li>'}</ol></div>`;
+  });
+  return `<div class="termcols" data-topic-cols="${k}">${cols.join("")}</div>`;
+}
+function sliderHTML(){
+  return `<label class="slider" title="Relevance term weighting. The slider blends two views of the top terms: raw frequency (how much of the topic's mass falls on the term) and lift (how much more the term shows up here than across the whole model). Slide left for lift, right for frequency.">
+    <span class="slider-head"><span>Relevance term weighting</span><span class="v" data-lambda-v>λ ${state.lambda.toFixed(2)}</span></span>
+    <input type="range" min="0" max="1" step="0.05" value="${state.lambda}" data-lambda aria-label="Relevance lambda">
+    <span class="slider-ends"><span title="Lift: how much more the term appears in this topic than across the model. Surfaces rare-but-concentrated terms.">lift</span><span title="Frequency: the term's raw probability under this topic.">frequency</span></span></label>`;
+}
+function wireSliders(root){
+  root.querySelectorAll("input[data-lambda]").forEach(inp=>inp.addEventListener("input",()=>{
+    state.lambda=+inp.value;
+    document.querySelectorAll("input[data-lambda]").forEach(o=>{ if(o!==inp) o.value=inp.value; });
+    document.querySelectorAll("[data-lambda-v]").forEach(s=>s.textContent="λ "+state.lambda.toFixed(2));
+    document.querySelectorAll("[data-topic-cols]").forEach(c=>{ c.outerHTML=termColsHTML(+c.getAttribute("data-topic-cols")); });
+  }));
+}
+
+/* ============================== differs from parent ====================== */
+// For each kept parent: the node's shipped terms with the largest β_node / β_parent. A term
+// not in the parent's shipped list is given the parent's smallest shipped weight in that
+// domain (an upper bound on its true weight there), so its ratio is a lower bound: approximate.
+const DIFF_N=6;
+function diffTerms(k,pk,d){
+  const a=TOPICS[k].dom[d], b=TOPICS[pk].dom[d]; if(!a||!a.ids.length) return [];
+  const pm=new Map(); let minB=Infinity;
+  if(b) for(let i=0;i<b.ids.length;i++){ pm.set(b.ids[i],b.beta[i]); if(b.beta[i]<minB) minB=b.beta[i]; }
+  if(!isFinite(minB)) minB=Math.min(...a.beta);
+  const out=[];
+  for(let i=0;i<a.ids.length;i++){ const w=a.ids[i], has=pm.has(w), pb=has?pm.get(w):minB;
+    out.push({w, pwk:a.beta[i], pb, ratio:a.beta[i]/pb, absent:!has}); }
+  out.sort((x,y)=>y.ratio-x.ratio);
+  return out.slice(0,DIFF_N);
+}
+function diffHTML(n){
+  const kept=(n.kept||[]).filter(j=>NODES[j]&&NODES[j].topic!=null);
+  if(!kept.length) return `<div class="section-sub">A top node of the kept DAG: no parent topic to compare against.</div>`;
+  return kept.map(j=>{
+    const p=NODES[j], k=n.topic, pk=p.topic;
+    const cols=DOMAINS.map((dn,d)=>{
+      const rows=diffTerms(k,pk,d), maxR=rows.length?rows[0].ratio:1;
+      const lis=rows.map((r,i)=>`<li title="${esc(VOCAB.name[r.w])}\nβ here ${(r.pwk*100).toFixed(2)}% · in parent ${r.absent?"≤ ":""}${(r.pb*100).toFixed(3)}%${r.absent?" (not in the parent's list)":""}">`+
+        `<span class="rk">${i+1}</span><span class="nm">${esc(VOCAB.name[r.w])}${r.absent?'<span class="new" title="not in the parent\'s shipped list">new</span>':""}</span>`+
+        `<span class="num">${r.absent?"≥":""}×${r.ratio>=10?r.ratio.toFixed(0):r.ratio.toFixed(1)}</span><span></span>`+
+        `<span class="spark"><i style="width:${(100*Math.log1p(r.ratio)/Math.log1p(maxR)).toFixed(1)}%;background:var(--desc)"></i></span></li>`).join("");
+      return `<div class="dcol"><h4><span>${esc(dn)}</span><small>β / β parent</small></h4><ol class="terms">${lis||'<li><span></span><span class="nm" style="color:var(--muted)">none</span></li>'}</ol></div>`;
+    });
+    return `<div class="diffpar">vs parent <a data-goto="${esc(p.id)}">${esc(p.label)}</a></div><div class="termcols">${cols.join("")}</div>`;
+  }).join("");
+}
+
+/* ============================== DAG engine =============================== */
+// Copied from mondo-usage-dashboard/index.html (main) and adapted: node value = banded
+// support; visibility filter = "only nodes with a topic" (strict: hidden nodes are skipped
+// THROUGH, so their topic descendants are still reachable, joined by reachability edges).
+let selected=null;
+let graphOpen=new Set(), graphOpenUp=new Set(), graphCap=new Map(), graphFolded=new Set(), gz={x:24,y:24,k:0.85};
+let gPinned=new Set(), gBounds=null, gHL=new Set(), gHLD=new Set(), gSel=new Set();
+let gManualRank=new Map(), gLastRank=new Map(), gNodeDrag=null, gJustDragged=false;
+let gFocus=null, gPeek=null, gCoord=new Map();
+const GRAPH_CAP=14;          // max children revealed per expansion before a "＋N more" node
+const GRAPH_SEARCH_CAP=60;   // cap matches drawn (matched ∪ ancestors) for a broad query
+const INIT_MAX_DEPTH=2;      // starting view: open nodes in columns < 2 (shows 3 columns)
+let gSearchTotal=0;
+
+const gval=id=>{const n=byId.get(id); return n?(n.support||0):0;};
+const isRoot=id=>gRootIds.includes(id);
+
+function initialGraphView(){
+  graphOpen=new Set(gRootIds); graphOpenUp=new Set(); graphCap=new Map(); graphFolded=new Set();
+  gFocus=null; gManualRank=new Map();
+  for(const [id,n] of byId) if((n.lay||0)<INIT_MAX_DEPTH && couldShowGraph(id)) graphOpen.add(id);
+}
+function couldShowGraph(id){const n=byId.get(id);
+  if(!n) return false;
+  if(isRoot(id)||n.kind==="root") return true;
+  if(state.topicOnly && n.status!==0) return false;
+  return true;}
+function canShowGraph(id){return couldShowGraph(id) && !graphFolded.has(id);}
+// Children for expansion: DAG children passing `pred`; a child filtered out by the
+// topic-only toggle is skipped through to ITS children (a folded child is not).
+function gKids(id,pred=canShowGraph){
+  const out=[], seen=new Set(), st=[...(dagKids.get(id)||[])];
+  while(st.length){const c=st.shift(); if(seen.has(c))continue; seen.add(c);
+    if(pred(c)) out.push(c); else if(!couldShowGraph(c)) st.push(...(dagKids.get(c)||[]));}
+  return out;
+}
+function gParents(id,pred=canShowGraph){
+  const out=[], seen=new Set(), st=[...((byId.get(id)||{}).parents||[])];
+  while(st.length){const p=st.shift(); if(seen.has(p)||!byId.has(p))continue; seen.add(p);
+    if(pred(p)) out.push(p); else if(!couldShowGraph(p)) st.push(...(byId.get(p).parents||[]));}
+  return out;
+}
+const matchesQ=n=>state.q && (n.label.toLowerCase().includes(state.q.toLowerCase())||n.id.toLowerCase().includes(state.q.toLowerCase()));
+
+function graphVisible(){
+  const vis=new Map(), q=state.q.toLowerCase();
+  if(q){
+    const matches=[];
+    for(const n of NODES) if(canShowGraph(n.id)&&(n.label.toLowerCase().includes(q)||n.id.toLowerCase().includes(q))) matches.push(n.id);
+    gSearchTotal=matches.length;
+    matches.sort((a,b)=>gval(b)-gval(a));
+    const keep=new Set();
+    for(const id of matches.slice(0,GRAPH_SEARCH_CAP)){ keep.add(id); for(const a of ancestorSet(id)) keep.add(a); }
+    for(const id of keep) if(canShowGraph(id)) vis.set(id,byId.get(id));
+    for(const rid of gRootIds) vis.set(rid,byId.get(rid));
+    return vis;
+  }
+  const seeds=(gFocus&&byId.has(gFocus))?[gFocus]:gRootIds;
+  for(const s of seeds) if(canShowGraph(s)) vis.set(s,byId.get(s));
+  let changed=true;
+  while(changed){changed=false;
+    for(const id of [...vis.keys()]){
+      if(id.startsWith("more:"))continue;
+      if(graphOpen.has(id)){
+        const ch=gKids(id).sort((a,b)=>gval(b)-gval(a));
+        const cap=graphCap.get(id)??GRAPH_CAP;
+        let show=ch, hiddenN=0, sortv=0;
+        if(ch.length>cap){                     // top few AND bottom few, "＋N more" between
+          const T=Math.max(1,Math.ceil(cap*0.6)), B=Math.max(1,cap-T);
+          show=[...ch.slice(0,T),...ch.slice(ch.length-B)];
+          hiddenN=ch.length-show.length;
+          sortv=(gval(ch[T-1])+gval(ch[ch.length-B]))/2;
+        }
+        for(const c of show) if(!vis.has(c)){vis.set(c,byId.get(c));changed=true;}
+        const mid="more:"+id;
+        if(hiddenN>0 && !vis.has(mid)){
+          vis.set(mid,{id:mid,_more:true,parent:id,hidden:hiddenN,sortv,label:`＋${hiddenN} more`,lay:(byId.get(id).lay||0)+1}); changed=true;
+        }
+      }
+      if(graphOpenUp.has(id)){
+        for(const p of gParents(id)) if(!vis.has(p)){vis.set(p,byId.get(p));changed=true;}
+      }
+    }
+  }
+  if(gFocus && byId.has(gFocus)){
+    const anc=ancestorSet(gFocus); anc.add(gFocus);
+    for(const id of anc) if(canShowGraph(id)&&!vis.has(id)) vis.set(id,byId.get(id));
+  }
+  for(const id of gPinned) if(canShowGraph(id) && !vis.has(id)) vis.set(id,byId.get(id));
+  return vis;
+}
+function descendantSet(id){
+  const out=new Set(), st=[...(dagKids.get(id)||[])];
+  while(st.length){const c=st.pop(); if(out.has(c))continue; out.add(c); for(const cc of (dagKids.get(c)||[]))st.push(cc);}
+  return out;
+}
+function ancestorSet(id){
+  const out=new Set(), st=[...((byId.get(id)||{}).parents||[])];
+  while(st.length){const p=st.pop(); if(out.has(p)||!byId.has(p))continue; out.add(p);
+    for(const pp of (byId.get(p).parents||[])) st.push(pp);}
+  return out;
+}
+// Reduced parents of `id` within the shown set: the transitive reduction of full-DAG
+// reachability restricted to `shown`. direct = a real DAG parent (solid edge); otherwise
+// the edge summarizes a path through hidden nodes (quieter edge).
+function reducedParents(id,shown){
+  const node=byId.get(id); if(!node) return [];
+  const directParents=new Set(node.parents||[]);
+  const cand=new Set(), seen=new Set(), st=[...(node.parents||[])];
+  while(st.length){
+    const p=st.pop(); if(seen.has(p)||!byId.has(p))continue; seen.add(p);
+    if(shown.has(p)){ cand.add(p); continue; }
+    for(const pp of (byId.get(p).parents||[])) st.push(pp);
+  }
+  const ps=[...cand];
+  const reduced=ps.filter(p=>!ps.some(q=>q!==p && ancestorSet(q).has(p)));
+  return reduced.map(p=>({p, direct:directParents.has(p)}));
+}
+// radius: log scale of banded support against the global max
+function graphRadius(id){
+  const nn=byId.get(id); if(!nn) return 7;
+  if(nn.kind==="root") return 26;
+  const lv=Math.log10(Math.max(gval(id),0)+1), lm=Math.log10(SUPPORT_MAX+1);
+  return 8+40*(lm>0?Math.min(1,lv/lm):0);
+}
+function layoutGraph(vis){
+  const rad=id=>vis.get(id)._more?8:graphRadius(id);
+  const lab=id=>vis.get(id).label||"";
+  const autoKey=id=>vis.get(id)._more?-(vis.get(id).sortv||0):-gval(id);
+  const effKey=id=>gManualRank.has(id)?gManualRank.get(id):autoKey(id);
+  const coord=new Map(), layers={}; let maxD=0;
+  for(const [id,n] of vis){const d=n.lay||0;(layers[d]=layers[d]||[]).push(id);maxD=Math.max(maxD,d);}
+  let x=14; const gap=26;
+  for(let d=0;d<=maxD;d++){
+    const arr=(layers[d]||[]).slice().sort((a,b)=>(effKey(a)-effKey(b))||(lab(a)<lab(b)?-1:1));
+    if(!arr.length) continue;
+    for(const id of arr) gLastRank.set(id,effKey(id));
+    const maxR=Math.max(14,...arr.map(rad));
+    let H=0; for(const id of arr) H+=2*rad(id)+gap; H=Math.max(0,H-gap);
+    let y=-H/2;
+    for(const id of arr){const r=rad(id); coord.set(id,{x:x+maxR,y:y+r,r,dir:1}); y+=2*r+gap;}
+    x+=maxR*2+250;
+  }
+  return {coord};
+}
+function edgePath(a,b){const mx=(a.x+b.x)/2;
+  return `M${a.x+a.r},${a.y} C${mx},${a.y} ${mx},${b.y} ${b.x-b.r},${b.y}`;}
+let gLayer=null, gEdgeG=null, gNodeG=null, gEdgeEls=new Map(), gNodeEls=new Map();
+function graphInit(){
+  const svg=$("#graph"); while(svg.firstChild)svg.removeChild(svg.firstChild);
+  gLayer=svgEl("g",{}); gEdgeG=svgEl("g",{}); gNodeG=svgEl("g",{});
+  gLayer.appendChild(gEdgeG); gLayer.appendChild(gNodeG); svg.appendChild(gLayer);
+  gEdgeEls=new Map(); gNodeEls=new Map(); applyGT(gLayer);
+}
+function renderGraph(){
+  if(!NODES.length) return;
+  if(!gLayer||!gLayer.isConnected) graphInit();
+  const vis=graphVisible(), {coord}=layoutGraph(vis); gCoord=coord;
+  gHL=new Set(); gHLD=new Set();
+  for(const s of gSel){ if(!byId.has(s))continue;
+    for(const a of ancestorSet(s)) gHL.add(a); gHL.add(s);
+    for(const dd of descendantSet(s)) if(vis.has(dd)) gHLD.add(dd);
+  }
+  gLayer.classList.toggle("sel-active",gSel.size>0);
+  let minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
+  for(const [id,c] of coord){
+    const lbl=(vis.get(id)||{}).label||"", labW=Math.min(lbl.length,36)*7+20, farX=c.x+c.r+9+labW;
+    minX=Math.min(minX,c.x-c.r); maxX=Math.max(maxX,farX);
+    minY=Math.min(minY,c.y-c.r); maxY=Math.max(maxY,c.y+c.r);}
+  gBounds={minX,minY,maxX,maxY};
+  const shown=new Set(); for(const [k,nn] of vis) if(!nn._more) shown.add(k);
+  const seenE=new Set();
+  const addEdge=(p,id,viaHidden)=>{
+    const a=coord.get(p), b=coord.get(id); if(!a||!b)return;
+    const key=p+">"+id; seenE.add(key); const d=edgePath(a,b);
+    let e=gEdgeEls.get(key);
+    if(!e){e=svgEl("path",{class:"gedge"}); e.style.opacity=0; e.style.transition="none";
+      e.setAttribute("d",d); e.style.d=`path("${d}")`;
+      gEdgeG.appendChild(e); gEdgeEls.set(key,e);
+      requestAnimationFrame(()=>{e.style.transition=""; e.style.opacity="";}); }
+    else { e.setAttribute("d",d); e.style.d=`path("${d}")`; }
+    const up=gHL.has(p)&&gHL.has(id), down=(gHLD.has(p)||gSel.has(p))&&gHLD.has(id);
+    e.setAttribute("class","gedge"+(viaHidden?" via-hidden":"")+(up?" hl":down?" hld":""));
+  };
+  for(const [id,n] of vis){
+    if(!coord.get(id))continue;
+    if(n._more){ addEdge(n.parent,id,false); continue; }
+    for(const {p,direct} of reducedParents(id,shown)) addEdge(p,id,!direct);
+  }
+  for(const [key,e] of gEdgeEls){ if(!seenE.has(key)){ e.style.opacity=0; setTimeout(()=>{e.remove();},260); gEdgeEls.delete(key); } }
+  const seenN=new Set();
+  for(const [id,n] of vis){const c=coord.get(id); if(!c)continue; seenN.add(id);
+    let g=gNodeEls.get(id);
+    if(!g){ g=n._more?buildMore(n):buildNode(id,n); g.style.opacity=0; g.style.transition="none";
+      g.style.transform=`translate(${c.x}px,${c.y}px)`; gNodeG.appendChild(g); gNodeEls.set(id,g);
+      requestAnimationFrame(()=>{g.style.transition=""; g.style.opacity="";}); }
+    else { g.style.transform=`translate(${c.x}px,${c.y}px)`; }
+    if(n._more) updateMore(g,n); else updateNode(g,id,n,c);
+  }
+  for(const [id,g] of gNodeEls){ if(!seenN.has(id)){ g.style.opacity=0; setTimeout(()=>{g.remove();},260); gNodeEls.delete(id); } }
+  $("#graph-hint").textContent=state.q?(gSearchTotal>GRAPH_SEARCH_CAP
+    ? `${gSearchTotal} match “${state.q}” — showing the ${GRAPH_SEARCH_CAP} best-supported; keep typing to narrow`
+    : `${gSearchTotal} match “${state.q}”`):"";
+  updateFocusChip(); updateSelChip();
+}
+function updateFocusChip(){
+  const chip=$("#g-focus-chip");
+  if(gFocus&&byId.has(gFocus)){chip.style.display="inline-flex"; chip.querySelector("span").textContent="Focus: "+clip(byId.get(gFocus).label,26);}
+  else chip.style.display="none";
+}
+function updateSelChip(){
+  const chip=$("#g-sel-chip");
+  if(gSel.size>1){chip.style.display="inline-flex"; chip.querySelector("span").textContent=`${gSel.size} selected`;}
+  else chip.style.display="none";
+}
+function focusNode(id){gFocus=id; leaveSearch(id); graphOpen.add(id); select(id,true); requestAnimationFrame(()=>graphFit());}
+function clearFocus(){gFocus=null; renderGraph(); requestAnimationFrame(()=>graphFit());}
+// "Land" on a search result: pin the node + its lineage, then drop the search filter.
+function leaveSearch(id){
+  if(!state.q) return;
+  if(byId.has(id)){ gPinned.add(id); graphFolded.delete(id); graphOpenUp.add(id);
+    for(const a of ancestorSet(id)){ gPinned.add(a); graphFolded.delete(a); graphOpenUp.add(a); } }
+  state.q=""; $("#search").value="";
+}
+// Navigate to a node from a drawer link: pin it (and its showable lineage) so it is drawn,
+// select it and bring it into view.
+function revealNode(id){
+  if(!byId.has(id)) return;
+  if(state.view!=="graph") setView("graph");
+  if(state.q){ state.q=""; $("#search").value=""; }
+  if(!couldShowGraph(id)){ state.topicOnly=false; $("#topic-only").checked=false; }   // explicit nav shows it
+  gPinned.add(id); graphFolded.delete(id);
+  for(const a of ancestorSet(id)) if(couldShowGraph(a)){ gPinned.add(a); graphFolded.delete(a); }
+  select(id);
+  requestAnimationFrame(()=>centerNodeInView(id));
+}
+function expandChildren(id){ leaveSearch(id);
+  for(const c of gKids(id,couldShowGraph)) graphFolded.delete(c);
+  graphOpen.add(id); }
+function expandParents(id){ leaveSearch(id);
+  for(const p of gParents(id,couldShowGraph)) graphFolded.delete(p);
+  graphOpenUp.add(id); }
+function expandAllDescendants(id){
+  leaveSearch(id);
+  const q=[id], visited=new Set([id]);
+  while(q.length){ const cur=q.shift(); graphOpen.add(cur); graphFolded.delete(cur);
+    for(const c of (dagKids.get(cur)||[])){ graphFolded.delete(c); if(visited.has(c))continue; visited.add(c); q.push(c); } }
+  renderGraph(); requestAnimationFrame(graphFit);
+}
+function expandAllAncestors(id){
+  leaveSearch(id); graphOpenUp.add(id);
+  for(const a of ancestorSet(id)){ graphOpenUp.add(a); graphFolded.delete(a); }
+  renderGraph(); requestAnimationFrame(graphFit);
+}
+function collapseDescendants(id){
+  for(const d of descendantSet(id)){ graphFolded.add(d); graphOpen.delete(d); graphOpenUp.delete(d); graphCap.delete(d); gPinned.delete(d); }
+  graphOpen.delete(id); graphCap.delete(id);
+  for(const s of [...gSel]) if(!canShowGraph(s)) gSel.delete(s);
+  if(selected&&!canShowGraph(selected)) closeDrawer(); else renderGraph();
+}
+function collapseAncestors(id){
+  for(const a of ancestorSet(id)){ if(isRoot(a))continue; graphFolded.add(a); graphOpen.delete(a); graphOpenUp.delete(a); gPinned.delete(a); }
+  graphOpenUp.delete(id);
+  for(const s of [...gSel]) if(!canShowGraph(s)) gSel.delete(s);
+  if(selected&&!canShowGraph(selected)) closeDrawer(); else renderGraph();
+}
+function isolateNode(id){gFocus=id; graphOpen.add(id); renderGraph(); requestAnimationFrame(graphFit);}
+function toggleSel(id){
+  if(gSel.has(id)){ gSel.delete(id); if(selected===id) selected=gSel.size?[...gSel][gSel.size-1]:null; }
+  else { gSel.add(id); selected=id; }
+  if(selected) select(selected,true); else closeDrawer();
+  renderGraph();
+}
+function clearSelection(){gSel=new Set(); selected=null; closeDrawer();}
+function closeCtxMenu(){const m=$("#ctxmenu"); m.hidden=true; m.innerHTML="";}
+function openNodeMenu(id,px,py){
+  const n=byId.get(id); if(!n)return;
+  const m=$("#ctxmenu"); m.innerHTML="";
+  m.appendChild(el("div","ctx-title",clip(n.label,34)));
+  const hasKids=gKids(id,couldShowGraph).length>0, hasParents=gParents(id,couldShowGraph).length>0;
+  const item=(label,enabled,fn)=>{const b=el("button");b.textContent=label;
+    b.disabled=!enabled; if(enabled)b.onclick=()=>{closeCtxMenu();fn();}; m.appendChild(b);};
+  const sep=()=>m.appendChild(el("div","sep"));
+  item("Expand children", hasKids&&!graphOpen.has(id), ()=>{expandChildren(id);renderGraph();});
+  item("Expand all descendants", hasKids, ()=>expandAllDescendants(id));
+  item("Collapse descendants", hasKids, ()=>collapseDescendants(id));
+  sep();
+  item("Expand parents", hasParents&&!graphOpenUp.has(id), ()=>{expandParents(id);renderGraph();});
+  item("Expand all ancestors", hasParents, ()=>expandAllAncestors(id));
+  item("Collapse ancestors", hasParents, ()=>collapseAncestors(id));
+  sep();
+  item("Focus here (re-root)", true, ()=>isolateNode(id));
+  m.hidden=false;
+  const r=m.getBoundingClientRect(), W=innerWidth, H=innerHeight;
+  let x=px+2, y=py+2; if(x+r.width>W-8)x=W-r.width-8; if(y+r.height>H-8)y=H-r.height-8;
+  m.style.left=Math.max(8,x)+"px"; m.style.top=Math.max(8,y)+"px";
+}
+function centerNodeInView(id){
+  const c=gCoord.get(id); if(!c||!gLayer)return;
+  const svg=$("#graph"),W=svg.clientWidth,H=svg.clientHeight;
+  gz.x=W/2-c.x*gz.k; gz.y=H/2-c.y*gz.k;
+  gLayer.style.transition="transform .42s cubic-bezier(.4,0,.2,1)"; applyGT(gLayer);
+  setTimeout(()=>{if(gLayer)gLayer.style.transition="";},460);
+}
+function peekOn(id){
+  if(!gLayer)return; gPeek=id;
+  const up=ancestorSet(id); up.add(id); const down=descendantSet(id);
+  for(const [nid,gnEl] of gNodeEls){ gnEl.classList.toggle("pk",up.has(nid)); gnEl.classList.toggle("pkd",down.has(nid)&&!up.has(nid)); }
+  for(const [key,eEl] of gEdgeEls){const [p,c]=key.split(">");
+    eEl.classList.toggle("pk",up.has(p)&&up.has(c)); eEl.classList.toggle("pkd",(down.has(p)||p===id)&&down.has(c)); }
+  gLayer.classList.add("peek-active");
+}
+function peekOff(){
+  if(!gLayer)return; gPeek=null; gLayer.classList.remove("peek-active");
+  for(const [,gnEl] of gNodeEls) gnEl.classList.remove("pk","pkd");
+  for(const [,eEl] of gEdgeEls) eEl.classList.remove("pk","pkd");
+}
+function buildMore(n){
+  const gm=svgEl("g",{class:"gmore"});
+  gm.appendChild(svgEl("rect",{y:-11,height:22,rx:9}));
+  gm.appendChild(svgEl("text",{x:0,y:4,"text-anchor":"middle","font-size":11}));
+  gm.addEventListener("click",e=>{e.stopPropagation(); graphCap.set(n.parent,(graphCap.get(n.parent)??GRAPH_CAP)+10); renderGraph();});
+  updateMore(gm,n); return gm;
+}
+function updateMore(gm,n){
+  const w=n.label.length*7+16, rect=gm.querySelector("rect");
+  rect.setAttribute("x",-w/2); rect.setAttribute("width",w); gm.querySelector("text").textContent=n.label;
+}
+const nodeSub=n=>n.kind==="root"?"":(n.status===0?"":statusOf(n).label+" · ")+supportText(n.support);
+function nodeTip(n){
+  if(n.kind==="root") return n.label;
+  return `${n.label}\n${n.id} · ${n.status===0?"has a topic":"no topic: "+statusOf(n).label}\nsupport ${supportText(n.support)}`+
+    (n.sfrac!=null?` · supportFraction ${(n.sfrac/1000).toFixed(2)}`:"");
+}
+function buildNode(id,n){
+  const g=svgEl("g",{class:"gnode"});
+  g.appendChild(svgEl("circle",{class:"gcirc",cx:0,cy:0}));
+  g.appendChild(svgEl("text",{class:"glbl","font-size":12.5}));
+  g.appendChild(svgEl("text",{class:"gsub","font-size":10.5}));
+  const pl=svgEl("g",{class:"gplus",opacity:0});
+  pl.appendChild(svgEl("circle",{class:"gplus-bg",r:7,cx:0,cy:0}));
+  pl.appendChild(svgEl("path",{class:"gplus-sign",d:"M-3.2,0 h6.4 M0,-3.2 v6.4"}));
+  g.appendChild(pl);
+  const mn=svgEl("g",{class:"gmenu"});
+  mn.appendChild(svgEl("circle",{class:"gmenu-bg",r:7.5,cx:0,cy:0}));
+  for(const dx of [-3,0,3]) mn.appendChild(svgEl("circle",{class:"gmenu-dots",r:1,cx:dx,cy:0}));
+  mn.addEventListener("click",e=>{e.stopPropagation(); openNodeMenu(id,e.clientX,e.clientY);});
+  g.appendChild(mn);
+  g.addEventListener("click",e=>{e.stopPropagation();
+    if(gJustDragged){ gJustDragged=false; return; }
+    if(e.shiftKey){ toggleSel(id); return; }
+    const landed=!!state.q;
+    if(landed) leaveSearch(id);
+    if(!graphOpen.has(id) && gKids(id,couldShowGraph).length) expandChildren(id);
+    select(id);
+    if(landed) requestAnimationFrame(()=>centerNodeInView(id));
+  });
+  g.addEventListener("contextmenu",e=>{e.preventDefault();e.stopPropagation(); openNodeMenu(id,e.clientX,e.clientY);});
+  g.addEventListener("pointerdown",e=>{ if(e.button!==0)return; gNodeDrag={id,startY:e.clientY,moved:false}; });
+  g.addEventListener("mouseenter",()=>{ if(!gNodeDrag) peekOn(id); });
+  g.addEventListener("mousemove",e=>{ if(gNodeDrag&&gNodeDrag.moved)return; showTip(e,nodeTip(byId.get(id))); });
+  g.addEventListener("mouseleave",()=>{hideTip();peekOff();});
+  return g;
+}
+function updateNode(g,id,n,c){
+  const pk=g.classList.contains("pk")?" pk":g.classList.contains("pkd")?" pkd":"";
+  g.setAttribute("class","gnode"+(n.status!==0&&n.kind!=="root"?" notopic":"")+(gSel.has(id)?" sel":"")+(gHL.has(id)?" hl":gHLD.has(id)?" hld":"")+pk+(matchesQ(n)?" match":""));
+  g.setAttribute("data-id",id);
+  const circ=g.querySelector(".gcirc"); circ.setAttribute("r",c.r); circ.style.r=c.r+"px";
+  circ.setAttribute("fill",n.kind==="root"?"var(--ink-2)":statusOf(n).color);
+  circ.setAttribute("fill-opacity",n.kind==="root"?0.85:n.status===0?0.9:0.45);
+  const lx=c.r+9;
+  const lbl=g.querySelector(".glbl"); lbl.setAttribute("x",lx); lbl.setAttribute("y",c.r>14?-2:4); lbl.textContent=clip(n.label,36);
+  const sub=g.querySelector(".gsub"); sub.setAttribute("x",lx); sub.setAttribute("y",13); sub.textContent=nodeSub(n);
+  const bx=c.r*0.72, by=c.r*0.72;
+  const hasUnshown=gKids(id,couldShowGraph).some(k=>!gCoord.has(k));
+  const pl=g.querySelector(".gplus"); pl.setAttribute("transform",`translate(${bx},${by})`); pl.setAttribute("opacity",hasUnshown?1:0);
+  g.querySelector(".gmenu").setAttribute("transform",`translate(${bx},${-by})`);
+}
+function applyGT(g){if(g)g.setAttribute("transform",`translate(${gz.x},${gz.y}) scale(${gz.k})`);}
+function graphFit(){
+  const svg=$("#graph"); if(!gBounds||!gLayer)return;
+  const w=gBounds.maxX-gBounds.minX, h=gBounds.maxY-gBounds.minY;
+  if(w<=0||h<=0)return;
+  const W=svg.clientWidth,H=svg.clientHeight,pad=34;
+  gz.k=Math.min(1.3,Math.max(0.12,Math.min((W-2*pad)/w,(H-2*pad)/h)));
+  gz.x=pad-gBounds.minX*gz.k+Math.max(0,(W-2*pad-w*gz.k)/2);
+  gz.y=Math.max(pad,(H-h*gz.k)/2)-gBounds.minY*gz.k;
+  gLayer.style.transition="transform .4s cubic-bezier(.4,0,.2,1)"; applyGT(gLayer);
+  setTimeout(()=>{if(gLayer)gLayer.style.transition="";},450);
+}
+
+/* ============================== drawer =================================== */
+function renderDrawerDefault(){
+  $("#drawer-inner").innerHTML=`<div class="drawer-empty">Select a node to see its topic, what differs from its parent topic, and its support.<br><br>Click to expand · drag to reorder · shift-click to multi-select · right-click for the node menu.</div>`;
+}
+function chip(n){
+  const s=statusOf(n);
+  return `<a data-goto="${esc(n.id)}" title="${esc(n.id)} · ${n.status===0?"has a topic":s.label}"><span class="sw" style="background:${s.color}"></span>${esc(n.label)}</a>`;
+}
+function select(id,quiet){
+  if(!quiet){ gSel=new Set([id]); }
+  selected=id; const n=byId.get(id); const inner=$("#drawer-inner");
+  if(!n){ renderDrawerDefault(); return; }
+  const s=statusOf(n);
+  const purl=n.id.startsWith("MONDO:")?`https://monarchinitiative.org/${n.id}`:null;
+  let html=`<div class="dh"><div>
+      <div class="section-t" style="margin:0 0 4px">${n.kind==="root"?"root":"Mondo term · depth "+n.depth}</div>
+      <h3>${esc(n.label)}</h3></div>
+      <div style="display:flex;gap:6px">
+      <button class="close" id="dfocus" title="Focus this node in the graph" aria-label="Focus in graph" style="font-size:15px">⌖</button>
+      <button class="close" id="dclose" aria-label="Close">×</button></div></div><div class="body">`;
+  if(n.kind==="root"){
+    html+=`<p class="section-sub">A synthetic root over the ${fmt(gKids(id,()=>true).length)} top-level labels.</p></div>`;
+  } else {
+    html+=`<span class="pill" style="color:${s.color};background:color-mix(in srgb,${s.color} 15%,transparent)">${n.status===0?"has a topic":"no topic · "+s.label}</span>`;
+    html+=`<dl class="kv">
+      <dt>ID</dt><dd>${purl?`<a href="${purl}" target="_blank" rel="noopener">${esc(n.id)}</a>`:esc(n.id)}</dd>
+      <dt>Depth</dt><dd>${fmt(n.depth)}</dd>
+      <dt>Support</dt><dd style="font-size:14px">${supportText(n.support)}<div class="note">${supportNote(n.support)}. Document counts are published in 20-wide bands.</div></dd>`;
+    if(n.sfrac!=null){
+      const f=n.sfrac/1000;
+      html+=`<dt>supportFraction</dt><dd>${f.toFixed(3)}<div class="fracbar" title="0 = sharp (the topic concentrates on few terms) · 1 = flat"><i style="left:${(f*100).toFixed(1)}%"></i></div><div class="fracends"><span>0 sharp</span><span>1 flat</span></div></dd>`;
+    }
+    html+=`</dl>`;
+    if(n.status===0 && n.topic!=null && TOPICS[n.topic]){
+      html+=`<div class="section-t">Topic</div><div class="section-sub">Top ${TOP_N} shipped terms per domain, ranked by relevance = λ·log β + (1 − λ)·log(β / p). Bar and number: β, the term's share of this topic within the domain.</div>`;
+      html+=sliderHTML()+termColsHTML(n.topic);
+      html+=`<div class="section-t">Differs from parent (approximate)</div><div class="section-sub">For each parent topic in the kept DAG: this node's shipped terms with the largest β / β<sub>parent</sub>. A term absent from the parent's shipped list is given the parent's smallest shipped weight in that domain ("new", shown as ≥), so these ratios are approximate.</div>`;
+      html+=diffHTML(n);
+    } else if(n.status!==0){
+      const land=n.landing||[];
+      html+=`<div class="explain" style="--st-c:${s.color}">${esc(s.why)} ${land.length?"Its labels land on:":"Its labels land in the background topics."}</div>`;
+      html+=land.length?`<div class="chiplist">${land.map(j=>NODES[j]?chip(NODES[j]):"").join("")}</div>`
+        :`<div class="chiplist"><a data-bg="1">Background topics</a></div>`;
+    }
+    const pars=n.parents.filter(p=>byId.has(p)&&byId.get(p).kind!=="root").map(p=>byId.get(p));
+    const kids=(dagKids.get(id)||[]).map(c=>byId.get(c));
+    if(pars.length) html+=`<div class="section-t">Parents in the label DAG (${pars.length})</div><div class="chiplist">${pars.map(chip).join("")}</div>`;
+    if(kids.length) html+=`<div class="section-t">Children (${kids.length})</div><div class="chiplist">${kids.slice(0,40).map(chip).join("")}${kids.length>40?`<span>+${kids.length-40} more</span>`:""}</div>`;
+    html+=`</div>`;
+  }
+  inner.innerHTML=html;
+  $("#dclose").onclick=closeDrawer;
+  $("#dfocus").onclick=()=>focusNode(id);
+  inner.querySelectorAll("[data-goto]").forEach(a=>a.onclick=()=>revealNode(a.getAttribute("data-goto")));
+  inner.querySelectorAll("[data-bg]").forEach(a=>a.onclick=()=>setView("bg"));
+  wireSliders(inner);
+  renderGraph();
+  if(!quiet && matchMedia("(max-width:900px)").matches) $("#drawer").scrollIntoView({behavior:"smooth",block:"nearest"});
+}
+function closeDrawer(){selected=null; gSel=new Set(); renderDrawerDefault(); renderGraph();}
+
+/* ============================== background view ========================== */
+let bgShown=0; const BG_PAGE=25;
+function renderBackground(){
+  const nb=MAN.n_bg||0;
+  $("#bg-intro").innerHTML=`The <b>${fmt(nb)} background topics</b> are shared by every document regardless of its labels; they soak up what is common across the corpus so that the node topics can stay specific. Each shows its top ${TOP_N} shipped terms per domain, ranked by the same relevance as the node drawer.`;
+  $("#bg-slider").innerHTML=sliderHTML(); wireSliders($("#bg-slider"));
+  bgShown=Math.min(nb,BG_PAGE); drawBgList();
+}
+function drawBgList(){
+  const nb=MAN.n_bg||0, box=$("#bg-list");
+  let html="";
+  for(let k=0;k<bgShown;k++) html+=`<div class="bgcard"><h3>Background topic ${k+1}</h3>${termColsHTML(k)}</div>`;
+  if(bgShown<nb) html+=`<div style="padding:14px 0"><button class="btn" id="bg-more">Show ${Math.min(BG_PAGE,nb-bgShown)} more (${fmt(nb-bgShown)} not shown)</button></div>`;
+  box.innerHTML=html;
+  const mb=$("#bg-more"); if(mb) mb.onclick=()=>{bgShown=Math.min(nb,bgShown+BG_PAGE); drawBgList();};
+}
+function setView(v){
+  state.view=v;
+  document.querySelectorAll("#viewtabs button").forEach(b=>b.setAttribute("aria-selected",b.dataset.view===v));
+  $("#stage").hidden=v!=="graph"; $("#view-bg").hidden=v!=="bg";
+  if(v==="bg") renderBackground();
+  else { if(selected) select(selected,true); requestAnimationFrame(graphFit); }
+}
+
+/* ============================== svg + tooltip ============================ */
+function svgEl(t,attrs){const e=document.createElementNS("http://www.w3.org/2000/svg",t);
+  for(const k in attrs)e.setAttribute(k,attrs[k]);return e;}
+const tip=$("#tip");
+function showTip(e,txt){tip.textContent=txt;tip.style.opacity=1;
+  tip.style.left=Math.min(e.clientX+12,innerWidth-tip.offsetWidth-8)+"px";tip.style.top=(e.clientY+14)+"px";}
+function hideTip(){tip.style.opacity=0;}
+
+/* ============================== wiring =================================== */
+document.querySelectorAll("#viewtabs button").forEach(b=>b.onclick=()=>setView(b.dataset.view));
+$("#g-reset").onclick=()=>{initialGraphView();gPinned=new Set();gSel=new Set();selected=null;closeDrawer();gz={x:24,y:24,k:0.85};renderGraph();requestAnimationFrame(graphFit);};
+$("#g-fit").onclick=graphFit;
+$("#g-focus-clear").onclick=()=>clearFocus();
+$("#g-sel-clear").onclick=()=>clearSelection();
+const DIM_STOPS=[0.05,0.2,0.4,0.65,1.0];
+function applyDim(){const s=$("#dim-slider"); const v=Math.max(0,Math.min(4,+s.value||0));
+  $("#view-graph").style.setProperty("--dim",DIM_STOPS[v]);
+  try{localStorage.setItem("dagdash-dim",v);}catch(e){}}
+(function(){const s=$("#dim-slider");
+  try{const v=localStorage.getItem("dagdash-dim"); if(v!==null)s.value=v;}catch(e){}
+  s.addEventListener("input",applyDim); applyDim();})();
+$("#topic-only").addEventListener("change",e=>{state.topicOnly=e.target.checked; gManualRank=new Map();
+  if(selected&&!canShowGraph(selected)) closeDrawer(); else renderGraph(); requestAnimationFrame(graphFit);});
+document.addEventListener("pointerdown",e=>{const m=$("#ctxmenu"); if(!m.hidden&&!e.target.closest("#ctxmenu"))closeCtxMenu();},true);
+(function(){const svg=$("#graph");let drag=null;
+  svg.addEventListener("wheel",e=>{e.preventDefault();const r=svg.getBoundingClientRect();
+    const mx=e.clientX-r.left,my=e.clientY-r.top,f=Math.exp(-e.deltaY*0.0016);
+    const nk=Math.min(3,Math.max(0.12,gz.k*f));
+    gz.x=mx-(mx-gz.x)*(nk/gz.k);gz.y=my-(my-gz.y)*(nk/gz.k);gz.k=nk;
+    applyGT(gLayer);},{passive:false});
+  svg.addEventListener("pointerdown",e=>{if(e.target.closest(".gnode,.gmore"))return;
+    drag={x:e.clientX,y:e.clientY,ox:gz.x,oy:gz.y,moved:false};svg.classList.add("grabbing");
+    try{svg.setPointerCapture(e.pointerId);}catch(_){}});
+  svg.addEventListener("pointermove",e=>{if(!drag)return;
+    if(Math.abs(e.clientX-drag.x)+Math.abs(e.clientY-drag.y)>4)drag.moved=true;
+    gz.x=drag.ox+(e.clientX-drag.x);gz.y=drag.oy+(e.clientY-drag.y); applyGT(gLayer);});
+  const end=()=>{ if(drag&&!drag.moved&&selected) closeDrawer(); drag=null; svg.classList.remove("grabbing"); };
+  svg.addEventListener("pointerup",end); svg.addEventListener("pointercancel",end);
+})();
+function finalizeNodeReorder(clientY){
+  const id=gNodeDrag.id, c=gCoord.get(id); if(!c)return;
+  const newY=c.y+(clientY-gNodeDrag.startY)/gz.k;
+  const peers=[...gCoord.entries()].filter(([pid,pc])=>pid!==id && Math.abs(pc.x-c.x)<1).sort((a,b)=>a[1].y-b[1].y);
+  let idx=peers.findIndex(([,pc])=>newY<pc.y); if(idx<0)idx=peers.length;
+  const above=idx>0?peers[idx-1][0]:null, below=idx<peers.length?peers[idx][0]:null;
+  const rk=pid=>gLastRank.has(pid)?gLastRank.get(pid):0;
+  let nk;
+  if(above===null&&below===null) nk=0;
+  else if(above===null) nk=rk(below)-1;
+  else if(below===null) nk=rk(above)+1;
+  else nk=(rk(above)+rk(below))/2;
+  gManualRank.set(id,nk); renderGraph();
+}
+document.addEventListener("pointermove",e=>{
+  if(!gNodeDrag)return;
+  if(Math.abs(e.clientY-gNodeDrag.startY)>4) gNodeDrag.moved=true;
+  if(gNodeDrag.moved){ hideTip();
+    const id=gNodeDrag.id, gEl=gNodeEls.get(id), c=gCoord.get(id);
+    if(gEl&&c){ gEl.classList.add("dragging"); gEl.style.transition="none";
+      const liveY=c.y+(e.clientY-gNodeDrag.startY)/gz.k;
+      gEl.style.transform=`translate(${c.x}px,${liveY}px)`;
+      const dpos={x:c.x,y:liveY,r:c.r};
+      for(const [key,ed] of gEdgeEls){
+        const gt=key.indexOf(">"); const p=key.slice(0,gt), ch=key.slice(gt+1);
+        if(p!==id && ch!==id) continue;
+        const a=p===id?dpos:gCoord.get(p), b=ch===id?dpos:gCoord.get(ch); if(!a||!b) continue;
+        const d=edgePath(a,b); ed.style.transition="none"; ed.setAttribute("d",d); ed.style.d=`path("${d}")`;
+      }
+    }
+  }
+});
+document.addEventListener("pointerup",e=>{
+  if(!gNodeDrag)return;
+  const {id,moved}=gNodeDrag;
+  const gEl=gNodeEls.get(id); if(gEl){ gEl.classList.remove("dragging"); gEl.style.transition=""; }
+  for(const [,ed] of gEdgeEls) ed.style.transition="";
+  if(moved){ gJustDragged=true; finalizeNodeReorder(e.clientY); }
+  gNodeDrag=null;
+});
+let searchT; $("#search").addEventListener("input",e=>{clearTimeout(searchT);
+  searchT=setTimeout(()=>{state.q=e.target.value.trim();renderGraph();requestAnimationFrame(graphFit);},130);});
+$("#theme").onclick=()=>{const r=document.documentElement;
+  const cur=r.getAttribute("data-theme")||(matchMedia("(prefers-color-scheme:dark)").matches?"dark":"light");
+  const next=cur==="dark"?"light":"dark"; r.setAttribute("data-theme",next);
+  try{localStorage.setItem("dagdash-theme",next);}catch(e){}};
+try{const saved=localStorage.getItem("dagdash-theme");if(saved)document.documentElement.setAttribute("data-theme",saved);}catch(e){}
+addEventListener("keydown",e=>{if(e.key==="Escape"){ if(!$("#ctxmenu").hidden) closeCtxMenu(); else if(selected) closeDrawer(); }});
+let rz; addEventListener("resize",()=>{clearTimeout(rz);rz=setTimeout(()=>{if(gLayer&&state.view==="graph")graphFit();},180);});
+
+boot();
+</script>
+</body>
+</html>
