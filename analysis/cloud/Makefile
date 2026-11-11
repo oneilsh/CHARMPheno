@@ -1,4 +1,4 @@
-.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect inspect-topics smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates
+.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect inspect-topics export-dag-gated smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates
 
 REPO_ROOT       := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP    := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
@@ -120,6 +120,11 @@ help:
 	@echo "                           (off-YARN bq lookup); COMPARE=M / CREDITED=1 slice the"
 	@echo "                           --readout-auc report. INSPECT_ARGS=--profile-census"
 	@echo "                           --own-codes (the identity census) / --digest."
+	@echo "  export-dag-gated ID=N    OFF-CLUSTER browsable export of a DAG-gated fit"
+	@echo "                           (dag-gated-export/1, ~2 MB gzip; no Spark/YARN) ->"
+	@echo "                           <run>/dag_export/. RESOLVE_NAMES=1 names the terms"
+	@echo "                           (off-YARN bq lookup; else <run>/concept_names.csv or"
+	@echo "                           EXPORT_NAMES=<csv>); EXPORT_ARGS='--out DIR ...'."
 	@echo "  eval-exp [ID=N]         Re-run eval; if ID omitted, auto-selects most-recently-fit."
 	@echo "  build-dashboard-exp     - build dashboard bundle (auto-picks freshest fit needing build)"
 	@echo "  build-dashboard-exp ID=N - force rebuild for a specific experiment"
@@ -523,6 +528,28 @@ inspect-topics: $(WORKSPACE_ENV)
 	    $(if $(CREDITED),--credited-file "$(CREDITED_FILE)") \
 	    $(if $(COMPARE),--compare-run "$(RUNS_DIR)/$(COMPARE_PAD)-*") \
 	    $(INSPECT_ARGS)
+
+# ---------------------------------------------------------------------------
+# export-dag-gated: OFF-CLUSTER browsable export of a DAG-gated fit (spec
+# docs/superpowers/specs/2026-11-11-dag-gated-dashboard-export.md; pure numpy, NO
+# Spark, NO YARN). Reads <run>/model/result, label_dag.json, bundle_meta.json,
+# manifest.json (+ node_statistics.tsv for the unsupported nodes' support) and the
+# fit's Mondo nodes file for the labels; writes <run>/dag_export/{manifest,nodes,
+# vocab,topics}.json and prints the raw / gzip size of each. Model parameters and
+# banded node support only (no per-document data); copy it out of the workspace only
+# per the egress rules.
+#   make export-dag-gated ID=173 RESOLVE_NAMES=1
+#   make export-dag-gated ID=173 EXPORT_NAMES=/path/concept_names.csv EXPORT_ARGS="--out /path/dir"
+EXPORT_NAMES       ?=
+EXPORT_ARGS        ?=
+EXPORT_RUN_DIR     ?= $(RUNS_DIR)/$(shell printf '%04d' $(ID))-*
+export-dag-gated: $(WORKSPACE_ENV)
+	@if [ -z "$(ID)" ] && [ "$(origin EXPORT_RUN_DIR)" != "command line" ]; then echo "ERROR: provide ID=N (or EXPORT_RUN_DIR=<dir>)"; exit 1; fi
+	@. ./$(WORKSPACE_ENV) && \
+	python $(REPO_ROOT)/analysis/cloud/export_dag_gated.py \
+	    --run-dir "$(EXPORT_RUN_DIR)" \
+	    $(if $(EXPORT_NAMES),--names "$(EXPORT_NAMES)",$(if $(RESOLVE_NAMES),--resolve-names,)) \
+	    $(EXPORT_ARGS)
 
 # Stage-1 OFFLINE HPOA profile survey — PUBLIC ontology data only (no CDR, no
 # Spark, no egress exposure; runs anywhere with network + pandas). Gauges
