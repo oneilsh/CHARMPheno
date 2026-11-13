@@ -26,6 +26,8 @@
   /* node status: 0 topic · 1 pruned · 2 spliced · 3 unsupported (always paired with a word) */
   --st0:#0072b2; --st1:#9aa4b0; --st2:#6a55d6; --st3:#d55e00;
   --bar:#0072b2;
+  /* term marks: a node's own code · its HPO phenotype profile */
+  --mk-own:#00867e; --mk-hpo:#a3368a;
   --shadow:0 1px 2px rgba(20,30,40,.06),0 8px 24px rgba(20,30,40,.06);
   --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
   --sans:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
@@ -38,6 +40,7 @@
   --accent:#2bb5aa; --accent-ink:#06201e; --desc:#6f9bff; --warn:#d59234;
   --st0:#4a97d6; --st1:#6d7883; --st2:#9483ea; --st3:#f0713a;
   --bar:#4a97d6;
+  --mk-own:#2bb5aa; --mk-hpo:#e07bc6;
   --shadow:0 1px 2px rgba(0,0,0,.3),0 10px 30px rgba(0,0,0,.35);
 }}
 :root[data-theme="dark"]{
@@ -47,6 +50,7 @@
   --accent:#2bb5aa; --accent-ink:#06201e; --desc:#6f9bff; --warn:#d59234;
   --st0:#4a97d6; --st1:#6d7883; --st2:#9483ea; --st3:#f0713a;
   --bar:#4a97d6;
+  --mk-own:#2bb5aa; --mk-hpo:#e07bc6;
   --shadow:0 1px 2px rgba(0,0,0,.3),0 10px 30px rgba(0,0,0,.35);
 }
 *{box-sizing:border-box}
@@ -227,6 +231,30 @@ header.top{position:relative;padding:2px 0 10px;border-bottom:1px solid var(--bo
 .terms .spark i{display:block;height:100%;background:var(--bar);border-radius:2px}
 .terms .new{color:var(--warn);font-family:var(--mono);font-size:10px;margin-left:3px}
 .diffpar{margin:10px 0 4px;font-size:12.5px;color:var(--ink-2)}
+
+/* term marks: own code / HPO profile badges, their legend and the marks sections */
+.terms .nmw{display:flex;align-items:center;gap:3px;min-width:0}
+.terms .nmw .tx{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.mk{flex:0 0 auto;font-family:var(--mono);font-size:9px;line-height:13px;font-weight:600;letter-spacing:.02em;
+  padding:0 3px;border-radius:3px;border:1px solid currentColor;text-transform:none}
+.mk.own{color:var(--mk-own)}
+.mk.hpo{color:var(--mk-hpo)}
+.mk-legend{display:flex;flex-wrap:wrap;gap:3px 14px;font-size:11px;color:var(--ink-2);margin:0 0 8px}
+.mk-legend span.it{display:inline-flex;align-items:center;gap:5px}
+.marks{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px 18px;margin-top:4px}
+.mkbox h5{margin:0 0 3px;font-size:11.5px;font-weight:600;color:var(--ink-2);display:flex;align-items:center;gap:6px;
+  border-bottom:1px solid var(--border);padding-bottom:3px}
+.mkbox .sum{font-size:11.5px;color:var(--muted);margin:2px 0 5px;line-height:1.45}
+.mkbox .sum b{color:var(--ink);font-weight:600}
+.mklist{list-style:none;margin:0;padding:0}
+.mklist li{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;font-size:12px;padding:1.5px 0;align-items:baseline}
+.mklist .tx{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.mklist .where{font-family:var(--mono);font-size:10.5px;color:var(--ink-2);text-align:right;white-space:nowrap}
+.mklist .where.out{color:var(--muted);font-family:var(--sans);font-size:11px;font-style:italic}
+.mklist .where.top{color:var(--ink);font-weight:600}
+.mklist li.more{display:none}
+.mklist.open li.more{display:grid}
+.mkmore{border:0;background:none;color:var(--accent);font-size:11.5px;padding:3px 0;cursor:pointer}
 .diffpar a{cursor:pointer;font-weight:600}
 
 /* background view */
@@ -336,6 +364,9 @@ const statusOf=n=>STATUS[n.status]||{label:"status "+n.status,color:"var(--muted
 // Decoded export. Nodes keep their export index (`ix`) and are keyed by their user id
 // (Mondo CURIE) in byId, the shape the copied DAG engine works on.
 let MAN=null, NODES=[], TOPICS=[], VOCAB=null, DOMAINS=[], NPMI=null;
+// Term marks (optional, manifest.marks): per node its own codes and positive HPO-profile
+// concepts as vocab indices in one domain (MARKS.domain, the condition domain).
+let MARKS=null;
 let byId=new Map(), dagKids=new Map(), gRootIds=[], SUPPORT_MAX=1;
 const ROOT_ID="__root__";
 
@@ -381,7 +412,14 @@ function decode(man,nodes,vocab,topics){
     pix:nodes.parents[i]||[], depth:nodes.depth[i], status:nodes.status[i],
     landing:nodes.landing?nodes.landing[i]:null, kept:nodes.kept_parents?nodes.kept_parents[i]:null,
     support:nodes.support[i]==null?null:nodes.support[i], sfrac:nodes.support_frac?nodes.support_frac[i]:null,
-    topic:nodes.topic[i]});
+    topic:nodes.topic[i],
+    own:nodes.own?nodes.own[i]:null, ownN:nodes.own_n?nodes.own_n[i]:0,
+    prof:nodes.profile?nodes.profile[i]:null, profN:nodes.profile_n?nodes.profile_n[i]:0});
+  MARKS=null;
+  if(man.marks&&(nodes.own||nodes.profile)){
+    MARKS={domain:man.marks.domain||0, own:man.marks.own||null, profile:man.marks.profile||null};
+    for(const n of NODES){ n.ownSet=n.own?new Set(n.own):null; n.profSet=n.prof?new Set(n.prof):null; }
+  }
   for(const n of NODES) n.parents=n.pix.map(j=>NODES[j].id);
   byId=new Map(); for(const n of NODES) byId.set(n.id,n);
   // graph root: the single top-level node, or a synthetic root over several
@@ -556,12 +594,26 @@ function rankedTerms(k,d,lambda,n){
 // A term's display name; an export made without names (no RESOLVE_NAMES) shows the code.
 const termName=w=>{const nm=VOCAB.name[w]; return nm?String(nm):`code ${VOCAB.code[w]}`;};
 const termTitle=r=>`${termName(r.w)}\ncode ${VOCAB.code[r.w]}\nβ (share of the topic in this domain) ${(r.pwk*100).toFixed(2)}%\np (marginal in this domain) ${(r.pw*100).toFixed(3)}%\nlift β/p ${(r.pwk/r.pw).toFixed(1)}`;
+// The node a topic belongs to (null for a background topic), for its term marks.
+const topicNode=k=>{const i=TOPICS[k]?TOPICS[k].node:null; return i==null?null:NODES[i];};
+// A term's marks on node n: {own, hpo} (only in the marks domain; both can hold).
+function termMarks(n,w,d){
+  if(!MARKS||!n||d!==MARKS.domain) return {own:false,hpo:false};
+  return {own:!!(n.ownSet&&n.ownSet.has(w)), hpo:!!(n.profSet&&n.profSet.has(w))};
+}
+const markBadges=m=>(m.own?`<span class="mk own">own</span>`:"")+(m.hpo?`<span class="mk hpo">HPO</span>`:"");
+const markTip=m=>(m.own?"\nown code: the code ladder puts this code on this node":"")+
+  (m.hpo?"\nHPO: in this node's HPO phenotype profile":"");
 function termColsHTML(k){
+  const tn=topicNode(k);
   const cols=DOMAINS.map((dn,d)=>{
     const t=TOPICS[k].dom[d], rows=rankedTerms(k,d,state.lambda,TOP_N);
     const maxB=t&&t.beta.length?Math.max(...t.beta):1;
-    const lis=rows.map((r,i)=>`<li title="${esc(termTitle(r))}"><span class="rk">${i+1}</span><span class="nm">${esc(termName(r.w))}</span>`+
-      `<span class="num">${(r.pwk*100).toFixed(r.pwk>=0.1?1:2)}%</span><span></span><span class="spark"><i style="width:${(100*r.pwk/maxB).toFixed(1)}%"></i></span></li>`).join("");
+    const lis=rows.map((r,i)=>{const mk=termMarks(tn,r.w,d);
+      return `<li title="${esc(termTitle(r)+markTip(mk))}"><span class="rk">${i+1}</span>`+
+      (mk.own||mk.hpo?`<span class="nm nmw"><span class="tx">${esc(termName(r.w))}</span>${markBadges(mk)}</span>`
+                     :`<span class="nm">${esc(termName(r.w))}</span>`)+
+      `<span class="num">${(r.pwk*100).toFixed(r.pwk>=0.1?1:2)}%</span><span></span><span class="spark"><i style="width:${(100*r.pwk/maxB).toFixed(1)}%"></i></span></li>`;}).join("");
     return `<div class="dcol"><h4><span>${esc(dn)}</span><small>${t?t.ids.length:0} shipped</small></h4><ol class="terms">${lis||'<li><span></span><span class="nm" style="color:var(--muted)">none</span></li>'}</ol></div>`;
   });
   return `<div class="termcols" data-topic-cols="${k}">${cols.join("")}</div>`;
@@ -578,8 +630,69 @@ function wireSliders(root){
     document.querySelectorAll("input[data-lambda]").forEach(o=>{ if(o!==inp) o.value=inp.value; });
     document.querySelectorAll("[data-lambda-v]").forEach(s=>s.textContent="λ "+state.lambda.toFixed(2));
     document.querySelectorAll("[data-topic-cols]").forEach(c=>{ c.outerHTML=termColsHTML(+c.getAttribute("data-topic-cols")); });
+    document.querySelectorAll("[data-marks-node]").forEach(c=>{ c.outerHTML=marksHTML(NODES[+c.getAttribute("data-marks-node")]); });
   }));
 }
+
+/* ============================== term marks =============================== */
+// Below the topic columns: the node's own codes and its HPO-profile concepts, each with
+// where it ranks in the topic's shipped list (by β, in the marks domain) or "not in the
+// topic's list"; how many are among the top TOP_N shown (at the current λ) and among the
+// shipped terms. Collapsed after MARKS_SHOW rows. Nothing without a marks block.
+const MARKS_SHOW=10; const marksOpen=new Set();
+function marksLegendHTML(n){
+  if(!MARKS||!n||n.topic==null) return "";
+  const dn=DOMAINS[MARKS.domain]||"condition", it=[];
+  if(MARKS.own) it.push(`<span class="it" data-tip="Own code: the code ladder (${esc(MARKS.own.source)}) puts this ${esc(dn)} code on this node; its documents are labelled with it.">${markBadges({own:true})} one of the node's own codes</span>`);
+  if(MARKS.profile) it.push(`<span class="it" data-tip="HPO: a positive phenotype annotation of this disease (HPO${MARKS.profile.hpo_release?" "+esc(MARKS.profile.hpo_release):""}), mapped to a standard ${esc(dn)} concept. NOT-annotated and contested phenotypes are left out.">${markBadges({hpo:true})} in its HPO phenotype profile</span>`);
+  return it.length?`<div class="mk-legend">${it.join("")}<span class="it" style="color:var(--muted)">(${esc(dn)} terms)</span></div>`:"";
+}
+function markBox(n,kind){
+  const isOwn=kind==="own", meta=isOwn?MARKS.own:MARKS.profile; if(!meta) return "";
+  const ids=(isOwn?n.own:n.prof)||[], cnt=isOwn?n.ownN:n.profN, md=MARKS.domain;
+  const title=isOwn?"Own codes":"HPO profile", badge=markBadges(isOwn?{own:true}:{hpo:true});
+  const what=isOwn?"own code":"HPO-profile concept";
+  if(!cnt) return `<div class="mkbox"><h5>${title} ${badge}</h5><div class="sum">${isOwn?"No own code in the model's vocabulary.":"No HPO profile in the model's vocabulary."}</div></div>`;
+  const k=n.topic;
+  if(k==null||!TOPICS[k]){
+    if(!ids.length) return `<div class="mkbox"><h5>${title} ${badge}</h5><div class="sum"><b>${fmt(cnt)}</b> ${what}${cnt===1?"":"s"} in the model's vocabulary; listed for nodes with a topic only.</div></div>`;
+  }
+  // rank by β in the topic's shipped list of the marks domain
+  const rank=new Map(), top=new Set();
+  let nShip=0;
+  if(k!=null&&TOPICS[k]&&TOPICS[k].dom[md]){
+    const t=TOPICS[k].dom[md], o=[...t.ids.keys()].sort((a,b)=>t.beta[b]-t.beta[a]); nShip=o.length;
+    o.forEach((j,r)=>rank.set(t.ids[j],{r:r+1,b:t.beta[j]}));
+    for(const r of rankedTerms(k,md,state.lambda,TOP_N)) top.add(r.w);
+  }
+  const rows=ids.map(w=>({w,rk:rank.get(w)||null,top:top.has(w)}))
+    .sort((a,b)=>(a.rk?a.rk.r:1e9)-(b.rk?b.rk.r:1e9)||termName(a.w).localeCompare(termName(b.w)));
+  const inTop=rows.filter(r=>r.top).length, inShip=rows.filter(r=>r.rk).length;
+  const sum=k!=null&&TOPICS[k]
+    ? `<b>${fmt(cnt)}</b> in the vocabulary · <b>${inTop}</b> among the top ${TOP_N} shown · <b>${inShip}</b> among the topic's ${fmt(nShip)} shipped terms`
+    : `<b>${fmt(cnt)}</b> in the vocabulary (no topic)`;
+  const key=n.ix+":"+kind, open=marksOpen.has(key);
+  const lis=rows.map((r,i)=>{
+    const where=!(k!=null&&TOPICS[k])?"":r.rk?`β #${r.rk.r}${r.top?" · shown":""}`:"not in the topic's list";
+    const tipT=`${termName(r.w)}\ncode ${VOCAB.code[r.w]}`+(r.rk?`\nβ rank ${r.rk.r} of ${nShip} shipped (β ${(r.rk.b*100).toFixed(2)}%)`+(r.top?`\namong the top ${TOP_N} shown at λ ${state.lambda.toFixed(2)}`:""):(k!=null?"\nnot in the topic's shipped list (its weight there is below the top-β and top-lift selection)":""));
+    return `<li class="${i>=MARKS_SHOW?"more":""}" data-tip="${esc(tipT)}"><span class="tx">${esc(termName(r.w))}</span><span class="where ${r.top?"top":r.rk?"":"out"}">${where}</span></li>`;}).join("");
+  const more=rows.length>MARKS_SHOW?`<button class="mkmore" data-mk-toggle="${key}">${open?"show fewer":`show all ${rows.length}`}</button>`:"";
+  return `<div class="mkbox"><h5>${title} ${badge}</h5><div class="sum">${sum}</div><ol class="mklist${open?" open":""}">${lis}</ol>${more}</div>`;
+}
+function marksHTML(n){
+  if(!MARKS||!n) return "";
+  // a node without a topic shows only the kinds it has
+  const kinds=n.topic!=null?["own","profile"]:["own","profile"].filter(kd=>kd==="own"?n.ownN:n.profN);
+  const boxes=kinds.map(kd=>markBox(n,kd)).filter(Boolean);
+  if(!boxes.length) return "";
+  return `<div class="marks" data-marks-node="${n.ix}">${boxes.join("")}</div>`;
+}
+document.addEventListener("click",e=>{
+  const b=e.target.closest&&e.target.closest("[data-mk-toggle]"); if(!b) return;
+  const key=b.getAttribute("data-mk-toggle"); if(marksOpen.has(key)) marksOpen.delete(key); else marksOpen.add(key);
+  const ix=+key.split(":")[0], box=document.querySelector(`[data-marks-node="${ix}"]`);
+  if(box) box.outerHTML=marksHTML(NODES[ix]);
+});
 
 /* ============================== differs from parent ====================== */
 // For each kept parent: the node's shipped terms with the largest β_node / β_parent. A term
@@ -1041,7 +1154,8 @@ function select(id,quiet){
     html+=`</dl>`;
     if(n.status===0 && n.topic!=null && TOPICS[n.topic]){
       html+=`<div class="section-t">Topic</div><div class="section-sub">Top ${TOP_N} shipped terms per domain, ranked by relevance = λ·log β + (1 − λ)·log(β / p). Bar and number: β, the term's share of this topic within the domain.</div>`;
-      html+=sliderHTML()+termColsHTML(n.topic);
+      html+=sliderHTML()+marksLegendHTML(n)+termColsHTML(n.topic);
+      if(MARKS) html+=`<div class="section-t">Own codes and HPO profile</div>`+marksHTML(n);
       html+=npmiHTML(n.topic);
       html+=`<div class="section-t">Differs from parent (approximate)</div><div class="section-sub">For each parent topic in the kept DAG: this node's shipped terms with the largest β / β<sub>parent</sub>. A term absent from the parent's shipped list is given the parent's smallest shipped weight in that domain ("new", shown as ≥), so these ratios are approximate.</div>`;
       html+=diffHTML(n);
@@ -1050,6 +1164,9 @@ function select(id,quiet){
       html+=`<div class="explain" style="--st-c:${s.color}">${esc(s.why)} ${land.length?"Its labels land on:":"Its labels land in the background topics."}</div>`;
       html+=land.length?`<div class="chiplist">${land.map(j=>NODES[j]?chip(NODES[j]):"").join("")}</div>`
         :`<div class="chiplist"><a data-bg="1">Background topics</a></div>`;
+      // own codes land on nodes with a topic, so a node without one normally has none;
+      // its HPO profile is counted (listed for nodes with a topic only)
+      if(MARKS&&(n.ownN||n.profN)) html+=`<div class="section-t">Own codes and HPO profile</div>`+marksHTML(n);
     }
     const pars=n.parents.filter(p=>byId.has(p)&&byId.get(p).kind!=="root").map(p=>byId.get(p));
     const kids=(dagKids.get(id)||[]).map(c=>byId.get(c));

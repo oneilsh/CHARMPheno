@@ -1,4 +1,4 @@
-.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect inspect-topics export-dag-gated smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates
+.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect inspect-topics export-dag-gated profile-marks smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates
 
 REPO_ROOT       := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP    := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
@@ -125,6 +125,16 @@ help:
 	@echo "                           <run>/dag_export/. RESOLVE_NAMES=1 names the terms"
 	@echo "                           (off-YARN bq lookup; else <run>/concept_names.csv or"
 	@echo "                           EXPORT_NAMES=<csv>); EXPORT_ARGS='--out DIR ...'."
+	@echo "                           Marks each node's own codes (<run>/code_map.tsv) and"
+	@echo "                           HPO-profile terms (<run>/profile_marks.tsv) when present."
+	@echo "  profile-marks ID=N       OFF-CLUSTER HPO-profile marks for a run (no Spark/YARN):"
+	@echo "                           the stage-1 HPOA survey over all of Mondo"
+	@echo "                           (HPOA_BRANCH_ALL=$(HPOA_BRANCH_ALL), public ontology files)"
+	@echo "                           -> <run>/hpoa/profile_codes.tsv, then hpo_profile_marks"
+	@echo "                           (a targeted bq mapping query) -> <run>/profile_marks.tsv"
+	@echo "                           (+ .json naming the HPO release). Mondo version from the"
+	@echo "                           run manifest (else HPOA_MONDO_VER); HPO $(HPOA_HPO_RELEASE)."
+	@echo "                           PROFILE_SURVEY_ARGS='--rollup' credits ancestors too."
 	@echo "  eval-exp [ID=N]         Re-run eval; if ID omitted, auto-selects most-recently-fit."
 	@echo "  build-dashboard-exp     - build dashboard bundle (auto-picks freshest fit needing build)"
 	@echo "  build-dashboard-exp ID=N - force rebuild for a specific experiment"
@@ -568,6 +578,46 @@ hpoa-profile-survey:
 	    --branch $(HPOA_BRANCH) --mondo-version $(HPOA_MONDO_VER) \
 	    --hpo-release $(HPOA_HPO_RELEASE) --cache-dir $(REPO_ROOT)/data/ontology \
 	    --out-dir $(HPOA_OUT) $(HPOA_ARGS)
+
+# ---------------------------------------------------------------------------
+# profile-marks: the HPO-profile marks of a run, for the digest's `*` (inspect-topics
+# --credited-file) and the browsable export's "HPO" badges (export-dag-gated reads
+# <run>/profile_marks.tsv by itself). OFF-CLUSTER, no Spark, no YARN:
+#   1. hpoa_profile_survey.py --emit-codes over Mondo's ROOT (MONDO:0000001 "disease":
+#      the label subgraph is whole-Mondo, native_dag's parentless terms sit under it),
+#      PUBLIC ontology files only (Mondo KGX, hp.obo, phenotype.hpoa; cached in
+#      data/ontology) -> <run>/hpoa/profile_codes.tsv (node, HPO term, SNOMED code, neg);
+#   2. hpo_profile_marks.py: one targeted `bq query` per 1000 codes (SNOMED -> 'Maps to'
+#      -> standard Condition) -> <run>/profile_marks.tsv (mondo_id, concept_id, neg);
+#   3. <run>/profile_marks.json names the HPO release / Mondo version / branch.
+# Ontology mappings only: no patient data, no counts. The Mondo version is the run's
+# (corpus_manifest.mondo_version), else HPOA_MONDO_VER. HPO stays pinned to
+# HPOA_HPO_RELEASE (the last release whose hp.obo carries SNOMED xrefs, see above).
+#   make profile-marks ID=174
+#   make profile-marks ID=174 PROFILE_SURVEY_ARGS="--rollup"   # credit ancestors with descendants' profiles
+HPOA_BRANCH_ALL      ?= MONDO:0000001
+PROFILE_SURVEY_ARGS  ?=
+PROFILE_RUN_DIR      ?= $(RUNS_DIR)/$(shell printf '%04d' $(ID))-*
+profile-marks: $(WORKSPACE_ENV)
+	@if [ -z "$(ID)" ] && [ "$(origin PROFILE_RUN_DIR)" != "command line" ]; then echo "ERROR: provide ID=N (or PROFILE_RUN_DIR=<dir>)"; exit 1; fi
+	@set -e; RUN=""; N=0; \
+	for d in $(PROFILE_RUN_DIR); do if [ -f "$$d/manifest.json" ]; then RUN="$$d"; N=$$((N+1)); fi; done; \
+	if [ "$$N" != 1 ]; then echo "ERROR: $(PROFILE_RUN_DIR) matches $$N run dirs with a manifest.json; pass PROFILE_RUN_DIR=<exact dir>"; exit 1; fi; \
+	MV=$$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("corpus_manifest") or {}).get("mondo_version") or "")' "$$RUN/manifest.json"); \
+	MV=$${MV:-$(HPOA_MONDO_VER)}; \
+	echo "[profile-marks] $$RUN: Mondo $$MV, HPO $(HPOA_HPO_RELEASE), branch $(HPOA_BRANCH_ALL)"; \
+	mkdir -p "$$RUN/hpoa"; \
+	PYTHONPATH=$(REPO_ROOT)/analysis/cloud:$(REPO_ROOT)/charmpheno:$(REPO_ROOT)/spark-vi python3 $(REPO_ROOT)/analysis/cloud/hpoa_profile_survey.py \
+	    --branch $(HPOA_BRANCH_ALL) --mondo-version "$$MV" \
+	    --hpo-release $(HPOA_HPO_RELEASE) --cache-dir $(REPO_ROOT)/data/ontology \
+	    --out-dir "$$RUN/hpoa" --emit-codes "$$RUN/hpoa/profile_codes.tsv" $(PROFILE_SURVEY_ARGS); \
+	if [ "$$(wc -l < "$$RUN/hpoa/profile_codes.tsv")" -le 1 ]; then echo "ERROR: the survey emitted no profile codes under $(HPOA_BRANCH_ALL) (not a Disease-category root in Mondo $$MV?); retry with HPOA_BRANCH_ALL=MONDO:0700096 (human disease)"; exit 1; fi; \
+	. ./$(WORKSPACE_ENV) && \
+	python $(REPO_ROOT)/analysis/cloud/hpo_profile_marks.py --run-dir "$$RUN" \
+	    --profile-codes "$$RUN/hpoa/profile_codes.tsv" --out "$$RUN/profile_marks.tsv"; \
+	printf '{"hpo_release": "%s", "mondo_version": "%s", "branch": "%s", "survey_args": "%s"}\n' \
+	    "$(HPOA_HPO_RELEASE)" "$$MV" "$(HPOA_BRANCH_ALL)" "$(PROFILE_SURVEY_ARGS)" > "$$RUN/profile_marks.json"; \
+	echo "[profile-marks] wrote $$RUN/profile_marks.tsv (+ profile_marks.json); export-dag-gated picks it up"
 
 # Build the E4 FIRST-ATTESTATION SIDECAR for a finished run's corpus (spec E4 /
 # plan WP6, unit i). One full-history `condition_era` scan joined to the label

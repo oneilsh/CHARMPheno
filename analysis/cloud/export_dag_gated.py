@@ -24,7 +24,13 @@ Spark, no YARN, safe on the master mid-anything. The pure work is
   only), then the id;
 - term names: `--names <csv>` (resolve_vocab_names / inspect_topics format), or
   `--resolve-names` (runs resolve_vocab_names.py: a targeted `bq query`, off-YARN), or
-  `<run>/concept_names.csv` when present.
+  `<run>/concept_names.csv` when present;
+- marks (optional): each node's OWN codes from `<run>/code_map.tsv` (the fit's code
+  ladder landed on the fitted node set; `--own-codes TSV`, `--no-own-codes`) and its
+  POSITIVE HPO-profile concepts from `<run>/profile_marks.tsv` (`hpo_profile_marks.py`,
+  `make profile-marks`; `--profile-marks TSV`, `--no-profile`), read against the
+  condition vocabulary. A `profile_marks.json` next to the marks TSV (the make target
+  writes it) names the HPO release; `--hpo-release` overrides it.
 
 The export holds model parameters and banded node support only: no per-document or
 patient data (AGENTS.md, egress floor). It refuses a run whose vocabulary floor
@@ -178,6 +184,51 @@ def unsupported_support(run, manifest) -> dict:
     return out
 
 
+def load_own_codes(path, nodes) -> dict:
+    """`{node id: {std concept id}}` from a `code_map.tsv` (`std_cid\tnode_cid`, the fit
+    driver's `write_code_map`; read with inspect_topics' `load_code_map`). The node's
+    integer cid is mapped back to its id among `nodes` (`_node_cid`, the bridge's
+    `node_cid`); rows on a cid outside `nodes` are dropped."""
+    from inspect_topics import load_code_map
+    by_cid = {}
+    for n in nodes:
+        c = _node_cid(n)
+        if c is not None:
+            by_cid[c] = n
+    out = {}
+    for cid, stds in load_code_map(path).items():
+        n = by_cid.get(int(cid))
+        if n is not None:
+            out.setdefault(n, set()).update(int(x) for x in stds)
+    return out
+
+
+def read_profile_marks(path) -> list:
+    """`[(mondo_id, concept_id, neg)]` from a profile-marks TSV (`hpo_profile_marks.py`:
+    columns mondo_id, concept_id, neg; extra columns, e.g. an `--emit-eta` table's,
+    are ignored). `neg` parsed as `profile_eta` parses it."""
+    from profile_eta import _neg_flags
+    with open(path, newline="") as fh:
+        rows = list(csv.DictReader(fh, delimiter="\t"))
+    if rows:
+        for col in ("mondo_id", "concept_id", "neg"):
+            if col not in rows[0]:
+                raise SystemExit(f"[export-dag-gated] {path} has no {col} column "
+                                 f"(columns: {list(rows[0])})")
+    negs = _neg_flags([r["neg"] for r in rows])
+    return [(str(r["mondo_id"]), int(r["concept_id"]), bool(g))
+            for r, g in zip(rows, negs)]
+
+
+def marks_domain_index(domains) -> int:
+    """The condition domain (own codes and profile concepts are Condition concepts):
+    the domain named `condition`, else domain 0 (inspect_topics' convention)."""
+    for m, d in enumerate(domains):
+        if str(d).lower().startswith("condition"):
+            return m
+    return 0
+
+
 def format_sizes(sizes) -> str:
     from charmpheno.export.dag_gated import FILES
     lines = [f"  {'file':<14} {'raw':>12} {'gzip':>12}"]
@@ -208,6 +259,18 @@ def parse_args(argv=None):
                     help="topic NPMI to ship per topic (topic_npmi.py output; default "
                          "<run>/npmi_top10.json when it exists)")
     ap.add_argument("--no-npmi", action="store_true", help="ship no NPMI")
+    ap.add_argument("--own-codes", default=None, metavar="TSV",
+                    help="each node's own codes (std_cid, node_cid; default "
+                         "<run>/code_map.tsv when it exists)")
+    ap.add_argument("--no-own-codes", action="store_true", help="ship no own codes")
+    ap.add_argument("--profile-marks", default=None, metavar="TSV",
+                    help="HPO-profile marks (mondo_id, concept_id, neg; "
+                         "hpo_profile_marks.py / `make profile-marks`; default "
+                         "<run>/profile_marks.tsv when it exists)")
+    ap.add_argument("--no-profile", action="store_true", help="ship no HPO profile")
+    ap.add_argument("--hpo-release", default=None,
+                    help="the HPO release the profile marks came from (default: the "
+                         "marks TSV's .json sidecar, written by `make profile-marks`)")
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--names", default=None,
                    help="term-name CSV (concept_id,concept_name), keyed by the vocab "
@@ -322,14 +385,65 @@ def main(argv=None):
         else:
             print(f"[export-dag-gated] no NPMI ({npath} not found; run the readout "
                   "with --npmi first, or pass --npmi-file)", flush=True)
+    # marks: own codes and HPO profile concepts (ontology / code-ladder mappings)
+    md = marks_domain_index(domains)
+    own_codes = profile = None
+    marks_meta = {}
+    if not args.no_own_codes:
+        opath = Path(args.own_codes) if args.own_codes else run / "code_map.tsv"
+        if opath.exists():
+            own_codes = load_own_codes(opath, list(given))
+            marks_meta["own"] = {"source": opath.name}
+            print(f"[export-dag-gated] own codes from {opath}: "
+                  f"{sum(len(v) for v in own_codes.values())} (code, node) pairs on "
+                  f"{len(own_codes)} nodes (domain {domains[md]})", flush=True)
+        elif args.own_codes:
+            raise SystemExit(f"[export-dag-gated] --own-codes: {opath} not found")
+        else:
+            print(f"[export-dag-gated] no own codes ({opath} not found)", flush=True)
+    if not args.no_profile:
+        ppath = (Path(args.profile_marks) if args.profile_marks
+                 else run / "profile_marks.tsv")
+        if ppath.exists():
+            from charmpheno.export.dag_gated import positive_profile_sets
+            profile, pst = positive_profile_sets(read_profile_marks(ppath))
+            rel = args.hpo_release
+            side = ppath.with_suffix(".json")
+            if rel is None and side.exists():
+                rel = (json.loads(side.read_text()) or {}).get("hpo_release")
+            marks_meta["profile"] = {"source": ppath.name,
+                                     **({"hpo_release": rel} if rel else {})}
+            n_in = sum(1 for n in profile if n in given)
+            print(f"[export-dag-gated] HPO profile from {ppath}"
+                  f"{f' (HPO {rel})' if rel else ''}: {pst['n_rows']} rows, "
+                  f"{pst['n_neg_rows']} NOT-annotated dropped, {pst['n_contested']} "
+                  f"contested concepts dropped; {len(profile)} profiled nodes, {n_in} "
+                  "in the label DAG", flush=True)
+        elif args.profile_marks:
+            raise SystemExit(f"[export-dag-gated] --profile-marks: {ppath} not found")
+        else:
+            print(f"[export-dag-gated] no HPO profile ({ppath} not found; "
+                  "`make profile-marks ID=N` writes it)", flush=True)
     files = build_export(
         lam, ns, n_bg=n_bg, tpn=tpn, given_dag=given, domains=domains,
         vocab_maps=vocab_maps, node_names=node_names, term_names=term_names,
         extra_support=extra, run=run.name, mondo_version=version or "",
         cdr=cm.get("cdr", ""), created_utc=args.created_utc,
         top_beta=args.top_beta, top_lift=args.top_lift, lift_pool=args.lift_pool,
-        npmi=npmi)
+        npmi=npmi, own_codes=own_codes, profile=profile, marks_meta=marks_meta,
+        marks_domain=md)
     sizes = write_export(files, out)
+    mk = files["manifest.json"].get("marks")
+    if mk:
+        nd = files["nodes.json"]
+        for key in ("own", "profile"):
+            if key in mk:
+                print(f"[export-dag-gated] marks.{key}: {mk[key]['nodes']} nodes listed, "
+                      f"{sum(1 for x in nd[key + '_n'] if x)} with a concept in the "
+                      "vocabulary", flush=True)
+        dm = files["manifest.json"]["domains"][mk["domain"]]
+        print(f"[export-dag-gated] vocab: {dm.get('mark_terms', 0)} marked terms added "
+              f"to {domains[mk['domain']]} (in no shipped topic list)", flush=True)
     n_null = sum(s is None for s in files["nodes.json"]["support"])
     print(f"[export-dag-gated] wrote {out} ({len(files['nodes.json']['id'])} nodes, "
           f"{n_null} with support not recorded; {len(files['vocab.json']['code'])} "

@@ -27,7 +27,8 @@ version:
 3. health: support band, `supportFraction` (0 sharp, 1 flat);
 4. for a node without a topic: its status and where its labels land (links).
 A background-topics view lists the 200 shared topics in the same form. Later, not now:
-own codes, background mixtures per node, readout AUC.
+background mixtures per node, readout AUC. Own codes and HPO-profile terms were added
+2026-11-13 (section "Marks").
 
 ## Format `dag-gated-export/1` (a directory of minified JSON files)
 
@@ -64,7 +65,8 @@ other arrays, never repeated strings.
  topic: [int|null]}          # index into topics.json; null without a topic
 ```
 
-`vocab.json` (only terms that appear in some shipped list; index = term index):
+`vocab.json` (only terms that appear in some shipped list, plus the marked terms of
+section "Marks"; index = term index):
 ```
 {domain: [int], code: [str|int], name: [str], freq: [int]}   # freq: log-byte (freq_codec)
 ```
@@ -99,13 +101,77 @@ Selection per topic and domain: its top `top_beta` terms by β, plus up to `top_
 more by lift β / p among its top `lift_pool` terms by β (lift restricted to a pool so a
 rare term's prior-level weight cannot rank first).
 
+### Marks (optional; added 2026-11-13)
+
+Two optional blocks that let the browser badge a topic's terms: a node's OWN codes and
+its HPO PROFILE concepts, both standard Condition concepts read against the condition
+domain's vocabulary (`manifest.marks.domain`: the domain named `condition`, else 0).
+
+- **Own codes**: the code ladder landed on the fitted node set, `<run>/code_map.tsv`
+  (`std_cid`, `node_cid`; `dag_gated_fit.write_code_map` / `landed_code_map`). Each
+  code sits on the kept node its Mondo term is, or on the nearest kept ancestors of a
+  pruned / spliced term, so in practice only nodes with a topic have own codes.
+  `node_cid` is the numeric part of the node's Mondo CURIE (the bridge's `node_cid`).
+- **HPO profile**: `<run>/profile_marks.tsv` (`mondo_id`, `concept_id`, `neg`;
+  `hpo_profile_marks.py`, from the stage-1 `hpoa_profile_survey.py --emit-codes`, made
+  by `make profile-marks`). Only POSITIVE concepts mark: NOT-annotated rows are dropped
+  and a concept listed both positive and NOT for the same node (contested) is dropped,
+  as `profile_eta.build_profile_seed` does. The HPO release comes from the
+  `profile_marks.json` sidecar the make target writes (or `--hpo-release`).
+
+`nodes.json` gains, per block present:
+```
+ own:       [[int]|null],   # vocab.json indices of the node's own codes (in the vocabulary);
+                            # null when it has none there
+ own_n:     [int],          # how many of the node's own codes are in the model's vocabulary
+ profile:   [[int]|null],   # vocab.json indices of its positive HPO-profile concepts; listed
+                            # for nodes WITH A TOPIC only (null otherwise or when none)
+ profile_n: [int],          # how many of its positive profile concepts are in the vocabulary
+                            # (every node, with or without a topic)
+```
+Lists are sorted ascending (not delta-coded: they are short). `own_n` equals the list's
+length where it is shipped; it is kept so a node without a list still says how many it
+has. A concept outside the model's vocabulary has no term and is neither listed nor
+counted. Profile lists are limited to topic nodes because a profile marks a topic's
+terms, and the whole label DAG's profiles would outweigh the topics at full scale.
+
+A marked term in the vocabulary that no shipped topic list holds is ADDED to vocab.json
+(with its name and `freq`), appended after the marks domain's shipped terms in local
+index order; `manifest.domains[marks domain].mark_terms` counts them (`shipped_terms`
+stays the count of topic-shipped terms, so a topic's ids never point past them). The
+freq codec's range covers the added terms.
+
+`manifest.json` gains:
+```
+ marks: {domain: int,
+         own?:     {source: "code_map.tsv", nodes: int},       # nodes with a non-null own
+         profile?: {source: str, hpo_release?: str, nodes: int}} # nodes with a non-null profile
+```
+Driver flags: `--own-codes TSV` (default `<run>/code_map.tsv` when present) /
+`--no-own-codes`; `--profile-marks TSV` (default `<run>/profile_marks.tsv` when present) /
+`--no-profile`; `--hpo-release`. A block whose default table is absent is left out; an
+explicit path that does not exist is an error.
+
+Size (synthetic run at the real scale, `dag_export_synth.py --measure`: 2,895 topics,
+7,000 given nodes, 11,421 own (code, node) pairs on 2,278 kept nodes, 27,538 profile rows
+on 3,833 nodes): total 1,336,811 -> 1,384,404 bytes gzipped (+48 KB; nodes.json 157,736
+-> 205,255), raw 4.61 -> 4.78 MB. At this scale every vocabulary term is already shipped
+by some topic, so no term is added.
+
 ## Disclosure
 
 Model parameters over a vocabulary floored at 20 patients per term; no document or
 patient data. Checked, not assumed (code review A2, 2026-11-13): `build_export` refuses
 a node set fitted with `min_docs_per_node < 20`, and the driver refuses a run whose
 `corpus_manifest.min_patient_count` is below 20 or missing. Node support is shown banded as the Mondo usage dashboard does. Nothing
-per-node beyond the banded support and the topic.
+per-node beyond the banded support and the topic, and the marks.
+
+The marks (section "Marks") are ontology and code-ladder mappings: which vocabulary
+terms are a node's own codes (Mondo -> OMOP mapping landed on the fitted node set) and
+which are in its HPO phenotype profile (public HPO annotations mapped through the CDR's
+concept tables). They carry no count beyond counts of concepts (`own_n`, `profile_n`,
+the manifest's node counts), no document or patient count; every listed term is a
+vocabulary term, so floored at 20 patients like every other shipped term.
 
 ## Code
 
@@ -114,7 +180,17 @@ per-node beyond the banded support and the topic.
   `<run>/model/result`, `label_dag.json`, `bundle_meta.json`, names via
   `resolve_vocab_names.py` or a names CSV and the Mondo labels; writes `<run>/dag_export/`;
   prints raw and gzip size per file and in total). Make target `export-dag-gated`.
+  The marks: own codes from `<run>/code_map.tsv`, the profile from
+  `<run>/profile_marks.tsv`, which `make profile-marks ID=N` writes (the stage-1 HPOA
+  survey over Mondo's root `MONDO:0000001` into `<run>/hpoa/`, then
+  `hpo_profile_marks.py`'s targeted `bq` mapping; off-YARN).
 - Browser: `dag-dashboard/index.html` (vanilla JS, no build step), adapted from the Mondo
   usage dashboard's DAG engine and drawer (copied, not shared: that dashboard is
   developed separately on main), plus a port of the main dashboard's relevance ranking.
+  With a marks block, the drawer badges a topic's condition terms (`own`, `HPO`, both
+  possible; a legend line above the columns, the tooltip says which) and lists, below
+  the columns, the node's own codes and HPO-profile concepts with their β rank in the
+  topic's shipped list ("not in the topic's list" otherwise) and how many are among the
+  top terms shown and among the shipped terms; collapsed after 10. Without a marks
+  block the page shows nothing of this.
   Deployment as a gh-pages subdirectory is a later step.

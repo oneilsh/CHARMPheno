@@ -5,7 +5,11 @@ no patient data, no real model.
 A run dir is written as the fit driver writes one (`dag_gated_fit.py`): `model/result`
 (`spark_vi.io.export.save_result`, the node set in its metadata), `label_dag.json`,
 `bundle_meta.json`, `manifest.json`, `node_statistics.tsv` (the model AS FITTED, before
-the drop), plus a Mondo-style `mondo_nodes.tsv` in a cache dir and a concept-names CSV.
+the drop), plus a Mondo-style `mondo_nodes.tsv` in a cache dir and a concept-names CSV,
+and the two marks tables: `code_map.tsv` (each kept node's own codes, as
+`dag_gated_fit.write_code_map` writes it) and `profile_marks.tsv` (+ its `.json`
+sidecar; HPO-profile concepts with NOT-annotated and contested rows, as
+`hpo_profile_marks.py` and `make profile-marks` write them).
 
   # regenerate the committed fixture (deterministic, byte-identical)
   PYTHONPATH=.:spark-vi:charmpheno python analysis/cloud/tests/dag_export_synth.py \
@@ -189,6 +193,76 @@ def _drop_topics(lam, ns_before, ns_after, n_bg, tpn):
     return {m: a[idx] for m, a in lam.items()}
 
 
+OUT_OF_VOCAB_BASE = 3990000          # condition codes outside the synthetic vocabulary
+HPO_RELEASE = "v2026-06-23"
+
+
+def write_marks(run, *, dag, ns, lam, n_bg, tpn, vocab_codes, seed):
+    """`code_map.tsv` and `profile_marks.tsv` (+ `profile_marks.json`) for a synthetic
+    run. Own codes land on KEPT nodes only (as `landed_code_map`): a few of the node's
+    top condition terms by λ, a few (for some nodes a dozen) from deep in its row
+    (outside its shipped list, mostly), and a few codes outside the vocabulary. Profiles: about half of all given
+    nodes, kept or not, the same mix plus a NOT-annotated row, a contested concept
+    (listed positive and NOT) and rows for a node outside the label DAG. Its own rng,
+    so the model and the rest of the run do not move."""
+    rng = np.random.default_rng(seed)
+    cond = np.asarray(lam[0])
+    codes0 = vocab_codes[0]
+    V = len(codes0)
+
+    def cid(n):
+        return int(str(n).split(":")[1])
+
+    def topic_terms(u):
+        t = n_bg + (ns.engine_id[u] - 1) * tpn
+        return [int(i) for i in np.argsort(-cond[t], kind="stable")]
+
+    own_rows, prof_rows = set(), set()
+    for u in sorted(ns.nodes):
+        if rng.random() < 0.15:
+            continue                                        # a kept node with no codes
+        order = topic_terms(u)
+        pick = order[:int(rng.integers(1, 4))]
+        n_deep = 12 if rng.random() < 0.12 else 2           # some nodes own many codes
+        pick += [order[int(j)] for j in rng.integers(min(250, V - 1), V, size=n_deep)]
+        for li in pick:
+            own_rows.add((codes0[li], cid(u)))
+        for j in range(int(rng.integers(0, 3))):
+            own_rows.add((OUT_OF_VOCAB_BASE + 13 * int(rng.integers(0, 5000)), cid(u)))
+    for n in sorted(dag):
+        if rng.random() < 0.45:
+            continue
+        mid = str(n)
+        pos = set()
+        if n in ns.engine_id:
+            order = topic_terms(n)
+            pos.update(order[int(j)] for j in rng.choice(12, size=3, replace=False))
+            neg_li = order[int(rng.integers(12, 40))]
+            prof_rows.add((mid, codes0[neg_li], 1))         # a NOT-annotated term
+            contested = order[0]
+            prof_rows.add((mid, codes0[contested], 0))      # contested: listed both ways
+            prof_rows.add((mid, codes0[contested], 1))
+        pos.update(int(x) for x in rng.integers(0, V, size=int(rng.integers(2, 7))))
+        for li in pos:
+            if (mid, codes0[li], 1) not in prof_rows:
+                prof_rows.add((mid, codes0[li], 0))
+        for j in range(int(rng.integers(0, 3))):
+            prof_rows.add((mid, OUT_OF_VOCAB_BASE + 11 * int(rng.integers(0, 5000)), 0))
+    prof_rows.add(("MONDO:0000000", codes0[0], 0))           # a node outside the DAG
+    run = Path(run)
+    with open(run / "code_map.tsv", "w") as fh:
+        fh.write("std_cid\tnode_cid\n")
+        for a, b in sorted(own_rows):
+            fh.write(f"{int(a)}\t{int(b)}\n")
+    with open(run / "profile_marks.tsv", "w") as fh:
+        fh.write("mondo_id\tconcept_id\tneg\n")
+        for mid, c, ng in sorted(prof_rows):
+            fh.write(f"{mid}\t{int(c)}\t{int(ng)}\n")
+    (run / "profile_marks.json").write_text(json.dumps(
+        {"hpo_release": HPO_RELEASE, "mondo_version": MONDO_VERSION,
+         "branch": "MONDO:0000001"}))
+
+
 def write_run(run, *, dag, ns_fitted, ns, lam, n_bg, tpn, vocab_codes, node_names,
               term_names, mondo_cache, domains=DOMAINS, cdr="synthetic-project.synthetic_cdr"):
     """A run dir as the fit driver writes it (the pieces the exporter reads)."""
@@ -250,6 +324,8 @@ def write_run(run, *, dag, ns_fitted, ns, lam, n_bg, tpn, vocab_codes, node_name
         w.writerow(["concept_id", "concept_name"])
         for cs, ns_ in zip(vocab_codes, term_names):
             w.writerows(zip(cs, ns_))
+    write_marks(run, dag=dag, ns=ns, lam=lam, n_bg=n_bg, tpn=tpn,
+                vocab_codes=vocab_codes, seed=K + 7)
     return run
 
 
@@ -328,14 +404,15 @@ def scale_run(root, *, n_bg=200, n_kept=2695, n_given=7000, sizes=(5000, 5000, 1
                      term_names=tnames, mondo_cache=root / "mondo")
 
 
-def export_run(run, out, *, created_utc=None):
-    """Run the driver's pipeline on a synthetic run dir (names from its files)."""
+def export_run(run, out, *, created_utc=None, extra=()):
+    """Run the driver's pipeline on a synthetic run dir (names from its files; the
+    marks from its code_map.tsv / profile_marks.tsv by the driver's defaults)."""
     import export_dag_gated as drv
     argv = ["--run-dir", str(run), "--out", str(out),
             "--names", str(Path(run) / "concept_names.csv")]
     if created_utc:
         argv += ["--created-utc", created_utc]
-    return drv.main(argv)
+    return drv.main(argv + list(extra))
 
 
 def main(argv=None):

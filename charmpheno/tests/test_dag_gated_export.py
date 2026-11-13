@@ -207,3 +207,85 @@ def test_npmi_ships_only_at_or_above_the_egress_floor(capsys):
         assert ("npmi" in f["topics.json"]) is shipped
         assert ("npmi" in f["manifest.json"]) is shipped
     assert "NPMI dropped" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- marks
+
+def test_positive_profile_sets_drops_not_annotated_and_contested():
+    rows = [("MONDO:1", 10, False), ("MONDO:1", 11, False), ("MONDO:1", 12, True),
+            ("MONDO:1", 11, True),                       # 11 contested: listed both ways
+            ("MONDO:2", 20, True),                       # only a NOT term: no profile
+            ("MONDO:3", 30, False), ("MONDO:3", 30, False)]
+    prof, st = dg.positive_profile_sets(rows)
+    assert prof == {"MONDO:1": {10}, "MONDO:3": {30}}
+    assert st == {"n_rows": 7, "n_neg_rows": 3, "n_contested": 1}
+
+
+def test_marks_local_keeps_only_vocabulary_concepts():
+    vm = {"1000": 0, "1001": 1, "1005": 2}
+    idx, cnt = dg.marks_local({"a": {1005, 1000, 9999}, "b": {9999}, "c": {"1001"}}, vm)
+    assert idx == {"a": [0, 2], "c": [1]} and cnt == {"a": 2, "c": 1}
+
+
+def test_build_with_marks_ships_indices_counts_and_extra_terms():
+    dag, ns, n_bg, lam, vm = _small()
+    kw = dict(n_bg=n_bg, tpn=1, given_dag=dag, domains=["a", "b"], vocab_maps=vm,
+              top_beta=3, top_lift=2, lift_pool=10, created_utc="t",
+              term_names={1000 + i: f"term {i}" for i in range(40)})
+    plain = dg.build_export(lam, ns, **kw)
+    # own codes on the kept nodes (with a code outside the vocabulary), a profile on
+    # every node (kept or not)
+    own = {u: {1000 + 3 * i, 1039, 555555} for i, u in enumerate(sorted(ns.nodes))}
+    prof = {u: {1001, 1038, 777777} for u in ["x", "y", "z", "w", "v"]}
+    f = dg.build_export(lam, ns, own_codes=own, profile=prof,
+                        marks_meta={"profile": {"source": "pm.tsv", "hpo_release": "v1"}},
+                        **kw)
+    nodes, vocab, man = f["nodes.json"], f["vocab.json"], f["manifest.json"]
+    assert "marks" not in plain["manifest.json"] and "own" not in plain["nodes.json"]
+    # the topics are untouched by the marks (same terms, same weights; a later domain's
+    # vocab indices shift by the added terms); the vocab grows at the domain's end only
+    def coded(files):
+        v = files["vocab.json"]
+        return [[([(v["domain"][j], v["code"][j]) for j in dg.delta_decode(ids)], w)
+                 for ids, w in per] for per in files["topics.json"]["d"]]
+    assert coded(f) == coded(plain)
+    assert [per[0] for per in f["topics.json"]["d"]] == \
+        [per[0] for per in plain["topics.json"]["d"]]          # domain 0: byte-identical
+    n0 = man["domains"][0]["shipped_terms"]
+    assert n0 == plain["manifest.json"]["domains"][0]["shipped_terms"]
+    extra = man["domains"][0]["mark_terms"]
+    assert extra > 0 and "mark_terms" not in man["domains"][1]
+    assert vocab["code"][:n0] == plain["vocab.json"]["code"][:n0]
+    assert vocab["domain"].count(0) == n0 + extra
+    added = vocab["code"][n0:n0 + extra]
+    assert all(vocab["name"][n0 + j] == f"term {c - 1000}" for j, c in enumerate(added))
+    used = set()
+    for per in f["topics.json"]["d"]:
+        used.update(dg.delta_decode(per[0][0]))
+    assert not used & set(range(n0, n0 + extra))
+    # indices, counts, nulls
+    code_of = vocab["code"]
+    for i, u in enumerate(nodes["id"]):
+        want_own = sorted(c for c in own.get(u, ()) if str(c) in vm[0])
+        got = nodes["own"][i]
+        assert (sorted(code_of[j] for j in got) if got else []) == want_own
+        assert (got is None) == (not want_own)
+        assert nodes["own_n"][i] == len(want_own)
+        assert all(vocab["domain"][j] == 0 for j in got or [])
+        want_prof = sorted(c for c in prof.get(u, ()) if str(c) in vm[0])
+        assert nodes["profile_n"][i] == len(want_prof)
+        if nodes["status"][i] == 0:
+            assert sorted(code_of[j] for j in nodes["profile"][i]) == want_prof
+        else:
+            assert nodes["profile"][i] is None              # listed for topic nodes only
+    assert any(s != 0 and n for s, n in zip(nodes["status"], nodes["profile_n"]))
+    assert man["marks"] == {
+        "domain": 0,
+        "own": {"source": "code_map.tsv",
+                "nodes": sum(1 for x in nodes["own"] if x is not None)},
+        "profile": {"source": "pm.tsv", "hpo_release": "v1",
+                    "nodes": sum(1 for x in nodes["profile"] if x is not None)}}
+    # one block alone
+    g = dg.build_export(lam, ns, profile=prof, **kw)
+    assert "own" not in g["nodes.json"] and "profile" in g["nodes.json"]
+    assert set(g["manifest.json"]["marks"]) == {"domain", "profile"}

@@ -31,6 +31,11 @@ checked, not assumed: `build_export` refuses a node set with `min_docs_per_node`
 the floor and drops an NPMI result whose `min_pair_count` is below it
 (`npmi_exportable`); the driver refuses a vocabulary floored below it.
 
+Marks (optional, `positive_profile_sets` / `marks_local`): a node's OWN codes (the
+code ladder landed on the fitted node set) and its POSITIVE HPO-profile concepts, as
+indices into vocab.json in the condition domain, so the browser can badge a topic's
+terms. Ontology / code-ladder mappings only: no count beyond counts of concepts.
+
 Node topics: topic k < n_bg is background; the node with engine id e owns topics
 n_bg + (e - 1) * tpn .. n_bg + e * tpn - 1 (`DagLayout`'s block order). With tpn > 1
 every topic of a block is exported (`topics.node` names its node for each) and
@@ -320,11 +325,50 @@ def npmi_exportable(npmi: dict):
     return True, ""
 
 
+def positive_profile_sets(rows) -> tuple:
+    """`({node: {concept id}}, stats)`: each node's POSITIVE HPO-profile concepts from
+    profile-mark rows `(mondo_id, concept_id, neg)` (`hpo_profile_marks.py`'s table).
+
+    The rule is `profile_eta.build_profile_seed`'s: a NOT-annotated (`neg`) phenotype
+    is not what the node's topic should look like, so it never marks; a concept listed
+    both ways for the same node is contested and dropped. `stats` counts rows and
+    concepts only (`n_rows`, `n_neg_rows`, `n_contested`)."""
+    pos, neg = {}, {}
+    n_rows = n_neg = 0
+    for mid, cid, ng in rows:
+        n_rows += 1
+        if ng:
+            n_neg += 1
+        (neg if ng else pos).setdefault(mid, set()).add(int(cid))
+    out, n_contested = {}, 0
+    for mid, s in pos.items():
+        bad = s & neg.get(mid, set())
+        n_contested += len(bad)
+        if s - bad:
+            out[mid] = s - bad
+    return out, {"n_rows": n_rows, "n_neg_rows": n_neg, "n_contested": n_contested}
+
+
+def marks_local(by_node, vocab_map) -> tuple:
+    """`({node: sorted local term indices}, {node: count})` of a marks map
+    (`{node: {concept code}}`) against one domain's vocab map (`{code: local index}`):
+    only concepts in the model's vocabulary have an index; the count is of those. A
+    node whose concepts are all outside the vocabulary is absent from both."""
+    code2local = {_code(c): int(i) for c, i in vocab_map.items()}
+    idx = {}
+    for n, codes in by_node.items():
+        loc = sorted({code2local[_code(c)] for c in codes if _code(c) in code2local})
+        if loc:
+            idx[n] = loc
+    return idx, {n: len(v) for n, v in idx.items()}
+
+
 def build_export(lam, ns, *, n_bg, tpn, given_dag, domains, vocab_maps,
                  node_names=None, term_names=None, extra_support=None,
                  run="", mondo_version="", cdr="", created_utc=None,
                  top_beta=25, top_lift=25, lift_pool=200, notes=None,
-                 npmi=None) -> dict:
+                 npmi=None, own_codes=None, profile=None, marks_meta=None,
+                 marks_domain=0) -> dict:
     """The four files of `dag-gated-export/1` as JSON-ready objects
     (`{file name: object}`; `manifest["sizes"]` is filled by `write_export`).
 
@@ -336,6 +380,17 @@ def build_export(lam, ns, *, n_bg, tpn, given_dag, domains, vocab_maps,
     ints where they are ints). `extra_support`: `{node: support}` for nodes the node
     set holds no support for (the unsupported ones, as fitted). `npmi`: a topic-NPMI
     result (`npmi_block`); dropped, with the reason printed, unless `npmi_exportable`.
+
+    Marks (optional; the spec's "Marks" section): `own_codes` is `{node id: {concept
+    id}}`, each node's OWN codes (the code ladder landed on the fitted node set, the
+    fit's `code_map.tsv`); `profile` is `{node id: {concept id}}`, each node's POSITIVE
+    HPO-profile concepts (`positive_profile_sets`). Both are read against the vocab of
+    domain `marks_domain` (the condition domain): `nodes.json` gains `own` / `profile`
+    (vocab.json indices, null when none; `profile` for nodes with a topic only) and
+    `own_n` / `profile_n` (how many of the node's concepts are in the model's
+    vocabulary, every node). A marked term that no topic list ships is added to
+    vocab.json (after the domain's shipped terms) so the page can name it. `marks_meta`
+    is `{"own": {"source"}, "profile": {"source", "hpo_release"}}` for the manifest.
 
     Disclosure: refuses (ValueError) a node set fitted with `min_docs_per_node` below
     the egress floor, since a kept node's banded support and its topic then rest on
@@ -455,6 +510,27 @@ def build_export(lam, ns, *, n_bg, tpn, given_dag, domains, vocab_maps,
 
     # ---- vocab: only shipped terms; index order (domain, times shipped desc, local
     # index) so the terms most topics ship get the smallest ids and the shortest gaps.
+    # ---- marks (optional): the marked nodes' terms in the marks domain -----------
+    has_marks = own_codes is not None or profile is not None
+    md = int(marks_domain)
+    if has_marks and not 0 <= md < M:
+        raise ValueError(f"marks_domain={md} is not one of the {M} domains")
+    own_loc, own_cnt = (marks_local(own_codes, vocab_maps[md]) if own_codes is not None
+                        else ({}, {}))
+    prof_loc, prof_cnt = (marks_local(profile, vocab_maps[md]) if profile is not None
+                          else ({}, {}))
+    # Profile LISTS ship for nodes with a topic only: a profile marks a topic's terms,
+    # and the profiles of the whole label DAG would outweigh the topics. Counts ship
+    # for every node.
+    prof_loc = {n: v for n, v in prof_loc.items() if status.get(n) == STATUS_TOPIC}
+    own_loc = {n: v for n, v in own_loc.items() if n in idx}
+    own_cnt = {n: v for n, v in own_cnt.items() if n in idx}
+    prof_cnt = {n: v for n, v in prof_cnt.items() if n in idx}
+    marked_local = set()
+    for d in (own_loc, prof_loc):
+        for v in d.values():
+            marked_local.update(v)
+
     vocab = {"domain": [], "code": [], "name": [], "freq": []}
     gidx = []          # per domain: local index -> global vocab index
     freq_codec, weight_codec, domain_meta = [], [], []
@@ -466,6 +542,13 @@ def build_export(lam, ns, *, n_bg, tpn, given_dag, domains, vocab_maps,
                              np.zeros(0, np.int64), minlength=len(vm))
         shipped = np.flatnonzero(counts)
         shipped = shipped[np.lexsort((shipped, -counts[shipped]))]
+        n_topic_terms = int(shipped.size)
+        if has_marks and m == md:
+            # marked terms that no topic list ships: appended after the shipped ones
+            # in local-index order, so the topics' delta-coded ids do not move
+            extra = np.asarray(sorted(marked_local - set(shipped.tolist())),
+                               dtype=np.int64)
+            shipped = np.concatenate([shipped, extra])
         g = np.full(len(vm), -1, dtype=np.int64)
         base = len(vocab["domain"])
         g[shipped] = base + np.arange(shipped.size)
@@ -483,7 +566,35 @@ def build_export(lam, ns, *, n_bg, tpn, given_dag, domains, vocab_maps,
             if K else np.zeros(0)
         wlo, whi = log_byte_range(w_all)
         weight_codec.append({"lo": wlo, "hi": whi})
-        domain_meta.append({"name": str(domains[m]), "shipped_terms": int(shipped.size)})
+        dmeta = {"name": str(domains[m]), "shipped_terms": n_topic_terms}
+        if has_marks and m == md:
+            dmeta["mark_terms"] = int(shipped.size) - n_topic_terms
+        domain_meta.append(dmeta)
+
+    marks_manifest = None
+    if has_marks:
+        gm = gidx[md]
+
+        def _glist(loc):
+            return sorted(int(gm[li]) for li in loc)
+        marks_manifest = {"domain": md}
+        meta = marks_meta or {}
+        if own_codes is not None:
+            nodes["own"] = [_glist(own_loc[n]) if n in own_loc else None for n in order]
+            nodes["own_n"] = [int(own_cnt.get(n, 0)) for n in order]
+            marks_manifest["own"] = {
+                "source": str((meta.get("own") or {}).get("source", "code_map.tsv")),
+                "nodes": sum(1 for x in nodes["own"] if x is not None)}
+        if profile is not None:
+            nodes["profile"] = [_glist(prof_loc[n]) if n in prof_loc else None
+                                for n in order]
+            nodes["profile_n"] = [int(prof_cnt.get(n, 0)) for n in order]
+            pm = meta.get("profile") or {}
+            marks_manifest["profile"] = {
+                "source": str(pm.get("source", "profile_marks.tsv")),
+                **({"hpo_release": str(pm["hpo_release"])} if pm.get("hpo_release")
+                   else {}),
+                "nodes": sum(1 for x in nodes["profile"] if x is not None)}
 
     # ---- topics -----------------------------------------------------------------
     d_all = []
@@ -519,6 +630,7 @@ def build_export(lam, ns, *, n_bg, tpn, given_dag, domains, vocab_maps,
                        "21-40 -> 30, ...)"},
         "min_docs_per_node": int(ns.min_docs_per_node),
         **({"npmi": npmi_meta} if npmi_meta else {}),
+        **({"marks": marks_manifest} if marks_manifest else {}),
         "sizes": {},
         "notes": notes if notes is not None else default_notes(),
     }

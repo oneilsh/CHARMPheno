@@ -61,6 +61,15 @@ reviewed for release.
   the parent's list gets the parent's smallest shipped weight, so this is approximate).
   For a node without a topic: why (pruned, spliced, unsupported) and links to the nodes
   its labels land on (or to the background topics).
+- **Own codes and HPO profile** (when the export carries a `marks` block): in the
+  condition column, an `own` badge on a term that is one of the node's own codes (the
+  code ladder puts it on this node) and an `HPO` badge on one in its HPO phenotype
+  profile (positive annotations only); a legend line above the columns and the hover
+  tooltip say which. Below the columns, the node's own codes and profile concepts with
+  their β rank in the topic's shipped list (or "not in the topic's list"), and how many
+  are among the top 15 shown and among the shipped terms; long lists collapse after 10.
+  The export picks up `<run>/code_map.tsv` (written by the fit) and
+  `<run>/profile_marks.tsv` (written by `make -C analysis/cloud profile-marks ID=N`).
 - **Background topics:** the shared background topics in the same three-column form.
 
 ## Synthetic sample
