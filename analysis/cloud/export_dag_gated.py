@@ -281,6 +281,10 @@ def main(argv=None):
     elif names_path is None and (run / "concept_names.csv").exists():
         names_path = str(run / "concept_names.csv")
     term_names = load_term_names(names_path) if names_path else {}
+    if not term_names:
+        print("[export-dag-gated] WARNING: no term names: the page will show term CODES "
+              "only. Re-run with RESOLVE_NAMES=1 (make) / --resolve-names, or pass "
+              "--names <csv>.", flush=True)
     print(f"[export-dag-gated] term names: {len(term_names)} from "
           f"{names_path or '(none: vocab.name stays empty)'}", flush=True)
 

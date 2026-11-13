@@ -19,6 +19,6 @@ echo "### npmi 174 (pair minimum 20: exportable)"
 make -C analysis/cloud dag-gated-readout ID=174 DGR_SPARK_CONF=spark.eventLog.enabled=false DGR_ARGS="--npmi --npmi-top 10 --npmi-domains 0,2 --npmi-min-pair-count 20 --acq-tag top10" || echo "WARN: npmi failed"
 grep -h -E "median NPMI" "$R"/npmi_top10.md 2>/dev/null | head -6
 echo "### export (dag_export/ + dag_view.html)"
-make -C analysis/cloud export-dag-gated ID=174 || echo "WARN: export failed"
+make -C analysis/cloud export-dag-gated ID=174 RESOLVE_NAMES=1 || echo "WARN: export failed"
 ls -la "$R"/dag_view.html 2>/dev/null
 echo "### DONE 174"

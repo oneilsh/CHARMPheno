@@ -553,12 +553,14 @@ function rankedTerms(k,d,lambda,n){
   out.sort((a,b)=>b.rel-a.rel || b.pwk-a.pwk);
   return out.slice(0,n);
 }
-const termTitle=r=>`${VOCAB.name[r.w]}\ncode ${VOCAB.code[r.w]}\nβ (share of the topic in this domain) ${(r.pwk*100).toFixed(2)}%\np (marginal in this domain) ${(r.pw*100).toFixed(3)}%\nlift β/p ${(r.pwk/r.pw).toFixed(1)}`;
+// A term's display name; an export made without names (no RESOLVE_NAMES) shows the code.
+const termName=w=>{const nm=VOCAB.name[w]; return nm?String(nm):`code ${VOCAB.code[w]}`;};
+const termTitle=r=>`${termName(r.w)}\ncode ${VOCAB.code[r.w]}\nβ (share of the topic in this domain) ${(r.pwk*100).toFixed(2)}%\np (marginal in this domain) ${(r.pw*100).toFixed(3)}%\nlift β/p ${(r.pwk/r.pw).toFixed(1)}`;
 function termColsHTML(k){
   const cols=DOMAINS.map((dn,d)=>{
     const t=TOPICS[k].dom[d], rows=rankedTerms(k,d,state.lambda,TOP_N);
     const maxB=t&&t.beta.length?Math.max(...t.beta):1;
-    const lis=rows.map((r,i)=>`<li title="${esc(termTitle(r))}"><span class="rk">${i+1}</span><span class="nm">${esc(VOCAB.name[r.w])}</span>`+
+    const lis=rows.map((r,i)=>`<li title="${esc(termTitle(r))}"><span class="rk">${i+1}</span><span class="nm">${esc(termName(r.w))}</span>`+
       `<span class="num">${(r.pwk*100).toFixed(r.pwk>=0.1?1:2)}%</span><span></span><span class="spark"><i style="width:${(100*r.pwk/maxB).toFixed(1)}%"></i></span></li>`).join("");
     return `<div class="dcol"><h4><span>${esc(dn)}</span><small>${t?t.ids.length:0} shipped</small></h4><ol class="terms">${lis||'<li><span></span><span class="nm" style="color:var(--muted)">none</span></li>'}</ol></div>`;
   });
@@ -602,8 +604,8 @@ function diffHTML(n){
     const p=NODES[j], k=n.topic, pk=p.topic;
     const cols=DOMAINS.map((dn,d)=>{
       const rows=diffTerms(k,pk,d), maxR=rows.length?rows[0].ratio:1;
-      const lis=rows.map((r,i)=>`<li title="${esc(VOCAB.name[r.w])}\nβ here ${(r.pwk*100).toFixed(2)}% · in parent ${r.absent?"≤ ":""}${(r.pb*100).toFixed(3)}%${r.absent?" (not in the parent's list)":""}">`+
-        `<span class="rk">${i+1}</span><span class="nm">${esc(VOCAB.name[r.w])}${r.absent?'<span class="new" title="not in the parent\'s shipped list">new</span>':""}</span>`+
+      const lis=rows.map((r,i)=>`<li title="${esc(termName(r.w))}\nβ here ${(r.pwk*100).toFixed(2)}% · in parent ${r.absent?"≤ ":""}${(r.pb*100).toFixed(3)}%${r.absent?" (not in the parent's list)":""}">`+
+        `<span class="rk">${i+1}</span><span class="nm">${esc(termName(r.w))}${r.absent?'<span class="new" title="not in the parent\'s shipped list">new</span>':""}</span>`+
         `<span class="num">${r.absent?"≥":""}×${r.ratio>=10?r.ratio.toFixed(0):r.ratio.toFixed(1)}</span><span></span>`+
         `<span class="spark"><i style="width:${(100*Math.log1p(r.ratio)/Math.log1p(maxR)).toFixed(1)}%;background:var(--desc)"></i></span></li>`).join("");
       return `<div class="dcol"><h4><span>${esc(dn)}</span><small>β / β parent</small></h4><ol class="terms">${lis||'<li><span></span><span class="nm" style="color:var(--muted)">none</span></li>'}</ol></div>`;
