@@ -240,13 +240,26 @@ def read_params_metadata(uri: str, expected_class: str = "") -> dict:
     return DefaultParamsReader._parseMetaData(line, expected_class)
 
 
+def refuse_existing_path(path: str, uri: str) -> None:
+    """MLlib's rule for ``write().save(path)``: refuse a path that exists. Called from
+    ``saveImpl``, which ``MLWriter.save`` reaches only after ``write().overwrite()``
+    has removed the path (``FileSystemOverwrite``), so an overwrite never trips it."""
+    from spark_vi.io import fs
+    if fs.exists(uri):
+        raise FileExistsError(f"Path {path} already exists. To overwrite it, use "
+                              f"write().overwrite().save(path)")
+
+
 class DriverParamsWriter(DefaultParamsWriter):
     """``DefaultParamsWriter`` whose metadata is written from the driver
-    (``write_params_metadata``), for stages whose whole state is their Params."""
+    (``write_params_metadata``), for stages whose whole state is their Params.
+    Refuses an existing path unless ``write().overwrite()`` (MLlib's rule)."""
 
     def saveImpl(self, path: str) -> None:
         from spark_vi.io import fs
-        write_params_metadata(self.instance, fs.qualify(path), self.sc)
+        uri = fs.qualify(path)
+        refuse_existing_path(path, uri)
+        write_params_metadata(self.instance, uri, self.sc)
 
 
 class DriverParamsReader(MLReader):
@@ -348,9 +361,8 @@ class _StageWriter(MLWriter):
             # Replace only this stage's files in a directory that may hold others:
             # the old metadata goes first, so a reader never pairs it with new data.
             fs.remove_tree(fs.join(uri, "metadata"))
-        elif fs.exists(uri):
-            raise FileExistsError(f"Path {path} already exists. To overwrite it, use "
-                                  f"write().overwrite().save(path)")
+        else:
+            refuse_existing_path(path, uri)
         self.instance._save_data(uri)
         # Metadata last: it is what a reader looks for (object-store atomicity).
         write_params_metadata(self.instance, uri, self.sc,

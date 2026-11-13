@@ -38,9 +38,13 @@ The fitted model answers in user ids (R5): ``dag()``, ``prunedNodes()``,
 the flat blocks is explicit: ``dropUnsupportedNodes()`` returns a new model without
 them (R14.2), reported in ``unsupportedNodes()``. The node set
 rides the VIResult's metadata (``dag_node_set``), so ``save`` / ``load`` (MLlib
-persistence: Params metadata + the VIResult, any Hadoop URI, ``Pipeline`` too) keep it, and
+persistence: Params metadata + the VIResult, ``Pipeline`` too) keep it, and
 ``resumeFrom`` refuses a checkpoint whose node set differs from the one learned from
-the data it is given.
+the data it is given. Where a save may go: single stages save / load on any path, a
+driver-local one included (their metadata is written and read on the driver);
+``Pipeline.save`` / ``PipelineModel.load`` use MLlib's own executor-side metadata I/O,
+so on a multi-node cluster a Pipeline needs a shared filesystem (HDFS, GCS), not a
+driver-local path.
 
 Defaults are MLlib LDA's where a Param has an analogue; ``RECOMMENDED_PARAMS`` /
 ``DagGatedLDAEstimator.recommended(...)`` is the documented working preset (see the
@@ -49,6 +53,7 @@ estimator's docstring).
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Callable
 
 import numpy as np
@@ -231,7 +236,9 @@ class _DagGatedLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
     seed = Param(
         Params._dummy(), "seed",
         "random seed for the initialization and the mini-batch sampling. Default "
-        "unset: nondeterministic (only an explicitly set seed reaches the fit).",
+        "unset: an UNSET seed makes the fit nondeterministic. getSeed() on an unset "
+        "seed reports pyspark's class-hash default, which the fit ignores: only an "
+        "explicitly set seed reaches it.",
         typeConverter=TypeConverters.toInt,
     )
     topicDistributionCol = Param(
@@ -482,6 +489,10 @@ class _DagGatedLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
             return self._set(nodeTerms="")
         if isinstance(node_terms, str):
             node_terms = {_coerce_id(n): ts for n, ts in json.loads(node_terms)}
+        for n, ts in node_terms.items():
+            if isinstance(ts, (str, bytes)):
+                raise TypeError(f"nodeTerms[{n!r}] is a bare string {ts!r}; give a list "
+                                f"of terms (e.g. [{ts!r}]), not one string")
         enc = []
         for n in sorted((_coerce_id(n) for n in node_terms), key=node_sort_key):
             refs = {_term_ref(t) for t in node_terms[n]}
@@ -505,6 +516,10 @@ class _DagGatedLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         if isinstance(profile, str):
             profile = {_coerce_id(n): {_term_ref(t): w for t, w in tw}
                        for n, tw in json.loads(profile)}
+        for n, tw in profile.items():
+            if not isinstance(tw, Mapping):
+                raise TypeError(f"gateSeedProfile[{n!r}] is a {type(tw).__name__} "
+                                f"({tw!r}); give a {{term: weight}} mapping")
         enc = []
         for n in sorted((_coerce_id(n) for n in profile), key=node_sort_key):
             tw = {}
@@ -615,6 +630,8 @@ RECOMMENDED_PARAMS = dict(
 # Params whose setter encodes structured input; routed through it from kwargs.
 _STRUCTURED = {"dag": "setDag", "vocabularies": "setVocabularies",
                "nodeTerms": "setNodeTerms", "gateSeedProfile": "setGateSeedProfile"}
+# A keyword whose Param has another name (the DAG is stored as `dagEdges`).
+_PARAM_OF = {"dag": "dagEdges"}
 
 
 def _doc_alpha(doc_conc, K: int) -> np.ndarray:
@@ -739,11 +756,15 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator, DriverParamsWritable):
     def recommended(cls, **overrides) -> "DagGatedLDAEstimator":
         """An estimator with the recommended preset (``RECOMMENDED_PARAMS``) set, then
         ``overrides`` on top (any constructor keyword: ``dag``, ``labelsCol``,
-        ``minDocsPerNode``, ``seed``, a preset value to change, ...)."""
+        ``minDocsPerNode``, ``seed``, a preset value to change, ...). An override of
+        None CLEARS that Param, so its default / unset meaning returns (e.g.
+        ``docConcentration=None``: 1/K)."""
         kw = {k: (list(v) if isinstance(v, list) else v)
               for k, v in RECOMMENDED_PARAMS.items()}
         kw.update(overrides)
-        return cls(**kw)
+        est = cls(**{k: v for k, v in kw.items() if v is not None})
+        cleared = [k for k, v in overrides.items() if v is None]
+        return est.setParams(**{k: None for k in cleared}) if cleared else est
 
     @keyword_only
     def __init__(
@@ -795,7 +816,11 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator, DriverParamsWritable):
 
     @keyword_only
     def setParams(self, **kwargs) -> "DagGatedLDAEstimator":
-        # An explicit None leaves a Param unset (its default / isSet semantics).
+        """Set Params by keyword. An explicit None CLEARS that Param (``clear``), so it
+        is unset again and its default / unset meaning applies (on a fresh instance:
+        stays unset)."""
+        for k in [k for k, v in kwargs.items() if v is None]:
+            self.clear(self.getParam(_PARAM_OF.get(k, k)))
         kwargs = {k: v for k, v in kwargs.items() if v is not None}
         structured = {k: kwargs.pop(k) for k in list(kwargs) if k in _STRUCTURED}
         self._set(**kwargs)
@@ -1158,7 +1183,10 @@ class DagGatedLDAModel(_DagGatedLDAParams, _StagePersistence, Model):
     whose blocks are flat (spec R14).
 
     Persistence (MLlib's, spec R13): ``save`` / ``write().overwrite().save`` /
-    ``load`` and inside a ``PipelineModel``, on any Hadoop-filesystem URI. Layout::
+    ``load`` and inside a ``PipelineModel``. The stage alone saves / loads on any
+    Hadoop-filesystem URI or local path (its metadata goes through the driver); a
+    ``Pipeline`` / ``PipelineModel`` save uses MLlib's executor-side metadata I/O and
+    needs a shared filesystem (HDFS, GCS) on a multi-node cluster. Layout::
 
         <path>/metadata/   Params (DefaultParamsWriter), written last
         <path>/result/     the VIResult, in the fit checkpoints' format
@@ -1456,10 +1484,16 @@ class DagGatedLDAModel(_DagGatedLDAParams, _StagePersistence, Model):
         if len(vocabs) != len(fcols):
             raise ValueError(f"vocabularies has {len(vocabs)} list(s) for "
                              f"{len(fcols)} feature column(s) {fcols}")
-        if sum(len(v) for v in vocabs) != self.vocabSize():
-            raise ValueError(f"the vocabularies hold {sum(len(v) for v in vocabs)} "
-                             f"terms but the model's vocabulary size is "
-                             f"{self.vocabSize()}")
+        lam = self._result.global_params["lambda"]
+        widths = ([int(lam[k].shape[1]) for k in sorted(lam)] if isinstance(lam, dict)
+                  else [int(lam.shape[1])])
+        if len(widths) != len(vocabs):
+            raise ValueError(f"vocabularies has {len(vocabs)} list(s) but the model "
+                             f"has {len(widths)} domain(s)")
+        for m, (c, v, w) in enumerate(zip(fcols, vocabs, widths)):
+            if len(v) != w:
+                raise ValueError(f"vocabulary {m} ({c!r}) holds {len(v)} terms but the "
+                                 f"model's domain {m} has width {w}")
         multi = len(fcols) > 1
         return [f"{c}:{t}" if multi else str(t)
                 for c, v in zip(fcols, vocabs) for t in v]

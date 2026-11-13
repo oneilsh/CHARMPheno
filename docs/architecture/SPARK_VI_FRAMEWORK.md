@@ -538,6 +538,12 @@ unification rationale.
   `metadata`, `param_names`
 - `params/*.npy` — one file per entry in `global_params`
 
+On a non-local URI (`hdfs://`, `gs://`) each save writes the arrays into a fresh
+`params_<n_iterations>_<random>/` directory, then the manifest naming it (`params_dir`),
+then removes the superseded directory: overwriting in place could leave a manifest over
+mixed iterations after a crash, and HDFS truncates a file it overwrites (code review B1,
+2026-11-13). A local save stages every file and commits by rename, manifest last.
+
 Human-inspectable, no pickle. No patient data — only population-level distributional
 parameters. The `format_version` field provides a migration handle: `load_result` raises
 `ValueError` for unknown versions.
@@ -557,7 +563,12 @@ NumPy arrays directly without Spark.
 stages (`DagGatedFeaturizer[Model]`, `DagGatedLDAEstimator` / `DagGatedLDAModel`,
 `DagHeadsEstimator` / `DagHeadsModel`) are `MLWritable` / `MLReadable`, so
 `Pipeline([...]).fit(df).save(uri)` and `PipelineModel.load(uri)` work as for a built-in
-stage, on any Hadoop-filesystem URI. Each stage's directory holds MLlib's standard Params
+stage. Where a save may go: a single stage saves / loads on any path, a driver-local
+one included, because its Params metadata is written and read from the driver
+(`write_params_metadata`); `Pipeline.save` / `PipelineModel.load` are MLlib's own and
+write / read the pipeline's metadata with a Spark job, on the executors, so on a
+multi-node cluster a pipeline needs a shared filesystem (HDFS, GCS), not a driver-local
+path (code review C2, 2026-11-13). Each stage's directory holds MLlib's standard Params
 metadata (`metadata/`, `DefaultParamsWriter`, written LAST so an object-store reader
 never finds it before the data it names) plus the stage's own data files, written through
 `spark_vi.io.fs` (the shared writer is `spark_vi.mllib._common._StagePersistence`; the
@@ -569,7 +580,7 @@ path is qualified once, MLlib's rule, so a bare path lands on `fs.defaultFS` for
 | `DagGatedLDAModel` | `result/`: the VIResult in the format above (the fit checkpoints' format; the node set rides its metadata) |
 | `DagHeadsModel` | `readout_heads_model.npz` (the heads), `node_set.json` |
 | `DagHeadsEstimator` | `topicModel/` (a `DagGatedLDAModel` directory) when one is held via `setTopicModel` |
-| `DagGatedFeaturizerModel` | `data/`: the vocabularies (parquet) |
+| `DagGatedFeaturizerModel` | `data/vocabularies.json`: the vocabularies |
 
 `save` refuses an existing path; `write().overwrite().save` replaces it. A fit checkpoint
 (`saveDir`) is a bare VIResult: `DagGatedLDAModel(load_result(dir))` wraps it.

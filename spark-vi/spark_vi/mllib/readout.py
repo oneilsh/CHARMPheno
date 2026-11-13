@@ -31,7 +31,11 @@ shims, on any Hadoop-filesystem URI (`spark_vi.io.fs`). Both stages are MLlib
 ``MLWritable`` / ``MLReadable`` (``save`` / ``write().overwrite().save`` / ``load``,
 and inside a ``Pipeline`` / ``PipelineModel``): Params metadata plus data files, the
 metadata written last. The model keeps the heads and the node set; the estimator
-keeps its Params and, when it holds one (``setTopicModel``), the topic model.
+keeps its Params and, when it holds one (``setTopicModel``), the topic model. Where a
+save may go: single stages save / load on any path, a driver-local one included (their
+metadata is written and read on the driver); ``Pipeline.save`` /
+``PipelineModel.load`` use MLlib's own executor-side metadata I/O, so on a multi-node
+cluster a Pipeline needs a shared filesystem (HDFS, GCS), not a driver-local path.
 """
 from __future__ import annotations
 

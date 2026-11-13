@@ -91,7 +91,7 @@ from pyspark.sql.types import (
 )
 
 from spark_vi.mllib._common import (DriverParamsWritable, read_params_metadata,
-                                     write_params_metadata)
+                                    refuse_existing_path, write_params_metadata)
 
 _TERMS_TMP = "__dgf_terms_{}"
 _DOC_TMP = "__dgf_doc"
@@ -472,7 +472,8 @@ class _FeaturizerModelWriter(MLWriter):
     """Params metadata (``<path>/metadata``) + vocabularies JSON (``<path>/data/
     vocabularies.json``), both written from the driver through ``spark_vi.io.fs``
     (any local path or Hadoop URI; a Spark write job would put a driver-local path on
-    the executors' disks). Metadata last."""
+    the executors' disks). Metadata last. Refuses an existing path unless
+    ``write().overwrite()`` (MLlib's rule)."""
 
     def __init__(self, instance: DagGatedFeaturizerModel):
         super().__init__()
@@ -481,6 +482,7 @@ class _FeaturizerModelWriter(MLWriter):
     def saveImpl(self, path: str) -> None:
         from spark_vi.io import fs
         uri = fs.qualify(path)
+        refuse_existing_path(path, uri)
         fs.write_text(fs.join(uri, "data", "vocabularies.json"),
                       json.dumps([list(v) for v in self.instance._vocabularies]))
         write_params_metadata(self.instance, uri, self.sc)

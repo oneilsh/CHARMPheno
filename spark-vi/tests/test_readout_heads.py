@@ -156,6 +156,9 @@ def test_readout_heads_write_read_round_trip_and_rejections(tmp_path, caplog):
     assert heads.read_heads(tmp_path, "gated_pc", C=C, K=K, theta_topm=64) is None
     assert heads.read_heads(tmp_path, "gated_pc", C=99, K=K, theta_topm=0) is None
     assert "IGNORED" in caplog.text
+    # the message names the file, not the mismatched dimension (code review C5)
+    assert "readout heads readout_heads_gated_pc.npz IGNORED: C=3 != manifest C=99" \
+        in caplog.text
     # K unknown in an old manifest (K=None) skips only that check; still loads.
     assert heads.read_heads(tmp_path, "gated_pc", C=C, K=None,
                                theta_topm=0) is not None

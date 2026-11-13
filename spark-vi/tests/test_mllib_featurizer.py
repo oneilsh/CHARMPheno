@@ -221,3 +221,19 @@ def test_save_load_round_trip(spark, tmp_path):
     pm.write().overwrite().save(f"file://{tmp_path}/pipe")
     pm2 = PipelineModel.load(f"file://{tmp_path}/pipe")
     assert pm2.stages[0].vocabularies() == pm.stages[0].vocabularies()
+
+
+def test_save_refuses_an_existing_path_unless_overwrite(spark, tmp_path):
+    """Code review C1: the driver-side writers follow MLlib's rule."""
+    docs = _docs(spark)
+    m = DagGatedFeaturizer(minTF=1.0).addArrayDomain("words", "words").fit(docs)
+    est = DagGatedFeaturizer(vocabSize=7).addArrayDomain("words", "words")
+    for name, stage in (("model", m), ("est", est)):
+        path = f"file://{tmp_path}/{name}"
+        stage.write().save(path)
+        with pytest.raises(FileExistsError, match="overwrite"):
+            stage.write().save(path)
+        stage.write().overwrite().save(path)
+    assert DagGatedFeaturizerModel.load(f"file://{tmp_path}/model").vocabularies() == \
+        m.vocabularies()
+    assert DagGatedFeaturizer.load(f"file://{tmp_path}/est").getVocabSize() == 7

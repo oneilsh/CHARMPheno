@@ -182,6 +182,14 @@ Two levels, built in this order (maintainer, 2026-10-30):
   `PipelineModel.load(uri)` work like any built-in stage's (today fitting the pipeline
   works but saving it does not: the models' `save(path)` is custom). Built once, on the
   redesigned estimators.
+- **Where a save may go (as built; corrected 2026-11-13, code review C2).** A single
+  stage's `save` / `load` writes and reads its Params metadata FROM THE DRIVER
+  (`spark_vi.mllib._common.write_params_metadata`), so it works on any path, a
+  driver-local one included. `Pipeline.save` / `PipelineModel.load` are MLlib's own:
+  they write and read the pipeline's own metadata with a Spark job (`saveAsTextFile` /
+  `textFile`), i.e. on EXECUTORS (the stages inside still use our driver-side writers),
+  so on a multi-node cluster a pipeline needs a shared filesystem (HDFS, GCS); a
+  driver-local path fails there.
 
 **R14. Node statistics, and dropping the nodes the data did not sustain** (addendum
 2026-11-10, maintainer; evidence: exps 0169 / 0171). A fit long enough to forget its

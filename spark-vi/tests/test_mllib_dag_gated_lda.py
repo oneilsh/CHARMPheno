@@ -716,6 +716,56 @@ def test_describe_nodes_terms_multi_domain(spark):
     assert {t.split(":", 1)[0] for r in rows for t in r.terms} == {"f0", "f1"}
 
 
+def test_describe_nodes_checks_each_domains_vocabulary_width(spark):
+    """Code review C4: vocabularies of the right TOTAL size but swapped per-domain
+    widths (5 + 8 for domains of width 8 + 5) are refused, not misnamed."""
+    model = _str_est(maxIter=1).fit(_str_dag_df(spark))
+    model.setVocabularies([[f"a{i}" for i in range(5)], [f"b{i}" for i in range(8)]])
+    with pytest.raises(ValueError, match=r"vocabulary 0 \('f0'\) holds 5 terms .* width 8"):
+        model.describeNodes(3)
+
+
+# --------------------------------------------------------------------------- #
+# Code review C3, C6, C7 (no Spark)                                            #
+# --------------------------------------------------------------------------- #
+
+def test_bare_string_term_lists_are_refused():
+    from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
+    with pytest.raises(TypeError, match=r"nodeTerms\[3\] is a bare string"):
+        DagGatedLDAEstimator().setNodeTerms({1: ["t1"], 3: "t1"})
+    with pytest.raises(TypeError, match=r"nodeTerms\['x'\]"):
+        DagGatedLDAEstimator(nodeTerms={"x": b"t1"})
+    with pytest.raises(TypeError, match=r"gateSeedProfile\[1\] is a str"):
+        DagGatedLDAEstimator().setGateSeedProfile({1: "t1"})
+    with pytest.raises(TypeError, match=r"gateSeedProfile\[2\] is a list"):
+        DagGatedLDAEstimator().setGateSeedProfile({2: ["t1"]})
+    est = DagGatedLDAEstimator().setNodeTerms({3: ["t1"]})
+    assert est.getNodeTerms() == {3: ["t1"]}
+
+
+def test_none_override_clears_a_param():
+    from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
+    est = DagGatedLDAEstimator.recommended(docConcentration=None, learningOffset=None,
+                                           dag=PARENT)
+    assert not est.isSet("docConcentration") and not est.hasDefault("docConcentration")
+    assert not est.isSet("learningOffset") and est.getLearningOffset() == 1024.0
+    assert est.isSet("gateNBg") and est.getGateNBg() == 200      # the rest kept
+    # setParams(x=None) on an instance clears too (dag via its stored Param)
+    est.setParams(seed=7)
+    assert est.isSet("seed")
+    est.setParams(seed=None, dag=None, gateNBg=None)
+    assert not est.isSet("seed") and not est.isSet("dagEdges") and est.getDag() == {}
+    assert est.getGateNBg() == 10
+
+
+def test_seed_help_says_unset_is_nondeterministic_and_getseed_is_ignored():
+    from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
+    est = DagGatedLDAEstimator()
+    doc = est.getParam("seed").doc
+    assert "nondeterministic" in doc and "getSeed()" in doc and "ignores" in doc
+    assert not est.isSet("seed") and isinstance(est.getSeed(), int)
+
+
 @pytest.mark.parametrize("gate_warm", [0, 1])
 def test_local_engine_matches_the_spark_engine_in_full_batch(spark, gate_warm):
     """engine='local' runs the same model, schedule and seeds in the driver's memory

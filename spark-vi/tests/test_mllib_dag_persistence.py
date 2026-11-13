@@ -66,6 +66,19 @@ def test_estimator_round_trip_keeps_mixed_id_params(spark, tmp_path):
     assert back.getDocConcentration() == [0.5] and not back.isSet("topicConcentration")
 
 
+def test_estimator_save_refuses_an_existing_path_unless_overwrite(spark, tmp_path):
+    """Code review C1: the driver-side Params writer follows MLlib's rule."""
+    from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
+    uri = _uri(tmp_path, "est")
+    DagGatedLDAEstimator(dag=TWIN, minDocsPerNode=7).write().save(uri)
+    est = DagGatedLDAEstimator(dag=TWIN, minDocsPerNode=9)
+    with pytest.raises(FileExistsError, match="overwrite"):
+        est.write().save(uri)
+    assert DagGatedLDAEstimator.load(uri).getMinDocsPerNode() == 7
+    est.write().overwrite().save(uri)
+    assert DagGatedLDAEstimator.load(uri).getMinDocsPerNode() == 9
+
+
 # --------------------------------------------------------------------------- #
 # DagGatedLDAModel: Params + the VIResult                                      #
 # --------------------------------------------------------------------------- #

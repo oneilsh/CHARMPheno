@@ -246,15 +246,15 @@ def read_heads(run_dir, label, *, C=None, K=None, theta_topm=None):
     except Exception as exc:
         log.info(f"readout heads {name} UNREADABLE ({exc})")
         return None
-    for name, want, got in (("C", C, gC), ("K", K, gK),
-                            ("theta_topm", theta_topm, gm)):
+    for dim, want, got in (("C", C, gC), ("K", K, gK),
+                           ("theta_topm", theta_topm, gm)):
         if want is not None and int(want) != got:
-            log.info(f"readout heads {name} IGNORED: {name}={got} "
-                  f"!= manifest {name}={int(want)} — a different arm/run")
+            log.info(f"readout heads {name} IGNORED: {dim}={got} "
+                     f"!= manifest {dim}={int(want)} — a different arm/run")
             return None
     if V.shape != (gC, gK):
         log.info(f"readout heads {name} IGNORED: V shape {V.shape} "
-              f"!= (C={gC}, K={gK})")
+                 f"!= (C={gC}, K={gK})")
         return None
     return V, b_raw, const, degenerate, gC, gK, gm
 
