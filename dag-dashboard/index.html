@@ -154,6 +154,8 @@ header.top{position:relative;padding:2px 0 10px;border-bottom:1px solid var(--bo
 .gedge.pkd{stroke:var(--desc);stroke-opacity:.82;stroke-width:1.6}
 .g-legend{display:flex;flex-wrap:wrap;gap:5px 13px;padding:7px 14px 10px;border-bottom:1px solid var(--border);font-size:11px;color:var(--ink-2)}
 .g-legend .lg-item{display:flex;align-items:center;gap:5px}
+.g-legend .lg-grad{width:120px;height:10px;border-radius:3px;flex:0 0 auto}
+#color-by{font:inherit;font-size:12px;padding:1px 4px;margin-left:4px}
 .g-legend .lg-sw{width:10px;height:10px;border-radius:50%;flex:0 0 auto}
 .g-focus-chip{display:none;align-items:center;gap:6px;background:var(--surface-2);border:1px solid var(--border-strong);border-radius:20px;padding:3px 5px 3px 11px;font-size:12px;color:var(--ink);font-family:var(--mono)}
 .g-focus-chip button{border:0;background:transparent;color:var(--ink-2);font-size:15px;line-height:1;padding:0 4px;cursor:pointer;border-radius:50%}
@@ -278,6 +280,9 @@ header.top{position:relative;padding:2px 0 10px;border-bottom:1px solid var(--bo
             <span>dim</span>
             <input type="range" id="dim-slider" min="0" max="4" step="1" value="1" aria-label="Dim level">
           </div>
+          <label class="tb-check" title="Colour nodes by their status, or by a per-topic measure (nodes without a topic, or not scored, stay grey)">
+            colour <select id="color-by" aria-label="Colour nodes by"><option value="status">status</option></select>
+          </label>
           <label class="tb-check" title="Hide pruned, spliced and unsupported nodes; their topic descendants connect to the nearest shown ancestor by a faint shortcut edge">
             <input type="checkbox" id="topic-only"> Only nodes with a topic
           </label>
@@ -418,7 +423,7 @@ async function boot(){
     $(".stage .panel").innerHTML=`<div class="hint">Could not load a dag-gated-export/1 directory from <code>${esc(dir)}</code> (${esc(e.message)}).<br>Copy <code>&lt;run&gt;/dag_export</code> to <code>dag-dashboard/data/</code> and serve this folder with <code>python -m http.server</code>, or pass <code>?data=&lt;path&gt;</code>.</div>`;
     return;
   }
-  renderMeta(); renderFoot(); renderLegend();
+  renderMeta(); renderFoot(); initColorBy(); renderLegend();
   initialGraphView(); renderDrawerDefault();
   renderGraph(); requestAnimationFrame(graphFit);
   window.__dagReady=true;
@@ -451,8 +456,59 @@ function renderFoot(){
   add("terms/topic/domain",`top ${sel.top_beta??"?"} by β + ${sel.top_lift??"?"} by lift (of top ${sel.lift_pool??"?"})`);
   add("support",`${(m.disclosure||{}).min_cell||20}-wide bands, midpoint`);
 }
+/* ============================== colour by ================================ */
+// "status" (the default) or a per-topic measure on a sequential ramp: NPMI per scored
+// domain (gated, scaled from the 5th to the 95th percentile of node topics, so outliers
+// do not wash out the rest) or supportFraction (0 sharp .. 1 flat). Nodes without a topic,
+// and topics a measure did not score, are grey.
+const RAMP=["#440154","#3b528b","#21918c","#5ec962","#fde725"];          // viridis stops
+function rampColor(t){ t=Math.max(0,Math.min(1,t)); const x=t*(RAMP.length-1), i=Math.min(RAMP.length-2,Math.floor(x)), f=x-i;
+  const h=c=>[1,3,5].map(j=>parseInt(c.slice(j,j+2),16)), a=h(RAMP[i]), b=h(RAMP[i+1]);
+  return "#"+a.map((v,j)=>Math.round(v+(b[j]-v)*f).toString(16).padStart(2,"0")).join(""); }
+let COLOR_BY="status";
+function colorModes(){
+  const out=[{v:"status",label:"status"}];
+  if(NPMI) NPMI.domains.forEach((d,i)=>{ const r=NPMI.rank[i].gated; if(!r.length) return;
+    out.push({v:"npmi:"+i, label:`NPMI · ${DOMAINS[d]||"domain "+d}`, lo:r[Math.floor(0.05*(r.length-1))], hi:r[Math.floor(0.95*(r.length-1))],
+      get:n=>NPMI.gated[i][n.topic], fmt:v=>v.toFixed(2), loLab:"less coherent", hiLab:"more coherent"}); });
+  out.push({v:"sfrac", label:"supportFraction", lo:0, hi:1, get:n=>n.sfrac==null?null:n.sfrac/1000, fmt:v=>v.toFixed(2),
+    loLab:"sharp", hiLab:"flat", invert:true});
+  return out;
+}
+function currentMode(){ return colorModes().find(m=>m.v===COLOR_BY)||colorModes()[0]; }
+function nodeColor(n){
+  if(n.kind==="root") return "var(--ink-2)";
+  const m=currentMode(); if(m.v==="status") return statusOf(n).color;
+  if(n.status!==0||n.topic==null) return "#b9b9b9";
+  const v=m.get(n); if(v==null) return "#b9b9b9";
+  let t=(v-m.lo)/((m.hi-m.lo)||1); if(m.invert) t=1-t; return rampColor(t);
+}
+function colorTipLine(n){
+  const m=currentMode(); if(m.v==="status"||n.status!==0||n.topic==null) return "";
+  const v=m.get(n); return `\n${m.label} ${v==null?"not scored":m.fmt(v)}`;
+}
+function initColorBy(){
+  const sel=$("#color-by"); sel.innerHTML=colorModes().map(m=>`<option value="${m.v}">${esc(m.label)}</option>`).join("");
+  try{const v=localStorage.getItem("dagdash-colorby"); if(v&&colorModes().some(m=>m.v===v)) COLOR_BY=v;}catch(e){}
+  sel.value=COLOR_BY;
+  sel.onchange=()=>{COLOR_BY=sel.value; try{localStorage.setItem("dagdash-colorby",COLOR_BY);}catch(e){} renderLegend(); renderGraph();};
+}
+
 function renderLegend(){
   const box=$("#g-legend"); box.innerHTML="";
+  const md=currentMode();
+  if(md.v!=="status"){
+    const it=el("span","lg-item"); const g=el("span","lg-grad");
+    const stops=RAMP.map((c,i)=>`${c} ${Math.round(100*i/(RAMP.length-1))}%`);
+    g.style.background=`linear-gradient(90deg,${(md.invert?stops.map((x,i)=>RAMP[RAMP.length-1-i]+" "+x.split(" ")[1]):stops).join(",")})`;
+    it.appendChild(el("span",null,`${md.label}: ${md.fmt(md.lo)} ${md.loLab}`)); it.appendChild(g);
+    it.appendChild(el("span",null,`${md.fmt(md.hi)} ${md.hiLab}`)); box.appendChild(it);
+    const gr=el("span","lg-item"); const d=el("span","lg-sw"); d.style.background="#b9b9b9"; gr.appendChild(d);
+    gr.appendChild(el("span",null,"no topic, or not scored")); box.appendChild(gr);
+    const note=el("span","lg-item"); note.style.opacity=".75";
+    note.appendChild(el("span",null,md.v.startsWith("npmi")?"scale: 5th to 95th percentile of node topics · size = banded support":"size = banded support"));
+    box.appendChild(note); return;
+  }
   STATUS.forEach(s=>{const it=el("span","lg-item");const d=el("span","lg-sw");d.style.background=s.color;
     it.appendChild(d); it.appendChild(el("span",null,s.key==="topic"?"has a topic":s.label)); box.appendChild(it);});
   const note=el("span","lg-item"); note.style.opacity=".75";
@@ -887,7 +943,7 @@ function updateMore(gm,n){
 const nodeSub=n=>n.kind==="root"?"":(n.status===0?"":statusOf(n).label+" · ")+supportText(n.support);
 function nodeTip(n){
   if(n.kind==="root") return n.label;
-  return `${n.label}\n${n.id} · ${n.status===0?"has a topic":"no topic: "+statusOf(n).label}\nsupport ${supportText(n.support)}`+
+  return `${n.label}\n${n.id} · ${n.status===0?"has a topic":"no topic: "+statusOf(n).label}\nsupport ${supportText(n.support)}`+colorTipLine(n)+
     (n.sfrac!=null?` · supportFraction ${(n.sfrac/1000).toFixed(2)}`:"");
 }
 function buildNode(id,n){
@@ -925,7 +981,7 @@ function updateNode(g,id,n,c){
   g.setAttribute("class","gnode"+(n.status!==0&&n.kind!=="root"?" notopic":"")+(gSel.has(id)?" sel":"")+(gHL.has(id)?" hl":gHLD.has(id)?" hld":"")+pk+(matchesQ(n)?" match":""));
   g.setAttribute("data-id",id);
   const circ=g.querySelector(".gcirc"); circ.setAttribute("r",c.r); circ.style.r=c.r+"px";
-  circ.setAttribute("fill",n.kind==="root"?"var(--ink-2)":statusOf(n).color);
+  circ.setAttribute("fill",nodeColor(n));
   circ.setAttribute("fill-opacity",n.kind==="root"?0.85:n.status===0?0.9:0.45);
   const lx=c.r+9;
   const lbl=g.querySelector(".glbl"); lbl.setAttribute("x",lx); lbl.setAttribute("y",c.r>14?-2:4); lbl.textContent=clip(n.label,36);
