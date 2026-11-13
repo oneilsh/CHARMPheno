@@ -677,7 +677,7 @@ def build_dag_gated_args(
     (n_bg + kept nodes*tpn). The driver starts from the estimator's recommended
     preset (`DagGatedLDAEstimator.recommended`); every fit knob the front matter
     sets is passed as a flag and overrides it, and an optional knob the front
-    matter does not set (gate_warm, gate_seed_mode, gate_seed_leaves,
+    matter does not set (gate_warm, gate_seed_mode, gate_seed_leaves, gate_open_seed,
     doc_concentration, optimize_doc_concentration, gamma_shape) is left to the
     preset. The node-set threshold is `min_docs_per_node` (counted on training
     documents by the estimator); a front matter that predates it gives
@@ -775,6 +775,9 @@ def build_dag_gated_args(
     if effective.get("gate_seed_leaves") is not None:
         args.append("--gate-seed-leaves" if effective["gate_seed_leaves"]
                     else "--no-gate-seed-leaves")
+    if effective.get("gate_open_seed") is not None:
+        args.append("--gate-open-seed" if effective["gate_open_seed"]
+                    else "--no-gate-open-seed")
     if effective.get("gate_seed_mode") is not None:
         args.extend(["--gate-seed-mode", str(effective["gate_seed_mode"])])
     if effective.get("gate_seed_profile"):

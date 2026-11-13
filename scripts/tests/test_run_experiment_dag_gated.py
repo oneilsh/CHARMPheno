@@ -142,6 +142,25 @@ def test_config_round_trips_frontmatter_to_the_estimator(monkeypatch):
     assert est.getDag() == parsed._dag
 
 
+def test_gate_open_seed_frontmatter_reaches_the_estimator(monkeypatch):
+    """Code review D3: `gate_open_seed` was silently ignored; it is emitted as
+    --gate-open-seed / --no-gate-open-seed, and omitted when unset (the preset)."""
+    mod = _run_exp(monkeypatch)
+    cloud = str(Path(mod.__file__).resolve().parent.parent / "analysis" / "cloud")
+    if cloud not in sys.path:
+        sys.path.insert(0, cloud)
+    import dag_gated_fit
+    base = mod.build_dag_gated_args(_base_eff(), "/out")
+    assert "--gate-open-seed" not in base and "--no-gate-open-seed" not in base
+    for val, flag in ((False, "--no-gate-open-seed"), (True, "--gate-open-seed")):
+        args = mod.build_dag_gated_args({**_base_eff(), "gate_open_seed": val}, "/out")
+        assert flag in args
+        parsed = dag_gated_fit.parse_args(args)
+        parsed._dag = {"MONDO:0000001": []}
+        est = dag_gated_fit._build_estimator(parsed)
+        assert est.getOrDefault("gateOpenSeed") is val
+
+
 def test_mondo_native_dag_source_threads_end_to_end(monkeypatch):
     """exp 0110: `dag_source: mondo_native` front matter -> --dag-source ->
     the driver parses it -> the corpus spec routes it through the Mondo branch of

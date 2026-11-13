@@ -169,6 +169,38 @@ def _ckpt(tmp_path, identity, n_done):
     return d
 
 
+def test_recorded_estimator_params_after_a_resume_is_the_configured_run():
+    """Code review D2: a resumed fit's estimator holds the remaining budget and the
+    checkpoint path; the manifest records the total budget and no resumeFrom."""
+    from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
+    from dag_gated_fit import recorded_estimator_params
+    fresh = DagGatedLDAEstimator(maxIter=100, seed=3, dag={1: None},
+                                 saveDir="/r/fit_ckpt", saveInterval=5)
+    resumed = fresh.copy().setMaxIter(60).setResumeFrom("/r/fit_ckpt")
+    a = recorded_estimator_params(fresh, 100)
+    b = recorded_estimator_params(resumed, 100)
+    assert a == b and b["maxIter"] == 100 and "resumeFrom" not in b
+    assert "dagEdges" not in b and b["seed"] == 3 and b["saveInterval"] == 5
+
+
+def test_flat_trace_numbers_iterations_globally_after_a_resume(monkeypatch):
+    """Code review D1: the loop restarts its iteration count on a resume; the trace
+    adds the resumed count, for the printed number and the every-N / first rule."""
+    import starvation
+    from dag_gated_fit import make_flat_trace
+    monkeypatch.setattr(starvation, "trace_line", lambda it, lam, n_bg: f"iter {it}")
+    out, ref = [], [0]
+    tr = make_flat_trace(10, 2, ref, out.append)
+    for it in range(1, 22):
+        tr(it, {"lambda": None}, [])
+    assert out == ["iter 1", "iter 10", "iter 20"]
+    out.clear()
+    ref[0] = 35                         # resumed at 35: the loop says 1, 2, ...
+    for it in range(1, 22):
+        tr(it, {"lambda": None}, [])
+    assert out == ["iter 40", "iter 50"]
+
+
 def test_fit_identity_skips_the_budget_and_hashes_long_values():
     from dag_gated_fit import fit_identity
     est = _FakeEst(maxIter=100, saveDir="/x", subsamplingRate=0.05,

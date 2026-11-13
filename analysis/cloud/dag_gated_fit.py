@@ -477,6 +477,39 @@ def plan_fit_resume(ckpt_dir, identity, max_iter, *, fresh=False):
     return ("done" if n_done >= int(max_iter) else "resume"), n_done
 
 
+# Structured Params kept out of the manifest's estimator_params (large; recorded
+# elsewhere: the DAG in label_dag.json, the vocabularies in bundle_meta.json).
+_UNRECORDED_PARAMS = ("dagEdges", "vocabularies", "nodeTerms", "gateSeedProfile")
+
+
+def recorded_estimator_params(est, max_iter):
+    """The estimator Params the manifest records, as the run was CONFIGURED: maxIter
+    is the TOTAL budget `max_iter` and `resumeFrom` is left out, so a resumed fit
+    (whose estimator was given the remaining budget and the checkpoint to resume
+    from) records the same Params as an uninterrupted one (code review D2)."""
+    rec = {p.name: est.getOrDefault(p) for p in est.params
+           if p.name not in _UNRECORDED_PARAMS and p.name != "resumeFrom"
+           and (est.isSet(p) or est.hasDefault(p))}
+    if "maxIter" in rec:
+        rec["maxIter"] = int(max_iter)
+    return rec
+
+
+def make_flat_trace(every, n_bg, n_done_ref, emit):
+    """The `--trace-flat-every` per-iteration callback. The loop numbers iterations
+    from 1 within THIS fit call (`on_iteration(step + 1)`), so after a resume it
+    restarts; `n_done_ref[0]` (the resumed iteration count, set once the resume is
+    planned) is added, so the printed iteration and the every-N / first-line rule use
+    the fit's global iteration (code review D1)."""
+    from starvation import trace_line
+
+    def _trace(it, gp, _elbo):
+        g_it = int(it) + int(n_done_ref[0])
+        if g_it % every == 0 or g_it == 1:
+            emit(trace_line(g_it, gp["lambda"], n_bg))
+    return _trace
+
+
 def _save_fit(out, gp, C, manifest_fields, *, results=None, domain_mass=None,
               partial=None):
     """Write `<out>/gated_pc_result.npz` + `manifest.json`. Called TWICE per run.
@@ -1641,18 +1674,15 @@ def main() -> int:
         if args._gate_seed_profile and int(g("gateWarm")) <= 0:
             raise ValueError("--gate-seed-profile requires gateWarm > 0")
         n_bg, tpn, max_iter = int(g("gateNBg")), int(g("gateTpn")), int(g("maxIter"))
+        _n_done_ref = [0]          # the resumed iteration count, once planned below
         if args.trace_flat_every > 0:
             # Every N iterations: how many node topics sit at the flat prior (the
             # census's "starved") and the node topics' share of the lambda mass, so a
             # fit shows WHEN starvation sets in (exp 0171). Driver-side numpy over
             # lambda, a fraction of a second at whole-Mondo size.
-            from starvation import trace_line
-            _every, _nbg = int(args.trace_flat_every), n_bg
-
-            def _trace(it, gp, _elbo):
-                if it % _every == 0 or it == 1:
-                    _cprint(trace_line(it, gp["lambda"], _nbg), flush=True)
-            pc_est.setOnIteration(_trace)
+            pc_est.setOnIteration(make_flat_trace(
+                int(args.trace_flat_every), n_bg, _n_done_ref,
+                lambda line: _cprint(line, flush=True)))
         with _phase(f"gated_pc fit (DagGatedLDAEstimator: the node set is learned "
                     f"from the train split, minDocsPerNode={g('minDocsPerNode')})"):
             # Resume (the engine's own checkpoint, <out>/fit_ckpt): a re-run of the
@@ -1663,6 +1693,7 @@ def main() -> int:
             action, n_done = plan_fit_resume(ckpt, identity, max_iter,
                                              fresh=bool(args.fresh_fit))
             if action == "resume":
+                _n_done_ref[0] = int(n_done)
                 pc_est.setResumeFrom(str(ckpt))
                 pc_est.setMaxIter(max_iter - n_done)
                 _cprint(f"[driver]   RESUMING the fit from {ckpt} at iteration "
@@ -1754,11 +1785,7 @@ def main() -> int:
                 "subsampling_rate": float(g("subsamplingRate")),
                 "tau0": float(g("learningOffset")),
                 "kappa": float(g("learningDecay")), "max_iter": max_iter,
-                "estimator_params": {
-                    p.name: g(p) for p in pc_est.params
-                    if p.name not in ("dagEdges", "vocabularies", "nodeTerms",
-                                      "gateSeedProfile")
-                    and (pc_est.isSet(p) or pc_est.hasDefault(p))},
+                "estimator_params": recorded_estimator_params(pc_est, max_iter),
                 "labels_col": args._labels_col,
                 "node_set": counts,
                 "node_statistics": {
