@@ -16,11 +16,20 @@ Dispatch by scheme:
   file into memory (np.load needs a seekable file; every object written here is
   driver-sized already).
 
+A URI has a scheme when it starts `<scheme>:/` (RFC 3986 scheme characters, then a
+colon and a slash), so Hadoop's single-slash forms (`hdfs:/x`, `gs:/b/x`) are remote
+like `hdfs://nn/x`; anything else, including a relative path with a colon in it, is a
+plain local path. `file:` URIs are stripped by hand, not parsed, so a `#` or `?` in
+the path survives.
+
 Atomicity: `write_bytes(..., atomic=True)` writes a sibling temp then renames on a
-local path. On an object store an object becomes visible only when its upload
-completes, so a single object is never torn and no rename is used (a "rename" there
-is a copy); multi-file writers order their writes so the file that names the others
-(a manifest) goes last.
+local path. A non-local write overwrites in place with no rename. On an object store
+(`gs://`, `s3a://`) an object becomes visible only when its upload completes, so a
+single object is never torn (a "rename" there is a copy). On HDFS that does NOT hold:
+`create(overwrite=True)` truncates first, so a crash mid-write leaves a torn file.
+Multi-file writers therefore never overwrite their data files in place: they write a
+fresh set and then the small file that names it (a manifest) last
+(`spark_vi.io.export.save_result`).
 
 Never wrap a URI in `pathlib.Path`: it collapses `gs://b/x` to `gs:/b/x`. Use `join`.
 """
@@ -28,7 +37,7 @@ from __future__ import annotations
 
 import io
 import os
-from urllib.parse import urlparse
+import re
 
 __all__ = ["is_local", "local_path", "qualify", "join", "exists", "makedirs",
            "write_bytes", "read_bytes", "write_text", "read_text", "remove",
@@ -37,12 +46,15 @@ __all__ = ["is_local", "local_path", "qualify", "join", "exists", "makedirs",
 _CHUNK = 16 * 1024 * 1024
 
 
+# `<scheme>:/...`: RFC 3986 scheme characters, a colon, then a slash. Requiring the
+# slash keeps a relative local path with a colon in it (`a:b`) local, and takes both
+# Hadoop forms of a URI: `hdfs://nn/x` and the single-slash `hdfs:/x` / `file:/x`.
+_SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*):/")
+
+
 def _scheme(uri) -> str:
-    s = str(uri)
-    if "://" not in s:
-        # Hadoop's qualified local form is `file:/x` (one slash; see `qualify`).
-        return "file" if s.startswith("file:/") else ""
-    return urlparse(s).scheme.lower()
+    m = _SCHEME_RE.match(str(uri))
+    return m.group(1).lower() if m else ""
 
 
 def is_local(uri) -> bool:
@@ -51,9 +63,21 @@ def is_local(uri) -> bool:
 
 
 def local_path(uri) -> str:
-    """The filesystem path of a local URI (`file:///x` and `file:/x` -> `/x`)."""
+    """The filesystem path of a local URI (`file:///x` and `file:/x` -> `/x`).
+
+    Stripped by hand, not with `urlparse`, which would cut the path at a `#` or `?`
+    (fragment / query) and so read or write a different file. `file://host/x` (an
+    authority other than empty or `localhost`) is not a local path and is refused."""
     s = str(uri)
-    return urlparse(s).path if _scheme(s) == "file" else s
+    if _scheme(s) != "file":
+        return s
+    rest = s[len("file:"):]
+    if rest.startswith("//"):
+        auth, sep, path = rest[2:].partition("/")
+        if auth not in ("", "localhost"):
+            raise ValueError(f"{uri}: a file: URI with a host is not a local path")
+        return "/" + path
+    return rest
 
 
 def qualify(uri) -> str:

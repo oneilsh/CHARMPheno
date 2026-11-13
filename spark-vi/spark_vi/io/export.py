@@ -9,6 +9,11 @@ Layout:
         <name>.npy            # diagnostic_traces entry exists; one
                               # 2D array per trace, shape (n_iter, dim)
 
+On a non-local URI (`hdfs://`, `gs://`, ...) the arrays go to a fresh directory per
+save instead, `params_<n_iterations>_<random>/` (traces under its `traces/`), named by
+the manifest's "params_dir"; see `save_result`. Readers go through `load_result`,
+which reads "params_dir" (default "params").
+
 Rationale: JSON + .npy is the simplest format that is inspectable from the
 command line, survives long-term storage without opaque binary blobs, and
 doesn't require any non-standard library to read. The same format serves
@@ -23,6 +28,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import secrets
 from pathlib import Path
 
 import numpy as np
@@ -179,16 +185,34 @@ def save_result(result: VIResult, out_dir: Path | str) -> None:
     unaffected: they have their own sidecar path and are loaded with
     allow_pickle=True.
 
-    Staged, then committed: every file is first written under a `.tmp` name, and
-    only after ALL of them are on disk are they renamed into place, manifest.json
-    last. The same directory serves as the resume checkpoint, rewritten every
-    `checkpoint_interval` iterations, and the slow part (hundreds of MB of λ) is
-    the write; a process killed during it leaves the previous checkpoint intact
-    instead of a manifest from one iteration over params from another. The
-    remaining window is the renames themselves.
+    Crash safety. The same directory serves as the resume checkpoint, rewritten
+    every `checkpoint_interval` iterations, and the slow part (hundreds of MB of λ)
+    is the write; a process killed during it must leave the previous checkpoint
+    intact, not a manifest from one iteration over params from another.
+
+    * Local path: staged, then committed. Every file is first written under a
+      `.tmp` name, and only after ALL of them are on disk are they renamed into
+      place, manifest.json last. The remaining window is the renames themselves.
+    * Non-local URI (`hdfs://`, `gs://`, ...): renames are not cheap or not atomic
+      there (on an object store a "rename" is a copy), and overwriting a file in
+      place can tear it (HDFS truncates on create). So every save writes its arrays
+      into a FRESH directory, `params_<n_iterations>_<random>/` (array traces under
+      its `traces/`), then the manifest, which names it ("params_dir"), last; only
+      after the manifest is written are the previous params directories removed. A
+      crash before the manifest lands leaves the old manifest naming the old,
+      untouched directory (plus an orphan the next save removes). The manifest
+      itself is one small object, overwritten in place.
     """
     out = str(out_dir)
-    params_dir = fs.join(out, "params")
+    local = _is_local(out)
+    if local:
+        params_name = "params"
+        traces_name = "traces"
+    else:
+        params_name = (f"params_{int(result.n_iterations)}_"
+                       f"{secrets.token_hex(4)}")
+        traces_name = f"{params_name}/traces"
+    params_dir = fs.join(out, params_name)
     staged: list[tuple[str, bytes]] = []
 
     def _stage_npy(path: str, arr) -> None:
@@ -235,10 +259,10 @@ def save_result(result: VIResult, out_dir: Path | str) -> None:
             diagnostic_traces_manifest[name] = {"json": list(trace)}
         else:  # array
             if traces_dir is None:
-                traces_dir = fs.join(out, "traces")
+                traces_dir = fs.join(out, traces_name)
             stacked = np.stack([np.asarray(x) for x in trace], axis=0)
             _stage_npy(fs.join(traces_dir, f"{name}.npy"), stacked)
-            diagnostic_traces_manifest[name] = {"file": f"traces/{name}.npy"}
+            diagnostic_traces_manifest[name] = {"file": f"{traces_name}/{name}.npy"}
 
     manifest = {
         "format_version": _FORMAT_VERSION,
@@ -250,8 +274,10 @@ def save_result(result: VIResult, out_dir: Path | str) -> None:
         "diagnostic_traces": diagnostic_traces_manifest,
         "dict_param_keys": dict_param_keys,
     }
+    if not local:
+        manifest["params_dir"] = params_name
     manifest_bytes = json.dumps(manifest, indent=2).encode("utf-8")
-    if fs.is_local(out):
+    if local:
         # Stage every file under a `.tmp` name, then commit by rename, manifest last.
         root = fs.local_path(out)
         os.makedirs(os.path.join(root, "params"), exist_ok=True)
@@ -268,11 +294,26 @@ def save_result(result: VIResult, out_dir: Path | str) -> None:
             os.replace(p + ".tmp", p)
         os.replace(man + ".tmp", man)
     else:
-        # Object stores: each object appears only when its upload completes; write
-        # the data files, then the manifest that names them (no renames).
+        # Fresh params directory, then the manifest that names it, then drop the
+        # previous directories (no renames, nothing overwritten but the manifest).
         for p, data in staged:
             fs.write_bytes(p, data, atomic=False)
         fs.write_bytes(fs.join(out, "manifest.json"), manifest_bytes, atomic=False)
+        for stale in _stale_params_dirs(fs.listdir(out), params_name):
+            fs.remove_tree(fs.join(out, stale))
+
+
+def _is_local(uri) -> bool:
+    """`fs.is_local`, as a seam: tests drive the non-local branch on a local dir."""
+    return fs.is_local(uri)
+
+
+def _stale_params_dirs(names, current: str) -> list:
+    """Entries of a result directory a non-local save superseded: earlier
+    `params_<n>_<random>` directories (including orphans of a crashed save), and the
+    local layout's `params` / `traces`. Never `current`, never anything else."""
+    return sorted(n for n in names if n != current and (
+        n in ("params", "traces") or n.startswith("params_")))
 
 
 def load_result(in_dir: Path | str) -> VIResult:
@@ -310,7 +351,8 @@ def load_result(in_dir: Path | str) -> VIResult:
             f"Unsupported persistence format_version {version}; this build "
             f"reads format_version(s) {_READABLE_FORMAT_VERSIONS}."
         )
-    params_dir = fs.join(in_path, "params")
+    # A non-local save names its fresh params directory; a local one uses `params`.
+    params_dir = fs.join(in_path, manifest.get("params_dir", "params"))
 
     def _npy(p, **kw):
         return np.load(io.BytesIO(fs.read_bytes(p)), **kw)

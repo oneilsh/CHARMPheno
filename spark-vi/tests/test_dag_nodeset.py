@@ -579,6 +579,23 @@ def test_spark_dag_and_support_match_python(spark):
     assert n0 == 0 and set(sup0.values()) == {0}
 
 
+def test_spark_support_destroys_its_broadcast(spark, monkeypatch):
+    """Code review B6: the label-index broadcast is destroyed, not only unpersisted,
+    on success and on error."""
+    import spark_vi.core.broadcast as B
+    from pyspark.sql.types import ArrayType, StringType, StructField, StructType
+    from spark_vi.dag.nodeset import count_support_spark
+    seen = []
+    real = B.destroy_broadcast
+    monkeypatch.setattr(B, "destroy_broadcast", lambda bc: (seen.append(bc), real(bc)))
+    d = parse_dag({"a": [], "b": ["a"]})
+    schema = StructType([StructField("labels", ArrayType(StringType()), True)])
+    count_support_spark(spark.createDataFrame([(["b"],)], schema), "labels", d)
+    with pytest.raises(ValueError):
+        count_support_spark(spark.createDataFrame([(["zz"],)], schema), "labels", d)
+    assert len(seen) == 2
+
+
 def test_spark_int_ids_distinct_from_str(spark):
     from pyspark.sql.types import ArrayType, LongType, StringType, StructField, StructType
     from spark_vi.dag.nodeset import count_support_spark

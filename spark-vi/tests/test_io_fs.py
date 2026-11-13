@@ -18,6 +18,33 @@ def test_scheme_dispatch_and_join():
     assert fs.is_local("file:/tmp/x") and fs.local_path("file:/tmp/x") == "/tmp/x"
 
 
+def test_single_slash_hadoop_uris_are_remote():
+    """Code review B5: `hdfs:/x` and `gs:/b/x` (Hadoop's single-slash forms) carry a
+    scheme; a relative path with a colon, or a bare name, does not."""
+    for uri in ("hdfs:/x", "gs:/b/x", "s3a://b/k", "HDFS://nn/x", "viewfs:/a"):
+        assert not fs.is_local(uri), uri
+    for uri in ("/tmp/x", "rel/x", "a:b", "run:1/x", "x", "./c:/d"):
+        assert fs.is_local(uri), uri
+        assert fs.local_path(uri) == uri
+
+
+def test_file_uris_keep_hash_and_query_characters():
+    """Code review B5: `#` / `?` are path characters here, not a fragment / query."""
+    assert fs.local_path("file:///tmp/a#1/b?c") == "/tmp/a#1/b?c"
+    assert fs.local_path("file:/tmp/run#2") == "/tmp/run#2"
+    assert fs.local_path("file://localhost/tmp/x") == "/tmp/x"
+    assert fs.local_path("FILE:///tmp/x") == "/tmp/x"
+    with pytest.raises(ValueError):
+        fs.local_path("file://otherhost/tmp/x")
+
+
+def test_local_roundtrip_through_a_file_uri_with_a_hash(tmp_path):
+    uri = "file://" + str(tmp_path / "run#3" / "f.bin")
+    fs.write_bytes(uri, b"abc")
+    assert (tmp_path / "run#3" / "f.bin").read_bytes() == b"abc"
+    assert fs.read_bytes(uri) == b"abc"
+
+
 def test_qualify_without_spark_leaves_the_uri():
     from pyspark import SparkContext
     if SparkContext._active_spark_context is not None:

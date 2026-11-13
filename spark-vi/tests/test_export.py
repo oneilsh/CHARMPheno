@@ -594,3 +594,95 @@ def test_a_save_that_fails_midway_leaves_the_previous_checkpoint(tmp_path):
     back = load_result(tmp_path)
     assert back.n_iterations == 1
     np.testing.assert_array_equal(back.global_params["a"], np.zeros(3))
+
+
+# ---- non-local layout (code review B1) ------------------------------------- #
+def _remote(monkeypatch):
+    """Drive save_result's non-local branch on a local directory: the fs calls it
+    makes (write_bytes, listdir, remove_tree) work on local paths as well."""
+    import spark_vi.io.export as e
+    monkeypatch.setattr(e, "_is_local", lambda uri: False)
+
+
+def _res(n, fill, trace=False):
+    from spark_vi.core.result import VIResult
+    return VIResult(global_params={"a": np.full(3, fill), "lam": {0: np.full((2, 2), fill),
+                                                                  1: np.full((2, 3), fill)}},
+                    elbo_trace=[-1.0] * n, n_iterations=n, converged=False,
+                    diagnostic_traces=({"v": [np.full(2, fill)] * n} if trace else {}))
+
+
+def test_non_local_save_writes_a_fresh_params_dir_named_by_the_manifest(tmp_path, monkeypatch):
+    import json
+    from spark_vi.io.export import load_result, save_result
+    _remote(monkeypatch)
+    save_result(_res(1, 1.0, trace=True), tmp_path)
+    man1 = json.loads((tmp_path / "manifest.json").read_text())
+    d1 = man1["params_dir"]
+    assert d1.startswith("params_1_") and (tmp_path / d1 / "a.npy").exists()
+    assert man1["diagnostic_traces"]["v"] == {"file": f"{d1}/traces/v.npy"}
+    assert not (tmp_path / "params").exists() and not (tmp_path / "traces").exists()
+    save_result(_res(2, 2.0, trace=True), tmp_path)
+    d2 = json.loads((tmp_path / "manifest.json").read_text())["params_dir"]
+    assert d2.startswith("params_2_") and d2 != d1
+    assert not (tmp_path / d1).exists()                     # previous removed after
+    back = load_result(tmp_path)
+    assert back.n_iterations == 2
+    np.testing.assert_array_equal(back.global_params["a"], np.full(3, 2.0))
+    np.testing.assert_array_equal(back.global_params["lam"][1], np.full((2, 3), 2.0))
+    np.testing.assert_array_equal(back.diagnostic_traces["v"][1], np.full(2, 2.0))
+
+
+def test_non_local_save_interrupted_before_the_manifest_keeps_the_previous(tmp_path, monkeypatch):
+    """A crash after the new arrays but before the manifest: the old manifest still
+    names the old, untouched directory; the next save removes the orphan."""
+    import json
+    import spark_vi.io.export as e
+    from spark_vi.io import fs
+    from spark_vi.io.export import load_result, save_result
+    _remote(monkeypatch)
+    save_result(_res(1, 1.0), tmp_path)
+    real = fs.write_bytes
+
+    def dying(uri, data, *, atomic=True):
+        if str(uri).endswith("manifest.json"):
+            raise OSError("killed")
+        real(uri, data, atomic=atomic)
+    monkeypatch.setattr(e.fs, "write_bytes", dying)
+    with pytest.raises(OSError):
+        save_result(_res(2, 2.0), tmp_path)
+    monkeypatch.setattr(e.fs, "write_bytes", real)
+    back = load_result(tmp_path)
+    assert back.n_iterations == 1
+    np.testing.assert_array_equal(back.global_params["a"], np.full(3, 1.0))
+    assert len([p for p in tmp_path.iterdir() if p.name.startswith("params_")]) == 2
+    save_result(_res(3, 3.0), tmp_path)
+    left = [p.name for p in tmp_path.iterdir() if p.name.startswith("params")]
+    assert left == [json.loads((tmp_path / "manifest.json").read_text())["params_dir"]]
+
+
+def test_non_local_save_over_a_local_layout_result_supersedes_it(tmp_path, monkeypatch):
+    from spark_vi.io.export import load_result, save_result
+    save_result(_res(1, 1.0, trace=True), tmp_path)        # local layout
+    assert (tmp_path / "params").is_dir() and (tmp_path / "traces").is_dir()
+    _remote(monkeypatch)
+    save_result(_res(2, 2.0), tmp_path)
+    assert not (tmp_path / "params").exists() and not (tmp_path / "traces").exists()
+    assert load_result(tmp_path).n_iterations == 2
+
+
+def test_local_save_layout_is_unchanged(tmp_path):
+    import json
+    from spark_vi.io.export import save_result
+    save_result(_res(1, 1.0, trace=True), tmp_path)
+    man = json.loads((tmp_path / "manifest.json").read_text())
+    assert "params_dir" not in man
+    assert man["diagnostic_traces"]["v"] == {"file": "traces/v.npy"}
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["manifest.json", "params", "traces"]
+
+
+def test_stale_params_dirs_never_names_current_or_other_files():
+    from spark_vi.io.export import _stale_params_dirs
+    names = ["manifest.json", "params", "traces", "params_1_ab", "params_2_cd",
+             "paramsx", "other", "heads"]
+    assert _stale_params_dirs(names, "params_2_cd") == ["params", "params_1_ab", "traces"]

@@ -464,6 +464,7 @@ def count_support_spark(df, labels_col, dag, *, unknown_labels="error"):
     the task closure, ADR 0047) and the per-partition counts merge with `treeReduce`.
     Every partition yields exactly one (possibly empty) `SupportCounts`, so the
     reduce has no zero value to get wrong."""
+    from spark_vi.core.broadcast import destroy_broadcast
     _check_policy(unknown_labels)
     index = LabelIndex.from_dag(dag)
     sc_ctx = df.sparkSession.sparkContext
@@ -476,7 +477,9 @@ def count_support_spark(df, labels_col, dag, *, unknown_labels="error"):
             sc = (rdd.mapPartitions(lambda it, _bc=bc: _partition_support(it, _bc, 0))
                   .treeReduce(lambda a, b: a.merge(b)))
     finally:
-        bc.unpersist()
+        # destroy, not unpersist: unpersist leaves the driver copy and its pickle
+        # behind, one per call (spark_vi.core.broadcast.destroy_broadcast).
+        destroy_broadcast(bc)
     return _finish(sc, index, unknown_labels)
 
 
