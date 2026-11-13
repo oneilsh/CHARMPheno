@@ -228,6 +228,79 @@ def test_forked_workers_do_not_share_the_global_rng():
                               np.asarray(s2["lambda_stats"]))
 
 
+def test_unseeded_model_with_processes_is_reproducible_given_the_global_rng():
+    """Code review B2: with random_seed=None the workers' np.random seeds come from
+    the parent's np.random (one per chunk), so two fits after np.random.seed(0) are
+    identical; a different global seed gives a different fit."""
+    from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
+    lay, V, docs = _gated_fixture()
+    cfg = VIConfig(max_iterations=3, random_seed=1, convergence_tol=1e-12)
+
+    def fit(seed):
+        np.random.seed(seed)
+        m = DagGatedOnlineLDA(lay, V, random_seed=None, cavi_max_iter=3)
+        return LocalRunner(m, cfg, chunk_size=15, processes=2).fit(docs)
+
+    a, b, c = fit(0), fit(0), fit(5)
+    np.testing.assert_array_equal(a.global_params["lambda"], b.global_params["lambda"])
+    np.testing.assert_array_equal(a.elbo_trace, b.elbo_trace)
+    assert not np.array_equal(a.global_params["lambda"], c.global_params["lambda"])
+
+
+def test_explicit_worker_seeds_fix_the_chunk_draws():
+    from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
+    from spark_vi.core.local_runner import _forked_local_updates
+    lay, V, docs = _gated_fixture(n=2)
+    m = DagGatedOnlineLDA(lay, V, random_seed=None, cavi_max_iter=1)
+    params = m.broadcast_params(m.initialize_global(None))
+    a = _forked_local_updates(m, params, docs, [(0, 1), (1, 2)], 2, seeds=[7, 8])
+    b = _forked_local_updates(m, params, docs, [(0, 1), (1, 2)], 2, seeds=[7, 8])
+    for x, y in zip(a, b):
+        np.testing.assert_array_equal(np.asarray(x["lambda_stats"]),
+                                      np.asarray(y["lambda_stats"]))
+
+
+def test_forks_only_on_linux(monkeypatch):
+    """Code review B3: macOS lists 'fork' but the E-step runs serially there."""
+    import spark_vi.core.local_runner as lr
+    from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
+    monkeypatch.setattr(lr.sys, "platform", "darwin")
+    assert not lr._can_fork()
+    called = []
+    monkeypatch.setattr(lr, "_forked_local_updates",
+                        lambda *a, **k: called.append(1) or [])
+    lay, V, docs = _gated_fixture()
+    r = LocalRunner(DagGatedOnlineLDA(lay, V, random_seed=0),
+                    VIConfig(max_iterations=1, random_seed=1), processes=3)
+    r.fit(docs)
+    assert not called
+    monkeypatch.setattr(lr.sys, "platform", "linux")
+    assert lr._can_fork() == ("fork" in __import__("multiprocessing").get_all_start_methods())
+
+
+def test_two_threads_forking_do_not_mix_their_state():
+    """Code review B4: _FORK_STATE is set, forked and cleared under one lock, so two
+    runners in two threads each get their own model's statistics."""
+    import threading
+    from spark_vi.models.topic.dag_gated_lda import DagGatedOnlineLDA
+    lay, V, docs = _gated_fixture()
+    cfg = VIConfig(max_iterations=2, random_seed=1, convergence_tol=1e-12)
+
+    def fit(seed):
+        return LocalRunner(DagGatedOnlineLDA(lay, V, random_seed=seed), cfg,
+                           chunk_size=15, processes=2).fit(docs)
+
+    want = {s: fit(s).global_params["lambda"] for s in (0, 1)}
+    got = {}
+    ts = [threading.Thread(target=lambda s=s: got.__setitem__(s, fit(s))) for s in (0, 1)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    for s in (0, 1):
+        np.testing.assert_array_equal(got[s].global_params["lambda"], want[s])
+
+
 def test_processes_zero_means_one_per_cpu_and_negative_is_refused():
     import os
     from spark_vi.models.topic.counting import CountingModel

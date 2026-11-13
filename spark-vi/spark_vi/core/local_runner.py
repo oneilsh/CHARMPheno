@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import sys
+import threading
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -63,9 +65,20 @@ class LocalRunner:
         FORKED once per E-step after the iteration's `broadcast_params`, so the
         model, the shipped parameters and the corpus are shared copy-on-write, not
         pickled; only each chunk's statistics travel back. They are merged in chunk
-        order, so for a given `chunk_size` the result is bit-identical to
-        `processes=1`. Needs the 'fork' start method (Linux; not Windows, and not
-        the macOS default): elsewhere, or with one chunk, it runs serially."""
+        order. Forking is used on Linux only (macOS lists 'fork' but it is unsafe
+        there with system frameworks loaded, and Windows lacks it): elsewhere, or
+        with one chunk, it runs serially.
+
+        Reproducibility with `processes > 1`. Before forking, the parent draws one
+        seed per chunk from the global NumPy RNG and each worker seeds `np.random`
+        with its chunk's seed before `local_update`. So:
+        * a model whose randomness is content-seeded (`random_seed` set, e.g. the
+          gamma init keyed by the document) gives, for a given `chunk_size`, a fit
+          bit-identical to `processes=1`;
+        * a model that draws from the global `np.random` (`random_seed=None`) is
+          reproducible given `np.random`'s state (e.g. after `np.random.seed(0)`),
+          but differs from the serial fit, whose chunks share one stream.
+        The per-chunk seeds are drawn only when the E-step actually forks."""
         if not isinstance(model, VIModel):
             raise TypeError(f"model must be a VIModel subclass, got {type(model).__name__}")
         if chunk_size is not None and chunk_size < 1:
@@ -91,7 +104,7 @@ class LocalRunner:
         params = model.broadcast_params(global_params)    # once, as VIRunner does
         spans = self._chunks(len(rows))
         n_workers = min(self.processes, len(spans))
-        if n_workers > 1 and "fork" in multiprocessing.get_all_start_methods():
+        if n_workers > 1 and _can_fork():
             parts = _forked_local_updates(model, params, rows, spans, n_workers)
         else:
             # iter(): local_update sees an iterator, as under mapPartitions.
@@ -149,40 +162,53 @@ class LocalRunner:
 # --------------------------------------------------------------------------- #
 # What the forked workers read: set in the parent immediately before the pool forks,
 # so every worker inherits it copy-on-write (nothing array-shaped is pickled to them).
+# A module global, so two runners in two threads would clobber each other's state:
+# `_FORK_LOCK` serializes set -> fork -> clear (the workers have their copy once forked).
 _FORK_STATE: tuple | None = None
+_FORK_LOCK = threading.Lock()
 
 
-def _fork_init() -> None:
-    # A model without a content seed draws from the global NumPy RNG; forked
-    # children would all inherit the parent's stream and draw the same numbers.
-    np.random.seed()
+def _can_fork() -> bool:
+    """Fork the E-step only on Linux, where 'fork' is the safe default start method."""
+    return (sys.platform.startswith("linux")
+            and "fork" in multiprocessing.get_all_start_methods())
 
 
-def _fork_local_update(span: tuple[int, int]):
+def _fork_local_update(task):
+    # Seed the global NumPy RNG per chunk: a model without a content seed draws from
+    # it, and forked children would otherwise all inherit the parent's stream (the
+    # same numbers in every chunk). The seed comes from the parent's RNG, so the fit
+    # is reproducible given the parent's state.
+    (lo, hi), seed = task
+    np.random.seed(seed)
     model, params, rows = _FORK_STATE
-    lo, hi = span
     return model.local_update(iter(rows[lo:hi]), params)
 
 
-def _forked_local_updates(model, params, rows, spans, n_workers) -> list:
+def _forked_local_updates(model, params, rows, spans, n_workers, seeds=None) -> list:
     """`local_update` over each span in `n_workers` forked processes, results in span
     order. The pool lives for one E-step: forking after this iteration's
-    `broadcast_params` is what lets the workers see it without a copy."""
+    `broadcast_params` is what lets the workers see it without a copy. `seeds`: one
+    `np.random` seed per span; by default drawn here from the parent's `np.random`."""
     import warnings
     global _FORK_STATE
-    _FORK_STATE = (model, params, rows)
-    try:
-        ctx = multiprocessing.get_context("fork")
-        with warnings.catch_warnings():
-            # Python warns when a process with threads forks (here, py4j's threads
-            # when a SparkSession is live): a child may inherit a lock another thread
-            # held. The workers only run the model's numpy E-step on inherited arrays
-            # and return its statistics; they never touch py4j, logging or another
-            # thread's state, so the inherited locks are never taken.
-            warnings.filterwarnings("ignore", category=DeprecationWarning,
-                                    message=".*multi-threaded, use of fork.*")
-            with ctx.Pool(n_workers, initializer=_fork_init) as pool:
-                return pool.map(_fork_local_update, spans, chunksize=1)
-    finally:
-        _FORK_STATE = None
-
+    if seeds is None:
+        seeds = np.random.randint(0, 2**32 - 1, size=len(spans), dtype=np.uint64)
+    tasks = [(span, int(sd)) for span, sd in zip(spans, seeds)]
+    with _FORK_LOCK:
+        _FORK_STATE = (model, params, rows)
+        try:
+            ctx = multiprocessing.get_context("fork")
+            with warnings.catch_warnings():
+                # Python warns when a process with threads forks (here, py4j's
+                # threads when a SparkSession is live): a child may inherit a lock
+                # another thread held. The workers only run the model's numpy E-step
+                # on inherited arrays and return its statistics; they never touch
+                # py4j, logging or another thread's state, so the inherited locks are
+                # never taken.
+                warnings.filterwarnings("ignore", category=DeprecationWarning,
+                                        message=".*multi-threaded, use of fork.*")
+                with ctx.Pool(n_workers) as pool:
+                    return pool.map(_fork_local_update, tasks, chunksize=1)
+        finally:
+            _FORK_STATE = None

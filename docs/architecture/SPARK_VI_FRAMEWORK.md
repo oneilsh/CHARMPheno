@@ -398,9 +398,13 @@ leaves-first schedule. `LocalRunner.transform(rows, global_params)` maps
 worker processes, the local analogue of executors. The pool is forked once per E-step,
 right after the iteration's `broadcast_params`, so the model, the shipped parameters and
 the corpus are shared copy-on-write; only each chunk's statistics are pickled back, and
-they are merged in chunk order, so a fit is bit-identical to `processes=1` at the same
-`chunk_size` (`chunk_size=None` with N processes = N even chunks). Fork is Linux-only in
-practice; elsewhere it runs serially. Why it pays: at the whole-Mondo scale (K ≈ 3,000,
+they are merged in chunk order, so for a content-seeded model (`random_seed` set) a fit
+is bit-identical to `processes=1` at the same `chunk_size` (`chunk_size=None` with N
+processes = N even chunks). Each worker seeds `np.random` with a per-chunk seed the
+parent draws from its own `np.random`, so an unseeded model (`random_seed=None`) is
+reproducible given the global NumPy state but differs from the serial fit. Forking is
+Linux-only (checked by platform); elsewhere it runs serially. Forks are serialized by a
+module lock (two runners in two threads do not share the fork state). Why it pays: at the whole-Mondo scale (K ≈ 3,000,
 V ≈ 11,600) one core does the gated E-step at ~2–5 ms per document, so a Spark iteration
 over a 22k-document mini-batch is mostly overhead (shipping the topic matrix, scheduling,
 merging). `DagGatedLDAEstimator(engine="local", localProcesses=N)` uses it: the node set
