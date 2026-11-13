@@ -15,6 +15,13 @@ dashboard's CodePanel (`dashboard/src/lib/inference.ts`, `relevance`).
 make -C analysis/cloud export-dag-gated ID=173 RESOLVE_NAMES=1   # writes <run>/dag_export/
 ```
 
+It also writes **`<run>/dag_view.html`**: the page with the export embedded, one
+self-contained file that opens without a server. Use it where the page cannot fetch its
+data files: JupyterLab serves files in a sandbox (`Content-Security-Policy: sandbox`), so
+"Open in New Browser Tab" on `index.html` shows the page but not the data, and
+`file://` blocks the fetches too. In a Jupyter workbench, open `dag_view.html` with
+"Open in New Browser Tab". (`--no-single-file` skips it.)
+
 It needs no Spark (it reads `<run>/model/result`, `label_dag.json`, `bundle_meta.json`;
 `RESOLVE_NAMES=1` names the terms through the CDR concept table) and prints each file's
 raw and gzip size. The export holds model parameters, names, and banded per-node support

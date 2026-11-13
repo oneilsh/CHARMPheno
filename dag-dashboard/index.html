@@ -391,7 +391,13 @@ function topoOrder(){
 async function boot(){
   const dir=dataDir();
   try{
-    const [man,nodes,vocab,topics]=await Promise.all(["manifest","nodes","vocab","topics"].map(f=>fetchJSON(dir+f+".json")));
+    // A self-contained page (export_dag_gated.py writes <run>/dag_view.html) carries the
+    // four files in a <script id="dag-data" type="application/json"> block: no fetch, so
+    // it opens where fetching is blocked (a sandboxed file server, file://).
+    const emb=document.getElementById("dag-data");
+    const [man,nodes,vocab,topics]=emb
+      ? (d=>["manifest","nodes","vocab","topics"].map(f=>d[f+".json"]))(JSON.parse(emb.textContent))
+      : await Promise.all(["manifest","nodes","vocab","topics"].map(f=>fetchJSON(dir+f+".json")));
     decode(man,nodes,vocab,topics);
   }catch(e){
     console.warn("[export] load failed",e);

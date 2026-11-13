@@ -141,3 +141,21 @@ def test_build_refuses_a_lambda_that_does_not_fit_the_layout():
     with pytest.raises(ValueError, match="topics"):
         dg.build_export(bad, ns, n_bg=n_bg, tpn=1, given_dag=dag, domains=["a", "b"],
                         vocab_maps=vm)
+
+
+def test_embed_in_page_round_trips_and_cannot_close_the_script(tmp_path):
+    """The self-contained page carries the four files in a JSON script block; a string
+    holding "</script>" must not end the block early."""
+    import json
+    from charmpheno.export.dag_gated import FILES, embed_in_page
+    for name in FILES:
+        (tmp_path / name).write_text(json.dumps({"name": name, "evil": "</script><b>x"}))
+    page = "<html><head><title>t</title></head><body><script>boot()</script></body></html>"
+    out = embed_in_page(page, tmp_path)
+    start = out.index('<script id="dag-data" type="application/json">') + len(
+        '<script id="dag-data" type="application/json">')
+    block = out[start:out.index("</script>", start)]
+    data = json.loads(block)
+    assert set(data) == set(FILES)
+    assert data["nodes.json"]["evil"] == "</script><b>x"
+    assert out.index('id="dag-data"') < out.index("</head>") < out.index("boot()")

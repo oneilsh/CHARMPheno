@@ -497,6 +497,24 @@ def write_export(files: dict, out_dir) -> dict:
     return dict(man["sizes"])
 
 
+def embed_in_page(page_html: str, out_dir) -> str:
+    """The browser page with the export's four files embedded, as one self-contained
+    HTML file: a `<script id="dag-data" type="application/json">` block in `<head>`
+    holding `{file name: parsed file}`, which the page reads instead of fetching.
+
+    Why: some file servers (JupyterLab's, which sandboxes the HTML it serves) and
+    `file://` block the page's fetches of the data files; a page that carries its data
+    needs no fetch. `</` is escaped as `<\\/` (a valid JSON escape) so no string in the
+    data can close the script element."""
+    d = Path(out_dir)
+    blob = {name: json.loads((d / name).read_text(encoding="utf-8")) for name in FILES}
+    text = json.dumps(blob, separators=(",", ":"), ensure_ascii=False).replace("</", "<\\/")
+    tag = f'<script id="dag-data" type="application/json">{text}</script>\n'
+    if "</head>" not in page_html:
+        raise ValueError("the page has no </head> to embed the data before")
+    return page_html.replace("</head>", tag + "</head>", 1)
+
+
 def read_export(out_dir) -> dict:
     """The four files of an export directory, parsed."""
     d = Path(out_dir)

@@ -195,6 +195,12 @@ def parse_args(argv=None):
     ap.add_argument("--run-dir", required=True,
                     help="the run dir (or a quoted glob such as '.../0173-*')")
     ap.add_argument("--out", default=None, help="output dir (default <run>/dag_export)")
+    ap.add_argument("--single-file", default=None, metavar="HTML",
+                    help="also write the browser page with the export embedded, one "
+                         "self-contained file that opens without a server (default "
+                         "<run>/dag_view.html; see dag-dashboard/README.md)")
+    ap.add_argument("--no-single-file", action="store_true",
+                    help="do not write the self-contained page")
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--names", default=None,
                    help="term-name CSV (concept_id,concept_name), keyed by the vocab "
@@ -291,6 +297,15 @@ def main(argv=None):
           f"{n_null} with support not recorded; {len(files['vocab.json']['code'])} "
           f"terms; {len(files['topics.json']['node'])} topics)", flush=True)
     print(format_sizes(sizes), flush=True)
+    if not args.no_single_file:
+        from charmpheno.export.dag_gated import embed_in_page
+        page = _HERE.parent.parent / "dag-dashboard" / "index.html"
+        html_out = Path(args.single_file) if args.single_file else run / "dag_view.html"
+        html_out.write_text(embed_in_page(page.read_text(encoding="utf-8"), out),
+                            encoding="utf-8")
+        print(f"[export-dag-gated] wrote the self-contained page {html_out} "
+              f"({html_out.stat().st_size / 1e6:.2f} MB): open it in a browser, no server "
+              "needed", flush=True)
     return files, sizes
 
 
