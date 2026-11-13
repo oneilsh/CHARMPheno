@@ -442,6 +442,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "(default) or the held-out test split")
     p.add_argument("--npmi-domains", default="0",
                    help="(--npmi) comma-separated domain indices (0 = conditions)")
+    p.add_argument("--npmi-min-pair-count", type=int, default=3,
+                   help="(--npmi) a word pair enters a topic's NPMI only when its joint "
+                        "document count is at least this (default 3, the analysis "
+                        "default). >= 20 (the egress floor) is required for an "
+                        "exportable NPMI: export_dag_gated.py drops a result scored "
+                        "below it")
     p.add_argument("--diff-members", default="auto",
                    choices=("auto", "all", "top", "most-specific"),
                    help="(--differential) which label terms are a group's members: all "
@@ -1182,7 +1188,8 @@ def main(argv=None) -> int:
                          int2cid=_br["int2cid"], names=_br["name_by_id"],
                          split=args.npmi_split, top_n=args.npmi_top,
                          domains=[int(x) for x in str(args.npmi_domains).split(",")],
-                         tag=args.acq_tag)
+                         tag=args.acq_tag,
+                         min_pair_count=int(args.npmi_min_pair_count))
             return 0
 
         if args.differential:

@@ -81,7 +81,14 @@ all: [[int|null]]}`, per scored domain one value per topic, round(1000 * NPMI) o
 topic's top terms (gated: over the documents its gate admits; all: every document),
 null when unscored; with `manifest.npmi = {top_n, split, min_pair_count, domains,
 scale: 1000}`. From `analysis/cloud/topic_npmi.py`'s `<run>/npmi_top10.json`; only these
-scalars ship (pair counts under the egress floor were never scored).
+scalars ship, no count. A topic's NPMI averages the word pairs whose joint document
+count is at least the result's `min_pair_count` (`topic_npmi.run_npmi`; the analysis
+default is 3; the `floor` given to `score` is the gated reference-set size, not the pair
+cells). So the scalars rest on cells at or above the egress floor only when
+`min_pair_count >= 20`. Rule (corrected 2026-11-13, code review A1): the exporter ships
+the block only when `min_pair_count >= EGRESS_FLOOR` and otherwise drops it with a
+printed reason; an exportable NPMI comes from the readout's
+`--npmi --npmi-min-pair-count 20`.
 
 `ids` are term indices into vocab.json, sorted ascending and DELTA-coded (first value
 absolute, then gaps); `w` are log-byte weights aligned with the decoded ids: the topic's
@@ -95,7 +102,9 @@ rare term's prior-level weight cannot rank first).
 ## Disclosure
 
 Model parameters over a vocabulary floored at 20 patients per term; no document or
-patient data. Node support is shown banded as the Mondo usage dashboard does. Nothing
+patient data. Checked, not assumed (code review A2, 2026-11-13): `build_export` refuses
+a node set fitted with `min_docs_per_node < 20`, and the driver refuses a run whose
+`corpus_manifest.min_patient_count` is below 20 or missing. Node support is shown banded as the Mondo usage dashboard does. Nothing
 per-node beyond the banded support and the topic.
 
 ## Code

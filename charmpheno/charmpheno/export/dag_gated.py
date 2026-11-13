@@ -26,7 +26,10 @@ What is shipped, and why it stays small (target ~2 MB gzipped at K ~ 2,900):
 Disclosure (AGENTS.md, egress floor): model parameters over a vocabulary floored at
 20 patients per term; node support is shown BANDED (`band_support`, 20-wide bands at
 the midpoint); no document or patient data, and no per-node number beyond the banded
-support, the topic and its sharpness (supportFraction).
+support, the topic and its sharpness (supportFraction). The floors this rests on are
+checked, not assumed: `build_export` refuses a node set with `min_docs_per_node` below
+the floor and drops an NPMI result whose `min_pair_count` is below it
+(`npmi_exportable`); the driver refuses a vocabulary floored below it.
 
 Node topics: topic k < n_bg is background; the node with engine id e owns topics
 n_bg + (e - 1) * tpn .. n_bg + e * tpn - 1 (`DagLayout`'s block order). With tpn > 1
@@ -268,9 +271,15 @@ def npmi_block(npmi: dict, K: int):
     Per scored domain, two arrays aligned with the topics: the gated NPMI (over the
     documents each topic's gate admits) and the all-documents NPMI of the topic's top
     terms, as round(1000 * NPMI), null where a topic was not scored (NaN, or no row).
-    Only these two scalars are shipped: the NPMI was computed from pair counts at or
-    above the egress floor (`min_pair_count`), and no count leaves with it. Rows are
-    keyed by the model's topic index, which is the export's topic index."""
+    Only these two scalars are shipped, no count. Rows are keyed by the model's topic
+    index, which is the export's topic index.
+
+    Disclosure: a topic's NPMI averages the word pairs whose joint document count is at
+    least the result's `min_pair_count` (`topic_npmi.run_npmi`; its analysis default is
+    3). The `floor` that `score` is given is the size of the gated reference set, not
+    the pair cells. So the scalars rest on cells >= the egress floor only when
+    `min_pair_count >= EGRESS_FLOOR`; `npmi_exportable` is that rule, and
+    `build_export` drops the block otherwise. This function does not check it."""
     import math
     doms = sorted({int(r["domain"]) for r in npmi.get("rows", [])})
     gated = {d: [None] * K for d in doms}
@@ -291,6 +300,26 @@ def npmi_block(npmi: dict, K: int):
     return block, meta
 
 
+def npmi_exportable(npmi: dict):
+    """`(ok, reason)`: may this topic-NPMI result leave the workspace? Only when every
+    pair it averaged had a joint count at or above the egress floor, i.e. its
+    `min_pair_count >= EGRESS_FLOOR` (`npmi_block`'s docstring). `reason` says why not
+    (empty when ok)."""
+    floor = _egress_floor()
+    mpc = npmi.get("min_pair_count") if isinstance(npmi, dict) else None
+    try:
+        mpc_i = int(mpc)
+    except (TypeError, ValueError):
+        return False, (f"the NPMI result records no usable min_pair_count ({mpc!r}); "
+                       f"an exportable NPMI needs min_pair_count >= {floor}")
+    if mpc_i < floor:
+        return False, (f"the NPMI averaged word pairs with joint counts down to "
+                       f"min_pair_count={mpc_i}, below the egress floor {floor}; "
+                       f"re-run the readout with --npmi --npmi-min-pair-count {floor} "
+                       "for an exportable NPMI")
+    return True, ""
+
+
 def build_export(lam, ns, *, n_bg, tpn, given_dag, domains, vocab_maps,
                  node_names=None, term_names=None, extra_support=None,
                  run="", mondo_version="", cdr="", created_utc=None,
@@ -305,7 +334,25 @@ def build_export(lam, ns, *, n_bg, tpn, given_dag, domains, vocab_maps,
     `domains`: domain names in domain order. `vocab_maps`: per domain `{code: local
     index}`. `node_names`: `{node id: label}`; `term_names`: `{code: name}` (codes as
     ints where they are ints). `extra_support`: `{node: support}` for nodes the node
-    set holds no support for (the unsupported ones, as fitted)."""
+    set holds no support for (the unsupported ones, as fitted). `npmi`: a topic-NPMI
+    result (`npmi_block`); dropped, with the reason printed, unless `npmi_exportable`.
+
+    Disclosure: refuses (ValueError) a node set fitted with `min_docs_per_node` below
+    the egress floor, since a kept node's banded support and its topic then rest on
+    fewer documents than the floor. The vocabulary's own floor (`min_patient_count`)
+    is not in the model; the driver checks it from the run manifest."""
+    floor = _egress_floor()
+    if int(ns.min_docs_per_node) < floor:
+        raise ValueError(
+            f"min_docs_per_node={int(ns.min_docs_per_node)} is below the egress floor "
+            f"{floor}: the node set keeps nodes supported by fewer documents than the "
+            "floor, so the export is not disclosable (refit with minDocsPerNode >= "
+            f"{floor})")
+    if npmi is not None:
+        ok, why = npmi_exportable(npmi)
+        if not ok:
+            print(f"[export-dag-gated] NPMI dropped: {why}", flush=True)
+            npmi = None
     from spark_vi.eval.topic.sharpness import lambda_domains
     lam_list = lambda_domains(lam) if not isinstance(lam, list) else [
         np.asarray(a, dtype=np.float64) for a in lam]

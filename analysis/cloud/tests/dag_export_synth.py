@@ -222,6 +222,7 @@ def write_run(run, *, dag, ns_fitted, ns, lam, n_bg, tpn, vocab_codes, node_name
         "domain_names": list(domains),
         "node_statistics": {"file": "node_statistics.tsv", "dropped": True},
         "corpus_manifest": {"cdr": cdr, "billing": "synthetic-billing",
+                            "min_patient_count": 20,
                             "mondo_version": MONDO_VERSION,
                             "mondo_cache_dir": str(mondo_cache)}}))
     # node statistics of the model AS FITTED (support per kept-before-drop node)

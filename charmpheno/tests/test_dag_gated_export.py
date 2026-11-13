@@ -110,8 +110,8 @@ def test_unsupported_support_comes_from_extra_or_is_unknown():
 def _small(tpn=1):
     from spark_vi.dag.nodeset import fit_node_set
     dag = {"x": [], "y": ["x"], "z": ["x"], "w": ["y", "z"], "v": ["w"]}
-    ns = fit_node_set(dag, [["w"]] * 4 + [["y"]] * 3 + [["z"]] * 2 + [["v"]] * 1,
-                      min_docs_per_node=2)
+    ns = fit_node_set(dag, [["w"]] * 40 + [["y"]] * 30 + [["z"]] * 20 + [["v"]] * 10,
+                      min_docs_per_node=20)
     n_bg = 2
     K = n_bg + len(ns.nodes) * tpn
     rng = np.random.default_rng(1)
@@ -175,3 +175,35 @@ def test_npmi_block_aligns_topics_and_keeps_only_scalars():
                      "all": [[None, None, None], [200, None, -41]]}
     assert meta == {"top_n": 10, "split": "train", "min_pair_count": 20,
                     "domains": [0, 2], "scale": 1000}
+
+
+def test_build_refuses_a_node_set_floored_below_the_egress_floor():
+    """Code review A2: kept nodes must rest on >= EGRESS_FLOOR documents."""
+    import pytest
+    from spark_vi.dag.nodeset import fit_node_set
+    dag, _, n_bg, lam, vm = _small()
+    ns = fit_node_set(dag, [["w"]] * 4 + [["y"]] * 3 + [["z"]] * 2 + [["v"]] * 1,
+                      min_docs_per_node=2)
+    K = n_bg + len(ns.nodes)
+    lam = {m: a[:K] for m, a in lam.items()}
+    with pytest.raises(ValueError, match=r"min_docs_per_node=2 is below the egress floor 20"):
+        dg.build_export(lam, ns, n_bg=n_bg, tpn=1, given_dag=dag, domains=["a", "b"],
+                        vocab_maps=vm, created_utc="t")
+
+
+def test_npmi_ships_only_at_or_above_the_egress_floor(capsys):
+    """Code review A1: min_pair_count is the pair-cell floor; below 20 the block is
+    dropped with the reason printed."""
+    dag, ns, n_bg, lam, vm = _small()
+    rows = [{"domain": 0, "topic": 0, "npmi_gated": 0.25, "npmi_all": 0.2}]
+    assert dg.npmi_exportable({"min_pair_count": 20})[0]
+    assert not dg.npmi_exportable({"min_pair_count": 19})[0]
+    assert not dg.npmi_exportable({})[0]
+    for mpc, shipped in ((3, False), (20, True)):
+        f = dg.build_export(lam, ns, n_bg=n_bg, tpn=1, given_dag=dag,
+                            domains=["a", "b"], vocab_maps=vm, created_utc="t",
+                            npmi={"top_n": 10, "split": "train", "min_pair_count": mpc,
+                                  "rows": rows})
+        assert ("npmi" in f["topics.json"]) is shipped
+        assert ("npmi" in f["manifest.json"]) is shipped
+    assert "NPMI dropped" in capsys.readouterr().out

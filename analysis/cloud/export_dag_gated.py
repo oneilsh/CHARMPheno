@@ -27,8 +27,11 @@ Spark, no YARN, safe on the master mid-anything. The pure work is
   `<run>/concept_names.csv` when present.
 
 The export holds model parameters and banded node support only: no per-document or
-patient data (AGENTS.md, egress floor). Still: copy it out of the workspace only per
-the workspace's egress rules.
+patient data (AGENTS.md, egress floor). It refuses a run whose vocabulary floor
+(`corpus_manifest.min_patient_count`) or node-set floor (`min_docs_per_node`) is below
+the egress floor, and ships the topic NPMI only when the result's `min_pair_count` is at
+least the floor (readout `--npmi --npmi-min-pair-count 20`). Still: copy it out of the
+workspace only per the workspace's egress rules.
 
   python export_dag_gated.py --run-dir <run> [--names concept_names.csv | --resolve-names]
   make -C analysis/cloud export-dag-gated ID=173 RESOLVE_NAMES=1
@@ -229,7 +232,8 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
-    from charmpheno.export.dag_gated import build_export, write_export
+    from charmpheno.egress import EGRESS_FLOOR
+    from charmpheno.export.dag_gated import build_export, npmi_exportable, write_export
     from spark_vi.dag.nodeset import NodeSet
     from spark_vi.io.export import load_result
 
@@ -237,6 +241,14 @@ def main(argv=None):
     out = Path(args.out) if args.out else run / "dag_export"
     manifest = json.loads((run / "manifest.json").read_text())
     cm = manifest.get("corpus_manifest") or {}
+    # Disclosure: the vocabulary must be floored at the egress floor (every shipped
+    # term attested by >= EGRESS_FLOOR patients). Refuse when it is not, or unknown.
+    mpc = cm.get("min_patient_count")
+    if mpc is None or int(mpc) < EGRESS_FLOOR:
+        raise SystemExit(
+            f"[export-dag-gated] refusing: the run's corpus_manifest.min_patient_count "
+            f"is {mpc!r}, but an export needs a vocabulary floored at >= {EGRESS_FLOOR} "
+            "patients per term (the egress floor)")
     label_dag = json.loads((run / "label_dag.json").read_text())
     meta = json.loads((run / "bundle_meta.json").read_text())
     res = load_result(str(run / "model" / "result"))
@@ -294,8 +306,15 @@ def main(argv=None):
         npath = Path(args.npmi_file) if args.npmi_file else run / "npmi_top10.json"
         if npath.exists():
             npmi = json.loads(npath.read_text())
-            print(f"[export-dag-gated] NPMI from {npath} (top {npmi.get('top_n')}, "
-                  f"{npmi.get('split')} split)", flush=True)
+            ok, why = npmi_exportable(npmi)
+            if ok:
+                print(f"[export-dag-gated] NPMI from {npath} (top {npmi.get('top_n')}, "
+                      f"{npmi.get('split')} split, min_pair_count "
+                      f"{npmi.get('min_pair_count')})", flush=True)
+            else:
+                print(f"[export-dag-gated] NPMI from {npath} NOT shipped: {why}",
+                      flush=True)
+                npmi = None
         else:
             print(f"[export-dag-gated] no NPMI ({npath} not found; run the readout "
                   "with --npmi first, or pass --npmi-file)", flush=True)

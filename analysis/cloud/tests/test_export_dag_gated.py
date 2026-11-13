@@ -214,6 +214,35 @@ def test_names_fall_back_to_the_bundle_meta_without_the_mondo_file(tmp_path):
     assert all(files["vocab.json"]["name"])
 
 
+def test_npmi_below_the_egress_floor_is_not_shipped(tmp_path, capsys):
+    """Code review A1: an NPMI scored with min_pair_count 3 (the analysis default)
+    averaged pair cells below the floor; the export drops it and says why."""
+    run = synth.fixture_run(tmp_path)
+    npath = run / "npmi_top10.json"
+    d = json.loads(npath.read_text())
+    d["min_pair_count"] = 3
+    npath.write_text(json.dumps(d))
+    files, _ = synth.export_run(run, tmp_path / "out")
+    assert "npmi" not in files["topics.json"] and "npmi" not in files["manifest.json"]
+    assert "NOT shipped" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("mpc", [None, 5])
+def test_vocabulary_floored_below_the_egress_floor_is_refused(tmp_path, mpc):
+    """Code review A2: the vocabulary's min_patient_count must be >= the floor."""
+    run = synth.fixture_run(tmp_path)
+    mpath = run / "manifest.json"
+    m = json.loads(mpath.read_text())
+    if mpc is None:
+        del m["corpus_manifest"]["min_patient_count"]
+    else:
+        m["corpus_manifest"]["min_patient_count"] = mpc
+    mpath.write_text(json.dumps(m))
+    with pytest.raises(SystemExit, match="min_patient_count"):
+        synth.export_run(run, tmp_path / "out")
+    assert not (tmp_path / "out").exists()
+
+
 def test_committed_fixture_is_current(tmp_path):
     """dag-dashboard/fixture/ is the generator's output, byte for byte (regenerate:
     `python analysis/cloud/tests/dag_export_synth.py --fixture dag-dashboard/fixture`)."""
