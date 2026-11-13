@@ -174,7 +174,9 @@ def _scan_labels_spark(dataset, labels_col, landing, policy):
             sc = (rdd.mapPartitions(lambda it, _bc=bc: _partition_support(it, _bc, 0))
                   .treeReduce(lambda a, b: a.merge(b)))
     finally:
-        bc.unpersist()
+        # Destroy, not unpersist: unpersist leaves the driver's copy (review B6).
+        from spark_vi.core.broadcast import destroy_broadcast
+        destroy_broadcast(bc)
     _support, n_docs = _finish(sc, index, policy)
     return n_docs
 

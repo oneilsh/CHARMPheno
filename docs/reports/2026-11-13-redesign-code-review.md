@@ -54,3 +54,13 @@ on heads reload, no width check on the single-domain transform path, `gateSeedMo
 validated late, a log line when seed extras are set but `gateWarm = 0`, `extra_metadata`
 able to overwrite core keys, and the exporter's copies of `mondo_cid` / `dag_from_edges`
 / `_longest_depth`.
+
+Also fixed (found by the fixing pass, same pattern as B6): `mllib/readout.py`
+`_scan_labels_spark` now destroys its broadcast.
+
+Test tier at the end (2026-11-13): spark-vi 521 + 461 passed (4 skipped); charmpheno 285;
+drivers 640 passed + `test_build_dashboard_smoke` (pre-existing: missing fixture); the
+seven STM / gated-dashboard tests that first failed needed the optional `formulaic`
+package in the rebuilt environment and pass with it. After the fixes: spark-vi unit 731,
+charmpheno unit 193, the affected slow files and driver suites 296 passed.
+
