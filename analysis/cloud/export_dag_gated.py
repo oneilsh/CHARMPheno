@@ -201,6 +201,10 @@ def parse_args(argv=None):
                          "<run>/dag_view.html; see dag-dashboard/README.md)")
     ap.add_argument("--no-single-file", action="store_true",
                     help="do not write the self-contained page")
+    ap.add_argument("--npmi-file", default=None, metavar="JSON",
+                    help="topic NPMI to ship per topic (topic_npmi.py output; default "
+                         "<run>/npmi_top10.json when it exists)")
+    ap.add_argument("--no-npmi", action="store_true", help="ship no NPMI")
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--names", default=None,
                    help="term-name CSV (concept_id,concept_name), keyed by the vocab "
@@ -285,12 +289,23 @@ def main(argv=None):
     print(f"[export-dag-gated] unsupported-node support from the as-fitted node "
           f"statistics: {n_known} of {len(extra)}", flush=True)
 
+    npmi = None
+    if not args.no_npmi:
+        npath = Path(args.npmi_file) if args.npmi_file else run / "npmi_top10.json"
+        if npath.exists():
+            npmi = json.loads(npath.read_text())
+            print(f"[export-dag-gated] NPMI from {npath} (top {npmi.get('top_n')}, "
+                  f"{npmi.get('split')} split)", flush=True)
+        else:
+            print(f"[export-dag-gated] no NPMI ({npath} not found; run the readout "
+                  "with --npmi first, or pass --npmi-file)", flush=True)
     files = build_export(
         lam, ns, n_bg=n_bg, tpn=tpn, given_dag=given, domains=domains,
         vocab_maps=vocab_maps, node_names=node_names, term_names=term_names,
         extra_support=extra, run=run.name, mondo_version=version or "",
         cdr=cm.get("cdr", ""), created_utc=args.created_utc,
-        top_beta=args.top_beta, top_lift=args.top_lift, lift_pool=args.lift_pool)
+        top_beta=args.top_beta, top_lift=args.top_lift, lift_pool=args.lift_pool,
+        npmi=npmi)
     sizes = write_export(files, out)
     n_null = sum(s is None for s in files["nodes.json"]["support"])
     print(f"[export-dag-gated] wrote {out} ({len(files['nodes.json']['id'])} nodes, "

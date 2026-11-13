@@ -159,3 +159,19 @@ def test_embed_in_page_round_trips_and_cannot_close_the_script(tmp_path):
     assert set(data) == set(FILES)
     assert data["nodes.json"]["evil"] == "</script><b>x"
     assert out.index('id="dag-data"') < out.index("</head>") < out.index("boot()")
+
+
+def test_npmi_block_aligns_topics_and_keeps_only_scalars():
+    import math
+    from charmpheno.export.dag_gated import npmi_block
+    rows = [{"domain": 2, "topic": 0, "npmi_gated": 0.25, "npmi_all": 0.2, "n_pairs": 45},
+            {"domain": 2, "topic": 2, "npmi_gated": math.nan, "npmi_all": -0.0414},
+            {"domain": 0, "topic": 1, "npmi_gated": -0.1235, "npmi_all": None},
+            {"domain": 0, "topic": 9, "npmi_gated": 0.5, "npmi_all": 0.5}]   # out of range
+    block, meta = npmi_block({"top_n": 10, "split": "train", "min_pair_count": 20,
+                              "rows": rows}, K=3)
+    assert block == {"domains": [0, 2],
+                     "gated": [[None, -124, None], [250, None, None]],
+                     "all": [[None, None, None], [200, None, -41]]}
+    assert meta == {"top_n": 10, "split": "train", "min_pair_count": 20,
+                    "domains": [0, 2], "scale": 1000}

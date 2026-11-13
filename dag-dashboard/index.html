@@ -235,6 +235,8 @@ header.top{position:relative;padding:2px 0 10px;border-bottom:1px solid var(--bo
 .bg-list{padding:6px 18px 18px}
 .bgcard{border-bottom:1px solid var(--border);padding:14px 0}
 .bgcard h3{font-size:14px;font-weight:600;margin:0 0 8px;font-family:var(--mono)}
+.npmi-row{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12.5px;margin:4px 0 10px}
+.npmi-c b{font-weight:600;margin-right:4px}.npmi-all,.npmi-p{color:var(--muted,#888)}
 .tip{position:fixed;pointer-events:none;background:var(--ink);color:var(--bg);font-size:12px;
   font-family:var(--mono);padding:6px 9px;border-radius:6px;z-index:40;opacity:0;transition:opacity .1s;max-width:440px;
   white-space:pre-line;line-height:1.45}
@@ -328,7 +330,7 @@ const statusOf=n=>STATUS[n.status]||{label:"status "+n.status,color:"var(--muted
 /* ============================== data ===================================== */
 // Decoded export. Nodes keep their export index (`ix`) and are keyed by their user id
 // (Mondo CURIE) in byId, the shape the copied DAG engine works on.
-let MAN=null, NODES=[], TOPICS=[], VOCAB=null, DOMAINS=[];
+let MAN=null, NODES=[], TOPICS=[], VOCAB=null, DOMAINS=[], NPMI=null;
 let byId=new Map(), dagKids=new Map(), gRootIds=[], SUPPORT_MAX=1;
 const ROOT_ID="__root__";
 
@@ -344,6 +346,18 @@ const unbyte=(b,c)=>Math.exp(c.lo+(c.hi-c.lo)*b/255);
 function decode(man,nodes,vocab,topics){
   if(man.schema!=="dag-gated-export/1") console.warn("[export] unexpected schema",man.schema);
   MAN=man; DOMAINS=(man.domains||[]).map(d=>d.name);
+  // NPMI (optional): per scored domain, gated / all-documents NPMI x 1000 per topic.
+  // NPMI_RANK[d] holds the sorted node-topic values, for a node's percentile.
+  NPMI=null;
+  if(topics.npmi&&topics.npmi.domains){
+    const sc=(man.npmi&&man.npmi.scale)||1000, nb=man.n_bg||0;
+    NPMI={meta:man.npmi||{}, domains:topics.npmi.domains,
+      gated:topics.npmi.gated.map(a=>a.map(v=>v==null?null:v/sc)),
+      all:topics.npmi.all.map(a=>a.map(v=>v==null?null:v/sc))};
+    NPMI.rank=NPMI.domains.map((_,i)=>({
+      gated:NPMI.gated[i].filter((v,k)=>k>=nb&&v!=null).sort((a,b)=>a-b),
+      all:NPMI.all[i].filter((v,k)=>k>=nb&&v!=null).sort((a,b)=>a-b)}));
+  }
   const wc=man.weight_codec.per_domain, fc=man.freq_codec.per_domain;
   // vocab: p(w) within its domain (the model's own marginal), decoded from log-bytes
   const nv=vocab.domain.length, p=new Float64Array(nv);
@@ -970,6 +984,7 @@ function select(id,quiet){
     if(n.status===0 && n.topic!=null && TOPICS[n.topic]){
       html+=`<div class="section-t">Topic</div><div class="section-sub">Top ${TOP_N} shipped terms per domain, ranked by relevance = λ·log β + (1 − λ)·log(β / p). Bar and number: β, the term's share of this topic within the domain.</div>`;
       html+=sliderHTML()+termColsHTML(n.topic);
+      html+=npmiHTML(n.topic);
       html+=`<div class="section-t">Differs from parent (approximate)</div><div class="section-sub">For each parent topic in the kept DAG: this node's shipped terms with the largest β / β<sub>parent</sub>. A term absent from the parent's shipped list is given the parent's smallest shipped weight in that domain ("new", shown as ≥), so these ratios are approximate.</div>`;
       html+=diffHTML(n);
     } else if(n.status!==0){
@@ -997,6 +1012,29 @@ function closeDrawer(){selected=null; gSel=new Set(); renderDrawerDefault(); ren
 
 /* ============================== background view ========================== */
 let bgShown=0; const BG_PAGE=25;
+/* ============================== coherence ================================ */
+// NPMI of a topic's top terms (normalized pointwise mutual information, -1..1; higher =
+// the terms co-occur in documents more than chance). "gated" counts only the documents
+// the topic's gate admits; "all" counts every document. The percentile is among the
+// node topics of the same domain.
+function pctOf(sorted,v){ if(!sorted.length) return null; let lo=0,hi=sorted.length;
+  while(lo<hi){const m=(lo+hi)>>1; if(sorted[m]<v) lo=m+1; else hi=m;} return Math.round(100*lo/sorted.length); }
+function npmiHTML(k,{compact=false}={}){
+  if(!NPMI) return compact?"":`<div class="section-sub">No coherence scores in this export (the run had no NPMI result).</div>`;
+  const nb=MAN.n_bg||0, isNode=k>=nb, m=NPMI.meta;
+  const cells=NPMI.domains.map((d,i)=>{
+    const g=NPMI.gated[i][k], a=NPMI.all[i][k], name=DOMAINS[d]||("domain "+d);
+    if(g==null&&a==null) return `<span class="npmi-c"><b>${esc(name)}</b> not scored</span>`;
+    const pg=isNode&&g!=null?pctOf(NPMI.rank[i].gated,g):null;
+    const tipTxt=`${name}: NPMI of the top ${m.top_n||"?"} terms. Gated ${g==null?"n/a":g.toFixed(3)} (documents this topic's gate admits)`+
+      `, all documents ${a==null?"n/a":a.toFixed(3)}.`+(pg!=null?` Gated NPMI is above ${pg}% of node topics in this domain.`:"");
+    return `<span class="npmi-c" data-tip="${esc(tipTxt)}"><b>${esc(name)}</b> ${g==null?"n/a":g.toFixed(3)}`+
+      `<span class="npmi-all"> · all ${a==null?"n/a":a.toFixed(3)}</span>${pg!=null?`<span class="npmi-p"> · p${pg}</span>`:""}</span>`;
+  }).join("");
+  if(compact) return `<div class="npmi-row">NPMI ${cells}</div>`;
+  return `<div class="section-t">Coherence (NPMI)</div><div class="section-sub">NPMI of the top ${m.top_n||"?"} terms (−1…1; higher = the terms co-occur more than chance), over the ${esc(m.split||"train")} split: gated (the documents this topic's gate admits), then all documents; p = percentile among node topics. Pairs seen in fewer than ${m.min_pair_count||"the floor of"} documents are not scored.</div><div class="npmi-row">${cells}</div>`;
+}
+
 function renderBackground(){
   const nb=MAN.n_bg||0;
   $("#bg-intro").innerHTML=`The <b>${fmt(nb)} background topics</b> are shared by every document regardless of its labels; they soak up what is common across the corpus so that the node topics can stay specific. Each shows its top ${TOP_N} shipped terms per domain, ranked by the same relevance as the node drawer.`;
@@ -1006,7 +1044,7 @@ function renderBackground(){
 function drawBgList(){
   const nb=MAN.n_bg||0, box=$("#bg-list");
   let html="";
-  for(let k=0;k<bgShown;k++) html+=`<div class="bgcard"><h3>Background topic ${k+1}</h3>${termColsHTML(k)}</div>`;
+  for(let k=0;k<bgShown;k++) html+=`<div class="bgcard"><h3>Background topic ${k+1}</h3>${npmiHTML(k,{compact:true})}${termColsHTML(k)}</div>`;
   if(bgShown<nb) html+=`<div style="padding:14px 0"><button class="btn" id="bg-more">Show ${Math.min(BG_PAGE,nb-bgShown)} more (${fmt(nb-bgShown)} not shown)</button></div>`;
   box.innerHTML=html;
   const mb=$("#bg-more"); if(mb) mb.onclick=()=>{bgShown=Math.min(nb,bgShown+BG_PAGE); drawBgList();};
@@ -1026,6 +1064,24 @@ const tip=$("#tip");
 function showTip(e,txt){tip.textContent=txt;tip.style.opacity=1;
   tip.style.left=Math.min(e.clientX+12,innerWidth-tip.offsetWidth-8)+"px";tip.style.top=(e.clientY+14)+"px";}
 function hideTip(){tip.style.opacity=0;}
+
+// Fast hover for truncated names and other details: elements carrying data-tip, and
+// the drawer's / background view's term rows (their native title is moved to data-tip
+// so the browser's own delayed tooltip does not double up).
+document.addEventListener("mouseover",e=>{
+  const t=e.target.closest&&e.target.closest("[data-tip],#drawer-inner [title],#bg-list [title]");
+  if(!t){return;}
+  if(t.hasAttribute("title")){t.dataset.tip=t.getAttribute("title"); t.removeAttribute("title");}
+  showTip(e,t.dataset.tip);
+});
+document.addEventListener("mousemove",e=>{
+  const t=e.target.closest&&e.target.closest("[data-tip]");
+  if(t&&tip.style.opacity==="1") showTip(e,t.dataset.tip);
+});
+document.addEventListener("mouseout",e=>{
+  const t=e.target.closest&&e.target.closest("[data-tip]");
+  if(t&&!t.contains(e.relatedTarget)) hideTip();
+});
 
 /* ============================== wiring =================================== */
 document.querySelectorAll("#viewtabs button").forEach(b=>b.onclick=()=>setView(b.dataset.view));

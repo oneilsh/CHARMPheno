@@ -260,10 +260,42 @@ def _code(c):
         return s
 
 
+def npmi_block(npmi: dict, K: int):
+    """`(topics.json "npmi" block, manifest "npmi" entry)` from a topic-NPMI result
+    (`analysis/cloud/topic_npmi.py`'s `<run>/npmi_<tag>.json`: `{top_n, split,
+    min_pair_count, rows: [{domain, topic, npmi_gated, npmi_all, ...}]}`).
+
+    Per scored domain, two arrays aligned with the topics: the gated NPMI (over the
+    documents each topic's gate admits) and the all-documents NPMI of the topic's top
+    terms, as round(1000 * NPMI), null where a topic was not scored (NaN, or no row).
+    Only these two scalars are shipped: the NPMI was computed from pair counts at or
+    above the egress floor (`min_pair_count`), and no count leaves with it. Rows are
+    keyed by the model's topic index, which is the export's topic index."""
+    import math
+    doms = sorted({int(r["domain"]) for r in npmi.get("rows", [])})
+    gated = {d: [None] * K for d in doms}
+    every = {d: [None] * K for d in doms}
+
+    def q(v):
+        return None if v is None or (isinstance(v, float) and math.isnan(v)) \
+            else int(round(1000 * float(v)))
+    for r in npmi.get("rows", []):
+        k = int(r["topic"])
+        if 0 <= k < K:
+            gated[int(r["domain"])][k] = q(r.get("npmi_gated"))
+            every[int(r["domain"])][k] = q(r.get("npmi_all"))
+    block = {"domains": doms, "gated": [gated[d] for d in doms],
+             "all": [every[d] for d in doms]}
+    meta = {"top_n": npmi.get("top_n"), "split": npmi.get("split"),
+            "min_pair_count": npmi.get("min_pair_count"), "domains": doms, "scale": 1000}
+    return block, meta
+
+
 def build_export(lam, ns, *, n_bg, tpn, given_dag, domains, vocab_maps,
                  node_names=None, term_names=None, extra_support=None,
                  run="", mondo_version="", cdr="", created_utc=None,
-                 top_beta=25, top_lift=25, lift_pool=200, notes=None) -> dict:
+                 top_beta=25, top_lift=25, lift_pool=200, notes=None,
+                 npmi=None) -> dict:
     """The four files of `dag-gated-export/1` as JSON-ready objects
     (`{file name: object}`; `manifest["sizes"]` is filled by `write_export`).
 
@@ -420,6 +452,9 @@ def build_export(lam, ns, *, n_bg, tpn, given_dag, domains, vocab_maps,
             per.append([delta_encode(gl), [int(x) for x in wb]])
         d_all.append(per)
     topics = {"node": topic_node, "d": d_all}
+    npmi_meta = None
+    if npmi is not None:
+        topics["npmi"], npmi_meta = npmi_block(npmi, K)
 
     manifest = {
         "schema": SCHEMA, "run": str(run),
@@ -436,6 +471,7 @@ def build_export(lam, ns, *, n_bg, tpn, given_dag, domains, vocab_maps,
             "support": "20-wide bands shown at the midpoint (1-20 -> 10 '<=20', "
                        "21-40 -> 30, ...)"},
         "min_docs_per_node": int(ns.min_docs_per_node),
+        **({"npmi": npmi_meta} if npmi_meta else {}),
         "sizes": {},
         "notes": notes if notes is not None else default_notes(),
     }

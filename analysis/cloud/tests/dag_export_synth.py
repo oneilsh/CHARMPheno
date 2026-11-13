@@ -229,6 +229,16 @@ def write_run(run, *, dag, ns_fitted, ns, lam, n_bg, tpn, vocab_codes, node_name
     for u in ns_fitted.nodes:
         lines.append(f"{u}\t1\t{ns_fitted.support[u]}\t0.5\t1\t\tfalse")
     (run / "node_statistics.tsv").write_text("\n".join(lines) + "\n")
+    # topic NPMI as topic_npmi.py writes it (two scored domains; a few unscored topics)
+    nrng = np.random.default_rng(K)
+    rows = []
+    for d in (0, 1):
+        for k in range(K):
+            g = float(nrng.normal(0.2, 0.08)) if k % 17 else float("nan")
+            rows.append({"domain": d, "topic": k, "kind": "bg" if k < n_bg else "node",
+                         "npmi_gated": g, "npmi_all": g - 0.03})
+    (run / "npmi_top10.json").write_text(json.dumps(
+        {"top_n": 10, "split": "train", "min_pair_count": 20, "rows": rows}))
     Path(mondo_cache).mkdir(parents=True, exist_ok=True)
     with open(Path(mondo_cache) / f"{MONDO_VERSION}_mondo_nodes.tsv", "w") as fh:
         fh.write("id\tcategory\tname\n")

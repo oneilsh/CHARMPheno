@@ -76,6 +76,13 @@ needed), the p in the relevance formula.
 {node: [int|null],           # index into nodes.json; null for background
  d: [[ [ids], [w] ], ...]}   # per topic: one [ids, w] pair per domain
 ```
+Optional (added 2026-11-13, maintainer): `npmi: {domains: [int], gated: [[int|null]],
+all: [[int|null]]}`, per scored domain one value per topic, round(1000 * NPMI) of the
+topic's top terms (gated: over the documents its gate admits; all: every document),
+null when unscored; with `manifest.npmi = {top_n, split, min_pair_count, domains,
+scale: 1000}`. From `analysis/cloud/topic_npmi.py`'s `<run>/npmi_top10.json`; only these
+scalars ship (pair counts under the egress floor were never scored).
+
 `ids` are term indices into vocab.json, sorted ascending and DELTA-coded (first value
 absolute, then gaps); `w` are log-byte weights aligned with the decoded ids: the topic's
 E[β] within that domain (its λ row in the domain, normalized), b in 0..255,
