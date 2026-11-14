@@ -265,6 +265,7 @@ header.top{position:relative;padding:2px 0 10px;border-bottom:1px solid var(--bo
 .bg-list{padding:6px 18px 18px}
 .bgcard{border-bottom:1px solid var(--border);padding:14px 0}
 .bgcard h3{font-size:14px;font-weight:600;margin:0 0 8px;font-family:var(--mono)}
+.morectl{font-size:12px;color:var(--ink-2);margin:6px 0 4px}.morectl a{cursor:pointer;color:var(--accent);text-decoration:underline}
 .npmi-row{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12.5px;margin:4px 0 10px}
 .npmi-c b{font-weight:600;margin-right:4px}.npmi-all,.npmi-p{color:var(--muted,#888)}
 .tip{position:fixed;pointer-events:none;background:var(--ink);color:var(--bg);font-size:12px;
@@ -582,7 +583,12 @@ function relevance(pwk,pw,lambda){
   return lambda*Math.log(pwk)+(1-lambda)*Math.log(pwk/pw);
 }
 const state={view:"graph",q:"",lambda:0.6,topicOnly:false};
-const TOP_N=15;
+const TOP_N=15, SHOW_STEP=15;
+// Progressive reveal: how many terms per domain a topic's columns show (default TOP_N),
+// grown by SHOW_STEP up to everything the export shipped for it.
+const SHOWN=new Map();
+const shownFor=k=>SHOWN.get(k)||TOP_N;
+const shippedMax=k=>Math.max(0,...TOPICS[k].dom.map(t=>t?t.ids.length:0));
 function rankedTerms(k,d,lambda,n){
   const t=TOPICS[k].dom[d]; if(!t) return [];
   const out=[];
@@ -607,7 +613,7 @@ const markTip=m=>(m.own?"\nown code: the code ladder puts this code on this node
 function termColsHTML(k){
   const tn=topicNode(k);
   const cols=DOMAINS.map((dn,d)=>{
-    const t=TOPICS[k].dom[d], rows=rankedTerms(k,d,state.lambda,TOP_N);
+    const t=TOPICS[k].dom[d], rows=rankedTerms(k,d,state.lambda,shownFor(k));
     const maxB=t&&t.beta.length?Math.max(...t.beta):1;
     const lis=rows.map((r,i)=>{const mk=termMarks(tn,r.w,d);
       return `<li title="${esc(termTitle(r)+markTip(mk))}"><span class="rk">${i+1}</span>`+
@@ -616,7 +622,11 @@ function termColsHTML(k){
       `<span class="num">${(r.pwk*100).toFixed(r.pwk>=0.1?1:2)}%</span><span></span><span class="spark"><i style="width:${(100*r.pwk/maxB).toFixed(1)}%"></i></span></li>`;}).join("");
     return `<div class="dcol"><h4><span>${esc(dn)}</span><small>${t?t.ids.length:0} shipped</small></h4><ol class="terms">${lis||'<li><span></span><span class="nm" style="color:var(--muted)">none</span></li>'}</ol></div>`;
   });
-  return `<div class="termcols" data-topic-cols="${k}">${cols.join("")}</div>`;
+  const n=shownFor(k), mx=shippedMax(k);
+  const ctl=mx>TOP_N?`<div class="morectl">showing ${Math.min(n,mx)} of ${mx} shipped per domain`+
+    (n<mx?` · <a data-more="${k}" data-to="${Math.min(mx,n+SHOW_STEP)}">show ${Math.min(SHOW_STEP,mx-n)} more</a> · <a data-more="${k}" data-to="${mx}">show all</a>`:"")+
+    (n>TOP_N?` · <a data-more="${k}" data-to="${TOP_N}">show fewer</a>`:"")+`</div>`:"";
+  return `<div class="termcols-wrap" data-topic-cols="${k}"><div class="termcols">${cols.join("")}</div>${ctl}</div>`;
 }
 function sliderHTML(){
   return `<label class="slider" title="Relevance term weighting. The slider blends two views of the top terms: raw frequency (how much of the topic's mass falls on the term) and lift (how much more the term shows up here than across the whole model). Slide left for lift, right for frequency.">
@@ -633,6 +643,14 @@ function wireSliders(root){
     document.querySelectorAll("[data-marks-node]").forEach(c=>{ c.outerHTML=marksHTML(NODES[+c.getAttribute("data-marks-node")]); });
   }));
 }
+
+document.addEventListener("click",e=>{
+  const a=e.target.closest&&e.target.closest("[data-more]"); if(!a) return;
+  e.preventDefault(); const k=+a.dataset.more; SHOWN.set(k,+a.dataset.to);
+  document.querySelectorAll(`[data-topic-cols="${k}"]`).forEach(c=>{ c.outerHTML=termColsHTML(k); });
+  document.querySelectorAll("[data-marks-node]").forEach(c=>{ const nd=NODES[+c.getAttribute("data-marks-node")];
+    if(nd&&nd.topic===k) c.outerHTML=marksHTML(nd); });
+});
 
 /* ============================== term marks =============================== */
 // Below the topic columns: the node's own codes and its HPO-profile concepts, each with
@@ -663,18 +681,18 @@ function markBox(n,kind){
   if(k!=null&&TOPICS[k]&&TOPICS[k].dom[md]){
     const t=TOPICS[k].dom[md], o=[...t.ids.keys()].sort((a,b)=>t.beta[b]-t.beta[a]); nShip=o.length;
     o.forEach((j,r)=>rank.set(t.ids[j],{r:r+1,b:t.beta[j]}));
-    for(const r of rankedTerms(k,md,state.lambda,TOP_N)) top.add(r.w);
+    for(const r of rankedTerms(k,md,state.lambda,shownFor(k))) top.add(r.w);
   }
   const rows=ids.map(w=>({w,rk:rank.get(w)||null,top:top.has(w)}))
     .sort((a,b)=>(a.rk?a.rk.r:1e9)-(b.rk?b.rk.r:1e9)||termName(a.w).localeCompare(termName(b.w)));
   const inTop=rows.filter(r=>r.top).length, inShip=rows.filter(r=>r.rk).length;
   const sum=k!=null&&TOPICS[k]
-    ? `<b>${fmt(cnt)}</b> in the vocabulary · <b>${inTop}</b> among the top ${TOP_N} shown · <b>${inShip}</b> among the topic's ${fmt(nShip)} shipped terms`
+    ? `<b>${fmt(cnt)}</b> in the vocabulary · <b>${inTop}</b> among the top ${shownFor(k)} shown · <b>${inShip}</b> among the topic's ${fmt(nShip)} shipped terms`
     : `<b>${fmt(cnt)}</b> in the vocabulary (no topic)`;
   const key=n.ix+":"+kind, open=marksOpen.has(key);
   const lis=rows.map((r,i)=>{
     const where=!(k!=null&&TOPICS[k])?"":r.rk?`β #${r.rk.r}${r.top?" · shown":""}`:"not in the topic's list";
-    const tipT=`${termName(r.w)}\ncode ${VOCAB.code[r.w]}`+(r.rk?`\nβ rank ${r.rk.r} of ${nShip} shipped (β ${(r.rk.b*100).toFixed(2)}%)`+(r.top?`\namong the top ${TOP_N} shown at λ ${state.lambda.toFixed(2)}`:""):(k!=null?"\nnot in the topic's shipped list (its weight there is below the top-β and top-lift selection)":""));
+    const tipT=`${termName(r.w)}\ncode ${VOCAB.code[r.w]}`+(r.rk?`\nβ rank ${r.rk.r} of ${nShip} shipped (β ${(r.rk.b*100).toFixed(2)}%)`+(r.top?`\namong the top ${shownFor(k)} shown at λ ${state.lambda.toFixed(2)}`:""):(k!=null?"\nnot in the topic's shipped list (its weight there is below the top-β and top-lift selection)":""));
     return `<li class="${i>=MARKS_SHOW?"more":""}" data-tip="${esc(tipT)}"><span class="tx">${esc(termName(r.w))}</span><span class="where ${r.top?"top":r.rk?"":"out"}">${where}</span></li>`;}).join("");
   const more=rows.length>MARKS_SHOW?`<button class="mkmore" data-mk-toggle="${key}">${open?"show fewer":`show all ${rows.length}`}</button>`:"";
   return `<div class="mkbox"><h5>${title} ${badge}</h5><div class="sum">${sum}</div><ol class="mklist${open?" open":""}">${lis}</ol>${more}</div>`;
@@ -1153,7 +1171,7 @@ function select(id,quiet){
     }
     html+=`</dl>`;
     if(n.status===0 && n.topic!=null && TOPICS[n.topic]){
-      html+=`<div class="section-t">Topic</div><div class="section-sub">Top ${TOP_N} shipped terms per domain, ranked by relevance = λ·log β + (1 − λ)·log(β / p). Bar and number: β, the term's share of this topic within the domain.</div>`;
+      html+=`<div class="section-t">Topic</div><div class="section-sub">The top shipped terms per domain (more with \"show more\" below), ranked by relevance = λ·log β + (1 − λ)·log(β / p). Bar and number: β, the term's share of this topic within the domain.</div>`;
       html+=sliderHTML()+marksLegendHTML(n)+termColsHTML(n.topic);
       if(MARKS) html+=`<div class="section-t">Own codes and HPO profile</div>`+marksHTML(n);
       html+=npmiHTML(n.topic);

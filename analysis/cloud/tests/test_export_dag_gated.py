@@ -54,7 +54,7 @@ def test_schema_of_the_four_files(exported):
     assert all(len(a) == man["K"] for a in nb["gated"] + nb["all"])
     assert nb["gated"][0][0] is None                     # an unscored topic stays null
     assert all(v is None or isinstance(v, int) for a in nb["gated"] for v in a)
-    assert man["selection"] == {"top_beta": 25, "top_lift": 25, "lift_pool": 200}
+    assert man["selection"] == {"top_beta": 40, "top_lift": 40, "lift_pool": 200}
     assert man["weight_codec"]["kind"] == man["freq_codec"]["kind"] == "log-byte"
     assert [d["name"] for d in man["domains"]] == list(synth.DOMAINS)
     assert man["disclosure"]["min_cell"] == 20

@@ -285,8 +285,8 @@ def parse_args(argv=None):
     ap.add_argument("--no-fetch-mondo", action="store_true",
                     help="never download the Mondo nodes file; fall back to the "
                          "bundle meta's names (kept nodes only)")
-    ap.add_argument("--top-beta", type=int, default=25)
-    ap.add_argument("--top-lift", type=int, default=25)
+    ap.add_argument("--top-beta", type=int, default=40)
+    ap.add_argument("--top-lift", type=int, default=40)
     ap.add_argument("--lift-pool", type=int, default=200)
     ap.add_argument("--created-utc", default=None,
                     help="pin manifest.created_utc (reproducible exports)")

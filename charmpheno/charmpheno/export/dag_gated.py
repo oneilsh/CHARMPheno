@@ -139,7 +139,7 @@ def term_marginal(lam_dom) -> np.ndarray:
     return m / t if t > 0 else m
 
 
-def select_terms(beta, pw, *, top_beta=25, top_lift=25, lift_pool=200) -> list:
+def select_terms(beta, pw, *, top_beta=40, top_lift=40, lift_pool=200) -> list:
     """Per topic (row of `beta`, one domain): the local term indices shipped, as an
     ascending int array.
 
@@ -366,7 +366,7 @@ def marks_local(by_node, vocab_map) -> tuple:
 def build_export(lam, ns, *, n_bg, tpn, given_dag, domains, vocab_maps,
                  node_names=None, term_names=None, extra_support=None,
                  run="", mondo_version="", cdr="", created_utc=None,
-                 top_beta=25, top_lift=25, lift_pool=200, notes=None,
+                 top_beta=40, top_lift=40, lift_pool=200, notes=None,
                  npmi=None, own_codes=None, profile=None, marks_meta=None,
                  marks_domain=0) -> dict:
     """The four files of `dag-gated-export/1` as JSON-ready objects

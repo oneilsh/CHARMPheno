@@ -2,6 +2,7 @@
 
 **Date:** 2026-11-11
 **Status:** accepted (maintainer, 2026-11-11: 25 + 25 terms per domain, every size trick,
+2026-11-14: raised to 40 + 40 while the export is viewed inside the workspace;
 the minimum required information; the proposal below otherwise as discussed)
 **First model:** exp 0173 (`<run>/model`: 2,695 node topics + 200 background, 3 domains).
 
@@ -40,7 +41,7 @@ other arrays, never repeated strings.
 {schema: "dag-gated-export/1", run: str, created_utc: str, mondo_version: str, cdr: str,
  K: int, n_bg: int, tpn: int,
  domains: [{name: str, shipped_terms: int}],            # order = domain index
- selection: {top_beta: 25, top_lift: 25, lift_pool: 200},
+ selection: {top_beta: 40, top_lift: 40, lift_pool: 200},   # defaults (were 25 + 25)
  weight_codec: {kind: "log-byte", per_domain: [{lo: float, hi: float}]},
  freq_codec:   {kind: "log-byte", per_domain: [{lo: float, hi: float}]},
  min_docs_per_node: int,                                 # the fit's threshold (a pruned node's support is below it)
