@@ -22,7 +22,10 @@ off-cluster. Stage 2 (`hpoa_stage2_probe.py`, in-workspace) intersects the
 realizable codes with the corpus vocabulary and counts persons under the
 egress floor; `--emit-codes` writes its input — one row per (node, term,
 SNOMED code) over each profile term's descendant-or-self closure, still pure
-ontology data. `--rollup` additionally credits every branch node with the
+ontology data; `--emit-profile` writes every profile term, one row per (node,
+term), with its name and its closure's SNOMED code count (0: the term has no
+code, so `--emit-codes` has no row for it), for the export's per-term status
+(`make profile-marks`). `--rollup` additionally credits every branch node with the
 union of its branch descendants' profiles (see `rollup_profiles`) — stage 2
 found most profiled nodes sit below the powered label space.
 
@@ -438,26 +441,11 @@ def exclude_hpo_subtree(profiles, hp_parents, root: str = PRENATAL_ROOT):
     return profiles[~mask].reset_index(drop=True), stats
 
 
-def profile_code_rows(profiles, hp_parents, xref_rows, vocabs=("SNOMED",)) -> pd.DataFrame:
-    """One row per (mondo_id, hp_id, vocab, code): the codes that EVIDENCE a
-    profile term, collected over the term's HPO descendant-OR-SELF closure.
-
-    WHY descendant-or-self: the true-path rule, in the emit direction. A patient
-    coded with a MORE specific phenotype instantiates the profile's more general
-    term, so a term's evidence set is every SNOMED xref at or below it — exactly
-    the codes `hpo_realizability`'s closure rule counted as realizable, now made
-    explicit for stage 2 to intersect with the corpus vocabulary. Siblings must
-    NOT leak: a code below a sibling evidences the sibling's ancestors only,
-    which the downward walk guarantees by construction.
-
-    Negative terms (NOT / frequency-0) are CARRIED with ``neg=True`` — the eta
-    prior wants to downweight them, and dropping them here would force stage 2
-    back into the HPOA parse. ``freq`` stays NaN (a blank TSV cell) when no
-    source reported one. A term with no code in its closure yields no rows.
-
-    If ``profiles`` carries an ``inherited`` column (the `rollup_profiles`
-    output), it is passed through APPENDED after ``code``; otherwise the
-    emitted columns are byte-identical to the pre-rollup contract."""
+def closure_codes_fn(hp_parents, xref_rows, vocabs=("SNOMED",)):
+    """`term -> sorted ((vocab, code), ...)`: the codes of `vocabs` on the HPO term's
+    descendant-OR-SELF closure (memoized). Shared by `profile_code_rows` (one row per
+    code) and `profile_term_rows` (the closure's code count) so both read the same
+    true-path closure."""
     children: dict[str, list] = {}
     for child, ps in hp_parents.items():
         for parent in ps:
@@ -483,6 +471,61 @@ def profile_code_rows(profiles, hp_parents, xref_rows, vocabs=("SNOMED",)) -> pd
                 stack.extend(children.get(t, ()))
             memo[term] = tuple(sorted(out))
         return memo[term]
+    return _closure_codes
+
+
+def profile_term_rows(profiles, hp_parents, xref_rows, hp_labels,
+                      vocabs=("SNOMED",)) -> pd.DataFrame:
+    """One row per profile (mondo_id, hp_id), EVERY term kept: `(mondo_id, hp_id,
+    hp_name, neg, freq, n_snomed_codes[, inherited])`.
+
+    WHY: `profile_code_rows` emits rows only for terms with a code in their closure,
+    so a term without one vanishes downstream; the browser wants to show a node's
+    whole annotation profile and say why a term cannot be counted. `n_snomed_codes`
+    is the size of the term's descendant-or-self SNOMED closure (`closure_codes_fn`,
+    the same closure the code rows come from): 0 means the term has no SNOMED code
+    at all. `hp_name` is the term's label in `hp_labels` (`parse_hpo_dag`; empty for
+    a term the obo does not hold, e.g. obsolete). Negative terms are carried with
+    `neg=True`, `freq` stays blank when unknown, and an `inherited` column (the
+    roll-up's) is appended after the count, as in `profile_code_rows`. Public
+    ontology facts only."""
+    closure = closure_codes_fn(hp_parents, xref_rows, vocabs)
+    carry_inherited = "inherited" in profiles.columns
+    rows = []
+    for r in profiles.itertuples(index=False):
+        row = {"mondo_id": r.mondo_id, "hp_id": r.hpo_id,
+               "hp_name": hp_labels.get(r.hpo_id, ""), "neg": bool(r.neg),
+               "freq": r.freq, "n_snomed_codes": len(closure(r.hpo_id))}
+        if carry_inherited:
+            row["inherited"] = bool(r.inherited)
+        rows.append(row)
+    cols = ["mondo_id", "hp_id", "hp_name", "neg", "freq", "n_snomed_codes"]
+    if carry_inherited:
+        cols.append("inherited")
+    return pd.DataFrame(rows, columns=cols)
+
+
+def profile_code_rows(profiles, hp_parents, xref_rows, vocabs=("SNOMED",)) -> pd.DataFrame:
+    """One row per (mondo_id, hp_id, vocab, code): the codes that EVIDENCE a
+    profile term, collected over the term's HPO descendant-OR-SELF closure.
+
+    WHY descendant-or-self: the true-path rule, in the emit direction. A patient
+    coded with a MORE specific phenotype instantiates the profile's more general
+    term, so a term's evidence set is every SNOMED xref at or below it — exactly
+    the codes `hpo_realizability`'s closure rule counted as realizable, now made
+    explicit for stage 2 to intersect with the corpus vocabulary. Siblings must
+    NOT leak: a code below a sibling evidences the sibling's ancestors only,
+    which the downward walk guarantees by construction.
+
+    Negative terms (NOT / frequency-0) are CARRIED with ``neg=True`` — the eta
+    prior wants to downweight them, and dropping them here would force stage 2
+    back into the HPOA parse. ``freq`` stays NaN (a blank TSV cell) when no
+    source reported one. A term with no code in its closure yields no rows.
+
+    If ``profiles`` carries an ``inherited`` column (the `rollup_profiles`
+    output), it is passed through APPENDED after ``code``; otherwise the
+    emitted columns are byte-identical to the pre-rollup contract."""
+    _closure_codes = closure_codes_fn(hp_parents, xref_rows, vocabs)
 
     carry_inherited = "inherited" in profiles.columns
     rows = []
@@ -588,14 +631,21 @@ def main(argv=None) -> int:
                    help="also write a per-(node, term, code) TSV of the SNOMED "
                         "codes evidencing each profile term (descendant-or-self "
                         "closure; negatives carried) — stage 2's input")
+    p.add_argument("--emit-profile", default=None, metavar="PATH",
+                   help="also write every profile term, one row per (node, term), "
+                        "positive and NOT, with its name and the count of SNOMED codes "
+                        "in its descendant-or-self closure (mondo_id, hp_id, hp_name, "
+                        "neg, freq, n_snomed_codes; 0 = no SNOMED code, so no "
+                        "--emit-codes rows) -- the export's HPO term statuses. Same "
+                        "profile as --emit-codes (--rollup / --keep-prenatal apply)")
     p.add_argument("--rollup", action="store_true",
-                   help="--emit-codes only: credit every branch node with the "
+                   help="--emit-codes / --emit-profile only: credit every branch node with the "
                         "union of its OWN profile and all branch descendants' "
                         "profiles (freq pools by max, neg by unanimity), "
                         "appending an `inherited` provenance column; without "
                         "it, emission is byte-identical to the old contract")
     p.add_argument("--keep-prenatal", action="store_true",
-                   help="--emit-codes only: KEEP profile terms under HPO "
+                   help="--emit-codes / --emit-profile only: KEEP profile terms under HPO "
                         f"{PRENATAL_ROOT} (Abnormality of prenatal development "
                         "or birth). By default they are dropped: a fetal "
                         "phenotype's realized code lives in the mother's chart "
@@ -644,11 +694,11 @@ def main(argv=None) -> int:
         build_report(rows, prom_counts, prom_top, meta), encoding="utf-8")
     sys.stderr.write(f"[hpoa-survey] wrote survey to {out}\n")
 
-    if args.emit_codes:
+    if args.emit_codes or args.emit_profile:
         # Re-parse the DAG rather than threading it out of hpo_realizability:
         # the existing outputs (and their tests) stay byte-identical, at the
         # cost of one extra seconds-scale obo parse in an offline tool.
-        _labels, hp_parents = parse_hpo_dag(obo_text)
+        hp_labels_all, hp_parents = parse_hpo_dag(obo_text)
         emit_profiles = profiles
         if args.rollup:
             # The Mondo-descendant profile roll-up (semantics + timing lines
@@ -663,9 +713,10 @@ def main(argv=None) -> int:
                              f"{_px['n_subtree_terms']} subtree terms): dropped "
                              f"{_px['n_rows_dropped']} rows / {_px['n_terms_dropped']} "
                              f"terms across {_px['n_nodes_touched']} nodes\n")
+        xref_rows = parse_hpo_xrefs(obo_text)
+    if args.emit_codes:
         t0 = time.perf_counter()
-        codes = profile_code_rows(emit_profiles, hp_parents,
-                                  parse_hpo_xrefs(obo_text))
+        codes = profile_code_rows(emit_profiles, hp_parents, xref_rows)
         if args.rollup:
             sys.stderr.write(f"[hpoa-survey] rollup code rows: {len(codes)} "
                              f"({time.perf_counter() - t0:.1f}s)\n")
@@ -676,6 +727,16 @@ def main(argv=None) -> int:
             f"[hpoa-survey] emit-codes: {len(codes)} rows, "
             f"{codes['mondo_id'].nunique()} nodes, "
             f"{codes['code'].nunique()} distinct codes -> {dest}\n")
+    if args.emit_profile:
+        terms = profile_term_rows(emit_profiles, hp_parents, xref_rows, hp_labels_all)
+        dest = Path(args.emit_profile)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        terms.to_csv(dest, sep="\t", index=False)
+        n_none = int((terms["n_snomed_codes"] == 0).sum())
+        sys.stderr.write(
+            f"[hpoa-survey] emit-profile: {len(terms)} (node, term) rows, "
+            f"{terms['mondo_id'].nunique()} nodes, {terms['hp_id'].nunique()} "
+            f"distinct terms, {n_none} rows with no SNOMED code -> {dest}\n")
     return 0
 
 

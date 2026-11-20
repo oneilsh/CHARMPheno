@@ -30,7 +30,11 @@ Spark, no YARN, safe on the master mid-anything. The pure work is
   POSITIVE HPO-profile concepts from `<run>/profile_marks.tsv` (`hpo_profile_marks.py`,
   `make profile-marks`; `--profile-marks TSV`, `--no-profile`), read against the
   condition vocabulary. A `profile_marks.json` next to the marks TSV (the make target
-  writes it) names the HPO release; `--hpo-release` overrides it.
+  writes it) names the HPO release; `--hpo-release` overrides it. With the profile, the
+  stage-1 profile-terms table `<run>/hpoa/profile_terms.tsv` (`hpoa_profile_survey.py
+  --emit-profile`, also made by `make profile-marks`; `--profile-terms TSV`,
+  `--no-profile-terms`) adds, per topic node, every positive HPO annotation term with
+  why it is or is not counted; it needs the marks table's `hp_id` column.
 
 The export holds model parameters and banded node support only: no per-document or
 patient data (AGENTS.md, egress floor). It refuses a run whose vocabulary floor
@@ -204,9 +208,10 @@ def load_own_codes(path, nodes) -> dict:
 
 
 def read_profile_marks(path) -> list:
-    """`[(mondo_id, concept_id, neg)]` from a profile-marks TSV (`hpo_profile_marks.py`:
-    columns mondo_id, concept_id, neg; extra columns, e.g. an `--emit-eta` table's,
-    are ignored). `neg` parsed as `profile_eta` parses it."""
+    """`[(mondo_id, concept_id, neg)]`, deduplicated, from a profile-marks TSV
+    (`hpo_profile_marks.py`: columns mondo_id, hp_id, concept_id, neg; extra columns,
+    e.g. `hp_id` or an `--emit-eta` table's, are ignored). `neg` parsed as
+    `profile_eta` parses it."""
     from profile_eta import _neg_flags
     with open(path, newline="") as fh:
         rows = list(csv.DictReader(fh, delimiter="\t"))
@@ -216,8 +221,40 @@ def read_profile_marks(path) -> list:
                 raise SystemExit(f"[export-dag-gated] {path} has no {col} column "
                                  f"(columns: {list(rows[0])})")
     negs = _neg_flags([r["neg"] for r in rows])
-    return [(str(r["mondo_id"]), int(r["concept_id"]), bool(g))
+    # deduplicated: the table carries one row per (node, HPO term, concept)
+    return sorted({(str(r["mondo_id"]), int(r["concept_id"]), bool(g))
+                   for r, g in zip(rows, negs)})
+
+
+def read_profile_mark_terms(path):
+    """`[(mondo_id, hp_id, concept_id, neg)]` from a profile-marks TSV carrying `hp_id`
+    (`hpo_profile_marks.py` since the HPO-terms block), or None when the table has no
+    `hp_id` column (an older table: its rows cannot be tied to a profile term)."""
+    from profile_eta import _neg_flags
+    with open(path, newline="") as fh:
+        rows = list(csv.DictReader(fh, delimiter="\t"))
+    if not rows or "hp_id" not in rows[0]:
+        return None
+    negs = _neg_flags([r["neg"] for r in rows])
+    return [(str(r["mondo_id"]), str(r["hp_id"]), int(r["concept_id"]), bool(g))
             for r, g in zip(rows, negs)]
+
+
+def read_profile_terms(path) -> list:
+    """`[(mondo_id, hp_id, hp_name, neg, n_snomed_codes)]` from the stage-1
+    `hpoa_profile_survey.py --emit-profile` TSV (columns mondo_id, hp_id, hp_name, neg,
+    freq, n_snomed_codes; extra columns ignored)."""
+    from profile_eta import _neg_flags
+    with open(path, newline="") as fh:
+        rows = list(csv.DictReader(fh, delimiter="\t"))
+    if rows:
+        for col in ("mondo_id", "hp_id", "neg", "n_snomed_codes"):
+            if col not in rows[0]:
+                raise SystemExit(f"[export-dag-gated] {path} has no {col} column "
+                                 f"(columns: {list(rows[0])})")
+    negs = _neg_flags([r["neg"] for r in rows])
+    return [(str(r["mondo_id"]), str(r["hp_id"]), str(r.get("hp_name") or ""), bool(g),
+             int(float(r["n_snomed_codes"] or 0))) for r, g in zip(rows, negs)]
 
 
 def marks_domain_index(domains) -> int:
@@ -268,6 +305,13 @@ def parse_args(argv=None):
                          "hpo_profile_marks.py / `make profile-marks`; default "
                          "<run>/profile_marks.tsv when it exists)")
     ap.add_argument("--no-profile", action="store_true", help="ship no HPO profile")
+    ap.add_argument("--profile-terms", default=None, metavar="TSV",
+                    help="every HPO profile term per node (hpoa_profile_survey.py "
+                         "--emit-profile; default <run>/hpoa/profile_terms.tsv when it "
+                         "exists): ships each topic node's positive HPO terms with why "
+                         "each is or is not counted")
+    ap.add_argument("--no-profile-terms", action="store_true",
+                    help="ship no per-node HPO terms")
     ap.add_argument("--no-force-profile", action="store_true",
                     help="do not add a node's HPO-profile concepts to its topic's shipped "
                          "terms (by default every one ships, however low its weight)")
@@ -390,7 +434,7 @@ def main(argv=None):
                   "with --npmi first, or pass --npmi-file)", flush=True)
     # marks: own codes and HPO profile concepts (ontology / code-ladder mappings)
     md = marks_domain_index(domains)
-    own_codes = profile = None
+    own_codes = profile = hpo_terms = hpo_names = None
     marks_meta = {}
     if not args.no_own_codes:
         opath = Path(args.own_codes) if args.own_codes else run / "code_map.tsv"
@@ -422,6 +466,32 @@ def main(argv=None):
                   f"{pst['n_neg_rows']} NOT-annotated dropped, {pst['n_contested']} "
                   f"contested concepts dropped; {len(profile)} profiled nodes, {n_in} "
                   "in the label DAG", flush=True)
+            if not args.no_profile_terms:
+                tpath = (Path(args.profile_terms) if args.profile_terms
+                         else run / "hpoa" / "profile_terms.tsv")
+                if tpath.exists():
+                    mrows = read_profile_mark_terms(ppath)
+                    if mrows is None:
+                        msg = (f"{ppath} has no hp_id column (an older table), so its "
+                               "concepts cannot be tied to the HPO terms; re-run `make "
+                               "profile-marks`")
+                        if args.profile_terms:
+                            raise SystemExit(f"[export-dag-gated] --profile-terms: {msg}")
+                        print(f"[export-dag-gated] no HPO terms: {msg}", flush=True)
+                    else:
+                        from charmpheno.export.dag_gated import hpo_term_statuses
+                        hpo_terms, hpo_names = hpo_term_statuses(
+                            read_profile_terms(tpath), mrows, profile, vocab_maps[md])
+                        marks_meta["profile_terms"] = {"source": tpath.name}
+                        print(f"[export-dag-gated] HPO terms from {tpath}: "
+                              f"{sum(len(v) for v in hpo_terms.values())} positive "
+                              f"(node, term) pairs on {len(hpo_terms)} nodes", flush=True)
+                elif args.profile_terms:
+                    raise SystemExit(f"[export-dag-gated] --profile-terms: {tpath} "
+                                     "not found")
+                else:
+                    print(f"[export-dag-gated] no HPO terms ({tpath} not found; `make "
+                          "profile-marks ID=N` writes it)", flush=True)
         elif args.profile_marks:
             raise SystemExit(f"[export-dag-gated] --profile-marks: {ppath} not found")
         else:
@@ -434,7 +504,8 @@ def main(argv=None):
         cdr=cm.get("cdr", ""), created_utc=args.created_utc,
         top_beta=args.top_beta, top_lift=args.top_lift, lift_pool=args.lift_pool,
         npmi=npmi, own_codes=own_codes, profile=profile, marks_meta=marks_meta,
-        marks_domain=md, force_profile=not args.no_force_profile)
+        marks_domain=md, force_profile=not args.no_force_profile,
+        hpo_terms=hpo_terms, hpo_names=hpo_names)
     sizes = write_export(files, out)
     mk = files["manifest.json"].get("marks")
     if mk:
@@ -444,6 +515,11 @@ def main(argv=None):
                 print(f"[export-dag-gated] marks.{key}: {mk[key]['nodes']} nodes listed, "
                       f"{sum(1 for x in nd[key + '_n'] if x)} with a concept in the "
                       "vocabulary", flush=True)
+        tm = (mk.get("profile") or {}).get("terms")
+        if tm:
+            print(f"[export-dag-gated] marks.profile.terms: {tm['nodes']} topic nodes, "
+                  f"{tm['hpo_terms']} HPO terms; (node, term) pairs by status "
+                  + ", ".join(f"{k} {v}" for k, v in tm["by_status"].items()), flush=True)
         dm = files["manifest.json"]["domains"][mk["domain"]]
         print(f"[export-dag-gated] vocab: {dm.get('mark_terms', 0)} marked terms added "
               f"to {domains[mk['domain']]} (in no shipped topic list)", flush=True)

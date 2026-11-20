@@ -18,7 +18,7 @@ MANIFEST_KEYS = {"schema", "run", "created_utc", "mondo_version", "cdr", "K", "n
                  "disclosure", "sizes", "notes", "min_docs_per_node"}
 NODES_KEYS = {"id", "name", "parents", "kept_parents", "depth", "status", "landing",
               "support", "support_frac", "topic"}
-MARK_KEYS = {"own", "own_n", "profile", "profile_n"}
+MARK_KEYS = {"own", "own_n", "profile", "profile_n", "hpo"}
 VOCAB_KEYS = {"domain", "code", "name", "freq"}
 TOPICS_KEYS = {"node", "d"}
 
@@ -47,7 +47,7 @@ def test_schema_of_the_four_files(exported):
     # code_map.tsv and a profile_marks.tsv, so they are there)
     assert set(man) == MANIFEST_KEYS | {"npmi", "marks"}
     assert man["schema"] == "dag-gated-export/1"
-    assert set(nodes) == NODES_KEYS | MARK_KEYS and set(vocab) == VOCAB_KEYS
+    assert set(nodes) == NODES_KEYS | MARK_KEYS and set(vocab) == VOCAB_KEYS | {"hpo"}
     assert set(topics) == TOPICS_KEYS | {"npmi"}
     nb = topics["npmi"]
     assert nb["domains"] == man["npmi"]["domains"] == [0, 1]
@@ -63,7 +63,9 @@ def test_schema_of_the_four_files(exported):
     assert man["disclosure"]["min_cell"] == 20
     n = len(nodes["id"])
     assert all(len(v) == n for v in nodes.values())
-    assert all(len(v) == len(vocab["code"]) for v in vocab.values())
+    # the term table is columnar; `hpo` is a second table (the HPO terms), its own length
+    assert all(len(v) == len(vocab["code"]) for k, v in vocab.items() if k != "hpo")
+    assert len(vocab["hpo"]["id"]) == len(vocab["hpo"]["name"])
     assert len(topics["node"]) == len(topics["d"]) == man["K"]
     assert all(len(per) == len(man["domains"]) for per in topics["d"])
     for m, d in enumerate(man["domains"]):
@@ -320,9 +322,9 @@ def test_marks_match_the_run_tables(exported):
     assert man["marks"]["domain"] == 0
     assert man["marks"]["own"] == {"source": "code_map.tsv",
                                    "nodes": sum(1 for x in nodes["own"] if x)}
-    assert man["marks"]["profile"] == {"source": "profile_marks.tsv",
-                                       "hpo_release": synth.HPO_RELEASE,
-                                       "nodes": sum(1 for x in nodes["profile"] if x)}
+    assert {k: v for k, v in man["marks"]["profile"].items() if k != "terms"} == {
+        "source": "profile_marks.tsv", "hpo_release": synth.HPO_RELEASE,
+        "nodes": sum(1 for x in nodes["profile"] if x)}
     n_terms = len(vocab["code"])
     n_contested = 0
     for i, u in enumerate(nodes["id"]):
@@ -371,7 +373,9 @@ def test_marks_flags_turn_the_blocks_off_and_on(tmp_path):
     mk = files["manifest.json"]["marks"]
     assert mk["own"]["source"] == "own.tsv"
     assert mk["profile"] == {"source": "pm.tsv", "hpo_release": "v9",
-                             "nodes": mk["profile"]["nodes"]}
+                             "nodes": mk["profile"]["nodes"],
+                             "terms": mk["profile"]["terms"]}
+    assert mk["profile"]["terms"]["source"] == "profile_terms.tsv"
     assert mk["own"]["nodes"] > 0 and mk["profile"]["nodes"] > 0
     with pytest.raises(SystemExit, match="--own-codes"):
         synth.export_run(run, tmp_path / "e",
@@ -379,6 +383,10 @@ def test_marks_flags_turn_the_blocks_off_and_on(tmp_path):
     with pytest.raises(SystemExit, match="--profile-marks"):
         synth.export_run(run, tmp_path / "f",
                          extra=["--profile-marks", str(tmp_path / "missing.tsv")])
+    with pytest.raises(SystemExit, match="--profile-terms"):
+        synth.export_run(run, tmp_path / "g", extra=[
+            "--profile-marks", str(tmp_path / "pm.tsv"),
+            "--profile-terms", str(tmp_path / "missing.tsv")])
 
 
 def test_profile_marks_without_a_neg_column_are_refused(tmp_path):
@@ -386,3 +394,105 @@ def test_profile_marks_without_a_neg_column_are_refused(tmp_path):
     (run / "profile_marks.tsv").write_text("mondo_id\tconcept_id\nMONDO:9901000\t1\n")
     with pytest.raises(SystemExit, match="no neg column"):
         synth.export_run(run, tmp_path / "o")
+
+
+# ------------------------------------------------------------------ HPO terms
+
+HPO_STATUS = ("counted", "no_snomed", "no_condition", "not_in_vocab", "contested")
+
+
+def _expected_hpo(run, nodes):
+    """Recompute each node's positive HPO terms and their statuses from the run's
+    `hpoa/profile_terms.tsv` and `profile_marks.tsv` (independently of the exporter):
+    `{node: {hp_id: (status name, {counted concept ids})}}` and `{hp_id: name}`."""
+    import csv
+    vm0 = json.loads((run / "bundle_meta.json").read_text())["vocab_maps"][0]
+    own, prof, neg, contested = _expected_marks(run, nodes)
+    terms, names = {}, {}
+    with open(run / "hpoa" / "profile_terms.tsv") as fh:
+        for r in csv.DictReader(fh, delimiter="\t"):
+            names[r["hp_id"]] = r["hp_name"]
+            if r["neg"] != "True":
+                terms[(r["mondo_id"], r["hp_id"])] = int(r["n_snomed_codes"])
+    cs = {}
+    with open(run / "profile_marks.tsv") as fh:
+        for r in csv.DictReader(fh, delimiter="\t"):
+            if r["neg"] == "0":
+                cs.setdefault((r["mondo_id"], r["hp_id"]), set()).add(int(r["concept_id"]))
+    out = {}
+    for (u, hp), n_codes in terms.items():
+        c = cs.get((u, hp), set())
+        inv = {x for x in c if str(x) in vm0}
+        counted = inv & prof.get(u, set())
+        st = ("no_snomed" if not c and n_codes == 0 else "no_condition" if not c else
+              "not_in_vocab" if not inv else "counted" if counted else "contested")
+        out.setdefault(u, {})[hp] = (st, counted)
+    return out, names
+
+
+def test_hpo_terms_match_the_run_tables(exported):
+    f, run = exported["files"], exported["run"]
+    nodes, vocab, man = f["nodes.json"], f["vocab.json"], f["manifest.json"]
+    want, names = _expected_hpo(run, nodes)
+    tm = man["marks"]["profile"]["terms"]
+    assert tm["source"] == "profile_terms.tsv" and tm["status"] == list(HPO_STATUS)
+    table = vocab["hpo"]
+    assert set(table) == {"id", "name"} and len(table["id"]) == tm["hpo_terms"]
+    assert len(set(table["id"])) == len(table["id"])
+    by_status = dict.fromkeys(HPO_STATUS, 0)
+    cited = set()
+    n_all_four = 0
+    for i, u in enumerate(nodes["id"]):
+        lst = nodes["hpo"][i]
+        if nodes["status"][i] != 0 or not want.get(u):
+            assert lst is None                              # topic nodes only
+            continue
+        assert lst is not None
+        got = {}
+        for e in lst:
+            t, st = e[0], e[1]
+            hp = table["id"][t]
+            cited.add(t)
+            assert table["name"][t] == names[hp]
+            assert (len(e) == 3) == (st == 0)               # only counted lists concepts
+            got[hp] = (HPO_STATUS[st], {vocab["code"][j] for j in e[2]} if st == 0 else set())
+            if st == 0:                                     # counted = the HPO marks
+                assert set(e[2]) <= set(nodes["profile"][i])
+            by_status[HPO_STATUS[st]] += 1
+        assert got == want[u]
+        assert lst == sorted(lst, key=lambda e: (e[1], e[0]))
+        n_all_four += {s for s, _ in got.values()} >= {"counted", "no_snomed",
+                                                        "no_condition", "not_in_vocab"}
+    assert cited == set(range(len(table["id"])))           # only referenced terms
+    assert tm["by_status"] == by_status and all(by_status.values())   # all five occur
+    assert tm["nodes"] == sum(1 for x in nodes["hpo"] if x is not None)
+    assert n_all_four > 0
+    # every counted concept is one the node's profile list marks, and every concept of
+    # the profile list is counted by some term
+    for i, lst in enumerate(nodes["hpo"]):
+        if lst:
+            assert {j for e in lst if e[1] == 0 for j in e[2]} == set(nodes["profile"][i])
+
+
+def test_hpo_terms_flags_and_an_older_marks_table(tmp_path, capsys):
+    run = synth.fixture_run(tmp_path)
+    files, _ = synth.export_run(run, tmp_path / "a", extra=["--no-profile-terms"])
+    assert "hpo" not in files["nodes.json"] and "hpo" not in files["vocab.json"]
+    assert "terms" not in files["manifest.json"]["marks"]["profile"]
+    assert "profile" in files["nodes.json"]
+    # a marks table without hp_id (older): the profile ships, the terms do not
+    import csv
+    with open(run / "profile_marks.tsv") as fh:
+        rows = list(csv.DictReader(fh, delimiter="\t"))
+    (run / "profile_marks.tsv").write_text("mondo_id\tconcept_id\tneg\n" + "".join(
+        f"{r['mondo_id']}\t{r['concept_id']}\t{r['neg']}\n" for r in rows))
+    capsys.readouterr()
+    files_old, _ = synth.export_run(run, tmp_path / "b")
+    assert "no hp_id column" in capsys.readouterr().out
+    assert "hpo" not in files_old["nodes.json"]
+    # the same profile either way (rows deduplicated on (node, concept, neg))
+    files_new, _ = synth.export_run(synth.fixture_run(tmp_path / "n"), tmp_path / "c")
+    assert files_old["nodes.json"]["profile"] == files_new["nodes.json"]["profile"]
+    with pytest.raises(SystemExit, match="no hp_id column"):
+        synth.export_run(run, tmp_path / "d", extra=[
+            "--profile-terms", str(run / "hpoa" / "profile_terms.tsv")])

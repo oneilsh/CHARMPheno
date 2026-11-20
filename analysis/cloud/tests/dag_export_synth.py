@@ -195,16 +195,33 @@ def _drop_topics(lam, ns_before, ns_after, n_bg, tpn):
 
 OUT_OF_VOCAB_BASE = 3990000          # condition codes outside the synthetic vocabulary
 HPO_RELEASE = "v2026-06-23"
+HP_BASE = 9000000                    # synthetic HPO ids (HP:9xxxxxx pool, HP:8xxxxxx own)
+_HP_ADJ = ["Abnormal", "Increased", "Decreased", "Recurrent", "Progressive",
+           "Episodic", "Elevated", "Reduced"]
+_HP_NOUN = ["function", "morphology", "tone", "size", "pressure", "volume", "rhythm",
+            "reflexes"]
+
+
+def _hp_name(j):
+    """An invented HPO-style term name (synthetic)."""
+    nm = (f"{_HP_ADJ[j % len(_HP_ADJ)]} {_ORGAN[(j // 8) % len(_ORGAN)]} "
+          f"{_HP_NOUN[(j // 96) % len(_HP_NOUN)]}")
+    return nm + (f" {j // 768 + 1}" if j >= 768 else "")
 
 
 def write_marks(run, *, dag, ns, lam, n_bg, tpn, vocab_codes, seed):
     """`code_map.tsv` and `profile_marks.tsv` (+ `profile_marks.json`) for a synthetic
     run. Own codes land on KEPT nodes only (as `landed_code_map`): a few of the node's
     top condition terms by λ, a few (for some nodes a dozen) from deep in its row
-    (outside its shipped list, mostly), and a few codes outside the vocabulary. Profiles: about half of all given
-    nodes, kept or not, the same mix plus a NOT-annotated row, a contested concept
-    (listed positive and NOT) and rows for a node outside the label DAG. Its own rng,
-    so the model and the rest of the run do not move."""
+    (outside its shipped list, mostly), and a few codes outside the vocabulary. Profiles
+    (`profile_marks.tsv`, one row per (node, HPO term, concept), and the stage-1
+    `hpoa/profile_terms.tsv`, every term): about half of all given nodes, kept or not,
+    draw terms from a shared pool whose terms have no SNOMED code, codes with no
+    standard Condition, concepts outside the vocabulary or concepts in it; a kept node
+    also gets three terms on its top concepts, a NOT-annotated term (and one without a
+    code), a contested concept (listed positive and NOT) and one pool term of each
+    uncountable kind; plus rows for a node outside the label DAG. Its own rng, so the
+    model and the rest of the run do not move."""
     rng = np.random.default_rng(seed)
     cond = np.asarray(lam[0])
     codes0 = vocab_codes[0]
@@ -217,7 +234,7 @@ def write_marks(run, *, dag, ns, lam, n_bg, tpn, vocab_codes, seed):
         t = n_bg + (ns.engine_id[u] - 1) * tpn
         return [int(i) for i in np.argsort(-cond[t], kind="stable")]
 
-    own_rows, prof_rows = set(), set()
+    own_rows, prof_rows, term_rows = set(), set(), set()
     for u in sorted(ns.nodes):
         if rng.random() < 0.15:
             continue                                        # a kept node with no codes
@@ -229,35 +246,87 @@ def write_marks(run, *, dag, ns, lam, n_bg, tpn, vocab_codes, seed):
             own_rows.add((codes0[li], cid(u)))
         for j in range(int(rng.integers(0, 3))):
             own_rows.add((OUT_OF_VOCAB_BASE + 13 * int(rng.integers(0, 5000)), cid(u)))
+    # HPO profiles: a shared pool of HPO terms, each with a fixed mapping (as in HPO:
+    # no SNOMED code / codes that map to no standard Condition / concepts outside the
+    # vocabulary / concepts in it), plus per-node terms on the node's own top terms.
+    P = max(40, len(dag) // 2)
+    pool, kinds = [], {k: [] for k in ("none", "nocond", "oov", "vocab")}
+    for j in range(P):
+        u = rng.random()
+        kind = ("none" if u < 0.25 else "nocond" if u < 0.4 else "oov" if u < 0.55
+                else "vocab")
+        if kind == "none":
+            cs, n_codes = [], 0
+        elif kind == "nocond":
+            cs, n_codes = [], int(rng.integers(1, 4))
+        elif kind == "oov":
+            cs = [OUT_OF_VOCAB_BASE + 11 * int(x)
+                  for x in rng.integers(0, 5000, size=int(rng.integers(1, 3)))]
+            n_codes = len(cs)
+        else:
+            cs = [codes0[int(x)] for x in rng.integers(0, V, size=int(rng.integers(1, 4)))]
+            if rng.random() < 0.3:
+                cs.append(OUT_OF_VOCAB_BASE + 11 * int(rng.integers(0, 5000)))
+            n_codes = len(cs) + int(rng.integers(0, 2))
+        pool.append((f"HP:{HP_BASE + j:07d}", _hp_name(j), sorted(set(cs)), n_codes))
+        kinds[kind].append(j)
+    freqs = ["", "0.17", "0.545", "0.895"]
+    n_own = [0]
+
+    def own_term():
+        n_own[0] += 1
+        t = HP_BASE - 1000000 + n_own[0]
+        return f"HP:{t:07d}", _hp_name(P + n_own[0])
+
     for n in sorted(dag):
         if rng.random() < 0.45:
             continue
         mid = str(n)
-        pos = set()
+        picks = set(int(x) for x in rng.integers(0, P, size=min(P, 2 + int(
+            rng.pareto(1.2) * 4))))
         if n in ns.engine_id:
             order = topic_terms(n)
-            pos.update(order[int(j)] for j in rng.choice(12, size=3, replace=False))
-            neg_li = order[int(rng.integers(12, 40))]
-            prof_rows.add((mid, codes0[neg_li], 1))         # a NOT-annotated term
-            contested = order[0]
-            prof_rows.add((mid, codes0[contested], 0))      # contested: listed both ways
-            prof_rows.add((mid, codes0[contested], 1))
-        pos.update(int(x) for x in rng.integers(0, V, size=int(rng.integers(2, 7))))
-        for li in pos:
-            if (mid, codes0[li], 1) not in prof_rows:
-                prof_rows.add((mid, codes0[li], 0))
-        for j in range(int(rng.integers(0, 3))):
-            prof_rows.add((mid, OUT_OF_VOCAB_BASE + 11 * int(rng.integers(0, 5000)), 0))
-    prof_rows.add(("MONDO:0000000", codes0[0], 0))           # a node outside the DAG
+            for li in rng.choice(12, size=3, replace=False):     # counted, near the top
+                hp, nm = own_term()
+                term_rows.add((mid, hp, nm, 0, freqs[int(rng.integers(0, 4))], 1))
+                prof_rows.add((mid, hp, codes0[order[int(li)]], 0))
+            hp, nm = own_term()                                   # a NOT-annotated term
+            term_rows.add((mid, hp, nm, 1, "0.0", 1))
+            prof_rows.add((mid, hp, codes0[order[int(rng.integers(12, 40))]], 1))
+            hp, nm = own_term()                                   # NOT, and no code
+            term_rows.add((mid, hp, nm, 1, "", 0))
+            c0 = codes0[order[0]]                                 # contested: listed
+            hp, nm = own_term()                                   # both ways
+            term_rows.add((mid, hp, nm, 0, "", 1))
+            prof_rows.add((mid, hp, c0, 0))
+            hp, nm = own_term()
+            term_rows.add((mid, hp, nm, 1, "", 1))
+            prof_rows.add((mid, hp, c0, 1))
+            for k in ("none", "nocond", "oov"):                   # every status on topics
+                picks.add(int(kinds[k][int(rng.integers(0, len(kinds[k])))]))
+        for j in sorted(picks):
+            hp, nm, cs, n_codes = pool[j]
+            term_rows.add((mid, hp, nm, 0, freqs[int(rng.integers(0, 4))], n_codes))
+            for c in cs:
+                prof_rows.add((mid, hp, c, 0))
+    hp, nm, cs, n_codes = pool[kinds["vocab"][0]]                 # a node outside the DAG
+    term_rows.add(("MONDO:0000000", hp, nm, 0, "", n_codes))
+    for c in cs:
+        prof_rows.add(("MONDO:0000000", hp, c, 0))
     run = Path(run)
     with open(run / "code_map.tsv", "w") as fh:
         fh.write("std_cid\tnode_cid\n")
         for a, b in sorted(own_rows):
             fh.write(f"{int(a)}\t{int(b)}\n")
     with open(run / "profile_marks.tsv", "w") as fh:
-        fh.write("mondo_id\tconcept_id\tneg\n")
-        for mid, c, ng in sorted(prof_rows):
-            fh.write(f"{mid}\t{int(c)}\t{int(ng)}\n")
+        fh.write("mondo_id\thp_id\tconcept_id\tneg\n")
+        for mid, hp, c, ng in sorted(prof_rows):
+            fh.write(f"{mid}\t{hp}\t{int(c)}\t{int(ng)}\n")
+    (run / "hpoa").mkdir(exist_ok=True)
+    with open(run / "hpoa" / "profile_terms.tsv", "w") as fh:
+        fh.write("mondo_id\thp_id\thp_name\tneg\tfreq\tn_snomed_codes\n")
+        for mid, hp, nm, ng, fq, nc in sorted(term_rows):
+            fh.write(f"{mid}\t{hp}\t{nm}\t{'True' if ng else 'False'}\t{fq}\t{nc}\n")
     (run / "profile_marks.json").write_text(json.dumps(
         {"hpo_release": HPO_RELEASE, "mondo_version": MONDO_VERSION,
          "branch": "MONDO:0000001"}))

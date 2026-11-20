@@ -70,6 +70,11 @@ reviewed for release.
   are among the top 15 shown and among the shipped terms; long lists collapse after 10.
   The export picks up `<run>/code_map.tsv` (written by the fit) and
   `<run>/profile_marks.tsv` (written by `make -C analysis/cloud profile-marks ID=N`).
+  With `<run>/hpoa/profile_terms.tsv` (the same make target), the HPO box also lists the
+  node's HPO annotation terms: a summary by status, the counted terms with their
+  concept(s) and β rank, and the terms that cannot be counted with the reason (no
+  SNOMED code, no standard Condition, not in the vocabulary, contested); each term links
+  to the HPO browser.
 - **Background topics:** the shared background topics in the same three-column form.
 
 ## Synthetic sample

@@ -376,3 +376,65 @@ xref: SNOMEDCT_US:9999999
     assert not any(r[3] == "9999999" for r in rows)
     # a term with only an unmatched-vocab xref contributes nothing matchable... UMLS is kept
     assert ("HP:0000001", "All", "UMLS", "C0444868") in rows
+
+
+# --- emit-profile: every profile term, coded or not --------------------------
+
+def test_profile_term_rows_keep_every_term_with_name_and_closure_count():
+    """One row per (node, term), positive and NOT, terms WITHOUT a SNOMED code
+    included (n_snomed_codes 0) -- the rows --emit-codes drops -- with the term's
+    obo name and the descendant-or-self closure's code count (no sibling leak)."""
+    labels, parents = s.parse_hpo_dag(_HP_OBO)
+    xrefs = s.parse_hpo_xrefs(_HP_OBO)
+    rows = s.profile_term_rows(_profiles(), parents, xrefs, labels)
+    assert list(rows.columns) == ["mondo_id", "hp_id", "hp_name", "neg", "freq",
+                                  "n_snomed_codes"]
+    got = {(r.mondo_id, r.hp_id): (r.hp_name, bool(r.neg), int(r.n_snomed_codes))
+           for r in rows.itertuples(index=False)}
+    assert got == {
+        ("MONDO:2", "HP:0001635"): ("Congestive heart failure", False, 1),
+        ("MONDO:2", "HP:0031547"): ("Very specific unxreffed finding", False, 0),
+        ("MONDO:2", "HP:0099999"): ("Unrelated finding", True, 0),
+        ("MONDO:3", "HP:0001635"): ("Congestive heart failure", True, 1)}
+    codes = s.profile_code_rows(_profiles(), parents, xrefs)
+    # the code rows cover exactly the terms with a nonzero count
+    assert set(zip(codes["mondo_id"], codes["hp_id"])) == {
+        k for k, v in got.items() if v[2] > 0}
+    # an ancestor term counts its descendants' codes; a term the obo lacks has no name
+    anc = s.profile_term_rows(
+        pd.DataFrame({"mondo_id": ["MONDO:2", "MONDO:2"],
+                      "hpo_id": ["HP:0001626", "HP:7777777"],
+                      "neg": [False, False], "freq": [None, None]}),
+        parents, xrefs, labels)
+    assert list(anc["n_snomed_codes"]) == [1, 0] and list(anc["hp_name"]) == [
+        "Abnormality of the cardiovascular system", ""]
+    rolled = s.rollup_profiles(_profiles(), {"MONDO:1": ["MONDO:2", "MONDO:3"]},
+                               {"MONDO:1", "MONDO:2", "MONDO:3"})
+    assert list(s.profile_term_rows(rolled, parents, xrefs, labels).columns)[-1] == \
+        "inherited"
+
+
+def test_main_emit_profile_and_emit_codes_from_a_cache(tmp_path):
+    """The CLI end to end on cached (pre-placed) ontology files: --emit-profile writes
+    every term, --emit-codes stays the six-column table of the coded terms only."""
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    _NODES.to_csv(cache / "2099-01-01_mondo_nodes.tsv", sep="\t", index=False)
+    _EDGES.to_csv(cache / "2099-01-01_mondo_edges.tsv", sep="\t", index=False)
+    (cache / "vX_hp.obo").write_text(_HP_OBO)
+    (cache / "vX_phenotype.hpoa").write_text(_HPOA)
+    out = tmp_path / "out"
+    rc = s.main(["--branch", "MONDO:1", "--mondo-version", "2099-01-01",
+                 "--hpo-release", "vX", "--cache-dir", str(cache), "--out-dir", str(out),
+                 "--emit-codes", str(out / "codes.tsv"),
+                 "--emit-profile", str(out / "terms.tsv")])
+    assert rc == 0
+    terms = pd.read_csv(out / "terms.tsv", sep="\t", keep_default_na=False)
+    codes = pd.read_csv(out / "codes.tsv", sep="\t", dtype=str)
+    assert list(codes.columns) == ["mondo_id", "hp_id", "neg", "freq", "vocab", "code"]
+    assert list(terms.columns) == ["mondo_id", "hp_id", "hp_name", "neg", "freq",
+                                   "n_snomed_codes"]
+    assert len(terms) == 4 and (terms["n_snomed_codes"] == 0).sum() == 2
+    assert set(codes["hp_id"]) == {"HP:0001635"}
+    row = terms[terms["hp_id"] == "HP:0031547"].iloc[0]
+    assert row["hp_name"] == "Very specific unxreffed finding" and row["freq"] != ""

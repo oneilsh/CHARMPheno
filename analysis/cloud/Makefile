@@ -130,7 +130,8 @@ help:
 	@echo "  profile-marks ID=N       OFF-CLUSTER HPO-profile marks for a run (no Spark/YARN):"
 	@echo "                           the stage-1 HPOA survey over all of Mondo"
 	@echo "                           (HPOA_BRANCH_ALL=$(HPOA_BRANCH_ALL), public ontology files)"
-	@echo "                           -> <run>/hpoa/profile_codes.tsv, then hpo_profile_marks"
+	@echo "                           -> <run>/hpoa/profile_codes.tsv (+ profile_terms.tsv: every"
+	@echo "                           profile term, for the export's per-term status), then hpo_profile_marks"
 	@echo "                           (a targeted bq mapping query) -> <run>/profile_marks.tsv"
 	@echo "                           (+ .json naming the HPO release). Mondo version from the"
 	@echo "                           run manifest (else HPOA_MONDO_VER); HPO $(HPOA_HPO_RELEASE)."
@@ -610,7 +611,8 @@ profile-marks: $(WORKSPACE_ENV)
 	PYTHONPATH=$(REPO_ROOT)/analysis/cloud:$(REPO_ROOT)/charmpheno:$(REPO_ROOT)/spark-vi python3 $(REPO_ROOT)/analysis/cloud/hpoa_profile_survey.py \
 	    --branch $(HPOA_BRANCH_ALL) --mondo-version "$$MV" \
 	    --hpo-release $(HPOA_HPO_RELEASE) --cache-dir $(REPO_ROOT)/data/ontology \
-	    --out-dir "$$RUN/hpoa" --emit-codes "$$RUN/hpoa/profile_codes.tsv" $(PROFILE_SURVEY_ARGS); \
+	    --out-dir "$$RUN/hpoa" --emit-codes "$$RUN/hpoa/profile_codes.tsv" \
+	    --emit-profile "$$RUN/hpoa/profile_terms.tsv" $(PROFILE_SURVEY_ARGS); \
 	if [ "$$(wc -l < "$$RUN/hpoa/profile_codes.tsv")" -le 1 ]; then echo "ERROR: the survey emitted no profile codes under $(HPOA_BRANCH_ALL) (not a Disease-category root in Mondo $$MV?); retry with HPOA_BRANCH_ALL=MONDO:0700096 (human disease)"; exit 1; fi; \
 	. ./$(WORKSPACE_ENV) && \
 	python $(REPO_ROOT)/analysis/cloud/hpo_profile_marks.py --run-dir "$$RUN" \

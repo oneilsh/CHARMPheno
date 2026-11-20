@@ -34,7 +34,10 @@ the floor and drops an NPMI result whose `min_pair_count` is below it
 Marks (optional, `positive_profile_sets` / `marks_local`): a node's OWN codes (the
 code ladder landed on the fitted node set) and its POSITIVE HPO-profile concepts, as
 indices into vocab.json in the condition domain, so the browser can badge a topic's
-terms. Ontology / code-ladder mappings only: no count beyond counts of concepts.
+terms. With the stage-1 profile-terms table (`hpo_term_statuses`), a topic node also
+lists every positive HPO annotation term with why it is or is not counted (no SNOMED
+code, no standard Condition, not in the vocabulary, contested, counted). Ontology /
+code-ladder mappings only: no count beyond counts of concepts and terms.
 
 Node topics: topic k < n_bg is background; the node with engine id e owns topics
 n_bg + (e - 1) * tpn .. n_bg + e * tpn - 1 (`DagLayout`'s block order). With tpn > 1
@@ -363,12 +366,74 @@ def marks_local(by_node, vocab_map) -> tuple:
     return idx, {n: len(v) for n, v in idx.items()}
 
 
+# Status of one positive HPO annotation term of a node (spec "Marks", HPO terms):
+# why it is, or is not, counted among the node's HPO-profile concepts.
+HPO_COUNTED, HPO_NO_SNOMED, HPO_NO_CONDITION, HPO_NOT_IN_VOCAB, HPO_CONTESTED = range(5)
+HPO_STATUS = ("counted", "no_snomed", "no_condition", "not_in_vocab", "contested")
+
+
+def hpo_term_statuses(terms, marks, profile, vocab_map) -> tuple:
+    """`({node: [(hp_id, status, counted concept ids)]}, {hp_id: name})`: every
+    POSITIVE HPO annotation term of each node and why it is, or is not, counted.
+
+    `terms`: `(mondo_id, hp_id, hp_name, neg, n_snomed_codes)` rows, the stage-1
+    `--emit-profile` table (every profile term, coded or not). `marks`: `(mondo_id,
+    hp_id, concept_id, neg)` rows, `hpo_profile_marks.py`'s table (a row per term and
+    standard Condition concept its SNOMED codes map to). `profile`:
+    `positive_profile_sets`' `{node: {concept id}}`. `vocab_map`: the marks domain's
+    `{code: local index}`.
+
+    The status of a positive (node, term), first rule that holds:
+    - `HPO_NO_SNOMED`: no marks row, and no SNOMED code in the term's
+      descendant-or-self closure (`n_snomed_codes == 0`);
+    - `HPO_NO_CONDITION`: no marks row though it has SNOMED codes (none maps to a
+      standard Condition concept);
+    - `HPO_NOT_IN_VOCAB`: mapped concepts, none in the model's vocabulary (e.g. below
+      the vocabulary's patient floor);
+    - `HPO_CONTESTED`: concepts in the vocabulary, but every one is also reached by a
+      NOT-annotated term of the node, so it is dropped from the profile (the
+      `positive_profile_sets` rule);
+    - `HPO_COUNTED`: at least one concept in the vocabulary and in the node's
+      profile; those concepts are listed (the ones the export marks "HPO").
+    A NOT-annotated term is left out (a term listed both ways for a node is positive
+    unless every row says NOT, the stage-1 unanimity rule). Ontology facts only."""
+    code_in = {_code(c) for c in vocab_map}
+    pos_terms, names = {}, {}
+    for mid, hp, name, ng, n_codes in terms:
+        key = (str(mid), str(hp))
+        was = pos_terms.get(key)
+        pos_terms[key] = (bool(ng) if was is None else (was[0] and bool(ng)),
+                          max(int(n_codes or 0), 0 if was is None else was[1]))
+        if name and str(hp) not in names:
+            names[str(hp)] = str(name)
+    concepts = {}
+    for mid, hp, cid, ng in marks:
+        if not ng:
+            concepts.setdefault((str(mid), str(hp)), set()).add(int(cid))
+    out = {}
+    for (mid, hp), (ng, n_codes) in sorted(pos_terms.items()):
+        if ng:
+            continue
+        cs = concepts.get((mid, hp), set())
+        counted = []
+        if not cs:
+            st = HPO_NO_SNOMED if n_codes == 0 else HPO_NO_CONDITION
+        else:
+            inv = {c for c in cs if _code(c) in code_in}
+            counted = sorted(inv & set(profile.get(mid, ())))
+            st = (HPO_NOT_IN_VOCAB if not inv else
+                  HPO_COUNTED if counted else HPO_CONTESTED)
+        out.setdefault(mid, []).append((hp, st, counted))
+    return out, names
+
+
 def build_export(lam, ns, *, n_bg, tpn, given_dag, domains, vocab_maps,
                  node_names=None, term_names=None, extra_support=None,
                  run="", mondo_version="", cdr="", created_utc=None,
                  top_beta=40, top_lift=40, lift_pool=200, notes=None,
                  npmi=None, own_codes=None, profile=None, marks_meta=None,
-                 marks_domain=0, force_profile=True) -> dict:
+                 marks_domain=0, force_profile=True, hpo_terms=None,
+                 hpo_names=None) -> dict:
     """The four files of `dag-gated-export/1` as JSON-ready objects
     (`{file name: object}`; `manifest["sizes"]` is filled by `write_export`).
 
@@ -390,7 +455,16 @@ def build_export(lam, ns, *, n_bg, tpn, given_dag, domains, vocab_maps,
     `own_n` / `profile_n` (how many of the node's concepts are in the model's
     vocabulary, every node). A marked term that no topic list ships is added to
     vocab.json (after the domain's shipped terms) so the page can name it. `marks_meta`
-    is `{"own": {"source"}, "profile": {"source", "hpo_release"}}` for the manifest.
+    is `{"own": {"source"}, "profile": {"source", "hpo_release"}, "profile_terms":
+    {"source"}}` for the manifest.
+
+    HPO terms (optional, with `profile`): `hpo_terms` is `hpo_term_statuses`' first
+    value, `{node id: [(hp_id, status, counted concept ids)]}`, and `hpo_names` its
+    `{hp_id: name}`. For nodes with a topic, `nodes.json` gains `hpo`: per node a list
+    of `[t, status]` (`[t, HPO_COUNTED, [vocab.json indices]]` for a counted term), `t`
+    an index into `vocab.json`'s `hpo: {id, name}` table of the terms referenced; null
+    for other nodes and nodes without a positive term. The manifest's
+    `marks.profile.terms` counts the (node, term) pairs by status.
 
     Disclosure: refuses (ValueError) a node set fitted with `min_docs_per_node` below
     the egress floor, since a kept node's banded support and its topic then rest on
@@ -512,6 +586,8 @@ def build_export(lam, ns, *, n_bg, tpn, given_dag, domains, vocab_maps,
     # index) so the terms most topics ship get the smallest ids and the shortest gaps.
     # ---- marks (optional): the marked nodes' terms in the marks domain -----------
     has_marks = own_codes is not None or profile is not None
+    if hpo_terms is not None and profile is None:
+        raise ValueError("hpo_terms needs the profile marks (profile=...)")
     md = int(marks_domain)
     if has_marks and not 0 <= md < M:
         raise ValueError(f"marks_domain={md} is not one of the {M} domains")
@@ -612,6 +688,10 @@ def build_export(lam, ns, *, n_bg, tpn, given_dag, domains, vocab_maps,
                 **({"hpo_release": str(pm["hpo_release"])} if pm.get("hpo_release")
                    else {}),
                 "nodes": sum(1 for x in nodes["profile"] if x is not None)}
+            if hpo_terms is not None:
+                nodes["hpo"], vocab["hpo"], marks_manifest["profile"]["terms"] = \
+                    _hpo_block(hpo_terms, hpo_names or {}, order, status,
+                               vocab_maps[md], gm, meta.get("profile_terms") or {})
 
     # ---- topics -----------------------------------------------------------------
     d_all = []
@@ -653,6 +733,41 @@ def build_export(lam, ns, *, n_bg, tpn, given_dag, domains, vocab_maps,
     }
     return {"manifest.json": manifest, "nodes.json": nodes, "vocab.json": vocab,
             "topics.json": topics}
+
+
+def _hpo_block(hpo_terms, hpo_names, order, status, vocab_map, gm, meta) -> tuple:
+    """`(nodes.hpo, vocab.hpo, manifest marks.profile.terms)` for `build_export`.
+    Topic nodes only (as the profile lists). The term table lists only the terms some
+    topic node cites, most-cited first (small indices for the common terms; ties by
+    id), so the per-node lists stay short. Counted concepts are vocab.json indices:
+    each is in the node's profile list, so it is a shipped (or added) term."""
+    from collections import Counter
+    per = {n: v for n, v in hpo_terms.items() if status.get(n) == STATUS_TOPIC and v}
+    cite = Counter(hp for v in per.values() for hp, _st, _c in v)
+    table = sorted(cite, key=lambda h: (-cite[h], h))
+    tix = {h: i for i, h in enumerate(table)}
+    code2local = {_code(c): int(i) for c, i in vocab_map.items()}
+    by_status = [0] * len(HPO_STATUS)
+
+    def entries(v):
+        out = []
+        for hp, st, cids in v:
+            by_status[st] += 1
+            if st == HPO_COUNTED:
+                g = sorted(int(gm[code2local[_code(c)]]) for c in cids)
+                if min(g) < 0:
+                    raise ValueError(f"a counted concept of {hp} is not a shipped term")
+                out.append([tix[hp], st, g])
+            else:
+                out.append([tix[hp], st])
+        return sorted(out, key=lambda e: (e[1], e[0]))
+    col = [entries(per[n]) if n in per else None for n in order]
+    table_obj = {"id": table, "name": [str(hpo_names.get(h, "")) for h in table]}
+    man = {"source": str(meta.get("source", "profile_terms.tsv")),
+           "nodes": sum(1 for x in col if x is not None), "hpo_terms": len(table),
+           "status": list(HPO_STATUS),
+           "by_status": {nm: int(c) for nm, c in zip(HPO_STATUS, by_status)}}
+    return col, table_obj, man
 
 
 def _egress_floor() -> int:

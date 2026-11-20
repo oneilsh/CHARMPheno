@@ -326,3 +326,85 @@ def test_profile_terms_are_always_shipped_in_their_node_topic():
     i = on["nodes.json"]["id"].index(target)
     assert {on["vocab.json"]["code"][j] for j in on["nodes.json"]["profile"][i]} == set(weak)
 
+
+# --------------------------------------------------------------------------- HPO terms
+
+def test_hpo_term_statuses_every_reason_and_the_not_rules():
+    vm = {"1000": 0, "1001": 1, "1002": 2}
+    terms = [  # (mondo_id, hp_id, hp_name, neg, n_snomed_codes)
+        ("M:1", "HP:1", "counted", False, 2),
+        ("M:1", "HP:2", "no code", False, 0),
+        ("M:1", "HP:3", "no condition", False, 3),
+        ("M:1", "HP:4", "out of vocab", False, 1),
+        ("M:1", "HP:5", "contested", False, 1),
+        ("M:1", "HP:6", "NOT", True, 1),                 # NOT-annotated: left out
+        ("M:1", "HP:7", "", False, 0),                   # no name in the obo
+        ("M:1", "HP:8", "both ways", True, 1),           # NOT by one row, positive by
+        ("M:1", "HP:8", "both ways", False, 1),          # another: positive (unanimity)
+        ("M:2", "HP:1", "counted", False, 2)]
+    marks = [  # (mondo_id, hp_id, concept_id, neg)
+        ("M:1", "HP:1", 1000, False), ("M:1", "HP:1", 999999, False),
+        ("M:1", "HP:4", 888888, False),
+        ("M:1", "HP:5", 1001, False), ("M:1", "HP:6", 1001, True),
+        ("M:1", "HP:8", 1002, False),
+        ("M:2", "HP:1", 1000, False)]
+    prof, _ = dg.positive_profile_sets([(m, c, n) for m, _h, c, n in marks])
+    out, names = dg.hpo_term_statuses(terms, marks, prof, vm)
+    got = {m: {hp: (st, cs) for hp, st, cs in v} for m, v in out.items()}
+    assert got == {
+        "M:1": {"HP:1": (dg.HPO_COUNTED, [1000]), "HP:2": (dg.HPO_NO_SNOMED, []),
+                "HP:3": (dg.HPO_NO_CONDITION, []), "HP:4": (dg.HPO_NOT_IN_VOCAB, []),
+                "HP:5": (dg.HPO_CONTESTED, []), "HP:7": (dg.HPO_NO_SNOMED, []),
+                "HP:8": (dg.HPO_COUNTED, [1002])},
+        "M:2": {"HP:1": (dg.HPO_COUNTED, [1000])}}
+    assert names["HP:1"] == "counted" and "HP:7" not in names
+    assert dg.HPO_STATUS[dg.HPO_NOT_IN_VOCAB] == "not_in_vocab"
+
+
+def test_build_with_hpo_terms_ships_a_table_and_per_node_lists():
+    dag, ns, n_bg, lam, vm = _small()
+    kw = dict(n_bg=n_bg, tpn=1, given_dag=dag, domains=["a", "b"], vocab_maps=vm,
+              top_beta=3, top_lift=2, lift_pool=10, created_utc="t")
+    nodes_all = ["x", "y", "z", "w", "v"]
+    terms = [(u, hp, f"name {hp}", False, n) for u in nodes_all
+             for hp, n in (("HP:0000010", 1), ("HP:0000020", 0), ("HP:0000030", 2))]
+    terms.append(("w", "HP:0000040", "only w", False, 1))
+    marks = [(u, "HP:0000010", 1005, False) for u in nodes_all] + \
+        [("w", "HP:0000040", 1006, False), ("w", "HP:0000040", 1007, False)]
+    prof, _ = dg.positive_profile_sets([(m, c, n) for m, _h, c, n in marks])
+    hpo, names = dg.hpo_term_statuses(terms, marks, prof, vm[0])
+    with pytest.raises(ValueError, match="needs the profile"):
+        dg.build_export(lam, ns, hpo_terms=hpo, hpo_names=names, **kw)
+    f = dg.build_export(lam, ns, profile=prof, hpo_terms=hpo, hpo_names=names,
+                        marks_meta={"profile_terms": {"source": "pt.tsv"}}, **kw)
+    nodes, vocab, man = f["nodes.json"], f["vocab.json"], f["manifest.json"]
+    table = vocab["hpo"]
+    w_topic = "w" in ns.nodes
+    assert len(table["id"]) == 3 + w_topic                # only terms a topic node cites
+    if w_topic:
+        assert table["id"][-1] == "HP:0000040"            # least cited last
+    assert table["name"] == [("only w" if h == "HP:0000040" else f"name {h}")
+                             for h in table["id"]]
+    n_topic = 0
+    for i, u in enumerate(nodes["id"]):
+        lst = nodes["hpo"][i]
+        if nodes["status"][i] != 0:
+            assert lst is None
+            continue
+        n_topic += 1
+        dec = {table["id"][e[0]]: (e[1], [vocab["code"][j] for j in e[2]] if len(e) == 3
+                                   else None) for e in lst}
+        want = {"HP:0000010": (dg.HPO_COUNTED, [1005]),
+                "HP:0000020": (dg.HPO_NO_SNOMED, None),
+                "HP:0000030": (dg.HPO_NO_CONDITION, None)}
+        if u == "w":
+            want["HP:0000040"] = (dg.HPO_COUNTED, [1006, 1007])
+        assert dec == want
+        assert {j for e in lst if e[1] == 0 for j in e[2]} == set(nodes["profile"][i])
+    tm = man["marks"]["profile"]["terms"]
+    assert tm == {"source": "pt.tsv", "nodes": n_topic, "hpo_terms": 3 + w_topic,
+                  "status": list(dg.HPO_STATUS),
+                  "by_status": {"counted": n_topic + w_topic, "no_snomed": n_topic,
+                                "no_condition": n_topic, "not_in_vocab": 0,
+                                "contested": 0}}
+

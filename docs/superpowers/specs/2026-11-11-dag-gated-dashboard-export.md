@@ -29,7 +29,8 @@ version:
 4. for a node without a topic: its status and where its labels land (links).
 A background-topics view lists the 200 shared topics in the same form. Later, not now:
 background mixtures per node, readout AUC. Own codes and HPO-profile terms were added
-2026-11-13 (section "Marks").
+2026-11-13 (section "Marks"); each topic node's whole HPO annotation profile, with why a
+term is or is not counted, 2026-11-20 ("HPO terms" under "Marks").
 
 ## Format `dag-gated-export/1` (a directory of minified JSON files)
 
@@ -119,9 +120,12 @@ domain's vocabulary (`manifest.marks.domain`: the domain named `condition`, else
   code sits on the kept node its Mondo term is, or on the nearest kept ancestors of a
   pruned / spliced term, so in practice only nodes with a topic have own codes.
   `node_cid` is the numeric part of the node's Mondo CURIE (the bridge's `node_cid`).
-- **HPO profile**: `<run>/profile_marks.tsv` (`mondo_id`, `concept_id`, `neg`;
-  `hpo_profile_marks.py`, from the stage-1 `hpoa_profile_survey.py --emit-codes`, made
-  by `make profile-marks`). Only POSITIVE concepts mark: NOT-annotated rows are dropped
+- **HPO profile**: `<run>/profile_marks.tsv` (`mondo_id`, `hp_id`, `concept_id`, `neg`,
+  one row per (node, HPO term, standard concept); `hpo_profile_marks.py`, from the
+  stage-1 `hpoa_profile_survey.py --emit-codes`, made by `make profile-marks`; tables
+  made before 2026-11-20 lack `hp_id`, which only the HPO terms below need). The
+  profile reads (`mondo_id`, `concept_id`, `neg`) and deduplicates, as do
+  `profile_eta.build_profile_seed` (the fit's profile seed) and `inspect_topics`. Only POSITIVE concepts mark: NOT-annotated rows are dropped
   and a concept listed both positive and NOT for the same node (contested) is dropped,
   as `profile_eta.build_profile_seed` does. The HPO release comes from the
   `profile_marks.json` sidecar the make target writes (or `--hpo-release`).
@@ -142,6 +146,52 @@ has. A concept outside the model's vocabulary has no term and is neither listed 
 counted. Profile lists are limited to topic nodes because a profile marks a topic's
 terms, and the whole label DAG's profiles would outweigh the topics at full scale.
 
+#### HPO terms (optional; added 2026-11-20)
+
+With the profile block and the stage-1 profile-terms table `<run>/hpoa/profile_terms.tsv`
+(`hpoa_profile_survey.py --emit-profile`, made by `make profile-marks`: every profile
+term, one row per (node, term), positive and NOT: `mondo_id`, `hp_id`, `hp_name` (from
+`hp.obo`), `neg`, `freq`, `n_snomed_codes` = the SNOMED codes in the term's
+descendant-or-self closure; the same profile as `--emit-codes`, so `--rollup` and the
+prenatal exclusion apply), each topic node lists ALL its POSITIVE HPO annotation terms
+(NOT-annotated terms left out, as above) with a status, the first rule that holds
+(`dag_gated.hpo_term_statuses`):
+
+| code | status | rule |
+|---|---|---|
+| 1 | `no_snomed` | no SNOMED code in the term's closure (`n_snomed_codes` 0), so `--emit-codes` has no row for it |
+| 2 | `no_condition` | SNOMED codes, but none maps to a standard Condition (no `profile_marks.tsv` row for the (node, term)) |
+| 3 | `not_in_vocab` | mapped concept(s), none in the model's vocabulary (e.g. below the 20-patient vocabulary floor) |
+| 4 | `contested` | concept(s) in the vocabulary, but each is also reached by a NOT term of the node, so dropped from the profile |
+| 0 | `counted` | at least one concept in the vocabulary and in the node's profile: those concepts, which the export marks "HPO" |
+
+`vocab.json` gains a SECOND table (not columns of the term table):
+```
+ hpo: {id: [str], name: [str]}   # the HPO terms some topic node lists, most-cited first
+                                 # (ties by id); name "" = not in hp.obo (show the id)
+```
+and `nodes.json`:
+```
+ hpo: [[entry]|null],   # topic nodes with a positive term; null otherwise. entry =
+                        # [t, status] or, counted, [t, 0, [vocab.json indices]];
+                        # t indexes vocab.json's hpo table; sorted by (status, t)
+```
+A counted entry's indices are a subset of the node's `profile` list, and together they
+cover it. `manifest.marks.profile` gains `terms: {source: str, nodes: int (topic nodes
+with a list), hpo_terms: int (table length), status: [the five names, by code],
+by_status: {name: (node, term) pairs}}`. Driver flags: `--profile-terms TSV` (default
+`<run>/hpoa/profile_terms.tsv` when present) / `--no-profile-terms`; the block also needs
+the marks table's `hp_id` (an older table: the block is left out with a printed reason;
+an error with an explicit `--profile-terms`). The table sits in vocab.json rather than a
+fifth file so the file set (`FILES`, the embedded page, the size report) stays as it is.
+
+Size (`dag_export_synth.py --measure`, which now writes `profile_terms.tsv` and the
+`hp_id` marks: 63,292 positive (node, term) pairs on 3,819 nodes, 1,464 topic nodes
+listed, a 9,353-term table): total 1,987,802 -> 2,156,332 bytes gzipped (+168.5 KB:
+nodes.json 230,235 -> 343,261, vocab.json 90,247 -> 145,662), raw 6.66 -> 7.47 MB.
+The real size follows the real profiles: `--rollup` credits every ancestor with its
+subtree's terms and would lengthen the upper nodes' lists by orders of magnitude.
+
 A marked term in the vocabulary that no shipped topic list holds is ADDED to vocab.json
 (with its name and `freq`), appended after the marks domain's shipped terms in local
 index order; `manifest.domains[marks domain].mark_terms` counts them (`shipped_terms`
@@ -152,7 +202,8 @@ freq codec's range covers the added terms.
 ```
  marks: {domain: int,
          own?:     {source: "code_map.tsv", nodes: int},       # nodes with a non-null own
-         profile?: {source: str, hpo_release?: str, nodes: int}} # nodes with a non-null profile
+         profile?: {source: str, hpo_release?: str, nodes: int,  # nodes with a non-null profile
+                    terms?: {...}}}                            # "HPO terms" above
 ```
 Driver flags: `--own-codes TSV` (default `<run>/code_map.tsv` when present) /
 `--no-own-codes`; `--profile-marks TSV` (default `<run>/profile_marks.tsv` when present) /
@@ -178,7 +229,12 @@ terms are a node's own codes (Mondo -> OMOP mapping landed on the fitted node se
 which are in its HPO phenotype profile (public HPO annotations mapped through the CDR's
 concept tables). They carry no count beyond counts of concepts (`own_n`, `profile_n`,
 the manifest's node counts), no document or patient count; every listed term is a
-vocabulary term, so floored at 20 patients like every other shipped term.
+vocabulary term, so floored at 20 patients like every other shipped term. The HPO terms
+are public ontology facts (a disease's HPO annotations, the term's SNOMED xrefs in
+hp.obo, the CDR's public concept mapping, and membership in the already floored
+vocabulary); they carry no number beyond counts of terms (`marks.profile.terms`), and
+"not in the vocabulary" says only that no concept passed the vocabulary floor, which the
+shipped vocabulary already shows.
 
 ## Code
 
@@ -190,7 +246,8 @@ vocabulary term, so floored at 20 patients like every other shipped term.
   The marks: own codes from `<run>/code_map.tsv`, the profile from
   `<run>/profile_marks.tsv`, which `make profile-marks ID=N` writes (the stage-1 HPOA
   survey over Mondo's root `MONDO:0000001` into `<run>/hpoa/`, then
-  `hpo_profile_marks.py`'s targeted `bq` mapping; off-YARN).
+  `hpo_profile_marks.py`'s targeted `bq` mapping; off-YARN), and the HPO terms from
+  `<run>/hpoa/profile_terms.tsv`, which the same target writes.
 - Browser: `dag-dashboard/index.html` (vanilla JS, no build step), adapted from the Mondo
   usage dashboard's DAG engine and drawer (copied, not shared: that dashboard is
   developed separately on main), plus a port of the main dashboard's relevance ranking.
@@ -199,5 +256,11 @@ vocabulary term, so floored at 20 patients like every other shipped term.
   the columns, the node's own codes and HPO-profile concepts with their β rank in the
   topic's shipped list ("not in the topic's list" otherwise) and how many are among the
   top terms shown and among the shipped terms; collapsed after 10. Without a marks
-  block the page shows nothing of this.
+  block the page shows nothing of this. With the HPO terms, the HPO box spans the
+  section and adds the node's annotation terms: a summary line ("N HPO terms annotated:
+  a counted, b no SNOMED code, c no standard Condition, d not in the vocabulary[, e
+  contested]"), then "Counted" (each term with its concept(s) and their β rank) and
+  "Not countable" (each term with its reason), each collapsed after 10; a term links to
+  `https://hpo.jax.org/browse/term/<id>` and its tooltip gives the id and the reason.
+  Without the table the box is as before.
   Deployment as a gh-pages subdirectory is a later step.

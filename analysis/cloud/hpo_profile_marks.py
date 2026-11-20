@@ -4,7 +4,13 @@
 `inspect_topics --digest --credited-file TSV` marks with `*` each top-N word
 that is in the node's own HPO phenotype profile. Its TSV only needs
 (mondo_id, concept_id, neg): which standard Condition concepts each node's
-profile maps to. The stage-2 probe (`hpoa_stage2_probe --emit-eta`) writes a
+profile maps to. The table written here is (mondo_id, hp_id, concept_id, neg),
+one row per (node, HPO term, concept): `hp_id` keeps the link back to the
+profile term so the DAG export can say, per term, whether it is counted and
+why not (a coded term with no row here has no standard Condition mapping).
+Readers that need only (mondo_id, concept_id, neg) read those columns by name
+and deduplicate (`profile_eta.build_profile_seed`, `inspect_topics`,
+`export_dag_gated.read_profile_marks`). The stage-2 probe (`hpoa_stage2_probe --emit-eta`) writes a
 superset of that, but it is a Spark job: it loads the bundle and makes a
 treeAggregate pass, all for the train-derived `coverage` and `weight` the eta
 PRIOR needs. Marking words needs neither, so this tool does only the mapping:
@@ -29,7 +35,7 @@ from pathlib import Path
 
 
 def read_profile_codes(path):
-    """Stage-1 `--emit-codes` TSV -> list of (mondo_id, code, neg) for the
+    """Stage-1 `--emit-codes` TSV -> list of (mondo_id, hp_id, code, neg) for the
     SNOMED rows (columns mondo_id, hp_id, neg, freq, vocab, code)."""
     rows = []
     with open(path, newline="") as fh:
@@ -37,7 +43,8 @@ def read_profile_codes(path):
             if str(r.get("vocab", "")) != "SNOMED":
                 continue
             neg = str(r.get("neg", "")).strip().lower() in ("1", "true")
-            rows.append((str(r["mondo_id"]), str(r["code"]).strip(), neg))
+            rows.append((str(r["mondo_id"]), str(r.get("hp_id") or ""),
+                         str(r["code"]).strip(), neg))
     return rows
 
 
@@ -79,13 +86,15 @@ def bq_code_map(codes, cdr, billing, *, bq_bin="bq", batch=1000):
 
 
 def mark_rows(profile_rows, code_map):
-    """(mondo_id, concept_id, neg) rows, deduplicated. A concept reached by
-    both a positive and a NOT term of the same node keeps both rows; the
-    digest drops neg rows."""
+    """(mondo_id, hp_id, concept_id, neg) rows, deduplicated: one per (node, HPO
+    term, standard concept). A concept reached by both a positive and a NOT term
+    of the same node keeps both rows; the digest drops neg rows. A profile row
+    whose SNOMED code maps to no standard Condition yields nothing (the export
+    reads "coded but no row" as "no standard Condition")."""
     seen = set()
-    for mid, code, neg in profile_rows:
+    for mid, hp, code, neg in profile_rows:
         for cid in code_map.get(code, ()):
-            seen.add((mid, int(cid), bool(neg)))
+            seen.add((mid, hp, int(cid), bool(neg)))
     return sorted(seen)
 
 
@@ -121,20 +130,21 @@ def main(argv=None):
         raise SystemExit("[hpo_profile_marks] no cdr/billing; pass --cdr/--billing")
 
     prof = read_profile_codes(args.profile_codes)
-    codes = {c for _, c, _ in prof}
+    codes = {c for _, _, c, _ in prof}
     print(f"[hpo_profile_marks] {len(prof)} SNOMED profile rows, "
-          f"{len({m for m, _, _ in prof})} nodes, {len(codes)} distinct codes",
+          f"{len({m for m, _, _, _ in prof})} nodes, {len(codes)} distinct codes",
           flush=True)
     code_map = bq_code_map(codes, cdr, billing, bq_bin=args.bq_bin,
                            batch=args.batch_size)
     rows = mark_rows(prof, code_map)
     out = Path(args.out) if args.out else run_dir / "profile_marks.tsv"
     with open(out, "w") as fh:
-        fh.write("mondo_id\tconcept_id\tneg\n")
-        for mid, cid, neg in rows:
-            fh.write(f"{mid}\t{cid}\t{int(neg)}\n")
+        fh.write("mondo_id\thp_id\tconcept_id\tneg\n")
+        for mid, hp, cid, neg in rows:
+            fh.write(f"{mid}\t{hp}\t{cid}\t{int(neg)}\n")
     print(f"[hpo_profile_marks] {len(code_map)}/{len(codes)} codes map to a "
-          f"standard Condition; {len({m for m, _, n in rows if not n})} nodes "
+          f"standard Condition; {len(rows)} (node, term, concept) rows; "
+          f"{len({m for m, _, _, n in rows if not n})} nodes "
           f"with a positive profile concept -> {out}", flush=True)
     return 0
 

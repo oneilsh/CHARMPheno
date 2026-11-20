@@ -255,6 +255,18 @@ header.top{position:relative;padding:2px 0 10px;border-bottom:1px solid var(--bo
 .mklist li.more{display:none}
 .mklist.open li.more{display:grid}
 .mkmore{border:0;background:none;color:var(--accent);font-size:11.5px;padding:3px 0;cursor:pointer}
+/* the node's HPO annotation terms, by status (with a profile-terms table) */
+.mkbox.wide{grid-column:1 / -1}
+.hpot{margin-top:8px;border-top:1px dashed var(--border);padding-top:6px}
+.hpot .sum{margin-top:0}
+.hpocols{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:6px 18px}
+.hpocols h6{margin:2px 0 2px;font-size:11px;font-weight:600;color:var(--ink-2)}
+.hpolist li{grid-template-columns:minmax(0,1fr) auto}
+.hpolist a.hp{justify-self:start;max-width:100%;color:var(--ink);text-decoration:none;border-bottom:1px dotted var(--muted)}
+.hpolist a.hp:hover{color:var(--accent);border-bottom-color:var(--accent)}
+.hpolist .cs{grid-column:1 / -1;font-size:11px;color:var(--ink-2);padding-left:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hpolist .cs b{font-family:var(--mono);font-weight:600;font-size:10.5px}
+.hpolist .cs i{color:var(--muted)}
 .diffpar a{cursor:pointer;font-weight:600}
 
 /* background view */
@@ -368,6 +380,9 @@ let MAN=null, NODES=[], TOPICS=[], VOCAB=null, DOMAINS=[], NPMI=null;
 // Term marks (optional, manifest.marks): per node its own codes and positive HPO-profile
 // concepts as vocab indices in one domain (MARKS.domain, the condition domain).
 let MARKS=null;
+// HPO annotation terms (optional, vocab.hpo + nodes.hpo): the term table {id, name}; per
+// topic node a list of [term, status] / [term, 0, [vocab indices]] (status: HPO_REASON).
+let HPO=null;
 let byId=new Map(), dagKids=new Map(), gRootIds=[], SUPPORT_MAX=1;
 const ROOT_ID="__root__";
 
@@ -415,12 +430,16 @@ function decode(man,nodes,vocab,topics){
     support:nodes.support[i]==null?null:nodes.support[i], sfrac:nodes.support_frac?nodes.support_frac[i]:null,
     topic:nodes.topic[i],
     own:nodes.own?nodes.own[i]:null, ownN:nodes.own_n?nodes.own_n[i]:0,
-    prof:nodes.profile?nodes.profile[i]:null, profN:nodes.profile_n?nodes.profile_n[i]:0});
+    prof:nodes.profile?nodes.profile[i]:null, profN:nodes.profile_n?nodes.profile_n[i]:0,
+    hpo:nodes.hpo?nodes.hpo[i]:null});
   MARKS=null;
   if(man.marks&&(nodes.own||nodes.profile)){
     MARKS={domain:man.marks.domain||0, own:man.marks.own||null, profile:man.marks.profile||null};
     for(const n of NODES){ n.ownSet=n.own?new Set(n.own):null; n.profSet=n.prof?new Set(n.prof):null; }
   }
+  HPO=null;
+  if(MARKS&&MARKS.profile&&nodes.hpo&&vocab.hpo&&vocab.hpo.id)
+    HPO={id:vocab.hpo.id, name:vocab.hpo.name||[], meta:MARKS.profile.terms||{}};
   for(const n of NODES) n.parents=n.pix.map(j=>NODES[j].id);
   byId=new Map(); for(const n of NODES) byId.set(n.id,n);
   // graph root: the single top-level node, or a synthetic root over several
@@ -665,24 +684,31 @@ function marksLegendHTML(n){
   if(MARKS.profile) it.push(`<span class="it" data-tip="HPO: a positive phenotype annotation of this disease (HPO${MARKS.profile.hpo_release?" "+esc(MARKS.profile.hpo_release):""}), mapped to a standard ${esc(dn)} concept. NOT-annotated and contested phenotypes are left out.">${markBadges({hpo:true})} in its HPO phenotype profile</span>`);
   return it.length?`<div class="mk-legend">${it.join("")}<span class="it" style="color:var(--muted)">(${esc(dn)} terms)</span></div>`:"";
 }
-function markBox(n,kind){
-  const isOwn=kind==="own", meta=isOwn?MARKS.own:MARKS.profile; if(!meta) return "";
-  const ids=(isOwn?n.own:n.prof)||[], cnt=isOwn?n.ownN:n.profN, md=MARKS.domain;
-  const title=isOwn?"Own codes":"HPO profile", badge=markBadges(isOwn?{own:true}:{hpo:true});
-  const what=isOwn?"own code":"HPO-profile concept";
-  if(!cnt) return `<div class="mkbox"><h5>${title} ${badge}</h5><div class="sum">${isOwn?"No own code in the model's vocabulary.":"No HPO profile in the model's vocabulary."}</div></div>`;
-  const k=n.topic;
-  if(k==null||!TOPICS[k]){
-    if(!ids.length) return `<div class="mkbox"><h5>${title} ${badge}</h5><div class="sum"><b>${fmt(cnt)}</b> ${what}${cnt===1?"":"s"} in the model's vocabulary; listed for nodes with a topic only.</div></div>`;
-  }
-  // rank by β in the topic's shipped list of the marks domain
-  const rank=new Map(), top=new Set();
-  let nShip=0;
+// A topic's shipped terms in domain md ranked by β ({rank: term -> {r, b}}), the terms
+// among the top shown at the current λ (top) and how many it ships (nShip).
+function rankInfo(k,md){
+  const rank=new Map(), top=new Set(); let nShip=0;
   if(k!=null&&TOPICS[k]&&TOPICS[k].dom[md]){
     const t=TOPICS[k].dom[md], o=[...t.ids.keys()].sort((a,b)=>t.beta[b]-t.beta[a]); nShip=o.length;
     o.forEach((j,r)=>rank.set(t.ids[j],{r:r+1,b:t.beta[j]}));
     for(const r of rankedTerms(k,md,state.lambda,shownFor(k))) top.add(r.w);
   }
+  return {rank,top,nShip};
+}
+function markBox(n,kind){
+  const isOwn=kind==="own", meta=isOwn?MARKS.own:MARKS.profile; if(!meta) return "";
+  const ids=(isOwn?n.own:n.prof)||[], cnt=isOwn?n.ownN:n.profN, md=MARKS.domain;
+  const title=isOwn?"Own codes":"HPO profile", badge=markBadges(isOwn?{own:true}:{hpo:true});
+  const what=isOwn?"own code":"HPO-profile concept";
+  // the node's HPO annotation terms by status (profile box, with a profile-terms table)
+  const terms=isOwn?"":hpoTermsHTML(n), cls=terms?"mkbox wide":"mkbox";
+  if(!cnt) return `<div class="${cls}"><h5>${title} ${badge}</h5><div class="sum">${isOwn?"No own code in the model's vocabulary.":"No HPO-profile concept in the model's vocabulary."}</div>${terms}</div>`;
+  const k=n.topic;
+  if(k==null||!TOPICS[k]){
+    if(!ids.length) return `<div class="mkbox"><h5>${title} ${badge}</h5><div class="sum"><b>${fmt(cnt)}</b> ${what}${cnt===1?"":"s"} in the model's vocabulary; listed for nodes with a topic only.</div></div>`;
+  }
+  // rank by β in the topic's shipped list of the marks domain
+  const {rank,top,nShip}=rankInfo(k,md);
   const rows=ids.map(w=>({w,rk:rank.get(w)||null,top:top.has(w)}))
     .sort((a,b)=>(a.rk?a.rk.r:1e9)-(b.rk?b.rk.r:1e9)||termName(a.w).localeCompare(termName(b.w)));
   const inTop=rows.filter(r=>r.top).length, inShip=rows.filter(r=>r.rk).length;
@@ -695,7 +721,58 @@ function markBox(n,kind){
     const tipT=`${termName(r.w)}\ncode ${VOCAB.code[r.w]}`+(r.rk?`\nβ rank ${r.rk.r} of ${nShip} shipped (β ${(r.rk.b*100).toFixed(2)}%)`+(r.top?`\namong the top ${shownFor(k)} shown at λ ${state.lambda.toFixed(2)}`:""):(k!=null?"\nnot in the topic's shipped list (its weight there is below the top-β and top-lift selection)":""));
     return `<li class="${i>=MARKS_SHOW?"more":""}" data-tip="${esc(tipT)}"><span class="tx">${esc(termName(r.w))}</span><span class="where ${r.top?"top":r.rk?"":"out"}">${where}</span></li>`;}).join("");
   const more=rows.length>MARKS_SHOW?`<button class="mkmore" data-mk-toggle="${key}">${open?"show fewer":`show all ${rows.length}`}</button>`:"";
-  return `<div class="mkbox"><h5>${title} ${badge}</h5><div class="sum">${sum}</div><ol class="mklist${open?" open":""}">${lis}</ol>${more}</div>`;
+  return `<div class="${cls}"><h5>${title} ${badge}</h5><div class="sum">${sum}</div><ol class="mklist${open?" open":""}">${lis}</ol>${more}${terms}</div>`;
+}
+// The node's positive HPO annotation terms (HPO.meta.status order): counted, each with its
+// concept(s) and their β rank in the topic, then the terms that cannot be counted, each
+// with its reason. Collapsed after MARKS_SHOW rows per list. "" without the table.
+const HPO_REASON=["counted","no SNOMED code","no standard Condition","not in the vocabulary","contested"];
+const HPO_WHY=["At least one of its standard Condition concepts is in the model's vocabulary: those are the HPO-marked concepts.",
+  "No SNOMED code on the term or on any HPO descendant, so no OMOP concept can stand for it.",
+  "Its SNOMED codes map ('Maps to') to no standard Condition concept in the CDR.",
+  "Its standard Condition concept(s) are not in the model's vocabulary (for example below the 20-patient vocabulary floor).",
+  "Its concepts in the vocabulary are also reached by a NOT-annotated term of this disease, so they are left out (contested)."];
+const hpoId=t=>String(HPO.id[t]);
+const hpoName=t=>HPO.name[t]?String(HPO.name[t]):hpoId(t);
+const hpoUrl=t=>`https://hpo.jax.org/browse/term/${encodeURIComponent(hpoId(t))}`;
+function hpoLink(t,tipT){
+  return `<a class="hp tx" href="${hpoUrl(t)}" target="_blank" rel="noopener" data-tip="${esc(tipT)}">${esc(hpoName(t))}</a>`;
+}
+function hpoTermsHTML(n){
+  if(!HPO||!n||!n.hpo||!n.hpo.length) return "";
+  const k=n.topic, md=MARKS.domain, hasTopic=k!=null&&TOPICS[k], R=rankInfo(k,md);
+  const cnt=HPO_REASON.map(()=>0); for(const e of n.hpo) cnt[e[1]]=(cnt[e[1]]||0)+1;
+  const where=c=>!hasTopic?"":c.rk?`β #${c.rk.r}${c.top?" · shown":""}`:"not in the topic's list";
+  const counted=n.hpo.filter(e=>e[1]===0).map(e=>{
+    const cs=(e[2]||[]).map(w=>({w,rk:R.rank.get(w)||null,top:R.top.has(w)}))
+      .sort((a,b)=>(a.rk?a.rk.r:1e9)-(b.rk?b.rk.r:1e9)||termName(a.w).localeCompare(termName(b.w)));
+    return {t:e[0], cs, best:cs.length&&cs[0].rk?cs[0].rk.r:1e9};
+  }).sort((a,b)=>a.best-b.best||hpoName(a.t).localeCompare(hpoName(b.t)));
+  const unc=n.hpo.filter(e=>e[1]!==0)
+    .sort((a,b)=>a[1]-b[1]||hpoName(a[0]).localeCompare(hpoName(b[0])));
+  const list=(key,rows,render,label)=>{
+    if(!rows.length) return "";
+    const open=marksOpen.has(key);
+    const more=rows.length>MARKS_SHOW?`<button class="mkmore" data-mk-toggle="${key}">${open?"show fewer":`show all ${rows.length}`}</button>`:"";
+    return `<div><h6>${label}</h6><ol class="mklist hpolist${open?" open":""}" data-hpo-list="${key.split(":")[1]}">${rows.map((r,i)=>render(r,i>=MARKS_SHOW)).join("")}</ol>${more}</div>`;
+  };
+  const cHTML=list(n.ix+":hpoc",counted,(r,hid)=>{
+    const best=r.cs[0];
+    const tipT=`${hpoId(r.t)} · ${hpoName(r.t)}\ncounted: ${r.cs.length} standard concept${r.cs.length===1?"":"s"} in the vocabulary\n`+
+      r.cs.map(c=>`→ ${termName(c.w)} (code ${VOCAB.code[c.w]})${c.rk?` β #${c.rk.r}`:hasTopic?" not in the topic's list":""}`).join("\n")+
+      `\nopens in the HPO browser`;
+    const cs=r.cs.map(c=>`${esc(termName(c.w))}${hasTopic&&r.cs.length>1?` <b>${c.rk?"#"+c.rk.r:"–"}</b>`:""}`).join(" <i>·</i> ");
+    return `<li class="${hid?"more":""}" data-hpo-status="0">${hpoLink(r.t,tipT)}<span class="where ${best&&best.top?"top":best&&best.rk?"":"out"}">${best?where(best):""}</span><span class="cs">→ ${cs}</span></li>`;
+  },`Counted (${fmt(counted.length)})`);
+  const uHTML=list(n.ix+":hpou",unc,(e,hid)=>{
+    const tipT=`${hpoId(e[0])} · ${hpoName(e[0])}\nnot countable: ${HPO_REASON[e[1]]||"status "+e[1]}\n${HPO_WHY[e[1]]||""}\nopens in the HPO browser`;
+    return `<li class="${hid?"more":""}" data-hpo-status="${e[1]}">${hpoLink(e[0],tipT)}<span class="where out">${esc(HPO_REASON[e[1]]||"status "+e[1])}</span></li>`;
+  },`Not countable (${fmt(unc.length)})`);
+  const N=n.hpo.length;
+  const sum=`<b>${fmt(N)}</b> HPO term${N===1?"":"s"} annotated: <b>${fmt(cnt[0])}</b> counted, <b>${fmt(cnt[1])}</b> no SNOMED code, <b>${fmt(cnt[2])}</b> no standard Condition, <b>${fmt(cnt[3])}</b> not in the vocabulary`+
+    (cnt[4]?`, <b>${fmt(cnt[4])}</b> contested`:"");
+  const tip=`The disease's positive HPO phenotype annotations${MARKS.profile.hpo_release?" (HPO "+MARKS.profile.hpo_release+")":""}, NOT-annotated ones left out. A term is counted when one of its standard Condition concepts is in the model's vocabulary; otherwise the reason is given.`;
+  return `<div class="hpot" data-hpo-node="${n.ix}"><div class="sum" data-tip="${esc(tip)}">${sum}</div><div class="hpocols">${cHTML}${uHTML}</div></div>`;
 }
 function marksHTML(n){
   if(!MARKS||!n) return "";

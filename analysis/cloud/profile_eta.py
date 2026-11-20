@@ -1,7 +1,7 @@
 """The HPO profile seed for the leaves-first gate schedule (exp 0157/0158; ADR 0049).
 
 `build_profile_seed` turns a phenotype-marks table (``hpo_profile_marks.py``
-output: mondo_id, concept_id, neg) into {node: {term: weight}} for the estimator's
+output: mondo_id, hp_id, concept_id, neg; hp_id unused) into {node: {term: weight}} for the estimator's
 `gateSeedProfile`. Node and term keys are whatever the two maps give (since spec
 2026-10-30 the fit driver passes Mondo curie -> curie and concept id -> concept id,
 the estimator's user ids; it used to be engine ids and vocab indices). DRIVER-SIDE
@@ -49,13 +49,17 @@ def build_profile_seed(marks_df, *, eid_by_mondo, vocab_index_by_concept):
     log(N / n_c), so a phenotype every profiled node shares (n_c = N) weighs 0 and
     drops out — a knob-free exclusion of profile-generic terms, computed here because the marks table carries no weight
     (``hpo_profile_marks.py`` is bundle-agnostic). Columns used: mondo_id,
-    concept_id, neg. Returns ``(seed, stats)``; stats are counts only."""
+    concept_id, neg; extra columns (the table's `hp_id`) are ignored, and rows are
+    deduplicated on those three first, since the table carries one row per (node,
+    HPO term, concept) and a concept reached by several terms repeats. Returns
+    ``(seed, stats)``; stats are counts only (rows counted after the dedupe)."""
     mids = marks_df["mondo_id"].astype(str).to_numpy()
     cids = marks_df["concept_id"].astype("int64").to_numpy()
     negs = _neg_flags(marks_df["neg"].tolist())
+    triples = sorted({(str(m), int(c), bool(g)) for m, c, g in zip(mids, cids, negs)})
     pos, neg = {}, {}
     n_unmapped = 0
-    for mid, cid, ng in zip(mids, cids, negs):
+    for mid, cid, ng in triples:
         eid = eid_by_mondo.get(mid)
         if eid is None:
             continue
