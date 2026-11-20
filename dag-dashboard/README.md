@@ -3,7 +3,9 @@
 A single-file, no-build page (`index.html`, vanilla JS; only Google Fonts is external) for
 browsing a `dag-gated-export/1` directory: the Mondo label DAG a DAG-gated model was given,
 with each node's topic in a detail drawer. The format is specified in
-[`docs/superpowers/specs/2026-11-11-dag-gated-dashboard-export.md`](../docs/superpowers/specs/2026-11-11-dag-gated-dashboard-export.md).
+`docs/superpowers/specs/2026-11-11-dag-gated-dashboard-export.md` (on the development
+branch `claude/dismech-ribbon` until it merges, as are the exporter and the make targets
+named below).
 
 The DAG engine and drawer are copied from `mondo-usage-dashboard/index.html` on `main`
 (developed separately there, not shared); the relevance ranking is a port of the main
