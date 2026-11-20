@@ -368,7 +368,7 @@ def build_export(lam, ns, *, n_bg, tpn, given_dag, domains, vocab_maps,
                  run="", mondo_version="", cdr="", created_utc=None,
                  top_beta=40, top_lift=40, lift_pool=200, notes=None,
                  npmi=None, own_codes=None, profile=None, marks_meta=None,
-                 marks_domain=0) -> dict:
+                 marks_domain=0, force_profile=True) -> dict:
     """The four files of `dag-gated-export/1` as JSON-ready objects
     (`{file name: object}`; `manifest["sizes"]` is filled by `write_export`).
 
@@ -526,6 +526,23 @@ def build_export(lam, ns, *, n_bg, tpn, given_dag, domains, vocab_maps,
     own_loc = {n: v for n, v in own_loc.items() if n in idx}
     own_cnt = {n: v for n, v in own_cnt.items() if n in idx}
     prof_cnt = {n: v for n, v in prof_cnt.items() if n in idx}
+    # Forced terms: a node topic always ships its own positive HPO-profile concepts in
+    # the marks domain, however low their weight or lift, so the page can show every
+    # profile term with its real weight and rank (maintainer, 2026-11-20). They join
+    # the selection, so they are ordinary shipped terms from here on.
+    n_forced = 0
+    if force_profile and prof_loc:
+        for n, loc in prof_loc.items():
+            e = ns.engine_id.get(n)
+            if e is None:
+                continue
+            for k in range(n_bg + (e - 1) * tpn, n_bg + e * tpn):
+                before = picks[md][k]
+                merged = np.union1d(before, np.asarray(loc, dtype=before.dtype))
+                n_forced += int(merged.size - before.size)
+                picks[md][k] = merged
+        sel["forced"] = "profile"
+        sel["forced_terms"] = n_forced
     marked_local = set()
     for d in (own_loc, prof_loc):
         for v in d.values():

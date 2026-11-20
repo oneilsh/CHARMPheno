@@ -268,6 +268,9 @@ def parse_args(argv=None):
                          "hpo_profile_marks.py / `make profile-marks`; default "
                          "<run>/profile_marks.tsv when it exists)")
     ap.add_argument("--no-profile", action="store_true", help="ship no HPO profile")
+    ap.add_argument("--no-force-profile", action="store_true",
+                    help="do not add a node's HPO-profile concepts to its topic's shipped "
+                         "terms (by default every one ships, however low its weight)")
     ap.add_argument("--hpo-release", default=None,
                     help="the HPO release the profile marks came from (default: the "
                          "marks TSV's .json sidecar, written by `make profile-marks`)")
@@ -431,7 +434,7 @@ def main(argv=None):
         cdr=cm.get("cdr", ""), created_utc=args.created_utc,
         top_beta=args.top_beta, top_lift=args.top_lift, lift_pool=args.lift_pool,
         npmi=npmi, own_codes=own_codes, profile=profile, marks_meta=marks_meta,
-        marks_domain=md)
+        marks_domain=md, force_profile=not args.no_force_profile)
     sizes = write_export(files, out)
     mk = files["manifest.json"].get("marks")
     if mk:

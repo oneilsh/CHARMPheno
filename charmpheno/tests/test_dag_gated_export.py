@@ -237,7 +237,8 @@ def test_build_with_marks_ships_indices_counts_and_extra_terms():
     # every node (kept or not)
     own = {u: {1000 + 3 * i, 1039, 555555} for i, u in enumerate(sorted(ns.nodes))}
     prof = {u: {1001, 1038, 777777} for u in ["x", "y", "z", "w", "v"]}
-    f = dg.build_export(lam, ns, own_codes=own, profile=prof,
+    # force_profile=False: marks alone must not change the topics (forcing has its own test)
+    f = dg.build_export(lam, ns, own_codes=own, profile=prof, force_profile=False,
                         marks_meta={"profile": {"source": "pm.tsv", "hpo_release": "v1"}},
                         **kw)
     nodes, vocab, man = f["nodes.json"], f["vocab.json"], f["manifest.json"]
@@ -286,6 +287,42 @@ def test_build_with_marks_ships_indices_counts_and_extra_terms():
         "profile": {"source": "pm.tsv", "hpo_release": "v1",
                     "nodes": sum(1 for x in nodes["profile"] if x is not None)}}
     # one block alone
-    g = dg.build_export(lam, ns, profile=prof, **kw)
+    g = dg.build_export(lam, ns, profile=prof, force_profile=False, **kw)
     assert "own" not in g["nodes.json"] and "profile" in g["nodes.json"]
     assert set(g["manifest.json"]["marks"]) == {"domain", "profile"}
+
+
+def test_profile_terms_are_always_shipped_in_their_node_topic():
+    """force_profile (the default): a node topic ships every positive HPO-profile concept
+    of its node in the marks domain, however small its weight, so the page shows it with
+    its real weight and rank; other topics and domains are unchanged."""
+    dag, ns, n_bg, lam, vm = _small()
+    kw = dict(n_bg=n_bg, tpn=1, given_dag=dag, domains=["a", "b"], vocab_maps=vm,
+              top_beta=3, top_lift=2, lift_pool=10, created_utc="t")
+    target = sorted(ns.nodes)[0]
+    k = n_bg + ns.engine_id[target] - 1
+    lam = {m: a.copy() for m, a in lam.items()}
+    weak = [1005, 1017]                         # make them the topic's weakest terms
+    for c in weak:
+        lam[0][k, c - 1000] = 1e-6
+    prof = {target: set(weak) | {999999}}       # one concept outside the vocabulary
+    off = dg.build_export(lam, ns, profile=prof, force_profile=False, **kw)
+    on = dg.build_export(lam, ns, profile=prof, **kw)
+
+    def terms(files, kk, d=0):
+        v = files["vocab.json"]
+        return {v["code"][j] for j in dg.delta_decode(files["topics.json"]["d"][kk][d][0])}
+    assert not set(weak) & terms(off, k)
+    assert set(weak) <= terms(on, k)
+    assert terms(on, k) - terms(off, k) == set(weak)
+    for kk in range(len(on["topics.json"]["d"])):
+        if kk != k:
+            assert terms(on, kk) == terms(off, kk)
+        assert terms(on, kk, 1) == terms(off, kk, 1)
+    sel = on["manifest.json"]["selection"]
+    assert sel["forced"] == "profile" and sel["forced_terms"] == len(weak)
+    assert "forced" not in off["manifest.json"]["selection"]
+    # the profile list points at shipped terms of the topic now
+    i = on["nodes.json"]["id"].index(target)
+    assert {on["vocab.json"]["code"][j] for j in on["nodes.json"]["profile"][i]} == set(weak)
+

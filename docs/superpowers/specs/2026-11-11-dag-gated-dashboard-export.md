@@ -98,6 +98,12 @@ absolute, then gaps); `w` are log-byte weights aligned with the decoded ids: the
 E[β] within that domain (its λ row in the domain, normalized), b in 0..255,
 β = exp(lo + (hi − lo) · b / 255) with the domain's (lo, hi). The browser re-sorts by β.
 
+Forced terms (maintainer, 2026-11-20): with profile marks, a node topic also ships
+every positive HPO-profile concept of its node in the marks domain, however low its
+weight or lift (`manifest.selection.forced = "profile"`, `forced_terms` = how many were
+added; `--no-force-profile` turns it off), so every profile term can be shown with its
+real weight and rank.
+
 Selection per topic and domain: its top `top_beta` terms by β, plus up to `top_lift`
 more by lift β / p among its top `lift_pool` terms by β (lift restricted to a pool so a
 rare term's prior-level weight cannot rank first).

@@ -54,7 +54,10 @@ def test_schema_of_the_four_files(exported):
     assert all(len(a) == man["K"] for a in nb["gated"] + nb["all"])
     assert nb["gated"][0][0] is None                     # an unscored topic stays null
     assert all(v is None or isinstance(v, int) for a in nb["gated"] for v in a)
-    assert man["selection"] == {"top_beta": 40, "top_lift": 40, "lift_pool": 200}
+    assert {k: man["selection"][k] for k in ("top_beta", "top_lift", "lift_pool")} == \
+        {"top_beta": 40, "top_lift": 40, "lift_pool": 200}
+    # the synthetic run carries profile marks, so the profile terms are forced in
+    assert man["selection"].get("forced") == "profile"
     assert man["weight_codec"]["kind"] == man["freq_codec"]["kind"] == "log-byte"
     assert [d["name"] for d in man["domains"]] == list(synth.DOMAINS)
     assert man["disclosure"]["min_cell"] == 20
@@ -149,8 +152,17 @@ def test_selection_and_codec_round_trip(exported):
     dec = dg.decode_topics(f)
     for m in range(len(man["domains"])):
         beta, pw = dg.domain_beta(lam[m]), dg.term_marginal(lam[m])
-        picks = dg.select_terms(beta, pw, **man["selection"])
+        sel = {k: man["selection"][k] for k in ("top_beta", "top_lift", "lift_pool")}
+        picks = dg.select_terms(beta, pw, **sel)
         inv = {i: int(c) for c, i in vm[m].items()}
+        # forced: a node topic also ships its node's profile concepts (marks domain)
+        if man["selection"].get("forced") == "profile" and m == man["marks"]["domain"]:
+            nodes = f["nodes.json"]
+            for i, pl in enumerate(nodes["profile"]):
+                k = nodes["topic"][i]
+                if pl and k is not None:
+                    extra = [vm[m][str(vocab["code"][j])] for j in pl]
+                    picks[k] = np.union1d(picks[k], np.asarray(extra, dtype=np.int64))
         err = dg.log_byte_max_log_error(man["weight_codec"]["per_domain"][m]["lo"],
                                         man["weight_codec"]["per_domain"][m]["hi"])
         for k in range(man["K"]):
