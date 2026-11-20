@@ -12,7 +12,9 @@ repos:
         args: ['--maxkb=1024']
         # the Mondo-usage dashboard ships its (aggregated, small-cell-suppressed)
         # payloads (Mondo + HPO axes) as static JSON for GitHub Pages; they exceed 1 MB by design.
-        exclude: '^mondo-usage-dashboard/(mondo|hpo)_usage\.json$'
+        # The DAG topic browser's reviewed exports (dag-dashboard/published/<run>/,
+        # aggregate model parameters, see each PROVENANCE.md) likewise.
+        exclude: '^(mondo-usage-dashboard/(mondo|hpo)_usage\.json|dag-dashboard/published/[^/]+/(manifest|nodes|vocab|topics)\.json)$'
 
   - repo: local
     hooks:

@@ -5,7 +5,7 @@ on:
     # If branch-specific preview URLs are needed later, switch to a
     # destination_dir scheme per branch.
     branches: [main, dashboarding]
-    paths: ['dashboard/**', 'mondo-usage-dashboard/**', '.github/workflows/dashboard.yml']
+    paths: ['dashboard/**', 'mondo-usage-dashboard/**', 'dag-dashboard/**', '.github/workflows/dashboard.yml']
   workflow_dispatch: {}
 permissions: { contents: write }
 jobs:
@@ -37,6 +37,19 @@ jobs:
           # HPO phenotype axis: ships WITH the Mondo payload — the dual-axis Mondo payload
           # has phenotype terms removed, so it is only coherent alongside hpo_usage.json.
           cp mondo-usage-dashboard/hpo_usage.json dashboard/dist/mondo-aou-usage/
+      - name: Add DAG-gated topic browser (static, served at /dag-topics/)
+        env: { DAG_RELEASE: '0174' }
+        run: |
+          # The page plus one reviewed export (dag-dashboard/published/<run>/, see its
+          # PROVENANCE.md). Skipped until that export is committed.
+          src="dag-dashboard/published/$DAG_RELEASE"
+          if [ -f "$src/manifest.json" ]; then
+            mkdir -p dashboard/dist/dag-topics/data
+            cp dag-dashboard/index.html dashboard/dist/dag-topics/
+            cp "$src"/{manifest,nodes,vocab,topics}.json dashboard/dist/dag-topics/data/
+          else
+            echo "no export in $src; DAG topic browser not deployed"
+          fi
       - name: Deploy
         uses: peaceiris/actions-gh-pages@v3
         with:
