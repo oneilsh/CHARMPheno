@@ -1,0 +1,13 @@
+{
+  "group_var": "source_cohort",
+  "groups": [
+    "rare_dx"
+  ],
+  "topic_blocks": [
+    "background",
+    "background",
+    "background",
+    "rare_dx",
+    "rare_dx"
+  ]
+}
