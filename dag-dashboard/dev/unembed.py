@@ -33,7 +33,9 @@ def dumps(obj) -> bytes:
 def unembed(page: str) -> dict:
     """`{file name: parsed file}` from the page's embedded block. The embed escapes
     `</` as `<\\/`, a valid JSON escape, so `json.loads` reads it back unchanged."""
-    m = _TAG.search(page)
+    # The embed puts the block just before </head>; search only there, since the page's
+    # own script mentions the tag in a comment.
+    m = _TAG.search(page.split("</head>", 1)[0])
     if m is None:
         raise SystemExit('no <script id="dag-data"> block: not a self-contained export page')
     blob = json.loads(m.group(1))
