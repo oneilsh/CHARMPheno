@@ -225,7 +225,7 @@ FROM nlp GROUP BY 1 ORDER BY n_rows DESC"""))
     q.append(("Extracted concepts by domain, vocabulary, standard flag", "top 40 groups by rows",
               cte + f"""
 SELECT c.domain_id, c.vocabulary_id, IFNULL(c.standard_concept, '-') AS standard,
-       COUNT(*) AS n_rows, COUNT(DISTINCT nlp.cid) AS concepts,
+       COUNT(*) AS n_rows, COUNT(DISTINCT nlp.rcid) AS concepts,
        COUNT(DISTINCT nlp.person_id) AS patients
 FROM nlp LEFT JOIN `{cdr}.concept` c ON c.concept_id = nlp.rcid
 GROUP BY 1, 2, 3 ORDER BY n_rows DESC LIMIT 40"""))
