@@ -44,6 +44,6 @@ def test_fit_profile_seed_reads_a_marks_table_with_hp_id(tmp_path):
     dag, vocab = {"MONDO:1": [], "MONDO:2": []}, {201: 0, 202: 1, 203: 2}
     seed, st = fit._profile_seed(str(new), dag, vocab)
     assert (seed, st) == fit._profile_seed(str(old), dag, vocab)
-    assert seed == {"MONDO:1": {("features_0", 202): float(np.log(2))},
-                    "MONDO:2": {("features_0", 203): float(np.log(2))}}
+    assert seed == {"MONDO:1": {("features_0", "202"): float(np.log(2))},
+                    "MONDO:2": {("features_0", "203"): float(np.log(2))}}
     assert st["n_rows_concept_not_in_vocab"] == 1
