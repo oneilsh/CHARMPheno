@@ -47,3 +47,9 @@ with the cast hint, a numpy `str_` is unwrapped. Vectorizer vocabularies
 `_TermIndex`'s "twin" detection (`10` vs `"10"`), now deleted, with the mixed-type term
 sort key. Every id the estimator takes is a string. Stored JSON is unchanged for string
 terms.
+
+**Addendum (2026-11-23, walkthrough):** a document LABEL that is not a `str` raises
+`TypeError` (with the cast hint) in the support pass, the frontier, `NodeSet.land` and
+the readout labeler, under either `unknownLabels` policy. Before, it counted as an
+unknown label, so `"ignore"` silently dropped it and the document could turn into
+background. `unknownLabels` now governs only strings that are not DAG nodes.

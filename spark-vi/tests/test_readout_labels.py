@@ -86,6 +86,8 @@ def test_unknown_labels_error_or_ignore():
     lab = _labeler(unknown_labels="ignore")
     assert lab.active(["3", "nope"]) == (0, 1, 3)
     assert lab.active(["nope"]) == ()
+    with pytest.raises(TypeError, match="cast"):
+        lab.active(["3", 3])       # a non-str label is never "unknown" (ADR 0053)
 
 
 def test_bad_policies_refused():

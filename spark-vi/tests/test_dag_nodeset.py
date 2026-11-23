@@ -112,13 +112,20 @@ def test_support_counts_ancestor_closure():
 
 def test_unknown_labels_error_names_them():
     with pytest.raises(ValueError, match=r"'zz'.*") as e:
-        count_support([["a", "zz"], [1]], DIAMOND)
-    assert "'zz'" in str(e.value) and "1" in str(e.value)
+        count_support([["a", "zz"], ["yy"]], DIAMOND)
+    assert "'zz'" in str(e.value) and "'yy'" in str(e.value)
 
 
-def test_int_label_against_str_dag_is_unknown():
-    with pytest.raises(ValueError, match="not nodes"):
-        count_support([[1]], {"1": None})
+@pytest.mark.parametrize("policy", ["error", "ignore"])
+def test_non_str_label_is_a_type_error_under_either_policy(policy):
+    """ADR 0053: a mistyped label is not an unknown node, so 'ignore' must not
+    silently drop it (the document would become background)."""
+    with pytest.raises(TypeError, match=r"cast"):
+        count_support([[1]], {"1": None}, unknown_labels=policy)
+    ns = fit_node_set(DIAMOND, [["d"], ["e"]], unknown_labels=policy)
+    for call in (ns.frontier, ns.land):
+        with pytest.raises(TypeError, match=r"cast"):
+            call(["e", 3])
     sup, _ = count_support([["1"]], {"1": None})
     assert sup == {"1": 1}
 
@@ -264,7 +271,9 @@ def test_learn_node_set_takes_precomputed_support():
     assert ns.n_docs == 7
     assert ns.spliced == ("a",) and set(ns.pruned) == {"c", "d"}
     with pytest.raises(ValueError):
-        learn_node_set(DIAMOND, sup, min_docs_per_node=-1)
+        learn_node_set(DIAMOND, sup, n_docs=7, min_docs_per_node=-1)
+    with pytest.raises(TypeError):
+        learn_node_set(DIAMOND, sup, min_docs_per_node=1)   # n_docs is required
 
 
 # ---------------------------------------------------------------- R4 engine ids, frontier

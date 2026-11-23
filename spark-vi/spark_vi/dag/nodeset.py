@@ -299,13 +299,8 @@ def _iter_labels(labels):
     return labels
 
 
-def _msg_key(u):
-    """Order for naming unknown labels, which may be of any type."""
-    return (0, u) if isinstance(u, str) else (1, repr(u))
-
-
 def _unknown_error(unknown, n_unknown):
-    shown = ", ".join(repr(u) for u in sorted(unknown, key=_msg_key))
+    shown = ", ".join(repr(u) for u in sorted(unknown))
     more = "" if n_unknown <= len(unknown) else f" (and {n_unknown - len(unknown)} more)"
     return ValueError(
         f"{n_unknown} label(s) are not nodes of the DAG: {shown}{more}. Node ids "
@@ -338,11 +333,7 @@ def doc_support(labels, index: LabelIndex):
     `index` (broadcast) and the row."""
     covered, unknown = set(), []
     for lab in _iter_labels(labels):
-        try:
-            lab = _coerce_id(lab, what="label")
-        except TypeError:
-            unknown.append(lab)
-            continue
+        lab = _coerce_id(lab, what="label")     # a non-str label is a TypeError
         clo = index.closure.get(lab)
         if clo is None:
             unknown.append(lab)
@@ -374,10 +365,7 @@ class SupportCounts:
             for u in unknown:
                 if len(self.unknown) >= _UNKNOWN_CAP:
                     break
-                try:
-                    self.unknown.add(u)
-                except TypeError:      # unhashable junk: keep its repr
-                    self.unknown.add(repr(u))
+                self.unknown.add(u)
         return self
 
     def merge(self, other: "SupportCounts") -> "SupportCounts":
@@ -474,10 +462,7 @@ class FrontierFn:
         landed = set()
         unknown = []
         for lab in _iter_labels(labels):
-            try:
-                tgt = self.landing.get(_coerce_id(lab, what="label"))
-            except TypeError:
-                tgt = None
+            tgt = self.landing.get(_coerce_id(lab, what="label"))
             if tgt is None:
                 unknown.append(lab)
             else:
@@ -537,10 +522,7 @@ class NodeSet:
         eng = set()
         unknown = []
         for lab in _iter_labels(labels):
-            try:
-                tgt = self.frontier.landing.get(_coerce_id(lab, what="label"))
-            except TypeError:
-                tgt = None
+            tgt = self.frontier.landing.get(_coerce_id(lab, what="label"))
             if tgt is None:
                 unknown.append(lab)
             else:
@@ -660,12 +642,17 @@ def _number_engine_ids(parents):
     return order, engine_id, user_ids, engine_parents
 
 
-def learn_node_set(dag, support, *, n_docs=None, min_docs_per_node=1,
+def learn_node_set(dag, support, *, n_docs, min_docs_per_node=1,
                    unknown_labels="error") -> NodeSet:
     """Prune, land, reduce and splice (R3.3-6), then number the kept nodes (R4).
 
     `support` is `{node: documents whose labels' closure contains it}` from
-    `count_support` / `count_support_spark` (a missing node counts 0).
+    `count_support` / `count_support_spark` (a missing node counts 0); `n_docs` the
+    number of documents that pass counted (required: it is the root's support).
+
+    Labels must be strings (ADR 0053): a non-str label raises `TypeError` under
+    either `unknown_labels` policy, which applies only to strings that are not DAG
+    nodes (so "ignore" never silently drops a mistyped label).
 
     PRUNE: drop nodes with support < `min_docs_per_node`. Closure support never
     decreases going up (a document reaching a node reaches its ancestors), so the
@@ -733,7 +720,7 @@ def learn_node_set(dag, support, *, n_docs=None, min_docs_per_node=1,
         pruned={n: landing_user[n] for n in pruned_ids},
         spliced=tuple(nodes[i] for i in sorted(spliced)),
         support={n: sup[n] for n in order},
-        n_docs=int(n_docs) if n_docs is not None else 0,
+        n_docs=int(n_docs),
         engine_id=engine_id, user_ids=user_ids, engine_parents=engine_parents,
         frontier=FrontierFn(landing=landing, strict_anc=strict_anc,
                             unknown_labels=unknown_labels),

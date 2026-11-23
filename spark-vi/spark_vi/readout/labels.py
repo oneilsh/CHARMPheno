@@ -117,10 +117,7 @@ class NodeLabeler:
         (empty for a background document)."""
         landed, unknown = set(), []
         for lab in _iter_labels(labels):
-            try:
-                tgt = self.landing.get(_coerce_id(lab, what="label"))
-            except TypeError:
-                tgt = None
+            tgt = self.landing.get(_coerce_id(lab, what="label"))
             if tgt is None:
                 unknown.append(lab)
             else:
