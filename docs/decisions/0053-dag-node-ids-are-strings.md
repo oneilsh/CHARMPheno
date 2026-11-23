@@ -37,3 +37,13 @@ terms named by the seed extras) stay `str | int`, matched exactly, as before.
   model saved with int ids no longer loads (no backward compatibility, ADR 0052 §7).
 - A caller with integer ids (the source-hashed SNOMED bundle path,
   `charmpheno.omop.condition_dag` / `case_finding_assembly`) casts at its seam.
+
+## Addendum (2026-11-23, same walkthrough): term ids are strings too
+
+`vocabularies` and the terms named by `nodeTerms` / `gateSeedProfile` (bare, or the term
+of a `(featureColumn, term)` pair) are `str`; ints, bools and numpy ints are refused
+with the cast hint, a numpy `str_` is unwrapped. Vectorizer vocabularies
+(`CountVectorizer`, `DagGatedFeaturizer`) already hold strings, so the only cost was
+`_TermIndex`'s "twin" detection (`10` vs `"10"`), now deleted, with the mixed-type term
+sort key. Every id the estimator takes is a string. Stored JSON is unchanged for string
+terms.

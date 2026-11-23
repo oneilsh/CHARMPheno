@@ -38,6 +38,9 @@ to ontology nodes, deciding which events attest a node (the label window, the st
 > **Amended 2026-11-23 (ADR 0053):** node ids are `str` only. Anything else is refused
 > with a hint to cast it; the labels column is `array<string>` (R2), and node-id output
 > columns are STRING. Term ids stay `str | int`. Decision 2 below is superseded.
+>
+> **Amended again 2026-11-23 (ADR 0053 addendum):** term ids (`vocabularies` and the
+> terms named by `nodeTerms` / `gateSeedProfile`) are `str` only as well.
 
 - a `dict` `{child: parent | [parents]}`;
 - a Spark DataFrame with columns `(child, parent)`, one row per edge (collected once

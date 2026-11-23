@@ -108,7 +108,8 @@ def _row_to_gated_document(row, features_cols, domain_sizes, frontier_fn,
 
 # --------------------------------------------------------------------------------
 # JSON codecs for the structured Params. Every structure is a list of pairs (not an
-# object) so TERM ids, which may be str or int, round-trip with their type.
+# object), sorted, so the stored JSON is deterministic. Node and term ids are
+# strings (ADR 0053).
 # --------------------------------------------------------------------------------
 
 def _encode_dag(dag) -> str:
@@ -132,28 +133,18 @@ def _decode_dag(raw: str):
 
 
 def _coerce_term(x, *, what="term"):
-    """A term id as given: `str` or `int` (terms are matched exactly against the
-    vocabularies, so `10` and `"10"` differ; node ids, by contrast, are strings
-    only). Numpy scalars are unwrapped; `bool` is refused (`True == 1`)."""
-    if isinstance(x, bool):
-        raise TypeError(f"{what} {x!r}: bool is not a valid term id (True == 1)")
-    if isinstance(x, (str, int)):
-        return x if type(x) in (str, int) else (str(x) if isinstance(x, str) else int(x))
-    if type(x).__module__ == "numpy":
-        import numpy as _np
-        if isinstance(x, _np.integer) and not isinstance(x, _np.bool_):
-            return int(x)
+    """A term id: a `str` (a numpy `str_` is unwrapped to a plain `str`). Anything
+    else is refused: term ids are strings, like node ids (ADR 0053 addendum), so an
+    integer term id must be cast by the caller (`str(id)`); vectorizer vocabularies
+    hold strings already."""
+    if isinstance(x, str):
+        return x if type(x) is str else str(x)
     raise TypeError(f"{what} {x!r} has type {type(x).__name__}; term ids must be str "
-                    f"or int")
-
-
-def _term_sort_key(t):
-    """A total order over mixed str / int term ids: ints (numerically) before strs."""
-    return (0, t, "") if isinstance(t, int) else (1, 0, t)
+                    f"(cast integer ids with str())")
 
 
 def _term_ref(t):
-    """A term reference: a bare term id (`str` / `int`) or a qualified
+    """A term reference: a bare term id (`str`) or a qualified
     `(featureColumn, term)` pair (list or tuple), returned as a tuple."""
     if isinstance(t, (list, tuple)):
         if len(t) != 2 or not isinstance(t[0], str):
@@ -168,9 +159,8 @@ def _ref_json(r):
 
 
 def _sort_refs(refs):
-    return sorted(refs, key=lambda r: ((1,) + (r[0],) + _term_sort_key(r[1])
-                                       if isinstance(r, tuple)
-                                       else (0, "") + _term_sort_key(r)))
+    return sorted(refs, key=lambda r: (1, r[0], r[1]) if isinstance(r, tuple)
+                  else (0, "", r))
 
 
 def check_labels_column(dataset, labels_col):
@@ -394,20 +384,25 @@ class _DagGatedLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
     )
     vocabularies = Param(
         Params._dummy(), "vocabularies",
-        "set with setVocabularies: one list of term ids (str or int) per feature "
+        "set with setVocabularies: one list of term ids (strings) per feature "
         "column (featuresCols, else [featuresCol]), aligned with the vector indices "
-        "(length = that column's vector size). Used by nodeTerms / gateSeedProfile, "
-        "which name terms, and by describeNodes' terms column. Terms are matched "
-        "exactly as given, like node ids: vectorizer vocabularies hold strings, so "
-        "int term ids are passed as their strings there. Stored as JSON. Default "
-        "unset.",
+        "(length = that column's vector size). Only needed to NAME terms: by nodeTerms "
+        "/ gateSeedProfile and by describeNodes' terms column. Terms are strings and "
+        "matched exactly (vectorizer vocabularies hold strings; cast integer ids with "
+        "str()). Stored as JSON. Default unset.",
         typeConverter=TypeConverters.toString,
     )
     nodeTerms = Param(
         Params._dummy(), "nodeTerms",
-        "set with setNodeTerms: {node: [term]}, the terms that attest each node (user "
-        "node ids, term ids of the vocabularies). With gateSeedMode='balanced', a "
-        "node's terms are removed from its ancestors' open-time seeds. A term in two "
+        "set with setNodeTerms: {node: [term]}, the terms that attest each node, for "
+        "models whose labels are DERIVED FROM the features (e.g. a node attested by "
+        "codes that are also tokens). With gateWarm > 0, gateOpenSeed and "
+        "gateSeedMode='balanced', every proper descendant's terms are removed from a "
+        "node's open-time seed, so a parent does not open as a collage of its "
+        "children's own terms; ignored otherwise (the fit logs it). Leave unset when "
+        "the labels come from outside the features. It shapes seeds only; stripping "
+        "a document's own terms from its features is the caller's data preparation. "
+        "User node ids, term ids of the vocabularies. A term in two "
         "vocabularies must be qualified as (featureColumn, term). Entries of nodes "
         "not kept by the fit, and terms in no vocabulary, are dropped (counted in the "
         "log). Stored as JSON. Default unset.",
@@ -415,10 +410,13 @@ class _DagGatedLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
     )
     gateSeedProfile = Param(
         Params._dummy(), "gateSeedProfile",
-        "set with setGateSeedProfile: {node: {term: weight}}, an external per-node "
-        "term profile. With gateWarm > 0 it REPLACES a profiled node's seed in the "
-        "domains its terms belong to (leaves at iteration 0, later blocks when they "
-        "open); other domains and unprofiled nodes keep the count seed. Same id, "
+        "set with setGateSeedProfile: {node: {term: weight}}, external prior "
+        "knowledge of what a node looks like (any kind of model, e.g. a disease's "
+        "phenotype profile mapped to terms). With gateWarm > 0 it REPLACES a "
+        "profiled node's seed in the domains its terms belong to (leaves at "
+        "iteration 0, later blocks when they open; with or without gateOpenSeed); "
+        "other domains and unprofiled nodes keep the count seed. Ignored with "
+        "gateWarm = 0 (the fit logs it). Same id, "
         "qualification and dropping rules as nodeTerms. Stored as JSON. Default "
         "unset.",
         typeConverter=TypeConverters.toString,
@@ -462,7 +460,7 @@ class _DagGatedLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         for m, vocab in enumerate(vocabularies):
             ids = [_coerce_term(t, what=f"term of vocabulary {m}") for t in vocab]
             if len(set(ids)) != len(ids):
-                dup = sorted({t for t in ids if ids.count(t) > 1}, key=_term_sort_key)
+                dup = sorted({t for t in ids if ids.count(t) > 1}, )
                 raise ValueError(f"vocabulary {m} repeats term(s) {dup[:10]}")
             out.append(ids)
         return self._set(vocabularies=json.dumps(out))
@@ -602,9 +600,12 @@ _DAG_GATED_LDA_DEFAULTS = dict(
 # - docConcentration 0.5 held fixed (optimizeDocConcentration False): learned alpha
 #   collapses towards 1/K, where a document's words go to its ancestors' and the
 #   background's blocks and deep blocks stay empty;
-# - gateWarm 2 with the balanced open-time seed and leaf seeds: blocks open leaves
+# - gateWarm 4 with the balanced open-time seed and leaf seeds: blocks open leaves
 #   first, each starting from the term counts of the documents it admits, so a
-#   deep block does not start flat against sharp ancestor topics.
+#   deep block does not start flat against sharp ancestor topics (4 rather than 2:
+#   a little less starvation, exps 0169-0173).
+# Blocks the data cannot sustain still starve (decay to the flat prior):
+# nodeStatistics() reports them and dropUnsupportedNodes() removes them.
 # Not in the preset: minDocsPerNode (scale it to the corpus: a block needs enough
 # documents to estimate a topic; ~100 on large corpora), seed, and the column /
 # DAG Params.
@@ -613,7 +614,7 @@ RECOMMENDED_PARAMS = dict(
     maxIter=60, learningOffset=64.0, learningDecay=0.51, subsamplingRate=0.1,
     docConcentration=[0.5], optimizeDocConcentration=False,
     gammaShape=100.0, caviMaxIter=100, caviTol=1e-3,
-    gateWarm=2, gateOpenSeed=True, gateSeedMode="balanced", gateSeedLeaves=True,
+    gateWarm=4, gateOpenSeed=True, gateSeedMode="balanced", gateSeedLeaves=True,
 )
 
 # Params whose setter encodes structured input; routed through it from kwargs.
@@ -648,11 +649,7 @@ class _TermIndex:
     counted by the caller); a pair naming a column that is not a feature column
     raises.
 
-    Terms are matched EXACTLY as given (`10` and `"10"` differ).
-    Vocabularies from a vectorizer (`CountVectorizer`, `DagGatedFeaturizer`) are
-    STRINGS, so int term ids are passed as their strings there. To keep that from
-    failing silently, a term that misses but whose other-typed twin (`str(t)` for an
-    int, `int(t)` for a decimal string) is in a vocabulary raises, naming both."""
+    Terms are strings and matched exactly (ADR 0053 addendum)."""
 
     def __init__(self, fcols, vocabs, sizes):
         self.fcols = list(fcols)
@@ -665,35 +662,15 @@ class _TermIndex:
             for t in vocab:
                 self.where.setdefault(t, []).append(c)
 
-    @staticmethod
-    def _twin(t):
-        if isinstance(t, int):
-            return str(t)
-        if isinstance(t, str) and t.lstrip("-").isdigit():
-            return int(t)
-        return None
-
-    def _type_miss(self, t, present):
-        tw = self._twin(t)
-        if tw is not None and present(tw):
-            raise ValueError(
-                f"term {t!r} ({type(t).__name__}) is not in the vocabularies, but "
-                f"{tw!r} ({type(tw).__name__}) is: terms are matched exactly; "
-                f"vectorizer vocabularies hold strings, so pass {tw!r}")
-
     def resolve(self, ref):
         if isinstance(ref, tuple):
             col, t = ref
             if col not in self.by_col:
                 raise ValueError(f"term {ref!r} names column {col!r}, which is not a "
                                  f"feature column ({self.fcols})")
-            i = self.by_col[col].get(t)
-            if i is None:
-                self._type_miss(t, lambda x: x in self.by_col[col])
-            return i
+            return self.by_col[col].get(t)
         cols = self.where.get(ref)
         if not cols:
-            self._type_miss(ref, lambda x: x in self.where)
             return None
         if len(cols) > 1:
             raise ValueError(
@@ -725,12 +702,14 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator, DriverParamsWritable):
         gateNBg=200, gateTpn=1, maxIter=60, learningOffset=64, learningDecay=0.51,
         subsamplingRate=0.1, docConcentration=[0.5], optimizeDocConcentration=False,
         gammaShape=100, caviMaxIter=100, caviTol=1e-3,
-        gateWarm=2, gateOpenSeed=True, gateSeedMode='balanced', gateSeedLeaves=True
+        gateWarm=4, gateOpenSeed=True, gateSeedMode='balanced', gateSeedLeaves=True
 
     i.e. a wide background, a short Robbins-Monro warm-up, a fixed alpha, and the
     leaves-first schedule with every block seeded from its documents' term counts
     when it opens. Set ``minDocsPerNode`` for the corpus alongside it (a block needs
-    enough documents to estimate a topic; ~100 on large corpora).
+    enough documents to estimate a topic; ~100 on large corpora). Blocks the data
+    cannot sustain still starve: ``nodeStatistics()`` reports them and
+    ``dropUnsupportedNodes()`` removes them (exps 0169-0173).
 
     ``resumeFrom`` continues a checkpoint only when the node set learned from the
     given DataFrame is the checkpoint's (same kept nodes, kept DAG and layout);
@@ -738,8 +717,8 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator, DriverParamsWritable):
 
     Persistence: ``save`` / ``load`` (MLlib's Params metadata, written and read on
     the driver: ``spark_vi.mllib._common.DriverParamsWritable``) keep every Param, the structured ones (the DAG,
-    vocabularies, nodeTerms, gateSeedProfile) as the JSON they are stored as, so
-    str / int term ids survive; the ``setOnIteration`` callback is not persisted."""
+    vocabularies, nodeTerms, gateSeedProfile) as the JSON they are stored as; the
+    ``setOnIteration`` callback is not persisted."""
 
     @classmethod
     def recommended(cls, **overrides) -> "DagGatedLDAEstimator":
@@ -864,6 +843,30 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator, DriverParamsWritable):
         return vocabs
 
     # ---- seed extras: user ids -> engine ids and concatenated vocab indices ------
+
+    def _ignored_seed_extras(self) -> list:
+        """Messages for seed extras that are set but have no effect under the
+        current schedule Params (the fit logs each): both need gateWarm > 0;
+        nodeTerms is read only by the balanced open-time seed (gateOpenSeed and
+        gateSeedMode='balanced'). gateSeedProfile does not need gateOpenSeed: it
+        seeds leaves at iteration 0 and later blocks when they open either way."""
+        nt, prof = self.getNodeTerms(), self.getGateSeedProfile()
+        out = []
+        if int(self.getOrDefault("gateWarm")) <= 0:
+            for name, v in (("nodeTerms", nt), ("gateSeedProfile", prof)):
+                if v:
+                    out.append(f"{name} is set but ignored: seeds apply only with the "
+                               f"leaves-first schedule (gateWarm > 0; it is 0)")
+            return out
+        if nt:
+            if not bool(self.getOrDefault("gateOpenSeed")):
+                out.append("nodeTerms is set but ignored: it is read only by the "
+                           "open-time seed, and gateOpenSeed is False")
+            elif str(self.getOrDefault("gateSeedMode")) != "balanced":
+                out.append("nodeTerms is set but ignored: it is read only by "
+                           "gateSeedMode='balanced' (it is "
+                           f"{self.getOrDefault('gateSeedMode')!r})")
+        return out
 
     def _translate_seed_extras(self, ns: NodeSet, fcols, sizes, vocabs):
         """(own, profile, summary): `nodeTerms` -> `{engine id: [concat idx]}` and
@@ -1122,6 +1125,8 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator, DriverParamsWritable):
                .persist(StorageLevel.MEMORY_AND_DISK))
         try:
             rdd.count()  # materialize for VIRunner's strict cache precondition
+            for msg in self._ignored_seed_extras():
+                print(f"{_LOG} WARNING: {msg}", flush=True)
             # Leaves-first gate schedule.
             gw = int(self.getOrDefault("gateWarm"))
             if gw > 0:

@@ -27,7 +27,7 @@ PARENT = {"1": None, "2": None, "3": "1", "4": "1", "5": "2", "6": "2"}
 MIXED = {"A": None, "B": None, "1": "A", "c": "1", "2": ["A", "B"], "3": "2",
          "rare": "3"}
 V0_TERMS = [f"t{i}" for i in range(8)]
-V1_TERMS = [100, 101, 102, 103, "t0"]          # "t0" is in both vocabularies
+V1_TERMS = ["100", "101", "102", "103", "t0"]   # "t0" is in both vocabularies
 
 
 def _df(spark, n=40, V=30, seed=0, col="labels"):
@@ -102,7 +102,7 @@ def _str_est(**kw):
     kw.setdefault("minDocsPerNode", 2)
     kw.setdefault("dag", STR_DAG)
     # String term ids throughout, as a vectorizer's vocabularies are.
-    kw.setdefault("vocabularies", [V0_TERMS, [str(t) for t in V1_TERMS]])
+    kw.setdefault("vocabularies", [V0_TERMS, V1_TERMS])
     return DagGatedLDAEstimator(gateNBg=2, gateTpn=1, featuresCols=["f0", "f1"], **kw)
 
 
@@ -156,11 +156,10 @@ def test_dag_from_pandas():
 def test_seed_extras_params_round_trip():
     from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
     est = DagGatedLDAEstimator(
-        nodeTerms={"c": ["t1", ("f1", "t0")], "3": [101]},
-        gateSeedProfile={"3": {"t2": 2.0, 100: 1.0, "t3": 0.0}})
-    # node keys are strings; TERM ids stay str or int (101 and "t2" both survive)
-    assert est.getNodeTerms() == {"3": [101], "c": ["t1", ("f1", "t0")]}
-    assert est.getGateSeedProfile() == {"3": {100: 1.0, "t2": 2.0}}  # w <= 0 dropped
+        nodeTerms={"c": ["t1", ("f1", "t0")], "3": ["101"]},
+        gateSeedProfile={"3": {"t2": 2.0, "100": 1.0, "t3": 0.0}})
+    assert est.getNodeTerms() == {"3": ["101"], "c": ["t1", ("f1", "t0")]}
+    assert est.getGateSeedProfile() == {"3": {"100": 1.0, "t2": 2.0}}  # w <= 0 dropped
     copy = DagGatedLDAEstimator()
     copy.setNodeTerms(est.getOrDefault("nodeTerms"))
     copy.setGateSeedProfile(est.getOrDefault("gateSeedProfile"))
@@ -174,21 +173,46 @@ def test_seed_extras_params_round_trip():
         DagGatedLDAEstimator(gateSeedProfile={3: {"t1": 1.0}})
 
 
+def test_term_ids_are_strings():
+    """ADR 0053 addendum: term ids are strings; ints (bare or qualified), bools and
+    numpy ints are refused with the cast hint, numpy str_ is accepted."""
+    from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
+    for bad in (dict(vocabularies=[["a", 1]]), dict(nodeTerms={"a": [101]}),
+                dict(nodeTerms={"a": [("f1", 101)]}),
+                dict(gateSeedProfile={"a": {100: 1.0}}),
+                dict(gateSeedProfile={"a": {True: 1.0}}),
+                dict(vocabularies=[[np.int64(3)]])):
+        with pytest.raises(TypeError, match="term ids must be str"):
+            DagGatedLDAEstimator(**bad)
+    est = DagGatedLDAEstimator(vocabularies=[[np.str_("a"), "b"]],
+                               nodeTerms={"x": [np.str_("a")]})
+    assert est.getVocabularies() == [["a", "b"]]
+    assert type(est.getNodeTerms()["x"][0]) is str
+
+
+def test_ignored_seed_extras_are_reported():
+    from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
+    nt, pro = {"a": ["t1"]}, {"a": {"t1": 1.0}}
+    msgs = DagGatedLDAEstimator(nodeTerms=nt, gateSeedProfile=pro)._ignored_seed_extras()
+    assert len(msgs) == 2 and all("gateWarm > 0" in m for m in msgs)
+    msgs = DagGatedLDAEstimator(gateWarm=2, gateOpenSeed=False, nodeTerms=nt,
+                                gateSeedProfile=pro)._ignored_seed_extras()
+    assert len(msgs) == 1 and "gateOpenSeed is False" in msgs[0]   # profile still applies
+    msgs = DagGatedLDAEstimator(gateWarm=2, gateSeedMode="subtree",
+                                nodeTerms=nt)._ignored_seed_extras()
+    assert len(msgs) == 1 and "balanced" in msgs[0]
+    assert DagGatedLDAEstimator(gateWarm=2, nodeTerms=nt,
+                                gateSeedProfile=pro)._ignored_seed_extras() == []
+    assert DagGatedLDAEstimator()._ignored_seed_extras() == []
+
+
 def test_term_index_ambiguity_rule():
     from spark_vi.mllib.topic.dag_gated_lda import _TermIndex
     ti = _TermIndex(["f0", "f1"], [V0_TERMS, V1_TERMS], [8, 5])
     assert ti.resolve("t3") == 3
-    assert ti.resolve(102) == 8 + 2
+    assert ti.resolve("102") == 8 + 2
     assert ti.resolve(("f0", "t0")) == 0 and ti.resolve(("f1", "t0")) == 8 + 4
     assert ti.resolve("nope") is None and ti.resolve(("f1", "t3")) is None
-    with pytest.raises(ValueError, match="matched exactly"):   # 100 != "100"
-        ti.resolve("100")
-    ti_s = _TermIndex(["f0"], [["10", "x"]], [2])          # a vectorizer vocab: strs
-    assert ti_s.resolve("10") == 0
-    with pytest.raises(ValueError, match="pass .10."):
-        ti_s.resolve(10)
-    with pytest.raises(ValueError, match="matched exactly"):
-        ti_s.resolve(("f0", 10))
     with pytest.raises(ValueError, match="featureColumn"):
         ti.resolve("t0")
     with pytest.raises(ValueError, match="not a feature column"):
@@ -203,9 +227,9 @@ def test_seed_extras_translate_to_engine_ids_and_concat_indices():
     ns = fit_node_set(MIXED, [lab for _, _, lab in _mixed_rows()], min_docs_per_node=2)
     assert ns.pruned == {"rare": ("3",)} and ns.spliced == ("1",)
     est = DagGatedLDAEstimator(
-        nodeTerms={"c": ["t1", ("f1", "t0")], "3": [101, "zzz"], "rare": ["t5"],
+        nodeTerms={"c": ["t1", ("f1", "t0")], "3": ["101", "zzz"], "rare": ["t5"],
                    "1": ["t6"]},
-        gateSeedProfile={"2": {"t2": 2.0, 100: 1.0}, "nope": {"t1": 1.0}})
+        gateSeedProfile={"2": {"t2": 2.0, "100": 1.0}, "nope": {"t1": 1.0}})
     own, prof, summary = est._translate_seed_extras(
         ns, ["f0", "f1"], [8, 5], [V0_TERMS, V1_TERMS])
     e = ns.engine_id
@@ -598,7 +622,7 @@ def test_recommended_preset_and_overrides():
     assert RECOMMENDED_PARAMS == dict(
         gateNBg=200, gateTpn=1, maxIter=60, learningOffset=64.0, learningDecay=0.51,
         subsamplingRate=0.1, docConcentration=[0.5], optimizeDocConcentration=False,
-        gammaShape=100.0, caviMaxIter=100, caviTol=1e-3, gateWarm=2,
+        gammaShape=100.0, caviMaxIter=100, caviTol=1e-3, gateWarm=4,
         gateOpenSeed=True, gateSeedMode="balanced", gateSeedLeaves=True)
     est = DagGatedLDAEstimator.recommended()
     for k, v in RECOMMENDED_PARAMS.items():

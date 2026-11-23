@@ -43,23 +43,23 @@ def _uri(tmp_path, name):
 # --------------------------------------------------------------------------- #
 
 def test_estimator_round_trip_keeps_structured_params(spark, tmp_path):
-    """The structured Params survive save / load; TERM ids keep their str / int type
-    (node ids are strings, ADR 0053)."""
+    """The structured Params survive save / load (node and term ids are strings,
+    ADR 0053)."""
     from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
     est = DagGatedLDAEstimator.recommended(
         dag=TWIN, minDocsPerNode=7, seed=3, featuresCols=["f0", "f1"],
-        vocabularies=[["t0", "t1"], [1, "1", "t0"]],
-        nodeTerms={"a": ["t1"], "b": [("f1", 1)], "c": [("f1", "1"), ("f0", "t0")]},
+        vocabularies=[["t0", "t1"], ["1", "2", "t0"]],
+        nodeTerms={"a": ["t1"], "b": [("f1", "2")], "c": [("f1", "1"), ("f0", "t0")]},
         gateSeedProfile={"b": {("f1", "t0"): 2.0}, "a": {"t1": 0.5}})
     est.write().save(_uri(tmp_path, "est"))
     back = DagGatedLDAEstimator.load(_uri(tmp_path, "est"))
     assert back.uid == est.uid
     assert back.getDag() == est.getDag() == {"a": [], "b": ["a"], "c": ["b"],
                                              "x": ["a", "c"]}
-    assert back.getVocabularies() == [["t0", "t1"], [1, "1", "t0"]]
+    assert back.getVocabularies() == [["t0", "t1"], ["1", "2", "t0"]]
     assert back.getNodeTerms() == est.getNodeTerms()
     assert set(back.getNodeTerms()) == {"a", "b", "c"}
-    assert back.getNodeTerms()["b"] == [("f1", 1)]
+    assert back.getNodeTerms()["b"] == [("f1", "2")]
     assert back.getGateSeedProfile() == {"b": {("f1", "t0"): 2.0}, "a": {"t1": 0.5}}
     for p in est.params:
         assert back.isSet(p.name) == est.isSet(p), p.name
