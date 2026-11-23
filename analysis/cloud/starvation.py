@@ -1,9 +1,10 @@
 """Which node topics starve in a DAG-gated fit, and what they have in common.
 
 A node topic is STARVED (the census's word, `inspect_topics.classify_block_topics`)
-when its word distribution in its dominant domain spreads its effective support
-(exp of the entropy) over more than half that domain's vocabulary: it sits near the
-flat η prior, so it describes nothing. The measure is spark-vi's
+when its word distribution in EVERY domain spreads its effective support (exp of the
+entropy) over more than half that domain's vocabulary: it sits near the flat η prior,
+so it describes nothing. (Before 2026-11-23 the test read the dominant domain only;
+traces of exps 0169-0175 used that rule.) The measure is spark-vi's
 (`spark_vi.eval.topic.sharpness.support_fraction`, re-exported here); the fitted
 model's `nodeStatistics()` reports it per node, `flat` there being "starved" here. Under SVI a block whose documents stop sending
 it words decays back toward η, so a topic can be fed at one iteration and starved later

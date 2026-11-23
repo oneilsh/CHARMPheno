@@ -1,7 +1,8 @@
 """spark_vi.eval.topic.sharpness: the support fraction exp(H(β)) / V (spec R14.1)."""
 import numpy as np
 
-from spark_vi.eval.topic.sharpness import lambda_domains, support_fraction
+from spark_vi.eval.topic.sharpness import (lambda_domains, support_fraction,
+                                           support_fraction_by_domain)
 
 
 def test_sharp_row_reads_near_zero_and_a_flat_row_reads_one():
@@ -22,21 +23,36 @@ def test_effective_support_counts_equally_weighted_terms():
     row[:m] = 2.0
     frac, _ = support_fraction(row[None, :])
     np.testing.assert_allclose(frac[0], m / V)
-    frac0, _ = support_fraction(np.zeros((1, V)))          # an all-zero row: 1 / V
-    np.testing.assert_allclose(frac0[0], 1 / V)
+    frac0, _ = support_fraction(np.zeros((1, V)))          # an all-zero row holds
+    np.testing.assert_allclose(frac0[0], 1.0)              # nothing: flat
 
 
-def test_the_dominant_domain_decides():
-    """A flat but light row in one domain does not make a sharp, heavy topic flat;
-    a topic heavy in its flat domain is flat."""
-    a = np.full((2, 50), 1.0)                    # flat; 50 mass per topic
-    b = np.zeros((2, 10))
+def test_the_sharpest_domain_decides():
+    """A topic is flat only when flat in EVERY domain: a sharp row anywhere (even in
+    its lighter domain) makes it sharp; a flat prior-level row never makes it flat."""
+    a = np.full((3, 50), 1.0)                    # flat; 50 mass per topic
+    b = np.full((3, 10), 0.5)                    # flat
     b[0, 0] = 500.0                              # topic 0: sharp and heavy in b
-    b[1, :] = 0.5                                # topic 1: flat and light in b
+    b[1, 0] = 20.0                               # topic 1: sharp but LIGHT in b
     frac, mass = support_fraction({0: a, 1: b})
-    assert frac[0] < 0.2
-    np.testing.assert_allclose(frac[1], 1.0)     # dominant = a (50 > 5), flat
-    np.testing.assert_allclose(mass, [550.0, 55.0])
+    assert frac[0] < 0.2 and frac[1] < 0.5       # the dominant rule called 1 flat
+    np.testing.assert_allclose(frac[2], 1.0)     # flat everywhere
+    np.testing.assert_allclose(mass, [554.5, 74.5, 55.0])
+
+
+def test_by_domain_values_and_data_mass():
+    a = np.full((2, 4), 0.25)                    # prior only (eta 0.25 * V 4 = 1)
+    a[0, 0] += 9.0                               # 9 tokens on one term
+    b = np.full((2, 2), 0.5)                     # prior only (eta 0.5 * V 2 = 1)
+    frac, mass, data = support_fraction_by_domain({0: a, 1: b}, eta=[0.25, 0.5])
+    assert frac.shape == mass.shape == data.shape == (2, 2)
+    np.testing.assert_allclose(data, [[9.0, 0.0], [0.0, 0.0]])
+    np.testing.assert_allclose(frac[1], [1.0, 1.0])
+    assert frac[0, 0] < 0.5
+    _, _, none = support_fraction_by_domain({0: a, 1: b})
+    assert none is None
+    _, _, d1 = support_fraction_by_domain(a, eta=0.25)     # scalar eta, one domain
+    np.testing.assert_allclose(d1[:, 0], [9.0, 0.0])
 
 
 def test_domain_keys_order_as_ints():

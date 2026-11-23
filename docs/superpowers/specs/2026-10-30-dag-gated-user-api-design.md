@@ -231,6 +231,18 @@ coherence) and nothing is removed. So:
    (DagHeads built from the cleaned model by `setTopicModel` uses its node set, R6).
    Because a starved node may have fed children, the kept set is no longer closed
    upward; the landing and reduction must not assume it is.
+3. **Amendment (2026-11-23, walkthrough): the flatness rule.** `supportFraction` was the
+   block's dominant domain only, so one domain decided and a topic of two similar
+   domains could flip between them. A block is now flat only when EVERY domain of
+   EVERY one of its topics is flat: `supportFraction` is the block's sharpest row (the
+   minimum over its topics and domains), with the per-domain values in
+   `supportFractionByDomain` and each domain's data mass (λ minus the prior: the
+   expected tokens behind a row) in `dataMassByDomain`. One rule, no rule Param. It
+   drops a subset of what the dominant rule dropped. The node id column is a string
+   (ADR 0053). Open: whether a nearly empty row that looks sharp (a few stray tokens
+   over a tiny prior) can keep a starved block alive; read `dataMassByDomain` on the
+   next model of record (the driver now keeps the model as fitted, `model_asfitted`,
+   whenever it drops) before adding any floor.
 
 ## What changes outside spark-vi
 

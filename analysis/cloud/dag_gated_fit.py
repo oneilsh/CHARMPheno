@@ -718,20 +718,27 @@ def node_set_counts(model, n_given) -> dict:
 
 
 NODE_STATISTICS_FILE = "node_statistics.tsv"
-NODE_STATISTICS_COLUMNS = ("node", "depth", "support", "supportFraction", "mass",
+NODE_STATISTICS_COLUMNS = ("node", "depth", "support", "supportFraction",
+                           "supportFractionByDomain", "mass", "dataMassByDomain",
                            "massToParent", "flat")
+# When unsupported nodes are dropped, the finished fit's checkpoint is kept here
+# (renamed, not deleted), so the model AS FITTED stays available to revisit the drop.
+ASFITTED_DIR = "model_asfitted"
 DEFAULT_DROP_MAX_SUPPORT_FRACTION = 0.5     # the census's "starved" (spec R14)
 
 
 def write_node_statistics(run_dir, rows, name=NODE_STATISTICS_FILE):
     """`<run>/node_statistics.tsv`: one row per kept node of the fitted model
     (`DagGatedLDAModel.nodeStatistics()` rows, or dicts with its columns): node id,
-    depth, support, supportFraction, mass, massToParent, flat. Per-node document
+    depth, support, supportFraction, supportFractionByDomain, mass, dataMassByDomain,
+    massToParent, flat (the per-domain arrays comma-separated). Per-node document
     counts, so WORKSPACE-INTERNAL: never commit it or copy it out. Null cells are
     empty."""
     def cell(v):
         if v is None:
             return ""
+        if isinstance(v, (list, tuple)):
+            return ",".join(cell(x) for x in v)
         if isinstance(v, bool):
             return "true" if v else "false"
         if isinstance(v, float):
@@ -739,7 +746,11 @@ def write_node_statistics(run_dir, rows, name=NODE_STATISTICS_FILE):
         return str(v)
     p = Path(run_dir) / name
     lines = ["\t".join(NODE_STATISTICS_COLUMNS)]
-    lines += ["\t".join(cell(r[c]) for c in NODE_STATISTICS_COLUMNS) for r in rows]
+    def get(r, c):
+        d = r if isinstance(r, dict) else r.asDict()
+        return d.get(c)                   # a column the row lacks writes empty
+    lines += ["\t".join(cell(get(r, c)) for c in NODE_STATISTICS_COLUMNS)
+              for r in rows]
     p.write_text("\n".join(lines) + "\n")
     return p
 
@@ -1841,7 +1852,10 @@ def main() -> int:
                 "node_statistics": {
                     "file": NODE_STATISTICS_FILE, "flat_threshold": _thr,
                     "n_flat_as_fitted": int(sum(bool(r["flat"]) for r in _stats)),
-                    "dropped": bool(args.drop_unsupported)},
+                    "dropped": bool(args.drop_unsupported),
+                    # the model before the drop (renamed fit checkpoint), if dropped
+                    "model_asfitted": (ASFITTED_DIR if args.drop_unsupported
+                                       else None)},
                 "dag_source": args.dag_source,
                 "extra_domains": list(extra_domains),
                 "domain_names": args._domain_names,
@@ -1874,9 +1888,19 @@ def main() -> int:
             if ckpt.exists():
                 # Every post-fit save succeeded: the finished fit is durable in
                 # <run>/model and the npz, so the resume checkpoint has done its job
-                # (and is another lambda-sized copy on disk).
+                # (and is another lambda-sized copy on disk). After a drop, <run>/model
+                # is the CLEANED model, so the checkpoint (the model as fitted) is
+                # kept as <run>/model_asfitted to revisit the drop rule; otherwise
+                # deleted.
                 import shutil
-                shutil.rmtree(ckpt, ignore_errors=True)
+                if args.drop_unsupported:
+                    keep = out / ASFITTED_DIR
+                    shutil.rmtree(keep, ignore_errors=True)
+                    ckpt.rename(keep)
+                    _cprint(f"[driver]   kept the model as fitted (before the drop) "
+                            f"in {keep}", flush=True)
+                else:
+                    shutil.rmtree(ckpt, ignore_errors=True)
             # The fit ends here (cleanup 2026-10): every readout and evaluation is
             # `dag_gated_readout.py` against this saved fit. Per-node per-domain λ
             # mass needs no readout, so it is still reported with the fit.

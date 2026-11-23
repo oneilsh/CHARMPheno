@@ -314,8 +314,12 @@ def topic_sharpness(lams):
                          topic emits into -- matches per_node_domain_mass)
       support[t]         effective_support in the topic's DOMINANT domain
       top1[t]            max E[beta] in the dominant domain
-      support_frac[t]    support / V_dominant  (0->sharp, 1->flat/prior)
+      support_frac[t]    the topic's SHARPEST row: the minimum over domains of
+                         exp(H) / V_m (spark-vi's `support_fraction`; 0 sharp, 1
+                         flat/prior). Flat only when flat in every domain (2026-11-23;
+                         it was the dominant domain's, as `support` still is).
     """
+    from spark_vi.eval.topic.sharpness import support_fraction
     K = lams[0].shape[0]
     n_dom = len(lams)
     evidence = np.zeros(K)
@@ -333,8 +337,7 @@ def topic_sharpness(lams):
         beta = row / s if s > 0 else row
         support[t] = _entropy_support(beta)
         top1[t] = float(beta.max()) if s > 0 else float("nan")
-        V = row.shape[0]
-        support_frac[t] = support[t] / V if V else float("nan")
+    support_frac = support_fraction({m: np.asarray(l) for m, l in enumerate(lams)})[0]
     return dict(evidence=evidence, dom_mass=dom_mass, support=support,
                 top1=top1, support_frac=support_frac)
 

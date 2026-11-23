@@ -249,7 +249,8 @@ def test_node_statistics_tsv_and_pooled_line(tmp_path):
                                write_node_statistics)
     rows = [
         {"node": "MONDO:1", "depth": 1, "support": 5000, "supportFraction": 0.01,
-         "mass": 900.0, "massToParent": None, "flat": False},
+         "supportFractionByDomain": [0.01, 0.4], "mass": 900.0,
+         "dataMassByDomain": [850.0, 40.5], "massToParent": None, "flat": False},
         {"node": "MONDO:2", "depth": 2, "support": 150, "supportFraction": 0.99,
          "mass": 4.5, "massToParent": 0.005, "flat": True},
         {"node": "MONDO:3", "depth": 2, "support": 180, "supportFraction": 0.2,
@@ -258,7 +259,9 @@ def test_node_statistics_tsv_and_pooled_line(tmp_path):
     p = write_node_statistics(tmp_path, rows)
     lines = p.read_text().splitlines()
     assert lines[0].split("\t") == list(NODE_STATISTICS_COLUMNS)
-    assert lines[1].split("\t") == ["MONDO:1", "1", "5000", "0.01", "900", "", "false"]
+    assert lines[1].split("\t") == ["MONDO:1", "1", "5000", "0.01", "0.01,0.4", "900",
+                                    "850,40.5", "", "false"]
+    assert lines[2].split("\t")[4] == ""          # a row without the column: empty
     assert lines[2].split("\t")[-1] == "true"
     line = node_statistics_line(rows, 0.5)
     assert "1 of 3 node blocks flat (33.3%" in line

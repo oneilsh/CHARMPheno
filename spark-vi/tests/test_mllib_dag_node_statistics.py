@@ -100,15 +100,21 @@ def _flatten(model, *nodes):
 def test_node_statistics_columns_types_and_values(fitted):
     from pyspark.sql.types import (BooleanType, DoubleType, IntegerType, LongType,
                                    StringType)
-    from spark_vi.eval.topic.sharpness import support_fraction
+    from pyspark.sql.types import ArrayType
+    from spark_vi.eval.topic.sharpness import (support_fraction,
+                                               support_fraction_by_domain)
     model, _ = fitted
     df = model.nodeStatistics()
-    assert df.columns == ["node", "depth", "support", "supportFraction", "mass",
+    assert df.columns == ["node", "depth", "support", "supportFraction",
+                          "supportFractionByDomain", "mass", "dataMassByDomain",
                           "massToParent", "flat"]
     types = {f.name: type(f.dataType) for f in df.schema.fields}
     assert types == {"node": StringType, "depth": IntegerType, "support": LongType,
-                     "supportFraction": DoubleType, "mass": DoubleType,
+                     "supportFraction": DoubleType, "supportFractionByDomain": ArrayType,
+                     "mass": DoubleType, "dataMassByDomain": ArrayType,
                      "massToParent": DoubleType, "flat": BooleanType}
+    gp = model.result.global_params
+    fd, _, dd = support_fraction_by_domain(gp["lambda"], gp["eta"])
     rows = {r["node"]: r for r in df.collect()}
     assert list(rows) == list(model._ns().nodes)           # engine order
     assert {n: r["support"] for n, r in rows.items()} == model.nodeSupport()
@@ -118,6 +124,9 @@ def test_node_statistics_columns_types_and_values(fitted):
     for n, r in rows.items():
         (k,) = model.nodeTopics(n)
         assert r["supportFraction"] == pytest.approx(sf[k])
+        assert r["supportFractionByDomain"] == pytest.approx(list(fd[k]))
+        assert r["dataMassByDomain"] == pytest.approx(list(dd[k]))
+        assert r["supportFraction"] == pytest.approx(min(r["supportFractionByDomain"]))
         assert r["mass"] == pytest.approx(mass[k])
         assert r["flat"] is bool(sf[k] > 0.5)
         par = model.dag()[n]

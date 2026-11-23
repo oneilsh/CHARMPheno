@@ -1399,21 +1399,31 @@ class DagGatedLDAModel(_DagGatedLDAParams, _StagePersistence, Model):
 
     def _node_stat_rows(self, flatThreshold) -> list:
         """One tuple per kept node, in engine order: ``(node, depth, support,
-        supportFraction, mass, massToParent, flat)`` (see ``nodeStatistics``)."""
-        from spark_vi.eval.topic.sharpness import support_fraction
+        supportFraction, supportFractionByDomain, mass, dataMassByDomain,
+        massToParent, flat)`` (see ``nodeStatistics``)."""
+        from spark_vi.eval.topic.sharpness import support_fraction_by_domain
         thr = float(flatThreshold)
         ns, lay = self._ns(), self._layout()
-        sf, mass = support_fraction(self._result.global_params["lambda"])
-        bmass = {e: float(sum(mass[t] for t in lay.block[e])) for e in lay.nodes}
+        gp = self._result.global_params
+        frac, mass, data = support_fraction_by_domain(gp["lambda"], gp.get("eta"))
+        tmass = mass.sum(axis=1)
+        bmass = {e: float(sum(tmass[t] for t in lay.block[e])) for e in lay.nodes}
         rows = []
         for e, u in enumerate(ns.nodes, start=1):
-            blk = lay.block[e]
-            frac = float(min(sf[t] for t in blk)) if blk else None
+            blk = list(lay.block[e])
+            if blk:
+                by_dom = [float(x) for x in frac[blk].min(axis=0)]
+                dmass = ([float(x) for x in data[blk].sum(axis=0)]
+                         if data is not None else None)
+                sfrac = min(by_dom)
+            else:
+                by_dom, dmass, sfrac = None, None, None
             par = [p for p in ns.engine_parents[e] if p != 0]
             heaviest = max((bmass[p] for p in par), default=None)
             m2p = (bmass[e] / heaviest if heaviest else None)
-            rows.append((u, int(lay.depth(e)), int(ns.support[u]), frac, bmass[e], m2p,
-                         bool(frac is not None and frac > thr)))
+            rows.append((u, int(lay.depth(e)), int(ns.support[u]), sfrac, by_dom,
+                         bmass[e], dmass, m2p,
+                         bool(sfrac is not None and sfrac > thr)))
         return rows
 
     def nodeStatistics(self, flatThreshold: float = 0.5):
@@ -1425,12 +1435,18 @@ class DagGatedLDAModel(_DagGatedLDAParams, _StagePersistence, Model):
         - ``depth`` (int): the longest path from the synthetic root (top level = 1);
         - ``support`` (long): training documents whose labels' closure reaches the
           node (``nodeSupport()``);
-        - ``supportFraction`` (double): the block's effective support exp(H(β)) over
-          its dominant domain's vocabulary (``spark_vi.eval.topic.sharpness``): about
-          0 = sharp, 1 = flat at the topicConcentration prior. With ``gateTpn > 1``
-          the MINIMUM over the block's topics (a block is flat only when every topic
-          in it is). Null when the layout gives nodes no topics (``gateTpn`` 0);
-        - ``mass`` (double): the block's λ mass (pseudo-counts plus prior);
+        - ``supportFractionByDomain`` (array<double>, one per domain): the block's
+          effective support exp(H(β)) / V_m in each domain
+          (``spark_vi.eval.topic.sharpness``): about 0 = sharp, 1 = flat at the
+          topicConcentration prior; with ``gateTpn > 1`` the minimum over the block's
+          topics;
+        - ``supportFraction`` (double): the block's SHARPEST row, the minimum of
+          ``supportFractionByDomain``. The rule (walkthrough 2026-11-23): a block is
+          flat only when every domain of every one of its topics is flat. Null when
+          the layout gives nodes no topics (``gateTpn`` 0);
+        - ``mass`` (double): the block's λ mass, all domains (pseudo-counts plus prior);
+        - ``dataMassByDomain`` (array<double>): per domain, the block's λ mass minus
+          the prior, i.e. the expected tokens assigned to it (what backs a sharp row);
         - ``massToParent`` (double): ``mass`` over its heaviest kept parent's; null
           for a top-level node;
         - ``flat`` (boolean): ``supportFraction > flatThreshold``.
@@ -1438,7 +1454,7 @@ class DagGatedLDAModel(_DagGatedLDAParams, _StagePersistence, Model):
         A flat block is one the data did not renew: under SVI an unrenewed block
         decays to the prior, whatever it was seeded with."""
         from pyspark.sql import SparkSession
-        from pyspark.sql.types import (BooleanType, DoubleType, IntegerType,
+        from pyspark.sql.types import (ArrayType, BooleanType, DoubleType, IntegerType,
                                        LongType, StringType, StructField, StructType)
         rows = list(self._node_stat_rows(flatThreshold))
         schema = StructType([
@@ -1446,7 +1462,9 @@ class DagGatedLDAModel(_DagGatedLDAParams, _StagePersistence, Model):
             StructField("depth", IntegerType(), False),
             StructField("support", LongType(), False),
             StructField("supportFraction", DoubleType(), True),
+            StructField("supportFractionByDomain", ArrayType(DoubleType(), False), True),
             StructField("mass", DoubleType(), False),
+            StructField("dataMassByDomain", ArrayType(DoubleType(), False), True),
             StructField("massToParent", DoubleType(), True),
             StructField("flat", BooleanType(), False),
         ])
