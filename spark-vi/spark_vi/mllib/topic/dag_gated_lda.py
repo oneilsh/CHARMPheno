@@ -1421,8 +1421,7 @@ class DagGatedLDAModel(_DagGatedLDAParams, _StagePersistence, Model):
         data sustains each node's topic block. Reporting only: the model is
         unchanged (``dropUnsupportedNodes`` acts on it).
 
-        - ``node``: the node id, typed as in ``describeNodes`` (long when every id is
-          an int, string otherwise);
+        - ``node`` (string): the node id;
         - ``depth`` (int): the longest path from the synthetic root (top level = 1);
         - ``support`` (long): training documents whose labels' closure reaches the
           node (``nodeSupport()``);
