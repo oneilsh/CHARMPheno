@@ -47,3 +47,19 @@ def test_survey_with_fake_bq():
     s.survey(CDR, run, out.append)
     text = "\n".join(out)
     assert "| <20 | 500 |" in text and "## (patient, concept) pair overlap" in text
+
+
+def test_offcycle_nlp_dataset():
+    def run(sql):
+        if "proj.nlp`.INFORMATION_SCHEMA" in sql:
+            return [{"table_name": "note_nlp", "column_name": c}
+                    for c in ("note_id", "note_nlp_concept_id", "person_id")]
+        if "INFORMATION_SCHEMA" in sql:
+            return [{"table_name": "condition_occurrence", "column_name": "person_id"},
+                    {"table_name": "note", "column_name": "note_id"}]
+        assert "`proj.nlp.note_nlp`" in sql and "`proj.ds.condition_occurrence`" in sql
+        return [{"n_rows": "1000"}]
+    out = []
+    s.survey(CDR, run, out.append, nlp_cdr="proj.nlp")
+    text = "\n".join(out)
+    assert "`note_nlp` (`proj.nlp`)" in text and "## Per-patient rates" in text

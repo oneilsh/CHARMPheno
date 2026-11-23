@@ -30,7 +30,8 @@ Egress: the output is workspace-internal. Every count from 1 to 19 prints as "<2
 so the report is safe to read and to quote pooled figures from; per-concept rows still
 stay in the workspace.
 
-    python analysis/cloud/note_nlp_survey.py --out <file.md>
+    python analysis/cloud/note_nlp_survey.py --out <file.md> \
+        [--nlp-cdr <project>.C_V9_R6_offcycle_nlp]
       (reads WORKSPACE_CDR and GOOGLE_CLOUD_PROJECT from the environment;
        `. analysis/cloud/.workspace_env` first)
 """
@@ -97,14 +98,21 @@ def table(rows, cols=None) -> str:
 # --------------------------------------------------------------------------- #
 # SQL                                                                          #
 # --------------------------------------------------------------------------- #
-def schema_sql(cdr: str) -> str:
-    return (f"SELECT table_name, column_name FROM `{cdr}`.INFORMATION_SCHEMA.COLUMNS "
-            "WHERE table_name IN ('note_nlp', 'note', 'person', 'condition_occurrence')")
+def schema_sql(cdr: str, all_tables: bool = False) -> str:
+    where = "" if all_tables else (
+        " WHERE table_name IN ('note_nlp', 'note', 'person', 'condition_occurrence')")
+    return (f"SELECT table_name, column_name FROM `{cdr}`.INFORMATION_SCHEMA.COLUMNS"
+            + where)
 
 
-def nlp_cte(cdr: str, cols: dict) -> tuple[str, bool, bool]:
+def nlp_cte(cdr: str, cols: dict, nlp_cdr: str | None = None,
+            note_cdr: str | None = None) -> tuple[str, bool, bool]:
     """`WITH nlp AS (...)` with person_id, note_id, cid, te, sys, yr; and whether the
-    patient id and the note year are available."""
+    patient id and the note year are available. `note_nlp` is read from `nlp_cdr` and
+    `note` from `note_cdr` (both default to `cdr`: All of Us ships NLP output in an
+    off-cycle dataset, e.g. `C_V9_R6_offcycle_nlp`); concept, person and
+    condition_occurrence always come from `cdr`."""
+    nlp_cdr, note_cdr = nlp_cdr or cdr, note_cdr or cdr
     nn = cols.get("note_nlp", set())
     note = cols.get("note", set())
     te = "CAST(n.term_exists AS STRING)" if "term_exists" in nn else "'NA'"
@@ -113,13 +121,13 @@ def nlp_cte(cdr: str, cols: dict) -> tuple[str, bool, bool]:
     if "person_id" in nn:
         pid = "n.person_id"
         if {"note_id", "note_date"} <= note:
-            join = f"LEFT JOIN `{cdr}.note` t ON t.note_id = n.note_id"
+            join = f"LEFT JOIN `{note_cdr}.note` t ON t.note_id = n.note_id"
             yr, has_year = "EXTRACT(YEAR FROM t.note_date)", True
         else:
             yr = "CAST(NULL AS INT64)"
     elif {"note_id", "person_id"} <= note:
         pid = "t.person_id"
-        join = f"LEFT JOIN `{cdr}.note` t ON t.note_id = n.note_id"
+        join = f"LEFT JOIN `{note_cdr}.note` t ON t.note_id = n.note_id"
         if "note_date" in note:
             yr, has_year = "EXTRACT(YEAR FROM t.note_date)", True
         else:
@@ -129,7 +137,7 @@ def nlp_cte(cdr: str, cols: dict) -> tuple[str, bool, bool]:
     cte = f"""WITH nlp AS (
   SELECT {pid} AS person_id, n.note_id AS note_id, n.note_nlp_concept_id AS cid,
          {te} AS te, {sys_} AS sys, {yr} AS yr
-  FROM `{cdr}.note_nlp` n {join}
+  FROM `{nlp_cdr}.note_nlp` n {join}
 ),
 nlpc AS (
   SELECT nlp.* FROM nlp JOIN `{cdr}.concept` c ON c.concept_id = nlp.cid
@@ -254,21 +262,39 @@ FROM nlp GROUP BY 1 ORDER BY 1"""))
 # --------------------------------------------------------------------------- #
 # main                                                                         #
 # --------------------------------------------------------------------------- #
-def survey(cdr: str, run, emit=print) -> None:
-    emit(f"# note_nlp vs condition_occurrence survey\n\nCDR `{cdr}` · "
+def survey(cdr: str, run, emit=print, nlp_cdr: str | None = None) -> None:
+    nlp_cdr = nlp_cdr or cdr
+    emit(f"# note_nlp vs condition_occurrence survey\n\nCDR `{cdr}` · NLP dataset "
+         f"`{nlp_cdr}` · "
          f"{time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())} · counts 1-19 shown as "
          f"<{EGRESS_FLOOR} · workspace-internal\n")
     cols: dict = {}
     for r in run(schema_sql(cdr)):
         cols.setdefault(r["table_name"], set()).add(r["column_name"])
+    if not cols:
+        emit(f"INFORMATION_SCHEMA of `{cdr}` returned no rows; stopping.")
+        return
+    where = {t: cdr for t in cols}
+    if nlp_cdr != cdr:
+        ncols: dict = {}
+        for r in run(schema_sql(nlp_cdr, all_tables=True)):
+            ncols.setdefault(r["table_name"], set()).add(r["column_name"])
+        emit(f"## Tables in `{nlp_cdr}`\n")
+        emit(", ".join(f"`{t}` ({len(c)} columns)" for t, c in sorted(ncols.items()))
+             or "**none visible**")
+        emit("")
+        for t in ("note_nlp", "note"):
+            if t in ncols:
+                cols[t], where[t] = ncols[t], nlp_cdr
     emit("## Columns\n")
     for t in ("note_nlp", "note"):
-        emit(f"- `{t}`: " + (", ".join(sorted(cols[t])) if t in cols else "**not present**"))
+        emit(f"- `{t}`" + (f" (`{where[t]}`): " + ", ".join(sorted(cols[t]))
+                           if t in cols else ": **not present**"))
     emit("")
     if "note_nlp" not in cols:
-        emit("No `note_nlp` table in this CDR; stopping.")
+        emit(f"No `note_nlp` table in `{nlp_cdr}`; stopping.")
         return
-    cte, has_person, has_year = nlp_cte(cdr, cols)
+    cte, has_person, has_year = nlp_cte(cdr, cols, where["note_nlp"], where.get("note"))
     if not has_person:
         emit("No patient id for note_nlp rows (no `note_nlp.person_id`, no joinable "
              "`note`): patient-level sections skipped.\n")
@@ -289,6 +315,9 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cdr", default=os.environ.get("WORKSPACE_CDR"))
+    ap.add_argument("--nlp-cdr", default=None,
+                    help="<project>.<dataset> holding note_nlp (and note, if there) "
+                         "when it is not the CDR, e.g. <project>.C_V9_R6_offcycle_nlp")
     ap.add_argument("--billing", default=os.environ.get("GOOGLE_CLOUD_PROJECT"))
     ap.add_argument("--out", default=None, help="also write the report here (markdown)")
     ap.add_argument("--bq-bin", default="bq")
@@ -301,7 +330,7 @@ def main(argv=None) -> int:
     def emit(s):
         print(s, flush=True)
         lines.append(s)
-    survey(a.cdr, make_runner(a.billing, a.bq_bin), emit)
+    survey(a.cdr, make_runner(a.billing, a.bq_bin), emit, nlp_cdr=a.nlp_cdr)
     if a.out:
         Path(a.out).parent.mkdir(parents=True, exist_ok=True)
         Path(a.out).write_text("\n".join(lines) + "\n")
