@@ -18,9 +18,9 @@ def test_cell_floor():
 
 
 @pytest.mark.parametrize("cols,person,year,n", [
-    (NOTE_JOIN, True, True, 12),
-    ({"note_nlp": {"note_id", "note_nlp_concept_id", "person_id"}}, True, False, 11),
-    ({"note_nlp": {"note_id", "note_nlp_concept_id"}}, False, False, 4),
+    (NOTE_JOIN, True, True, 15),
+    ({"note_nlp": {"note_id", "note_nlp_concept_id", "person_id"}}, True, False, 14),
+    ({"note_nlp": {"note_id", "note_nlp_concept_id"}}, False, False, 7),
 ])
 def test_schema_adaptation(cols, person, year, n):
     cte, hp, hy = s.nlp_cte(CDR, cols)
@@ -46,7 +46,7 @@ def test_survey_with_fake_bq():
     out = []
     s.survey(CDR, run, out.append)
     text = "\n".join(out)
-    assert "| <20 | 500 |" in text and "## (patient, concept) pair overlap" in text
+    assert "| 500 | <20 |" in text and "## (patient, concept) pair overlap" in text
 
 
 def test_offcycle_nlp_dataset():
@@ -63,3 +63,10 @@ def test_offcycle_nlp_dataset():
     s.survey(CDR, run, out.append, nlp_cdr="proj.nlp")
     text = "\n".join(out)
     assert "`note_nlp` (`proj.nlp`)" in text and "## Per-patient rates" in text
+
+
+def test_column_order_and_verbatim_ids():
+    t = s.table([{"patients": "500", "concept_id": "4329041", "source": "x",
+                  "note_year": "2019"}])
+    assert t.splitlines()[0] == "| source | concept_id | note_year | patients |"
+    assert "| x | 4329041 | 2019 | 500 |" in t

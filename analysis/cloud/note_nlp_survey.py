@@ -22,8 +22,13 @@ script reads the columns first (INFORMATION_SCHEMA) and adapts: it uses
 patient-level sections when neither is available. Missing `term_exists` /
 `nlp_system` columns read as 'NA'.
 
-"Affirmed" = `term_exists` is not 'N' (NULL counts as affirmed; the split shows how many
-are NULL).
+"Affirmed" = not negated: `term_exists` is not false / 'N' / 0 (the AoU off-cycle
+release stores 'true' / 'false'; NULL counts as affirmed). `condition_occurrence` holds
+standard concepts only, while CLAMP emits some non-standard ones (ICD9CM, CIEL, Nebraska
+Lexicon, non-standard SNOMED), so every comparison maps the extracted concept to its
+standard 'Maps to' target first; the mapping section counts what maps and what does not.
+`term_temporal` and `term_modifiers` print their top values (family history, hypothetical
+and historical mentions live there).
 
 Egress: the output is workspace-internal. Every count from 1 to 19 prints as "<20"
 (`EGRESS_FLOOR`), and the concept tables list only concepts with >= 20 NLP patients,
@@ -85,13 +90,34 @@ def _cell(v):
     return f"{i:,}"
 
 
+# bq's json output sorts keys; tables print label columns first, then counts in this
+# order, then anything else alphabetically. Identifier columns print verbatim.
+_ORDER = ["source", "nlp_system", "term_exists", "mapping", "value", "domain_id",
+          "vocabulary_id", "standard", "concept_id", "concept_name", "note_year",
+          "patients", "n_rows", "notes", "concepts", "rows_concept_0", "rows_no_patient",
+          "rows_mean", "rows_p50", "rows_p90", "rows_p99", "concepts_mean",
+          "concepts_p50", "concepts_p90", "in_both", "nlp_only", "co_only",
+          "nlp_concepts", "co_concepts", "shared_concepts", "nlp_rows",
+          "nlp_rows_concept_not_in_co", "patients_in_both", "nlp_pairs", "co_pairs",
+          "shared_pairs", "frac_nlp_pairs_in_co", "frac_co_pairs_in_nlp",
+          "nlp_patients", "co_patients"]
+_VERBATIM = {"concept_id", "note_year"}
+
+
+def _order(keys):
+    rank = {c: i for i, c in enumerate(_ORDER)}
+    return sorted(keys, key=lambda c: (rank.get(c, len(_ORDER)), c))
+
+
 def table(rows, cols=None) -> str:
     if not rows:
         return "_(no rows)_\n"
-    cols = cols or list(rows[0])
+    cols = cols or _order(rows[0])
     lines = ["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
     for r in rows:
-        lines.append("| " + " | ".join(_cell(r.get(c)) for c in cols) + " |")
+        lines.append("| " + " | ".join(
+            ("" if r.get(c) is None else str(r.get(c))) if c in _VERBATIM
+            else _cell(r.get(c)) for c in cols) + " |")
     return "\n".join(lines) + "\n"
 
 
@@ -117,6 +143,8 @@ def nlp_cte(cdr: str, cols: dict, nlp_cdr: str | None = None,
     note = cols.get("note", set())
     te = "CAST(n.term_exists AS STRING)" if "term_exists" in nn else "'NA'"
     sys_ = "CAST(n.nlp_system AS STRING)" if "nlp_system" in nn else "'NA'"
+    tmod = "CAST(n.term_modifiers AS STRING)" if "term_modifiers" in nn else "'NA'"
+    ttmp = "CAST(n.term_temporal AS STRING)" if "term_temporal" in nn else "'NA'"
     join, has_person, has_year = "", True, False
     if "person_id" in nn:
         pid = "n.person_id"
@@ -134,16 +162,34 @@ def nlp_cte(cdr: str, cols: dict, nlp_cdr: str | None = None,
             yr = "CAST(NULL AS INT64)"
     else:
         pid, has_person, yr = "CAST(NULL AS INT64)", False, "CAST(NULL AS INT64)"
-    cte = f"""WITH nlp AS (
-  SELECT {pid} AS person_id, n.note_id AS note_id, n.note_nlp_concept_id AS cid,
-         {te} AS te, {sys_} AS sys, {yr} AS yr
+    # rcid = the concept as extracted; cid = its standard concept (itself when
+    # standard, else its 'Maps to' target, the smallest id when one-to-many; NULL when
+    # unmapped): condition_occurrence holds standard concepts only, so the overlap
+    # sections compare cid. Negated = term_exists false / N / 0 (the AoU off-cycle
+    # release stores 'true' / 'false').
+    cte = f"""WITH mp AS (
+  SELECT cr.concept_id_1 AS src, MIN(cr.concept_id_2) AS tgt
+  FROM `{cdr}.concept_relationship` cr
+  JOIN `{cdr}.concept` c2 ON c2.concept_id = cr.concept_id_2 AND c2.standard_concept = 'S'
+  WHERE cr.relationship_id = 'Maps to' AND cr.invalid_reason IS NULL
+  GROUP BY 1
+),
+nlp AS (
+  SELECT {pid} AS person_id, n.note_id AS note_id, n.note_nlp_concept_id AS rcid,
+         CASE WHEN c.standard_concept = 'S' THEN n.note_nlp_concept_id ELSE mp.tgt END AS cid,
+         CASE WHEN c.standard_concept = 'S' THEN 'standard'
+              WHEN mp.tgt IS NOT NULL THEN 'mapped to standard' ELSE 'unmapped' END AS mapst,
+         {te} AS te, LOWER({te}) IN ('false', 'n', '0', 'no', 'f') AS neg,
+         {sys_} AS sys, {tmod} AS tmod, {ttmp} AS ttmp, {yr} AS yr
   FROM `{nlp_cdr}.note_nlp` n {join}
+  LEFT JOIN `{cdr}.concept` c ON c.concept_id = n.note_nlp_concept_id
+  LEFT JOIN mp ON mp.src = n.note_nlp_concept_id
 ),
 nlpc AS (
   SELECT nlp.* FROM nlp JOIN `{cdr}.concept` c ON c.concept_id = nlp.cid
   WHERE c.domain_id = 'Condition'
 ),
-nlpa AS (SELECT * FROM nlpc WHERE te IS NULL OR te != 'N'),
+nlpa AS (SELECT * FROM nlpc WHERE NOT IFNULL(neg, FALSE)),
 co AS (
   SELECT person_id, condition_concept_id AS cid FROM `{cdr}.condition_occurrence`
   WHERE condition_concept_id != 0
@@ -157,40 +203,58 @@ def queries(cdr: str, cte: str, has_person: bool, has_year: bool) -> list:
     q = []
     q.append(("note_nlp overview", "", cte + """
 SELECT COUNT(*) AS n_rows, COUNT(DISTINCT note_id) AS notes,
-       COUNT(DISTINCT person_id) AS patients, COUNT(DISTINCT cid) AS concepts,
-       COUNTIF(cid = 0) AS rows_concept_0, COUNTIF(person_id IS NULL) AS rows_no_patient
+       COUNT(DISTINCT person_id) AS patients, COUNT(DISTINCT rcid) AS concepts,
+       COUNTIF(rcid = 0) AS rows_concept_0, COUNTIF(person_id IS NULL) AS rows_no_patient
 FROM nlp"""))
     q.append(("By nlp_system and term_exists", "", cte + """
 SELECT sys AS nlp_system, te AS term_exists, COUNT(*) AS n_rows,
-       COUNT(DISTINCT person_id) AS patients, COUNT(DISTINCT cid) AS concepts
+       COUNT(DISTINCT person_id) AS patients, COUNT(DISTINCT rcid) AS concepts
 FROM nlp GROUP BY 1, 2 ORDER BY n_rows DESC LIMIT 40"""))
+    for col, lab in (("ttmp", "term_temporal"), ("tmod", "term_modifiers")):
+        q.append((f"Top 25 {lab} values", "all rows; negated = share of the value's rows "
+                  "with term_exists false", cte + f"""
+SELECT {col} AS value, COUNT(*) AS n_rows, COUNT(DISTINCT person_id) AS patients,
+       AVG(IF(neg, 1, 0)) AS negated
+FROM nlp GROUP BY 1 ORDER BY n_rows DESC LIMIT 25"""))
+    q.append(("Mapping the extracted concepts to standard",
+              "condition_occurrence holds standard concepts; the overlap sections below "
+              "use the mapped standard concept", cte + """
+SELECT mapst AS mapping, COUNT(*) AS n_rows, COUNT(DISTINCT rcid) AS concepts,
+       COUNT(DISTINCT person_id) AS patients
+FROM nlp GROUP BY 1 ORDER BY n_rows DESC"""))
     q.append(("Extracted concepts by domain, vocabulary, standard flag", "top 40 groups by rows",
               cte + f"""
 SELECT c.domain_id, c.vocabulary_id, IFNULL(c.standard_concept, '-') AS standard,
        COUNT(*) AS n_rows, COUNT(DISTINCT nlp.cid) AS concepts,
        COUNT(DISTINCT nlp.person_id) AS patients
-FROM nlp LEFT JOIN `{cdr}.concept` c ON c.concept_id = nlp.cid
+FROM nlp LEFT JOIN `{cdr}.concept` c ON c.concept_id = nlp.rcid
 GROUP BY 1, 2, 3 ORDER BY n_rows DESC LIMIT 40"""))
-    q.append(("Totals side by side", "Condition domain only for NLP rows below this line",
+    q.append(("Totals side by side", "below the first row: NLP rows by their standard "
+              "concept, Condition domain; affirmed = not negated",
               cte + f"""
-SELECT 'note_nlp (all)' AS source, COUNT(*) AS n_rows, COUNT(DISTINCT person_id) AS patients,
-       COUNT(DISTINCT cid) AS concepts FROM nlp
+SELECT 'note_nlp (all, as extracted)' AS source, COUNT(*) AS n_rows,
+       COUNT(DISTINCT person_id) AS patients, COUNT(DISTINCT rcid) AS concepts FROM nlp
 UNION ALL SELECT 'note_nlp Condition', COUNT(*), COUNT(DISTINCT person_id), COUNT(DISTINCT cid) FROM nlpc
 UNION ALL SELECT 'note_nlp Condition affirmed', COUNT(*), COUNT(DISTINCT person_id), COUNT(DISTINCT cid) FROM nlpa
 UNION ALL SELECT 'condition_occurrence', COUNT(*), COUNT(DISTINCT person_id), COUNT(DISTINCT cid) FROM co
+UNION ALL SELECT 'condition_occurrence, NLP patients', COUNT(*), COUNT(DISTINCT person_id),
+       COUNT(DISTINCT cid) FROM co WHERE person_id IN (SELECT person_id FROM nlp)
 UNION ALL SELECT 'person table', COUNT(*), COUNT(DISTINCT person_id), NULL FROM `{cdr}.person`"""))
     if not has_person:
         return q
     q.append(("Per-patient rates", "over patients with >= 1 row in that source", cte + """
 , per AS (
-  SELECT 'note_nlp (all)' AS source, person_id, COUNT(*) AS n, COUNT(DISTINCT cid) AS k
-    FROM nlp WHERE person_id IS NOT NULL GROUP BY person_id
+  SELECT 'note_nlp (all, as extracted)' AS source, person_id, COUNT(*) AS n,
+    COUNT(DISTINCT rcid) AS k FROM nlp WHERE person_id IS NOT NULL GROUP BY person_id
   UNION ALL SELECT 'note_nlp Condition', person_id, COUNT(*), COUNT(DISTINCT cid)
     FROM nlpc WHERE person_id IS NOT NULL GROUP BY person_id
   UNION ALL SELECT 'note_nlp Condition affirmed', person_id, COUNT(*), COUNT(DISTINCT cid)
     FROM nlpa WHERE person_id IS NOT NULL GROUP BY person_id
   UNION ALL SELECT 'condition_occurrence', person_id, COUNT(*), COUNT(DISTINCT cid)
     FROM co GROUP BY person_id
+  UNION ALL SELECT 'condition_occurrence, NLP patients', person_id, COUNT(*),
+    COUNT(DISTINCT cid) FROM co WHERE person_id IN (SELECT person_id FROM nlp)
+    GROUP BY person_id
 )
 SELECT source, COUNT(*) AS patients,
        AVG(n) AS rows_mean, APPROX_QUANTILES(n, 100)[OFFSET(50)] AS rows_p50,
