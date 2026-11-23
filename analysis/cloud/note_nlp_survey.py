@@ -52,6 +52,25 @@ from pathlib import Path
 
 EGRESS_FLOOR = 20
 
+# `--context`: keyword flags over the lowercased `snippet` (the text around the match).
+# Only shares and counts of flagged rows are printed, never snippet text. Patterns are
+# deliberately broad (a flag marks a row as possibly not about the patient's own
+# current condition); `son` and `fh` can over-match, which errs toward filtering more.
+CONTEXT_FLAGS = (
+    ("fam", r"\b(family|famhx|fhx|fh|mother|father|mom|dad|sister|brother|sibling|"
+            r"aunt|uncle|grandmother|grandfather|grandma|grandpa|cousin|son|daughter|"
+            r"maternal|paternal)\b"),
+    ("scr", r"(screen|colonoscop|mammogra|vaccin|immuniz|\bshot\b)"),
+    ("hedge", r"(rule out|\br/o\b|possible|probable|suspect|concern for|risk of|"
+              r"at risk|\?)"),
+    ("hist", r"(history of|\bh/o\b|\bhx\b|\bs/p\b|status post|\bprior\b|previous)"),
+)
+# Concepts the first survey flagged as suspicious (colon carcinoma, influenza,
+# 'Disease', infectious disease, traumatic injury, discomfort) and controls (asthma,
+# hypertensive disorder, pain).
+CONTEXT_CONCEPTS = (4149847, 4266367, 4274025, 432250, 440921, 4090431,
+                    317009, 316866, 4329041)
+
 
 # --------------------------------------------------------------------------- #
 # bq                                                                           #
@@ -92,16 +111,19 @@ def _cell(v):
 
 # bq's json output sorts keys; tables print label columns first, then counts in this
 # order, then anything else alphabetically. Identifier columns print verbatim.
-_ORDER = ["source", "nlp_system", "term_exists", "mapping", "value", "domain_id",
-          "vocabulary_id", "standard", "concept_id", "concept_name", "note_year",
+_ORDER = ["source", "nlp_system", "term_exists", "mapping", "section_id", "section",
+          "domain_id",
+          "vocabulary_id", "standard", "concept_id", "concept_name", "value", "note_year",
           "patients", "n_rows", "notes", "concepts", "rows_concept_0", "rows_no_patient",
           "rows_mean", "rows_p50", "rows_p90", "rows_p99", "concepts_mean",
           "concepts_p50", "concepts_p90", "in_both", "nlp_only", "co_only",
           "nlp_concepts", "co_concepts", "shared_concepts", "nlp_rows",
           "nlp_rows_concept_not_in_co", "patients_in_both", "nlp_pairs", "co_pairs",
           "shared_pairs", "frac_nlp_pairs_in_co", "frac_co_pairs_in_nlp",
-          "nlp_patients", "co_patients"]
-_VERBATIM = {"concept_id", "note_year"}
+          "nlp_patients", "clean_patients", "no_fam_patients", "co_patients",
+          "negated", "share_fam", "share_scr", "share_hedge", "share_hist", "share_any",
+          "share"]
+_VERBATIM = {"concept_id", "note_year", "section_id"}
 
 
 def _order(keys):
@@ -145,6 +167,11 @@ def nlp_cte(cdr: str, cols: dict, nlp_cdr: str | None = None,
     sys_ = "CAST(n.nlp_system AS STRING)" if "nlp_system" in nn else "'NA'"
     tmod = "CAST(n.term_modifiers AS STRING)" if "term_modifiers" in nn else "'NA'"
     ttmp = "CAST(n.term_temporal AS STRING)" if "term_temporal" in nn else "'NA'"
+    sec = "n.section_concept_id" if "section_concept_id" in nn else "CAST(NULL AS INT64)"
+    lex = "CAST(n.lexical_variant AS STRING)" if "lexical_variant" in nn else "'NA'"
+    snip = "LOWER(CAST(n.snippet AS STRING))" if "snippet" in nn else "''"
+    flags = ",\n         ".join(f"REGEXP_CONTAINS({snip}, r'{rx}') AS {name}"
+                                for name, rx in CONTEXT_FLAGS)
     join, has_person, has_year = "", True, False
     if "person_id" in nn:
         pid = "n.person_id"
@@ -180,7 +207,9 @@ nlp AS (
          CASE WHEN c.standard_concept = 'S' THEN 'standard'
               WHEN mp.tgt IS NOT NULL THEN 'mapped to standard' ELSE 'unmapped' END AS mapst,
          {te} AS te, LOWER({te}) IN ('false', 'n', '0', 'no', 'f') AS neg,
-         {sys_} AS sys, {tmod} AS tmod, {ttmp} AS ttmp, {yr} AS yr
+         {sys_} AS sys, {tmod} AS tmod, {ttmp} AS ttmp, {yr} AS yr,
+         {sec} AS sec, {lex} AS lex,
+         {flags}
   FROM `{nlp_cdr}.note_nlp` n {join}
   LEFT JOIN `{cdr}.concept` c ON c.concept_id = n.note_nlp_concept_id
   LEFT JOIN mp ON mp.src = n.note_nlp_concept_id
@@ -323,10 +352,72 @@ FROM nlp GROUP BY 1 ORDER BY 1"""))
     return q
 
 
+def context_queries(cdr: str, cte: str, concepts=CONTEXT_CONCEPTS) -> list:
+    """`[(title, note, sql)]`: can family history, screening and hedged mentions be
+    filtered? Sections, snippet keyword flags overall and per concept, and the top
+    concepts once flagged rows are dropped."""
+    ids = ", ".join(str(int(c)) for c in concepts)
+    shares = ", ".join(f"AVG(IF({n}, 1, 0)) AS share_{n}" for n, _ in CONTEXT_FLAGS)
+    anyflag = " OR ".join(n for n, _ in CONTEXT_FLAGS)
+    q = []
+    q.append(("Note sections", "all rows; top 30 sections by rows; share_* = rows whose "
+              "snippet matches the flag", cte + f"""
+SELECT CAST(sec AS STRING) AS section_id, IFNULL(c.concept_name, '(none)') AS section,
+       COUNT(*) AS n_rows, COUNT(DISTINCT person_id) AS patients,
+       AVG(IF(neg, 1, 0)) AS negated, {shares}
+FROM nlp LEFT JOIN `{cdr}.concept` c ON c.concept_id = nlp.sec
+GROUP BY 1, 2 ORDER BY n_rows DESC LIMIT 30"""))
+    q.append(("Snippet flags, affirmed Condition rows", "any = at least one flag", cte + f"""
+SELECT COUNT(*) AS n_rows, {shares}, AVG(IF({anyflag}, 1, 0)) AS share_any,
+       COUNT(DISTINCT IF(fam, person_id, NULL)) AS patients_with_fam_row
+FROM nlpa"""))
+    q.append(("Suspicious and control concepts: flags and what survives filtering",
+              "affirmed; clean = no flag; co_patients = condition_occurrence", cte + f"""
+, pc AS (SELECT cid, COUNT(DISTINCT person_id) AS co_patients FROM co
+         WHERE cid IN ({ids}) GROUP BY cid)
+SELECT CAST(a.cid AS STRING) AS concept_id, ANY_VALUE(c.concept_name) AS concept_name,
+       COUNT(DISTINCT a.person_id) AS nlp_patients,
+       COUNT(DISTINCT IF(NOT ({anyflag}), a.person_id, NULL)) AS clean_patients,
+       COUNT(DISTINCT IF(NOT fam, a.person_id, NULL)) AS no_fam_patients,
+       ANY_VALUE(IFNULL(pc.co_patients, 0)) AS co_patients, COUNT(*) AS n_rows, {shares}
+FROM nlpa a LEFT JOIN pc USING (cid) LEFT JOIN `{cdr}.concept` c ON c.concept_id = a.cid
+WHERE a.cid IN ({ids}) GROUP BY 1 ORDER BY nlp_patients DESC"""))
+    q.append(("Top 3 sections per concept", "affirmed rows", cte + f"""
+, s AS (SELECT cid, sec, COUNT(*) AS n FROM nlpa WHERE cid IN ({ids}) GROUP BY 1, 2)
+SELECT CAST(s.cid AS STRING) AS concept_id, c1.concept_name,
+       IFNULL(c2.concept_name, '(none)') AS section, s.n AS n_rows,
+       s.n / SUM(s.n) OVER (PARTITION BY s.cid) AS share
+FROM s LEFT JOIN `{cdr}.concept` c1 ON c1.concept_id = s.cid
+LEFT JOIN `{cdr}.concept` c2 ON c2.concept_id = s.sec
+QUALIFY ROW_NUMBER() OVER (PARTITION BY s.cid ORDER BY s.n DESC) <= 3
+ORDER BY concept_id, n_rows DESC"""))
+    q.append(("Top 5 matched terms (lexical_variant) per concept",
+              f"affirmed rows; terms with >= {EGRESS_FLOOR} rows", cte + f"""
+, v AS (SELECT cid, LOWER(lex) AS term, COUNT(*) AS n FROM nlpa WHERE cid IN ({ids})
+        GROUP BY 1, 2 HAVING COUNT(*) >= {EGRESS_FLOOR})
+SELECT CAST(v.cid AS STRING) AS concept_id, c.concept_name, v.term AS value, v.n AS n_rows
+FROM v LEFT JOIN `{cdr}.concept` c ON c.concept_id = v.cid
+QUALIFY ROW_NUMBER() OVER (PARTITION BY v.cid ORDER BY v.n DESC) <= 5
+ORDER BY concept_id, n_rows DESC"""))
+    q.append(("Top 30 concepts by NLP patients after dropping flagged rows",
+              "affirmed, no flag; compare the first survey's top 30", cte + f"""
+, pn AS (SELECT cid, COUNT(DISTINCT person_id) AS clean_patients FROM nlpa
+         WHERE NOT ({anyflag}) GROUP BY cid HAVING COUNT(DISTINCT person_id) >= {EGRESS_FLOOR}),
+  pa AS (SELECT cid, COUNT(DISTINCT person_id) AS nlp_patients FROM nlpa GROUP BY cid),
+  pc AS (SELECT cid, COUNT(DISTINCT person_id) AS co_patients FROM co GROUP BY cid)
+SELECT CAST(pn.cid AS STRING) AS concept_id, c.concept_name, pn.clean_patients,
+       pa.nlp_patients, IFNULL(pc.co_patients, 0) AS co_patients
+FROM pn JOIN pa USING (cid) LEFT JOIN pc USING (cid)
+LEFT JOIN `{cdr}.concept` c ON c.concept_id = pn.cid
+ORDER BY clean_patients DESC LIMIT 30"""))
+    return q
+
+
 # --------------------------------------------------------------------------- #
 # main                                                                         #
 # --------------------------------------------------------------------------- #
-def survey(cdr: str, run, emit=print, nlp_cdr: str | None = None) -> None:
+def survey(cdr: str, run, emit=print, nlp_cdr: str | None = None,
+           context: bool = False) -> None:
     nlp_cdr = nlp_cdr or cdr
     emit(f"# note_nlp vs condition_occurrence survey\n\nCDR `{cdr}` · NLP dataset "
          f"`{nlp_cdr}` · "
@@ -362,7 +453,9 @@ def survey(cdr: str, run, emit=print, nlp_cdr: str | None = None) -> None:
     if not has_person:
         emit("No patient id for note_nlp rows (no `note_nlp.person_id`, no joinable "
              "`note`): patient-level sections skipped.\n")
-    for title, note, sql in queries(cdr, cte, has_person, has_year):
+    qs = (context_queries(cdr, cte) if context
+          else queries(cdr, cte, has_person, has_year))
+    for title, note, sql in qs:
         t0 = time.time()
         emit(f"## {title}\n")
         if note:
@@ -385,6 +478,10 @@ def main(argv=None) -> int:
     ap.add_argument("--billing", default=os.environ.get("GOOGLE_CLOUD_PROJECT"))
     ap.add_argument("--out", default=None, help="also write the report here (markdown)")
     ap.add_argument("--bq-bin", default="bq")
+    ap.add_argument("--context", action="store_true",
+                    help="run only the context check: sections, snippet flags (family "
+                         "history, screening, hedging, past history) and what survives "
+                         "filtering")
     a = ap.parse_args(argv)
     if not a.cdr or not a.billing:
         raise SystemExit("need WORKSPACE_CDR and GOOGLE_CLOUD_PROJECT "
@@ -394,7 +491,8 @@ def main(argv=None) -> int:
     def emit(s):
         print(s, flush=True)
         lines.append(s)
-    survey(a.cdr, make_runner(a.billing, a.bq_bin), emit, nlp_cdr=a.nlp_cdr)
+    survey(a.cdr, make_runner(a.billing, a.bq_bin), emit, nlp_cdr=a.nlp_cdr,
+           context=a.context)
     if a.out:
         Path(a.out).parent.mkdir(parents=True, exist_ok=True)
         Path(a.out).write_text("\n".join(lines) + "\n")

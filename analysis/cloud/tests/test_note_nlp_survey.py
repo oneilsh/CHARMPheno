@@ -70,3 +70,20 @@ def test_column_order_and_verbatim_ids():
                   "note_year": "2019"}])
     assert t.splitlines()[0] == "| source | concept_id | note_year | patients |"
     assert "| x | 4329041 | 2019 | 500 |" in t
+
+
+def test_context_queries_parse_and_flags():
+    cols = {"note_nlp": NOTE_JOIN["note_nlp"] | {"snippet", "section_concept_id",
+                                                 "lexical_variant"},
+            "note": NOTE_JOIN["note"]}
+    cte, hp, hy = s.nlp_cte(CDR, cols)
+    assert "REGEXP_CONTAINS(LOWER(CAST(n.snippet AS STRING))" in cte
+    qs = s.context_queries(CDR, cte)
+    assert len(qs) == 6
+    sqlglot = pytest.importorskip("sqlglot")
+    for _, _, q in qs:
+        sqlglot.parse_one(q, read="bigquery")
+    import re
+    fam = dict(s.CONTEXT_FLAGS)["fam"]
+    assert re.search(fam, "fhx: mother with colon cancer")
+    assert not re.search(fam, "patient reports colon pain")
