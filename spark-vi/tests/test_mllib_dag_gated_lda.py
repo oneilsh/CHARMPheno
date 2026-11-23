@@ -380,6 +380,24 @@ def test_multidomain_widths_vocabularies_and_seed_extras(spark, capsys):
         _str_est(maxIter=1, vocabularies=[V0_TERMS, ["1", "2", "3", "4"]]).fit(df)
 
 
+def test_dropping_nodes_keeps_a_per_domain_eta(spark, tmp_path):
+    """Exp 0175 failed here: dropUnsupportedNodes refused the per-domain eta (shape
+    (M,)), which is neither a per-topic array nor a scalar. It is kept as fitted."""
+    df = _str_dag_df(spark)
+    model = _str_est(maxIter=2, topicConcentration=[0.2, 0.05]).fit(df)
+    eta = np.asarray(model.result.global_params["eta"])
+    assert eta.shape == (2,)
+    victim = model._ns().nodes[-1]
+    cleaned = model._without_nodes([victim])
+    assert victim in cleaned.unsupportedNodes()
+    np.testing.assert_array_equal(cleaned.result.global_params["eta"], eta)
+    cleaned.save(str(tmp_path / "m"))
+    from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAModel
+    back = DagGatedLDAModel.load(str(tmp_path / "m"))
+    np.testing.assert_array_equal(back.result.global_params["eta"], eta)
+    back.transform(df).select("topicDistribution").head()
+
+
 def test_feature_width_from_column_metadata(spark):
     """A domain's width is read from the column's ML attribute size when present;
     a row whose vector disagrees is refused."""

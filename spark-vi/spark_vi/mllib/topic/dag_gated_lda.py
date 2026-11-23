@@ -1505,12 +1505,14 @@ class DagGatedLDAModel(_DagGatedLDAParams, _StagePersistence, Model):
                            if isinstance(v, dict) else topics(v, "lambda"))
             elif key in ("alpha", "gate_open_at"):
                 gp[key] = topics(v, key)
-            elif np.ndim(v) == 0:
-                gp[key] = np.array(v)                      # eta, gate_iter
+            elif key == "eta" or np.ndim(v) == 0:
+                # eta is per DOMAIN (shape (M,)) or a scalar, never per topic;
+                # gate_iter is a scalar. Kept as fitted.
+                gp[key] = np.array(v)
             else:
                 raise ValueError(f"global parameter {key!r} has shape {np.shape(v)}; "
                                  "dropping nodes knows only lambda, alpha, "
-                                 "gate_open_at and scalars")
+                                 "gate_open_at, eta and scalars")
         traces = dict(self._result.diagnostic_traces or {})
         if "alpha" in traces:
             traces["alpha"] = [topics(a, "the alpha trace")
