@@ -26,14 +26,14 @@ def test_nodes_only_as_parents_are_nodes_and_hang_from_root():
     assert "a" in d and d.parents["a"] == (ROOT,)
 
 
-def test_mixed_str_int_ids_kept_distinct():
-    d = parse_dag({1: "1", "1": None, 2: 1})
-    assert set(d.parents) == {1, "1", 2}
-    assert d.parents[1] == ("1",)                 # an edge, not a self-loop
-    assert d.parents["1"] == (ROOT,)
-    assert d.n_self_loops == 0
-    # ints before strs, never compared with each other
-    assert d.nodes == (1, 2, "1")
+def test_non_str_ids_refused_with_cast_hint():
+    """Node ids are strings (ADR 0053): int, bool, numpy int and float ids are
+    refused, naming the fix."""
+    import numpy as np
+    for bad in ({1: None}, {"a": 1}, {True: None}, {np.int64(2): "a"}, {1.5: None},
+                {"a": ["b", 2]}):
+        with pytest.raises(TypeError, match=r"must be str \(cast integer ids"):
+            parse_dag(bad)
 
 
 def test_self_loops_and_duplicate_edges_dropped_and_counted():
@@ -46,21 +46,16 @@ def test_self_loops_and_duplicate_edges_dropped_and_counted():
     assert d2.parents == {"x": (ROOT,)} and d2.n_self_loops == 1
 
 
-def test_pandas_int_column_with_missing_parent():
+def test_pandas_string_column_with_missing_parent():
     import pandas as pd
-    # pandas upcasts [None, 1] to float64 [nan, 1.0]; read back as the int 1
-    df = pd.DataFrame({"child": [1, 2, 3], "parent": [None, 1, 1]})
-    d = parse_dag(df)
-    assert d.parents == {1: (ROOT,), 2: (1,), 3: (1,)}
-    assert all(type(n) is int for n in d.nodes)
+    d = parse_dag(pd.DataFrame({"child": ["1", "2", "3"], "parent": [None, "1", "1"]}))
+    assert d.parents == {"1": (ROOT,), "2": ("1",), "3": ("1",)}
 
 
-def test_pandas_object_column_mixed_ids():
+def test_pandas_int_column_refused():
     import pandas as pd
-    df = pd.DataFrame({"child": ["1", 1, "x"], "parent": [None, "1", 1]},
-                      dtype=object)
-    d = parse_dag(df)
-    assert d.parents == {"1": (ROOT,), 1: ("1",), "x": (1,)}
+    with pytest.raises(TypeError, match="cast integer ids"):
+        parse_dag(pd.DataFrame({"child": [1, 2], "parent": [None, 1]}))
 
 
 def test_pandas_missing_columns_refused():
@@ -79,18 +74,15 @@ def test_cycle_refused_naming_nodes():
 
 
 def test_bad_ids_refused():
-    with pytest.raises(TypeError, match="bool"):
-        parse_dag({True: None})
-    with pytest.raises(TypeError, match="str or int"):
-        parse_dag({1.5: None})
     with pytest.raises(TypeError):
         parse_dag([("a", "b")])
 
 
-def test_numpy_ids_unwrapped():
+def test_numpy_str_ids_unwrapped():
     import numpy as np
-    d = parse_dag({np.int64(2): np.int64(1)})
-    assert d.parents == {2: (1,), 1: (ROOT,)}
+    d = parse_dag({np.str_("b"): np.str_("a")})
+    assert d.parents == {"b": ("a",), "a": (ROOT,)}
+    assert all(type(n) is str for n in d.nodes)
 
 
 def test_root_sentinel_pickles_by_identity():
@@ -100,9 +92,9 @@ def test_root_sentinel_pickles_by_identity():
     assert repr(ROOT) == "ROOT"
 
 
-def test_node_sort_key_total_on_mixed():
-    xs = ["b", 3, "a", 1, "10", 10]
-    assert sorted(xs, key=node_sort_key) == [1, 3, 10, "10", "a", "b"]
+def test_node_sort_key_is_string_order_root_first():
+    xs = ["b", "a", ROOT, "10", "9"]
+    assert sorted(xs, key=node_sort_key) == [ROOT, "10", "9", "a", "b"]
 
 
 # ---------------------------------------------------------------- R3.1-2 labels, support
@@ -124,7 +116,7 @@ def test_unknown_labels_error_names_them():
     assert "'zz'" in str(e.value) and "1" in str(e.value)
 
 
-def test_unknown_labels_int_vs_str_distinct():
+def test_int_label_against_str_dag_is_unknown():
     with pytest.raises(ValueError, match="not nodes"):
         count_support([[1]], {"1": None})
     sup, _ = count_support([["1"]], {"1": None})
@@ -278,13 +270,13 @@ def test_learn_node_set_takes_precomputed_support():
 # ---------------------------------------------------------------- R4 engine ids, frontier
 
 def test_engine_ids_topological_and_deterministic():
-    dag = {"z": None, 3: "z", "a": 3, 1: None, 2: [1, "z"]}
-    docs = [["a", 2], [3, 1], ["z"], [2]]
+    dag = {"z": None, "3": "z", "a": "3", "1": None, "2": ["1", "z"]}
+    docs = [["a", "2"], ["3", "1"], ["z"], ["2"]]
     ns = fit_node_set(dag, docs)
     assert ns.user_ids[0] is ROOT
-    # depth 1: ints first (1), then "z"; depth 2: 2, 3; depth 3: "a"
-    assert ns.nodes == (1, "z", 2, 3, "a")
-    assert ns.engine_id == {1: 1, "z": 2, 2: 3, 3: 4, "a": 5}
+    # depth 1: "1", "z"; depth 2: "2", "3"; depth 3: "a" (string order within a depth)
+    assert ns.nodes == ("1", "z", "2", "3", "a")
+    assert ns.engine_id == {"1": 1, "z": 2, "2": 3, "3": 4, "a": 5}
     assert ns.engine_parents == {1: [0], 2: [0], 3: [1, 2], 4: [2], 5: [4]}
     # same result from the dict in another insertion order
     ns2 = fit_node_set(dict(reversed(list(dag.items()))), docs)
@@ -308,21 +300,21 @@ def test_frontier_fn_pickles():
     assert f2(["d", "a"]) == ns.frontier(["d", "a"])
 
 
-def test_node_set_json_round_trip_keeps_id_types():
-    """`to_dict` -> JSON -> `from_dict` is the identity, with 1 and "1" kept apart
-    (the model persists its node set this way)."""
+def test_node_set_json_round_trip():
+    """`to_dict` -> JSON -> `from_dict` is the identity (the model persists its node
+    set this way)."""
     import json
     from spark_vi.dag.nodeset import NodeSet
-    dag = {"A": None, 1: "A", "1": "A", 2: [1, "1"], "x": 2, "y": 2, "z": "y"}
-    ns = fit_node_set(dag, [[2], ["x"], ["x", 1], ["1"], ["z"], []],
+    dag = {"A": None, "p": "A", "q": "A", "r": ["p", "q"], "x": "r", "y": "r", "z": "y"}
+    ns = fit_node_set(dag, [["r"], ["x"], ["x", "p"], ["q"], ["z"], []],
                       min_docs_per_node=2)
     back = NodeSet.from_dict(json.loads(json.dumps(ns.to_dict())))
     assert back == ns
-    assert 1 in back.spliced and "1" in back.engine_id      # 1 and "1" stay apart
+    assert back.spliced and back.pruned
 
 
 def _random_dag(rng, n):
-    ids = [i if rng.random() < 0.5 else f"n{i}" for i in range(n)]
+    ids = [f"n{i}" for i in range(n)]
     dag = {}
     for j, v in enumerate(ids):
         k = rng.choice([0, 1, 1, 2, 3]) if j else 0
@@ -442,19 +434,19 @@ def test_chained_drops_equal_one_drop_and_reland_earlier_drops():
     assert both.unsupported == {"m": ("r",), "x": ("r",)}
 
 
-def test_drop_with_mixed_str_and_int_ids():
-    dag = {"A": None, 1: "A", "1": "A", 2: [1, "1"], 3: 2}
-    docs = [["A"], [1], ["1"], [2], [3], [3]]
+def test_drop_a_multi_parent_nodes_parent():
+    dag = {"A": None, "p": "A", "q": "A", "s": ["p", "q"], "t": "s"}
+    docs = [["A"], ["p"], ["q"], ["s"], ["t"], ["t"]]
     ns = fit_node_set(dag, docs)
     assert not ns.spliced and not ns.pruned
-    out = drop_nodes(ns, [1])
-    assert 1 not in out.engine_id and "1" in out.engine_id     # 1 and "1" apart
-    assert out.parents[2] == ("1",)                            # A is above "1"
-    assert out.unsupported == {1: ("A",)}
-    assert out.land([1]) == ("A",)
+    out = drop_nodes(ns, ["p"])
+    assert "p" not in out.engine_id and "q" in out.engine_id
+    assert out.parents["s"] == ("q",)                          # A is above q
+    assert out.unsupported == {"p": ("A",)}
+    assert out.land(["p"]) == ("A",)
     _check_engine_numbering(out)
     with pytest.raises(KeyError, match="already dropped"):
-        drop_nodes(out, ["1", 1])                              # 1 is no longer kept
+        drop_nodes(out, ["q", "p"])                            # p is no longer kept
 
 
 def test_pruned_and_spliced_labels_that_landed_on_a_dropped_node_land_further_up():
@@ -492,16 +484,16 @@ def test_drop_is_deterministic():
 def test_node_set_json_round_trip_keeps_unsupported():
     import json
     from spark_vi.dag.nodeset import NodeSet
-    dag = {"A": None, 1: "A", "1": "A", 2: [1, "1"], 3: 2}
-    ns = fit_node_set(dag, [["A"], [1], ["1"], [2], [3], [3]])
-    out = drop_nodes(ns, [1, 2])
+    dag = {"A": None, "p": "A", "q": "A", "s": ["p", "q"], "t": "s"}
+    ns = fit_node_set(dag, [["A"], ["p"], ["q"], ["s"], ["t"], ["t"]])
+    out = drop_nodes(ns, ["p", "s"])
     back = NodeSet.from_dict(json.loads(json.dumps(out.to_dict())))
     assert back == out
-    # 2 lands on the first survivor of each upward path (through 1: A; through
-    # "1": "1"), as a pruned node's labels land in learn_node_set (not reduced: the
+    # s lands on the first survivor of each upward path (through p: A; through q:
+    # q), as a pruned node's labels land in learn_node_set (not reduced: the
     # frontier drops the redundant A, so the gate is the same)
-    assert back.unsupported == {1: ("A",), 2: ("1", "A")}
-    assert back.frontier([2]) == {back.engine_id["1"]}
+    assert back.unsupported == {"p": ("A",), "s": ("A", "q")}
+    assert back.frontier(["s"]) == {back.engine_id["q"]}
     # a node set saved before R14 has no key: never cleaned
     d = ns.to_dict()
     del d["unsupported"]
@@ -596,22 +588,11 @@ def test_spark_support_destroys_its_broadcast(spark, monkeypatch):
     assert len(seen) == 2
 
 
-def test_spark_int_ids_distinct_from_str(spark):
-    from pyspark.sql.types import ArrayType, LongType, StringType, StructField, StructType
-    from spark_vi.dag.nodeset import count_support_spark
+def test_spark_int_dag_refused_with_cast_hint(spark):
+    from pyspark.sql.types import LongType, StructField, StructType
     edges = spark.createDataFrame(
         [(2, 1), (1, None)],
         StructType([StructField("child", LongType()),
                     StructField("parent", LongType(), True)]))
-    d = parse_dag(edges)
-    assert d.parents == {1: (ROOT,), 2: (1,)}
-    df = spark.createDataFrame(
-        [([2],), ([1],)], StructType([StructField("labels", ArrayType(LongType()))]))
-    sup, n = count_support_spark(df, "labels", d)
-    assert sup == {1: 2, 2: 1} and n == 2
-    str_df = spark.createDataFrame(
-        [(["1"],)], StructType([StructField("labels", ArrayType(StringType()))]))
-    with pytest.raises(ValueError, match="not nodes"):
-        count_support_spark(str_df, "labels", d)
-    ns = learn_node_set(d, sup, n_docs=n)
-    assert ns.nodes == (1, 2) and ns.engine_parents == {1: [0], 2: [1]}
+    with pytest.raises(TypeError, match="cast integer ids"):
+        parse_dag(edges)

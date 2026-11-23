@@ -16,8 +16,10 @@ import pytest
 pyspark = pytest.importorskip("pyspark")
 from pyspark.ml.linalg import Vectors  # noqa: E402
 
-PARENT = {1: None, 2: None, 3: 1, 4: 1, 5: 2, 6: 2}
-UP = {3: 1, 4: 1, 5: 2, 6: 2}                 # leaf -> top-level node
+# Node ids are strings (ADR 0053); the helpers below compute on the ints the ids
+# spell (output index n = node str(n) here) and convert at the DataFrame boundary.
+PARENT = {"1": None, "2": None, "3": "1", "4": "1", "5": "2", "6": "2"}
+UP = {3: 1, 4: 1, 5: 2, 6: 2}                 # leaf -> top-level node (as ints)
 C = 7                                         # root + 6 nodes; index n = node n here
 K = 6
 
@@ -59,12 +61,19 @@ def _rows(n=300, seed=0, background=0.15):
     return rows
 
 
+def _s(labels):
+    """Int labels (the helpers' arithmetic) -> the string node ids the API takes."""
+    return None if labels is None else [str(x) for x in labels]
+
+
 def _schema(**cols):
-    """A StructType from `name=type` ('vector', 'array<int>', 'array<double>')."""
+    """A StructType from `name=type` ('vector', 'array<int>', 'array<string>',
+    'array<double>')."""
     from pyspark.ml.linalg import VectorUDT
-    from pyspark.sql.types import (ArrayType, DoubleType, IntegerType, StructField,
-                                   StructType)
+    from pyspark.sql.types import (ArrayType, DoubleType, IntegerType, StringType,
+                                   StructField, StructType)
     t = {"vector": VectorUDT(), "array<int>": ArrayType(IntegerType()),
+         "array<string>": ArrayType(StringType()),
          "array<double>": ArrayType(DoubleType())}
     return StructType([StructField(n, t[v]) for n, v in cols.items()])
 
@@ -73,9 +82,9 @@ def _df(spark, rows, mode="full"):
     out = []
     for th, labels in rows:
         y, m = _dense(labels, mode)
-        out.append((Vectors.dense(th), labels, y, m))
+        out.append((Vectors.dense(th), _s(labels), y, m))
     return spark.createDataFrame(out, _schema(
-        topicDistribution="vector", labels="array<int>", label="array<double>",
+        topicDistribution="vector", labels="array<string>", label="array<double>",
         labelMask="array<double>"))
 
 
@@ -91,9 +100,9 @@ def test_defaults_and_dag_param():
     assert est.getOrDefault("labelsCol") == "labels"
     assert est.getOrDefault("labelMaskMode") == "full"
     assert est.getDag() == {}
-    est.setDag({3: 1, 4: [1, "x"]})
-    assert est.getDag() == {1: [], "x": [], 3: [1], 4: [1, "x"]}
-    assert DagHeadsEstimator(dag=PARENT).getDag()[3] == [1]
+    est.setDag({"3": "1", "4": ["1", "x"]})
+    assert est.getDag() == {"1": [], "x": [], "3": ["1"], "4": ["1", "x"]}
+    assert DagHeadsEstimator(dag=PARENT).getDag()["3"] == ["1"]
     for gone in ("labelCol", "labelMaskCol", "dagParent"):
         assert not est.hasParam(gone)
 
@@ -118,7 +127,7 @@ def test_from_dag_equals_the_readout_on_dense_labels(spark, engine):
     V, b, const, deg, _ = _reference(df, max_iter=200)
     np.testing.assert_allclose(model.V, V, rtol=1e-6, atol=1e-8)
     np.testing.assert_allclose(model.b_raw, b, rtol=1e-6, atol=1e-8)
-    assert model.nodes() == [1, 2, 3, 4, 5, 6]
+    assert model.nodes() == ["1", "2", "3", "4", "5", "6"]
     assert [model.nodeIndex(n) for n in model.nodes()] == list(range(1, C))
     assert model.nodeIndex(None) == 0 and model.degenerateNodes() == {}
     rows = model.transform(df).select("topicDistribution", "nodeProbability",
@@ -168,19 +177,20 @@ def test_node_set_learning_prunes_and_lands(spark):
     rows.append((np.full(K, 1.0 / K), [6]))           # node 6: support 1
     df = _df(spark, rows).cache()
     model = DagHeadsEstimator(maxIter=100, dag=PARENT, minDocsPerNode=2).fit(df)
-    assert model.prunedNodes() == {6: [2]}
-    assert 6 not in model.nodes()
+    assert model.prunedNodes() == {"6": ["2"]}
+    assert "6" not in model.nodes()
     with pytest.raises(KeyError, match="pruned"):
-        model.nodeIndex(6)
+        model.nodeIndex("6")
     # The [6] document is a positive for 2 (its landing), as dense labels say.
-    two = model.nodeIndex(2)
-    lab = model.attachLabels(df.where("array_contains(labels, 6)")).head()
+    two = model.nodeIndex("2")
+    lab = model.attachLabels(df.where("array_contains(labels, '6')")).head()
     assert lab["label"][two] == 1.0 and lab["label"].toArray().sum() == 2.0
     # Same heads as fit_heads on the hand-built targets with column 6 dropped (the
     # [6] document's closure already holds 2, its landing).
     from pyspark.sql import functions as F
-    assert [model.nodeIndex(n) for n in model.nodes()] == model.nodes()
-    keep = [0] + model.nodes()
+    assert [model.nodeIndex(n) for n in model.nodes()] == [int(n) for n in
+                                                          model.nodes()]
+    keep = [0] + [int(n) for n in model.nodes()]
     sub = df.select("topicDistribution",
                     F.array(*[F.col("label")[c] for c in keep]).alias("label"),
                     F.array(*[F.col("labelMask")[c] for c in keep]).alias("labelMask"))
@@ -193,14 +203,17 @@ def test_unknown_labels_error_or_ignore(spark):
     from spark_vi.mllib import DagHeadsEstimator
 
     rows = _rows(n=80, seed=3) + [(np.full(K, 1.0 / K), [3, 99])]
-    df = spark.createDataFrame([(Vectors.dense(t), l) for t, l in rows],
-                               _schema(topicDistribution="vector", labels="array<int>"))
+    df = spark.createDataFrame([(Vectors.dense(t), _s(l)) for t, l in rows],
+                               _schema(topicDistribution="vector",
+                                       labels="array<string>"))
     with pytest.raises(ValueError, match="99"):
         DagHeadsEstimator(maxIter=5, dag=PARENT).fit(df)
     m = DagHeadsEstimator(maxIter=5, dag=PARENT, unknownLabels="ignore").fit(df)
-    assert m.nodes() == [1, 2, 3, 4, 5, 6]
-    with pytest.raises(ValueError, match="every DAG node id is a str"):
-        DagHeadsEstimator(dag={"a": None}).fit(df)
+    assert m.nodes() == ["1", "2", "3", "4", "5", "6"]
+    ints = spark.createDataFrame([(Vectors.dense(t), l) for t, l in rows],
+                                 _schema(topicDistribution="vector", labels="array<int>"))
+    with pytest.raises(ValueError, match=r"array<string>.*cast"):   # ADR 0053
+        DagHeadsEstimator(dag=PARENT).fit(ints)
 
 
 def _topic_df(spark, n=80, seed=0):
@@ -212,10 +225,11 @@ def _topic_df(spark, n=80, seed=0):
         leaf = [3, 4, 5, 6][i % 4]
         idx = sorted(rng.choice(30, size=6, replace=False).tolist())
         readout = [] if i % 5 == 0 else [[3, 4, 5, 5][i % 4]]
-        rows.append((Vectors.sparse(30, idx, [1.0] * 6), [leaf], readout))
-    rows.append((Vectors.sparse(30, [0], [1.0]), [6, 7], [3]))   # 7: rare, pruned
-    return spark.createDataFrame(rows, _schema(features="vector", labels="array<int>",
-                                               readout="array<int>"))
+        rows.append((Vectors.sparse(30, idx, [1.0] * 6), _s([leaf]), _s(readout)))
+    rows.append((Vectors.sparse(30, [0], [1.0]), ["6", "7"], ["3"]))  # 7: rare, pruned
+    return spark.createDataFrame(rows, _schema(features="vector",
+                                               labels="array<string>",
+                                               readout="array<string>"))
 
 
 @pytest.mark.slow
@@ -224,11 +238,11 @@ def test_from_topic_model_reuses_its_node_set(spark):
 
     from spark_vi.mllib import DagGatedLDAEstimator, DagHeadsEstimator
 
-    dag = {**PARENT, 7: 6}
+    dag = {**PARENT, "7": "6"}
     df = _topic_df(spark)
     lda = DagGatedLDAEstimator(gateNBg=2, gateTpn=1, maxIter=3, seed=0,
                                subsamplingRate=1.0, minDocsPerNode=2, dag=dag).fit(df)
-    assert lda.prunedNodes() == {7: [6]}
+    assert lda.prunedNodes() == {"7": ["6"]}
     scored = lda.transform(df).cache()
     heads = DagHeadsEstimator(maxIter=100, labelsCol="readout").setTopicModel(lda)
     model = heads.fit(scored)
@@ -237,7 +251,7 @@ def test_from_topic_model_reuses_its_node_set(spark):
     assert model.dag() == lda.dag() and model.prunedNodes() == lda.prunedNodes()
     # Node 6 is in the topic model's node set but never in the readout labels: an
     # all-negative head, a constant 0.
-    assert model.degenerateNodes() == {6: 0.0}
+    assert model.degenerateNodes() == {"6": 0.0}
     # Reference: dense targets over the topic model's engine ids.
     eng = lda._ns().engine_id
     par = {e: ps for e, ps in lda._ns().engine_parents.items()}
@@ -263,15 +277,15 @@ def test_from_topic_model_reuses_its_node_set(spark):
     np.testing.assert_allclose(model.V, V, rtol=1e-6, atol=1e-8)
     # Labels a pruned gate node carries land as the topic model landed them.
     lab = model.attachLabels(scored.select("readout").limit(1).withColumn(
-        "readout", F.array(F.lit(7)))).head()
-    assert lab["label"][model.nodeIndex(6)] == 1.0
+        "readout", F.array(F.lit("7")))).head()
+    assert lab["label"][model.nodeIndex("6")] == 1.0
     # The DAG and minDocsPerNode belong to the DAG path.
     with pytest.raises(ValueError, match="not both"):
         DagHeadsEstimator(labelsCol="readout", dag=dag).setTopicModel(lda).fit(scored)
     with pytest.raises(ValueError, match="minDocsPerNode"):
         DagHeadsEstimator(labelsCol="readout", minDocsPerNode=3).setTopicModel(
             lda).fit(scored)
-    bad = scored.withColumn("readout", F.array(F.lit(42)))
+    bad = scored.withColumn("readout", F.array(F.lit("42")))
     with pytest.raises(ValueError, match="42"):
         heads.fit(bad)
     with pytest.raises(ValueError, match="needs a label DAG"):
@@ -346,10 +360,10 @@ def test_save_dir_checkpoint_and_resume(spark, tmp_path, monkeypatch, caplog):
     with pytest.raises(FileNotFoundError):
         DagHeadsEstimator(dag=PARENT, resumeFrom=f"{base}/nothing").fit(df)
     from pyspark.sql import functions as F
-    eight = df.withColumn("labels", F.when(F.rand(0) < 0.1, F.array(F.lit(8)))
+    eight = df.withColumn("labels", F.when(F.rand(0) < 0.1, F.array(F.lit("8")))
                           .otherwise(F.col("labels")))
     with pytest.raises(ValueError, match="other nodes"):
-        DagHeadsEstimator(maxIter=2, dag={**PARENT, 8: 6},
+        DagHeadsEstimator(maxIter=2, dag={**PARENT, "8": "6"},
                           resumeFrom=f"{base}/full").fit(eight)
 
 
@@ -363,7 +377,7 @@ def test_local_from_labels_equals_the_estimator(spark):
     model = DagHeadsEstimator(maxIter=100, dag=PARENT, labelMaskMode="closure",
                               engine="local").fit(df)
     data = LocalReadoutData.from_labels(np.stack([r[0] for r in rows]),
-                                        [r[1] for r in rows], model._labeler())
+                                        [_s(r[1]) for r in rows], model._labeler())
     V, b, _, _, _ = fit_heads(data, max_iter=100)
     np.testing.assert_allclose(model.V, V, rtol=1e-6, atol=1e-8)
 
@@ -374,7 +388,7 @@ def test_pipeline_gated_lda_then_heads(spark):
 
     from spark_vi.mllib import DagGatedLDAEstimator, DagHeadsEstimator
 
-    df = _topic_df(spark).drop("readout").where("NOT array_contains(labels, 7)")
+    df = _topic_df(spark).drop("readout").where("NOT array_contains(labels, '7')")
     lda = DagGatedLDAEstimator(gateNBg=2, gateTpn=1, maxIter=3, seed=0,
                                subsamplingRate=1.0, dag=PARENT)
     heads = DagHeadsEstimator(maxIter=30, stackedProbabilityCol="stacked", dag=PARENT)

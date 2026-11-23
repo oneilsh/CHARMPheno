@@ -17,13 +17,14 @@ from pyspark.ml.linalg import Vectors  # noqa: E402
 
 # Two top-level nodes with two leaves each; 1 also has a multi-parent grandchild 7
 # (under 3 and 5), so dropping 3 re-attaches 7 under 1 (through 3) and 5.
-PARENT = {1: None, 2: None, 3: 1, 4: 1, 5: 2, 6: 2, 7: [3, 5]}
+PARENT = {"1": None, "2": None, "3": "1", "4": "1", "5": "2", "6": "2",
+          "7": ["3", "5"]}
 LEAF_TERMS = {3: range(0, 5), 4: range(5, 10), 5: range(10, 15), 6: range(15, 20),
               7: range(20, 25)}
 V = 40
 
 
-def _rows(n=100, seed=0, labels_as=lambda x: x):
+def _rows(n=100, seed=0, labels_as=str):
     rng = np.random.default_rng(seed)
     rows = []
     for i in range(n):
@@ -97,21 +98,22 @@ def _flatten(model, *nodes):
 # --------------------------------------------------------------------------- #
 
 def test_node_statistics_columns_types_and_values(fitted):
-    from pyspark.sql.types import (BooleanType, DoubleType, IntegerType, LongType)
+    from pyspark.sql.types import (BooleanType, DoubleType, IntegerType, LongType,
+                                   StringType)
     from spark_vi.eval.topic.sharpness import support_fraction
     model, _ = fitted
     df = model.nodeStatistics()
     assert df.columns == ["node", "depth", "support", "supportFraction", "mass",
                           "massToParent", "flat"]
     types = {f.name: type(f.dataType) for f in df.schema.fields}
-    assert types == {"node": LongType, "depth": IntegerType, "support": LongType,
+    assert types == {"node": StringType, "depth": IntegerType, "support": LongType,
                      "supportFraction": DoubleType, "mass": DoubleType,
                      "massToParent": DoubleType, "flat": BooleanType}
     rows = {r["node"]: r for r in df.collect()}
     assert list(rows) == list(model._ns().nodes)           # engine order
     assert {n: r["support"] for n, r in rows.items()} == model.nodeSupport()
-    assert {n: r["depth"] for n, r in rows.items()} == {1: 1, 2: 1, 3: 2, 4: 2, 5: 2,
-                                                         6: 2, 7: 3}
+    assert {n: r["depth"] for n, r in rows.items()} == {
+        "1": 1, "2": 1, "3": 2, "4": 2, "5": 2, "6": 2, "7": 3}
     sf, mass = support_fraction(model.result.global_params["lambda"])
     for n, r in rows.items():
         (k,) = model.nodeTopics(n)
@@ -129,23 +131,20 @@ def test_node_statistics_columns_types_and_values(fitted):
 
 def test_node_statistics_flags_a_hand_flattened_block(fitted):
     model, _ = fitted
-    flat = _flatten(model, 3)
+    flat = _flatten(model, "3")
     rows = {r["node"]: r for r in flat.nodeStatistics().collect()}
-    assert rows[3]["flat"] and rows[3]["supportFraction"] == pytest.approx(1.0)
-    assert [n for n, r in rows.items() if r["flat"]] == [3]
+    assert rows["3"]["flat"] and rows["3"]["supportFraction"] == pytest.approx(1.0)
+    assert [n for n, r in rows.items() if r["flat"]] == ["3"]
     # the threshold is the caller's
     assert not any(r["flat"] for r in flat.nodeStatistics(flatThreshold=1.0).collect())
     # reporting only: nothing dropped
-    assert flat.unsupportedNodes() == {} and 3 in flat._ns().engine_id
+    assert flat.unsupportedNodes() == {} and "3" in flat._ns().engine_id
 
 
-def test_node_statistics_string_ids_and_tpn_minimum(spark):
+def test_node_statistics_tpn_minimum(spark):
     from pyspark.sql.types import StringType
-    sdag = {str(k): (None if v is None else
-                     [str(x) for x in v] if isinstance(v, list) else str(v))
-            for k, v in PARENT.items()}
-    df = spark.createDataFrame(_rows(labels_as=str), ["features", "labels"])
-    model = _est(dag=sdag, gateTpn=2, maxIter=4).fit(df)
+    df = spark.createDataFrame(_rows(), ["features", "labels"])
+    model = _est(gateTpn=2, maxIter=4).fit(df)
     sdf = model.nodeStatistics()
     assert isinstance(sdf.schema["node"].dataType, StringType)
     eta = float(model.result.global_params["eta"])
@@ -169,15 +168,16 @@ def test_node_statistics_string_ids_and_tpn_minimum(spark):
 
 def test_drop_subsets_every_fitted_array_in_the_new_engine_order(fitted):
     model, _ = fitted
-    flat = _flatten(model, 3)
+    flat = _flatten(model, "3")
     clean = flat.dropUnsupportedNodes()
     # the original is unchanged
-    assert 3 in flat._ns().engine_id and flat.unsupportedNodes() == {}
-    assert clean.unsupportedNodes() == {3: [1]}
-    assert clean.dag() == {1: [], 2: [], 4: [1], 5: [2], 6: [2], 7: [1, 5]}
+    assert "3" in flat._ns().engine_id and flat.unsupportedNodes() == {}
+    assert clean.unsupportedNodes() == {"3": ["1"]}
+    assert clean.dag() == {"1": [], "2": [], "4": ["1"], "5": ["2"], "6": ["2"],
+                           "7": ["1", "5"]}
     assert clean.prunedNodes() == flat.prunedNodes()
     with pytest.raises(KeyError, match="dropped as unsupported"):
-        clean.nodeTopics(3)
+        clean.nodeTopics("3")
     old, new = flat.result.global_params, clean.result.global_params
     K = old["lambda"].shape[0]
     assert new["lambda"].shape == (K - 1, V)
@@ -197,7 +197,7 @@ def test_drop_subsets_every_fitted_array_in_the_new_engine_order(fitted):
     # the accessors work on the cleaned model
     assert clean.describeTopics().count() == K - 1
     nodes = {r["node"] for r in clean.describeNodes().collect()}
-    assert nodes == {None, 1, 2, 4, 5, 6, 7}
+    assert nodes == {None, "1", "2", "4", "5", "6", "7"}
     assert [r["node"] for r in clean.nodeStatistics().collect()] == list(clean._ns().nodes)
 
 
@@ -212,10 +212,10 @@ def test_drop_with_nothing_flat_is_an_equivalent_copy(fitted):
 
 def test_drop_a_top_level_node_with_kept_children(fitted):
     model, _ = fitted
-    clean = _flatten(model, 1).dropUnsupportedNodes()
-    assert clean.unsupportedNodes() == {1: []}
-    assert clean.dag()[3] == [] and clean.dag()[4] == []
-    assert clean._ns().frontier([1]) == frozenset()
+    clean = _flatten(model, "1").dropUnsupportedNodes()
+    assert clean.unsupportedNodes() == {"1": []}
+    assert clean.dag()["3"] == [] and clean.dag()["4"] == []
+    assert clean._ns().frontier(["1"]) == frozenset()
 
 
 def test_cleaned_transform_equals_a_model_built_from_the_subsetted_arrays(fitted):
@@ -223,10 +223,10 @@ def test_cleaned_transform_equals_a_model_built_from_the_subsetted_arrays(fitted
     from spark_vi.dag.nodeset import drop_nodes
     from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAModel
     model, df = fitted
-    flat = _flatten(model, 3)
+    flat = _flatten(model, "3")
     clean = flat.dropUnsupportedNodes()
     gp = flat.result.global_params
-    keep = [0, 1] + [flat.nodeTopics(n)[0] for n in drop_nodes(flat._ns(), [3]).nodes]
+    keep = [0, 1] + [flat.nodeTopics(n)[0] for n in drop_nodes(flat._ns(), ["3"]).nodes]
     direct_gp = {"lambda": gp["lambda"][keep], "alpha": gp["alpha"][keep],
                  "eta": gp["eta"]}
     md = dict(clean.result.metadata)
@@ -241,11 +241,11 @@ def test_cleaned_transform_equals_a_model_built_from_the_subsetted_arrays(fitted
 def test_cleaned_model_save_load_round_trip(fitted, tmp_path):
     from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAModel
     model, df = fitted
-    clean = _flatten(model, 3).dropUnsupportedNodes()
+    clean = _flatten(model, "3").dropUnsupportedNodes()
     uri = f"file://{tmp_path}/clean"
     clean.save(uri)
     back = DagGatedLDAModel.load(uri)
-    assert back.unsupportedNodes() == {3: [1]}
+    assert back.unsupportedNodes() == {"3": ["1"]}
     assert back._ns() == clean._ns()
     np.testing.assert_array_equal(back.result.global_params["lambda"],
                                   clean.result.global_params["lambda"])
@@ -257,16 +257,16 @@ def test_cleaned_model_save_load_round_trip(fitted, tmp_path):
 def test_heads_from_the_cleaned_model_have_no_head_for_the_dropped_node(fitted):
     from spark_vi.mllib import DagHeadsEstimator
     model, df = fitted
-    clean = _flatten(model, 3).dropUnsupportedNodes()
+    clean = _flatten(model, "3").dropUnsupportedNodes()
     scored = clean.transform(df).cache()
     heads = DagHeadsEstimator(maxIter=50).setTopicModel(clean).fit(scored)
     assert heads.nodes() == list(clean._ns().nodes)
-    assert 3 not in heads.nodes()
-    assert heads.unsupportedNodes() == {3: [1]}
+    assert "3" not in heads.nodes()
+    assert heads.unsupportedNodes() == {"3": ["1"]}
     with pytest.raises(KeyError, match="dropped as unsupported"):
-        heads.nodeIndex(3)
+        heads.nodeIndex("3")
     # a document labelled 3 is a positive of 3's landing (1) and its ancestors only
     lab = heads.attachLabels(scored.limit(1).select("labels").selectExpr(
-        "array(cast(3 as bigint)) as labels")).head()
-    assert lab["label"][heads.nodeIndex(1)] == 1.0
+        "array('3') as labels")).head()
+    assert lab["label"][heads.nodeIndex("1")] == 1.0
     assert sum(lab["label"]) == 2.0                        # root + 1

@@ -4,8 +4,6 @@ from pyspark.ml import Pipeline, PipelineModel
 from pyspark.ml.linalg import SparseVector
 from pyspark.sql.types import (
     ArrayType,
-    IntegerType,
-    LongType,
     StringType,
     StructField,
     StructType,
@@ -111,20 +109,34 @@ def test_min_df_max_df_and_vocab_size(spark):
     assert all(r["w_features"].size == len(m.vocabularies()[0]) for r in out)
 
 
-def test_labels_from_array_column_keep_type_and_background(spark):
+def test_labels_from_array_column_and_background(spark):
     docs = spark.createDataFrame(
-        [(1, ["a"], [1, 2]), (2, ["b"], []), (3, ["a"], None)],
-        "doc_id long, words array<string>, nodes array<int>")
+        [(1, ["a"], ["1", "2"]), (2, ["b"], []), (3, ["a"], None)],
+        "doc_id long, words array<string>, nodes array<string>")
     m = (DagGatedFeaturizer().addArrayDomain("w", "words")
          .setLabelsInputCol("nodes")).fit(docs)
     assert m.labelsCol() == "labels"
     out = m.transform(docs)
-    assert out.schema["labels"].dataType == ArrayType(IntegerType())
+    assert out.schema["labels"].dataType == ArrayType(StringType())
     got = _by_doc(out, "labels")
-    assert got == {1: ([1, 2],), 2: ([],), 3: ([],)}
+    assert got == {1: (["1", "2"],), 2: ([],), 3: ([],)}
 
 
-def test_labels_from_long_table_str_and_int_ids(spark):
+def test_int_label_sources_are_refused_with_a_cast_hint(spark):
+    """Node ids are strings (ADR 0053): an array<int> labels column or an integer
+    node column in a labels table is refused, naming the cast."""
+    docs = spark.createDataFrame([(1, ["a"], [1, 2])],
+                                 "doc_id long, words array<string>, nodes array<int>")
+    with pytest.raises(TypeError, match=r"array<string>.*cast"):
+        (DagGatedFeaturizer().addArrayDomain("w", "words")
+         .setLabelsInputCol("nodes")).fit(docs)
+    int_labels = spark.createDataFrame([(1, 2)], "doc_id long, node long")
+    with pytest.raises(TypeError, match=r"string column.*cast"):
+        (DagGatedFeaturizer().addArrayDomain("w", "words")
+         .setLabelsTable(int_labels)).fit(docs.drop("nodes"))
+
+
+def test_labels_from_long_table(spark):
     docs = spark.createDataFrame([(1, ["a"]), (2, ["b"]), (3, ["a"])],
                                  "doc_id long, words array<string>")
     str_labels = spark.createDataFrame(
@@ -137,13 +149,12 @@ def test_labels_from_long_table_str_and_int_ids(spark):
     got = {k: sorted(v[0]) for k, v in _by_doc(out, "nodes").items()}
     assert got == {1: ["1", "N:7"], 2: ["1"], 3: []}
 
-    int_labels = spark.createDataFrame([(5, 1), (1, 2), (1, 2)], "pid long, n long")
+    other = spark.createDataFrame([(5, "1"), (1, "2"), (1, "2")], "pid long, n string")
     m = (DagGatedFeaturizer().addArrayDomain("w", "words")
-         .setLabelsTable(int_labels, nodeCol="n", docIdCol="pid")).fit(docs)
+         .setLabelsTable(other, nodeCol="n", docIdCol="pid")).fit(docs)
     out = m.transform(docs)
-    assert out.schema["labels"].dataType == ArrayType(LongType())  # not cast to str
     got = _by_doc(out, "labels")
-    assert got == {1: ([2, 2],), 2: ([],), 3: ([],)}  # duplicates kept (R2)
+    assert got == {1: (["2", "2"],), 2: ([],), 3: ([],)}  # duplicates kept (R2)
 
 
 def test_transform_new_docs_unseen_terms_dropped(spark):
@@ -191,7 +202,7 @@ def test_pipeline_feeds_a_topic_estimator(spark):
 
 def test_save_load_round_trip(spark, tmp_path):
     docs = _docs(spark)
-    lab = spark.createDataFrame([(1, 3), (2, 4)], "doc_id long, node int")
+    lab = spark.createDataFrame([(1, "3"), (2, "4")], "doc_id long, node string")
     tab = spark.createDataFrame([(1, "x", 2)], "doc_id long, term string, n int")
     m = (DagGatedFeaturizer(minTF=1.0, docIdCol="doc_id")
          .addArrayDomain("words", "words")

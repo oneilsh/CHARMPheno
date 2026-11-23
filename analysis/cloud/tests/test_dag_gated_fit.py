@@ -174,7 +174,7 @@ def test_recorded_estimator_params_after_a_resume_is_the_configured_run():
     checkpoint path; the manifest records the total budget and no resumeFrom."""
     from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
     from dag_gated_fit import recorded_estimator_params
-    fresh = DagGatedLDAEstimator(maxIter=100, seed=3, dag={1: None},
+    fresh = DagGatedLDAEstimator(maxIter=100, seed=3, dag={"1": None},
                                  saveDir="/r/fit_ckpt", saveInterval=5)
     resumed = fresh.copy().setMaxIter(60).setResumeFrom("/r/fit_ckpt")
     a = recorded_estimator_params(fresh, 100)

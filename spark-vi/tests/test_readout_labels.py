@@ -11,8 +11,8 @@ from spark_vi.readout.labels import NodeLabeler
 
 # Two top-level nodes, two leaves under each. Engine order = (depth, id), so the
 # output index of node n is n here (index 0 = root).
-PARENT = {1: None, 2: None, 3: 1, 4: 1, 5: 2, 6: 2}
-DOCS = [[3], [4], [5], [6], [3, 1], []]
+PARENT = {"1": None, "2": None, "3": "1", "4": "1", "5": "2", "6": "2"}
+DOCS = [["3"], ["4"], ["5"], ["6"], ["3", "1"], []]
 
 
 def _labeler(docs=DOCS, dag=PARENT, min_docs=1, **kw):
@@ -23,17 +23,17 @@ def _labeler(docs=DOCS, dag=PARENT, min_docs=1, **kw):
 def test_closure_labels_and_background():
     lab = _labeler()
     assert lab.C == 7
-    assert lab.active([3]) == (0, 1, 3)
-    assert lab.active([3, 1, 3]) == (0, 1, 3)          # ancestors / duplicates
-    assert lab.active([3, 5]) == (0, 1, 2, 3, 5)
-    assert lab.active([2]) == (0, 2)
+    assert lab.active(["3"]) == (0, 1, 3)
+    assert lab.active(["3", "1", "3"]) == (0, 1, 3)          # ancestors / duplicates
+    assert lab.active(["3", "5"]) == (0, 1, 2, 3, 5)
+    assert lab.active(["2"]) == (0, 2)
     assert lab.active([]) == () and lab.active(None) == ()
 
 
 def test_full_mask_observes_everything():
     lab = _labeler()
-    assert lab([4]) == ((0, 1, 4), None)
-    y, m = lab.dense([[4], None])
+    assert lab(["4"]) == ((0, 1, 4), None)
+    y, m = lab.dense([["4"], None])
     np.testing.assert_array_equal(y, [[1, 1, 0, 0, 1, 0, 0], [0] * 7])
     np.testing.assert_array_equal(m, np.ones((2, 7)))
 
@@ -41,10 +41,10 @@ def test_full_mask_observes_everything():
 def test_closure_mask_observes_closure_and_siblings():
     lab = _labeler(mask_mode="closure")
     # [3]: closure {0,1,3}; siblings of 1 = {1,2} (root's children), of 3 = {3,4}.
-    assert lab([3]) == ((0, 1, 3), (0, 1, 2, 3, 4))
+    assert lab(["3"]) == ((0, 1, 3), (0, 1, 2, 3, 4))
     # [2]: closure {0,2}; siblings of 2 = {1,2}; leaves under 2 stay unobserved.
-    assert lab([2]) == ((0, 2), (0, 1, 2))
-    y, m = lab.dense([[6], []])
+    assert lab(["2"]) == ((0, 2), (0, 1, 2))
+    y, m = lab.dense([["6"], []])
     np.testing.assert_array_equal(y, [[1, 0, 1, 0, 0, 0, 1], [0] * 7])
     np.testing.assert_array_equal(m, [[1, 1, 1, 0, 0, 1, 1], [0] * 7])  # bg: nothing
 
@@ -62,12 +62,12 @@ def test_multi_parent_siblings():
 
 
 def test_pruned_label_lands_on_kept_ancestor():
-    docs = [[3], [3], [4], [4], [5], [5], [6]]           # 6 has support 1
+    docs = [["3"], ["3"], ["4"], ["4"], ["5"], ["5"], ["6"]]  # 6 has support 1
     ns = fit_node_set(PARENT, docs, min_docs_per_node=2)
-    assert 6 in ns.pruned
+    assert "6" in ns.pruned
     lab = NodeLabeler.from_node_set(ns)
-    two = ns.engine_id[2]
-    assert lab.active([6]) == (0, two)
+    two = ns.engine_id["2"]
+    assert lab.active(["6"]) == (0, two)
     assert lab.C == len(ns.nodes) + 1
 
 
@@ -82,16 +82,10 @@ def test_spliced_chain_label_lands():
 
 def test_unknown_labels_error_or_ignore():
     with pytest.raises(ValueError, match="'nope'"):
-        _labeler().active([3, "nope"])
+        _labeler().active(["3", "nope"])
     lab = _labeler(unknown_labels="ignore")
-    assert lab.active([3, "nope"]) == (0, 1, 3)
+    assert lab.active(["3", "nope"]) == (0, 1, 3)
     assert lab.active(["nope"]) == ()
-
-
-def test_ids_are_not_normalized():
-    dag = {1: None, "1": None}
-    lab = NodeLabeler.from_node_set(fit_node_set(dag, [[1], ["1"]]))
-    assert lab.active([1]) != lab.active(["1"])
 
 
 def test_bad_policies_refused():

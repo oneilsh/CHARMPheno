@@ -241,10 +241,13 @@ def test_vocab_is_fit_on_train_and_the_node_set_is_learned_from_train_labels(spa
     assert 555 not in bundle.vocab_map
     assert 400 in bundle.dag                      # the bundle keeps every node
 
-    train_labels = [list(r["labels"]) for r in bundle.train_df.collect()]
-    ns = fit_node_set(bundle.dag, train_labels, min_docs_per_node=2)
-    assert 400 in ns.pruned and ns.pruned[400] == (200,)   # lands on its parent
-    assert 200 in ns.engine_id
+    # this (SNOMED) bundle carries int concept ids; the estimator's node ids are
+    # strings (ADR 0053), so the caller casts them
+    train_labels = [[str(x) for x in r["labels"]] for r in bundle.train_df.collect()]
+    sdag = {str(n): [str(p) for p in ps] for n, ps in bundle.dag.items()}
+    ns = fit_node_set(sdag, train_labels, min_docs_per_node=2)
+    assert "400" in ns.pruned and ns.pruned["400"] == ("200",)   # lands on its parent
+    assert "200" in ns.engine_id
 
 
 def test_strip_mode_both_strips_train_features(spark):

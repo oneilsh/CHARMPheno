@@ -6,7 +6,7 @@ representation) and fit one L2 logistic head per node of a label DAG with the ba
 solver (`spark_vi.readout.fit_heads`). The inputs are the DAG-gated estimator's, in
 the user's own node ids:
 
-- ``labelsCol``: an ``array<string>`` / ``array<int>`` column of the nodes each
+- ``labelsCol``: an ``array<string>`` column of the nodes each
   document attests (ancestors and duplicates allowed; empty or null = background);
 - EITHER a DAG (``setDag``, parsed and validated as the topic estimator does; the
   node set is learned from the fit DataFrame with the same ``minDocsPerNode`` /
@@ -74,9 +74,9 @@ _DEFAULTS = dict(featuresCol="topicDistribution", labelsCol="labels", dagEdges="
 class _DagHeadsParams(HasFeaturesCol, HasMaxIter, _PersistenceParams):
     labelsCol = Param(
         Params._dummy(), "labelsCol",
-        "array<string> or array<int> column of the DAG nodes each document attests "
-        "(any nodes: ancestors and duplicates allowed; empty or null = background). "
-        "The element type must match the DAG's ids. Default 'labels'.",
+        "array<string> column of the DAG nodes each document attests (any nodes: "
+        "ancestors and duplicates allowed; empty or null = background). Default "
+        "'labels'.",
         typeConverter=TypeConverters.toString)
     dagEdges = Param(
         Params._dummy(), "dagEdges",
@@ -295,7 +295,7 @@ class DagHeadsEstimator(_DagHeadsParams, _StagePersistence, Estimator):
             ns = tm._ns()
             ns = dataclasses.replace(ns, frontier=dataclasses.replace(
                 ns.frontier, unknown_labels=policy))
-            check_labels_column(dataset, labels_col, tuple(ns.frontier.landing))
+            check_labels_column(dataset, labels_col)
             n_docs = _scan_labels_spark(dataset, labels_col, ns.frontier.landing,
                                         policy)
             return ns, n_docs, f"the topic model's node set ({len(ns.nodes)} nodes)"
@@ -303,7 +303,7 @@ class DagHeadsEstimator(_DagHeadsParams, _StagePersistence, Estimator):
             raise ValueError("DagHeadsEstimator needs a label DAG (setDag) or a fitted "
                              "DagGatedLDAModel (setTopicModel)")
         parsed = _decode_dag(str(self.getOrDefault("dagEdges")))
-        check_labels_column(dataset, labels_col, parsed.nodes)
+        check_labels_column(dataset, labels_col)
         support, n_docs = count_support_spark(dataset, labels_col, parsed,
                                               unknown_labels=policy)
         ns = learn_node_set(parsed, support, n_docs=n_docs,
@@ -412,8 +412,7 @@ class DagHeadsModel(_DagHeadsParams, _StagePersistence, Model):
         <path>/readout_heads_model.npz   V, b_raw, const, degenerate, theta_topm
                                          (+ W_std): `readout.heads.write_heads`, the
                                          file the drivers' scoring passes read
-        <path>/node_set.json             the node set (NodeSet.to_dict; user ids
-                                         with their str / int types)
+        <path>/node_set.json             the node set (NodeSet.to_dict; user ids)
         <path>/metadata/                 Params, written last
     """
 

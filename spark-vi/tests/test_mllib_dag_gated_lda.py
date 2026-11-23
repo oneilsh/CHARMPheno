@@ -19,12 +19,13 @@ import pytest
 pyspark = pytest.importorskip("pyspark")
 from pyspark.ml.linalg import Vectors  # noqa: E402
 
-# A plain int DAG: two top-level nodes, two leaves under each.
-PARENT = {1: None, 2: None, 3: 1, 4: 1, 5: 2, 6: 2}
+# A plain DAG: two top-level nodes, two leaves under each.
+PARENT = {"1": None, "2": None, "3": "1", "4": "1", "5": "2", "6": "2"}
 
-# A mixed str / int DAG with a multi-parent node (2), a chain to splice (1 -> "c":
-# 1 has one kept child and no documents of its own), and a rare node to prune.
-MIXED = {"A": None, "B": None, 1: "A", "c": 1, 2: ["A", "B"], 3: 2, "rare": 3}
+# A DAG with a multi-parent node ("2"), a chain to splice ("1" -> "c": "1" has one
+# kept child and no documents of its own), and a rare node to prune.
+MIXED = {"A": None, "B": None, "1": "A", "c": "1", "2": ["A", "B"], "3": "2",
+         "rare": "3"}
 V0_TERMS = [f"t{i}" for i in range(8)]
 V1_TERMS = [100, 101, 102, 103, "t0"]          # "t0" is in both vocabularies
 
@@ -33,7 +34,7 @@ def _df(spark, n=40, V=30, seed=0, col="labels"):
     rng = np.random.default_rng(seed)
     rows = []
     for _ in range(n):
-        leaf = int(rng.choice([3, 4, 5, 6]))
+        leaf = str(int(rng.choice([3, 4, 5, 6])))
         idx = sorted(rng.choice(V, size=6, replace=False).tolist())
         rows.append((Vectors.sparse(V, idx, [1.0] * len(idx)), [leaf]))
     return spark.createDataFrame(rows, ["features", col])
@@ -55,11 +56,11 @@ def _mixed_rows(seed=0, n=48, specific_only=False):
     gate)."""
     rng = np.random.default_rng(seed)
     full = {  # label list as written -> its most-specific labels
-        "c": (["c", 1, "A", "c"], ["c"]),
-        "3": ([3, 2, "B", 3], [3]),
-        "2": ([2], [2]),
+        "c": (["c", "1", "A", "c"], ["c"]),
+        "3": (["3", "2", "B", "3"], ["3"]),
+        "2": (["2"], ["2"]),
         "B": (["B", "B"], ["B"]),
-        "A+3": (["A", 3, "c"], [3, "c"]),
+        "A+3": (["A", "3", "c"], ["3", "c"]),
     }
     keys = list(full)
     rows = []
@@ -73,14 +74,13 @@ def _mixed_rows(seed=0, n=48, specific_only=False):
         i1 = sorted(rng.choice(5, size=2, replace=False).tolist())
         rows.append((Vectors.sparse(8, i0, [1.0] * 3), Vectors.sparse(5, i1, [2.0] * 2),
                      lab))
-    rare = [3, "rare"] if not specific_only else ["rare"]
+    rare = ["3", "rare"] if not specific_only else ["rare"]
     rows.append((Vectors.sparse(8, [0], [1.0]), Vectors.sparse(5, [1], [1.0]), rare))
     return rows
 
 
 def _str_dag_df(spark, specific_only=False, seed=0):
-    """The MIXED DAG with every id written as a str (Spark array columns are
-    homogeneous), and its labels as array<string>."""
+    """The MIXED DAG's rows as a DataFrame, labels as array<string>."""
     from pyspark.sql.types import ArrayType, StringType, StructField, StructType
     from pyspark.ml.linalg import VectorUDT
     schema = StructType([StructField("f0", VectorUDT()), StructField("f1", VectorUDT()),
@@ -90,9 +90,7 @@ def _str_dag_df(spark, specific_only=False, seed=0):
     return spark.createDataFrame(rows, schema)
 
 
-STR_DAG = {str(k): (None if v is None else
-                    [str(x) for x in v] if isinstance(v, list) else str(v))
-           for k, v in MIXED.items()}
+STR_DAG = MIXED
 
 
 def _str_est(**kw):
@@ -132,34 +130,37 @@ def test_defaults_and_removed_params():
         assert gone not in names, gone
 
 
-def test_dag_param_keeps_id_types_and_validates():
+def test_dag_param_round_trips_and_validates():
     from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
     est = DagGatedLDAEstimator(dag=MIXED)
     got = est.getDag()
-    assert got[2] == ["A", "B"] and got["c"] == [1] and got["A"] == []
-    assert 1 in got and "1" not in got
+    assert got["2"] == ["A", "B"] and got["c"] == ["1"] and got["A"] == []
     # The stored form is JSON and re-settable (copy / Pipeline carry the string).
     est2 = DagGatedLDAEstimator().setDag(est.getOrDefault("dagEdges"))
     assert est2.getDag() == got
     assert est.copy().getDag() == got
     with pytest.raises(ValueError, match="cycle"):
-        DagGatedLDAEstimator().setDag({1: 2, 2: 1})
+        DagGatedLDAEstimator().setDag({"1": "2", "2": "1"})
+    with pytest.raises(TypeError, match="cast integer ids"):     # ADR 0053
+        DagGatedLDAEstimator().setDag({1: None})
 
 
 def test_dag_from_pandas():
     pd = pytest.importorskip("pandas")
     from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
-    df = pd.DataFrame({"child": [3, 4, 1], "parent": [1, 1, None]})
-    assert DagGatedLDAEstimator().setDag(df).getDag() == {1: [], 3: [1], 4: [1]}
+    df = pd.DataFrame({"child": ["3", "4", "1"], "parent": ["1", "1", None]})
+    assert DagGatedLDAEstimator().setDag(df).getDag() == {"1": [], "3": ["1"],
+                                                          "4": ["1"]}
 
 
 def test_seed_extras_params_round_trip():
     from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
     est = DagGatedLDAEstimator(
-        nodeTerms={"c": ["t1", ("f1", "t0")], 3: [101]},
-        gateSeedProfile={3: {"t2": 2.0, 100: 1.0, "t3": 0.0}})
-    assert est.getNodeTerms() == {3: [101], "c": ["t1", ("f1", "t0")]}
-    assert est.getGateSeedProfile() == {3: {100: 1.0, "t2": 2.0}}   # w <= 0 dropped
+        nodeTerms={"c": ["t1", ("f1", "t0")], "3": [101]},
+        gateSeedProfile={"3": {"t2": 2.0, 100: 1.0, "t3": 0.0}})
+    # node keys are strings; TERM ids stay str or int (101 and "t2" both survive)
+    assert est.getNodeTerms() == {"3": [101], "c": ["t1", ("f1", "t0")]}
+    assert est.getGateSeedProfile() == {"3": {100: 1.0, "t2": 2.0}}  # w <= 0 dropped
     copy = DagGatedLDAEstimator()
     copy.setNodeTerms(est.getOrDefault("nodeTerms"))
     copy.setGateSeedProfile(est.getOrDefault("gateSeedProfile"))
@@ -167,6 +168,10 @@ def test_seed_extras_params_round_trip():
     assert copy.getGateSeedProfile() == est.getGateSeedProfile()
     with pytest.raises(ValueError, match="repeats"):
         DagGatedLDAEstimator(vocabularies=[["a", "a"]])
+    with pytest.raises(TypeError, match="cast integer ids"):   # node keys: str only
+        DagGatedLDAEstimator(nodeTerms={3: ["t1"]})
+    with pytest.raises(TypeError, match="cast integer ids"):
+        DagGatedLDAEstimator(gateSeedProfile={3: {"t1": 1.0}})
 
 
 def test_term_index_ambiguity_rule():
@@ -196,16 +201,16 @@ def test_seed_extras_translate_to_engine_ids_and_concat_indices():
     from spark_vi.dag.nodeset import fit_node_set
     from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
     ns = fit_node_set(MIXED, [lab for _, _, lab in _mixed_rows()], min_docs_per_node=2)
-    assert ns.pruned == {"rare": (3,)} and ns.spliced == (1,)
+    assert ns.pruned == {"rare": ("3",)} and ns.spliced == ("1",)
     est = DagGatedLDAEstimator(
-        nodeTerms={"c": ["t1", ("f1", "t0")], 3: [101, "zzz"], "rare": ["t5"],
-                   1: ["t6"]},
-        gateSeedProfile={2: {"t2": 2.0, 100: 1.0}, "nope": {"t1": 1.0}})
+        nodeTerms={"c": ["t1", ("f1", "t0")], "3": [101, "zzz"], "rare": ["t5"],
+                   "1": ["t6"]},
+        gateSeedProfile={"2": {"t2": 2.0, 100: 1.0}, "nope": {"t1": 1.0}})
     own, prof, summary = est._translate_seed_extras(
         ns, ["f0", "f1"], [8, 5], [V0_TERMS, V1_TERMS])
     e = ns.engine_id
-    assert own == {e["c"]: [1, 12], e[3]: [9]}
-    assert prof == {e[2]: {2: 2.0, 8: 1.0}}
+    assert own == {e["c"]: [1, 12], e["3"]: [9]}
+    assert prof == {e["2"]: {2: 2.0, 8: 1.0}}
     assert "2 not kept dropped" in summary and "1 term(s) in no vocabulary" in summary
     bad = DagGatedLDAEstimator(nodeTerms={"c": ["t0"]})
     with pytest.raises(ValueError, match="featureColumn"):
@@ -242,21 +247,23 @@ def test_fit_transform_smoke_and_node_accessors(spark):
     assert theta.shape == (2 + 6,)                 # K = n_bg + nodes * tpn
     np.testing.assert_allclose(theta.sum(), 1.0, atol=1e-6)
     assert model.result.metadata["model_class"] == "DagGatedOnlineLDA"
-    assert model.dag() == {1: [], 2: [], 3: [1], 4: [1], 5: [2], 6: [2]}
+    assert model.dag() == {"1": [], "2": [], "3": ["1"], "4": ["1"], "5": ["2"],
+                           "6": ["2"]}
     assert model.prunedNodes() == {} and model.splicedNodes() == []
     sup = model.nodeSupport()
-    assert sup[1] == sup[3] + sup[4] and sum(sup[n] for n in (3, 4, 5, 6)) == 40
+    assert sup["1"] == sup["3"] + sup["4"]
+    assert sum(sup[n] for n in ("3", "4", "5", "6")) == 40
     assert model.backgroundTopics() == [0, 1]
     topics = sorted(t for n in model.dag() for t in model.nodeTopics(n))
     assert topics == list(range(2, 8))
     with pytest.raises(KeyError, match="99"):
-        model.nodeTopics(99)
+        model.nodeTopics("99")
     rows = model.describeNodes(3).collect()
     assert len(rows) == 8 and [r.node for r in rows[:2]] == [None, None]
-    assert {r.node for r in rows[2:]} == {1, 2, 3, 4, 5, 6}
+    assert {r.node for r in rows[2:]} == {"1", "2", "3", "4", "5", "6"}
     for r in rows[2:]:
         assert model.nodeTopics(r.node) == [r.topic]
-    assert dict(model.describeNodes().dtypes)["node"] == "bigint"
+    assert dict(model.describeNodes().dtypes)["node"] == "string"
 
 
 def test_requires_the_dag_and_the_labels_column(spark):
@@ -268,27 +275,26 @@ def test_requires_the_dag_and_the_labels_column(spark):
         _est(labelsCol="nope", maxIter=1).fit(df)
 
 
-def test_labels_element_type_must_match_the_dag_ids(spark):
+def test_labels_column_must_be_array_of_strings(spark):
+    """Node ids are strings (ADR 0053): an array<int> labels column is refused before
+    any Spark job, naming the cast."""
     from pyspark.sql import functions as F
     df = _df(spark, n=6)
-    as_str = df.withColumn("labels", F.col("labels").cast("array<string>"))
-    with pytest.raises(ValueError, match="array<string>.*every DAG node id is an int"):
-        _est(maxIter=1).fit(as_str)
-    with pytest.raises(ValueError, match="every DAG node id is a str"):
-        _est(maxIter=1, dag={str(k): (None if v is None else str(v))
-                             for k, v in PARENT.items()}).fit(df)
-    with pytest.raises(ValueError, match="array"):
-        _est(maxIter=1).fit(df.withColumn("labels", F.lit(3)))
+    as_int = df.withColumn("labels", F.col("labels").cast("array<int>"))
+    with pytest.raises(ValueError, match=r"array<string>.*cast\('array<string>'\)"):
+        _est(maxIter=1).fit(as_int)
+    with pytest.raises(ValueError, match="array<string>"):
+        _est(maxIter=1).fit(df.withColumn("labels", F.lit("3")))
 
 
 def test_unknown_labels_error_and_ignore(spark):
     from pyspark.sql import functions as F
     df = _df(spark, n=10).union(
-        _df(spark, n=2, seed=9).withColumn("labels", F.array(F.lit(99))))
+        _df(spark, n=2, seed=9).withColumn("labels", F.array(F.lit("99"))))
     with pytest.raises(ValueError, match="99"):
         _est(maxIter=1).fit(df)
     model = _est(maxIter=1, unknownLabels="ignore").fit(df)
-    assert set(model.dag()) == {1, 2, 3, 4, 5, 6}
+    assert set(model.dag()) == {"1", "2", "3", "4", "5", "6"}
     with pytest.raises(ValueError, match="unknownLabels"):
         _est(maxIter=1, unknownLabels="drop").fit(df)
 
@@ -312,32 +318,6 @@ def test_node_set_prune_splice_multi_parent_and_background(spark, capsys):
         model.nodeTopics("1")
     log = capsys.readouterr().out
     assert "nodes given 7 / kept 5 / pruned 1 / spliced 1" in log
-    assert dict(model.describeNodes().dtypes)["node"] == "string"
-
-
-def test_mixed_id_dag_with_int_labels(spark):
-    """A DAG with str AND int ids, fed by an array<int> column: only the int nodes
-    can be named from it (ids are matched exactly); the str nodes are reached
-    through closure. describeNodes renders the mixed ids as strings."""
-    rows = []
-    rng = np.random.default_rng(0)
-    for i in range(30):
-        lab = [[3], [2], [3, 3, 2], [1], []][i % 5]
-        idx = sorted(rng.choice(10, size=3, replace=False).tolist())
-        rows.append((Vectors.sparse(10, idx, [1.0] * 3), lab))
-    from pyspark.sql.types import ArrayType, IntegerType, StructField, StructType
-    from pyspark.ml.linalg import VectorUDT
-    df = spark.createDataFrame(rows, StructType([
-        StructField("features", VectorUDT()),
-        StructField("labels", ArrayType(IntegerType()))]))
-    model = _est(dag=MIXED, maxIter=2).fit(df)
-    # "c" and "rare" are reached by no document: pruned at minDocsPerNode=1 and
-    # landed on their kept parents; "B" admits exactly 2's documents: spliced.
-    assert model.dag() == {"A": [], 1: ["A"], 2: ["A"], 3: [2]}
-    assert model.prunedNodes() == {"c": [1], "rare": [3]}
-    assert model.splicedNodes() == ["B"]
-    nodes = {r.node for r in model.describeNodes().collect() if r.node is not None}
-    assert nodes == {"A", "1", "2", "3"}
     assert dict(model.describeNodes().dtypes)["node"] == "string"
 
 
@@ -407,7 +387,7 @@ def test_pipeline_fit(spark):
     df = _df(spark)
     pm = Pipeline(stages=[_est(maxIter=2)]).fit(df)
     model = pm.stages[0]
-    assert model.dag()[3] == [1]
+    assert model.dag()["3"] == ["1"]
     assert "topicDistribution" in pm.transform(df).columns
 
 
@@ -449,24 +429,24 @@ def test_optimize_alpha_learns_asymmetric(spark):
     rng = np.random.default_rng(0)
     rows = []
     for _ in range(120):
-        leaf = 1 if rng.random() < 0.75 else 2
+        leaf = "1" if rng.random() < 0.75 else "2"
         idx = sorted(rng.choice(V, size=5, replace=False).tolist())
         rows.append((Vectors.sparse(V, idx, [1.0] * len(idx)), [leaf]))
     for _ in range(60):
         idx = sorted(rng.choice(V, size=5, replace=False).tolist())
         rows.append((Vectors.sparse(V, idx, [1.0] * len(idx)), []))
     df = spark.createDataFrame(rows, ["features", "labels"])
-    model = _est(dag={1: None, 2: None}, maxIter=8, learningOffset=1.0,
+    model = _est(dag={"1": None, "2": None}, maxIter=8, learningOffset=1.0,
                  learningDecay=0.7, optimizeDocConcentration=True).fit(df)
     alpha = model.result.global_params["alpha"]
-    assert alpha[model.nodeTopics(1)[0]] > alpha[model.nodeTopics(2)[0]]
+    assert alpha[model.nodeTopics("1")[0]] > alpha[model.nodeTopics("2")[0]]
 
 
 def test_leaves_first_schedule_with_balanced_and_leaf_seeds(spark):
     df = _df(spark, n=60)
     est = _est(gateWarm=1, gateSeedLeaves=True, maxIter=4,
                vocabularies=[[f"w{i}" for i in range(30)]],
-               nodeTerms={1: ["w0"], 2: ["w1"]})
+               nodeTerms={"1": ["w0"], "2": ["w1"]})
     model = est.fit(df)
     gp = model.result.global_params
     assert "gate_iter" in gp and int(gp["gate_iter"]) == 4
@@ -518,13 +498,13 @@ def test_model_save_load_round_trip_keeps_the_node_set(tmp_path, spark):
     assert loaded._frontier_fn() == model._frontier_fn()
 
 
-def test_model_save_load_int_ids_and_transform(tmp_path, spark):
+def test_model_save_load_and_transform(tmp_path, spark):
     from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAModel
     df = _df(spark)
     model = _est().fit(df)
     model.save(str(tmp_path / "m"))
     loaded = DagGatedLDAModel.load(str(tmp_path / "m"))
-    assert loaded.dag() == model.dag() and 3 in loaded.dag()
+    assert loaded.dag() == model.dag() and "3" in loaded.dag()
     assert "topicDistribution" in loaded.transform(df).columns
 
 
@@ -626,7 +606,7 @@ def test_recommended_preset_and_overrides():
     est2 = DagGatedLDAEstimator.recommended(dag=PARENT, gateNBg=4, minDocsPerNode=3,
                                             labelsCol="nodes")
     assert est2.getGateNBg() == 4 and est2.getMinDocsPerNode() == 3
-    assert est2.getLabelsCol() == "nodes" and est2.getDag()[3] == [1]
+    assert est2.getLabelsCol() == "nodes" and est2.getDag()["3"] == ["1"]
     assert est2.getLearningOffset() == 64.0          # the rest of the preset kept
     est2.getDocConcentration().append(9.0)            # no shared mutable state
     assert RECOMMENDED_PARAMS["docConcentration"] == [0.5]
@@ -660,17 +640,17 @@ def test_resume_refuses_a_different_node_set(tmp_path, spark):
 
     # Fewer kept nodes: minDocsPerNode prunes leaves (~10 docs each).
     with pytest.raises(ValueError, match=r"0 kept node\(s\) added \(e\.g\. \[\]\), "
-                                         r"[1-6] removed \(e\.g\. \[3, 4"):
+                                         r"[1-6] removed \(e\.g\. \['3', '4'"):
         resume(minDocsPerNode=15)
     # More kept nodes: a new DAG node with documents of its own.
     df7 = df.union(spark.createDataFrame(
-        [(Vectors.sparse(30, [0, 1], [1.0, 1.0]), [7])] * 3, df.schema))
-    with pytest.raises(ValueError, match=r"1 kept node\(s\) added \(e\.g\. \[7\]\), "
+        [(Vectors.sparse(30, [0, 1], [1.0, 1.0]), ["7"])] * 3, df.schema))
+    with pytest.raises(ValueError, match=r"1 kept node\(s\) added \(e\.g\. \['7'\]\), "
                                          r"0 removed"):
-        resume(data=df7, dag={**PARENT, 7: 2})
+        resume(data=df7, dag={**PARENT, "7": "2"})
     # Same nodes, other parents (4 gains a second parent).
     with pytest.raises(ValueError, match="kept DAG differs"):
-        resume(dag={**PARENT, 4: [1, 2]})
+        resume(dag={**PARENT, "4": ["1", "2"]})
     # Same node set, other layout.
     with pytest.raises(ValueError, match="layout is gateNBg=2, gateTpn=1"):
         _est(maxIter=1, seed=1, resumeFrom=ck).setGateNBg(3).fit(df)
@@ -731,16 +711,16 @@ def test_describe_nodes_checks_each_domains_vocabulary_width(spark):
 
 def test_bare_string_term_lists_are_refused():
     from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
-    with pytest.raises(TypeError, match=r"nodeTerms\[3\] is a bare string"):
-        DagGatedLDAEstimator().setNodeTerms({1: ["t1"], 3: "t1"})
+    with pytest.raises(TypeError, match=r"nodeTerms\['3'\] is a bare string"):
+        DagGatedLDAEstimator().setNodeTerms({"1": ["t1"], "3": "t1"})
     with pytest.raises(TypeError, match=r"nodeTerms\['x'\]"):
         DagGatedLDAEstimator(nodeTerms={"x": b"t1"})
-    with pytest.raises(TypeError, match=r"gateSeedProfile\[1\] is a str"):
-        DagGatedLDAEstimator().setGateSeedProfile({1: "t1"})
-    with pytest.raises(TypeError, match=r"gateSeedProfile\[2\] is a list"):
-        DagGatedLDAEstimator().setGateSeedProfile({2: ["t1"]})
-    est = DagGatedLDAEstimator().setNodeTerms({3: ["t1"]})
-    assert est.getNodeTerms() == {3: ["t1"]}
+    with pytest.raises(TypeError, match=r"gateSeedProfile\['1'\] is a str"):
+        DagGatedLDAEstimator().setGateSeedProfile({"1": "t1"})
+    with pytest.raises(TypeError, match=r"gateSeedProfile\['2'\] is a list"):
+        DagGatedLDAEstimator().setGateSeedProfile({"2": ["t1"]})
+    est = DagGatedLDAEstimator().setNodeTerms({"3": ["t1"]})
+    assert est.getNodeTerms() == {"3": ["t1"]}
 
 
 def test_none_override_clears_a_param():
@@ -778,7 +758,7 @@ def test_local_engine_matches_the_spark_engine_in_full_batch(spark, gate_warm):
     la, lb = a.result.global_params["lambda"], b.result.global_params["lambda"]
     np.testing.assert_allclose(lb, la, rtol=1e-9, atol=1e-12)
     np.testing.assert_allclose(b.result.elbo_trace, a.result.elbo_trace, rtol=1e-9)
-    assert b.dag() == a.dag() and b.nodeTopics(3) == a.nodeTopics(3)
+    assert b.dag() == a.dag() and b.nodeTopics("3") == a.nodeTopics("3")
     assert b.getOrDefault("engine") == "local"
 
 

@@ -34,6 +34,11 @@ to ontology nodes, deciding which events attest a node (the label window, the st
 ## Requirements
 
 **R1. The DAG** is given once, in the user's node ids (any `str` or `int`), as any of:
+
+> **Amended 2026-11-23 (ADR 0053):** node ids are `str` only. Anything else is refused
+> with a hint to cast it; the labels column is `array<string>` (R2), and node-id output
+> columns are STRING. Term ids stay `str | int`. Decision 2 below is superseded.
+
 - a `dict` `{child: parent | [parents]}`;
 - a Spark DataFrame with columns `(child, parent)`, one row per edge (collected once
   on the driver: a label DAG is small);
@@ -247,7 +252,8 @@ coherence) and nothing is removed. So:
 1. **Defaults (R10):** MLlib-like defaults, plus a documented preset for the working
    configuration (`gateNBg` 200, `learningOffset` 64, `gateWarm` 2, balanced + leaf seeds).
 2. **Node ids:** mixed `str` and `int` accepted, kept as given (no normalization: `1`
-   and `"1"` are different nodes); outputs use the same values.
+   and `"1"` are different nodes); outputs use the same values. *Superseded
+   2026-11-23 by ADR 0053: node ids are strings.*
 3. **Where Mondo pruning lives:** in the estimator (option (b), 2026-11-02): R3's
    generic validate / support / prune / land / reduce / splice. `minDocsPerNode`
    defaults to 1; unknown labels are refused by default (`unknownLabels="ignore"` to

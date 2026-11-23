@@ -19,7 +19,6 @@ from pyspark.ml import Pipeline, PipelineModel  # noqa: E402
 from pyspark.ml.linalg import Vectors  # noqa: E402
 
 from test_mllib_dag_gated_lda import (  # noqa: E402
-    MIXED,
     PARENT,
     _df,
     _est,
@@ -27,8 +26,8 @@ from test_mllib_dag_gated_lda import (  # noqa: E402
     _str_est,
 )
 
-# A DAG where 1 and "1" are different nodes.
-TWIN = {1: None, "1": 1, 2: "1", "x": [1, 2]}
+# A DAG with a multi-parent node.
+TWIN = {"a": None, "b": "a", "c": "b", "x": ["a", "c"]}
 
 
 def _theta(df, col="topicDistribution"):
@@ -43,22 +42,25 @@ def _uri(tmp_path, name):
 # DagGatedLDAEstimator: Params only                                            #
 # --------------------------------------------------------------------------- #
 
-def test_estimator_round_trip_keeps_mixed_id_params(spark, tmp_path):
+def test_estimator_round_trip_keeps_structured_params(spark, tmp_path):
+    """The structured Params survive save / load; TERM ids keep their str / int type
+    (node ids are strings, ADR 0053)."""
     from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
     est = DagGatedLDAEstimator.recommended(
         dag=TWIN, minDocsPerNode=7, seed=3, featuresCols=["f0", "f1"],
         vocabularies=[["t0", "t1"], [1, "1", "t0"]],
-        nodeTerms={1: ["t1"], "1": [("f1", 1)], 2: [("f1", "1"), ("f0", "t0")]},
-        gateSeedProfile={"1": {("f1", "t0"): 2.0}, 1: {"t1": 0.5}})
+        nodeTerms={"a": ["t1"], "b": [("f1", 1)], "c": [("f1", "1"), ("f0", "t0")]},
+        gateSeedProfile={"b": {("f1", "t0"): 2.0}, "a": {"t1": 0.5}})
     est.write().save(_uri(tmp_path, "est"))
     back = DagGatedLDAEstimator.load(_uri(tmp_path, "est"))
     assert back.uid == est.uid
-    assert back.getDag() == est.getDag() == {1: [], "1": [1], 2: ["1"], "x": [1, 2]}
+    assert back.getDag() == est.getDag() == {"a": [], "b": ["a"], "c": ["b"],
+                                             "x": ["a", "c"]}
     assert back.getVocabularies() == [["t0", "t1"], [1, "1", "t0"]]
     assert back.getNodeTerms() == est.getNodeTerms()
-    assert set(back.getNodeTerms()) == {1, "1", 2}
-    assert back.getNodeTerms()["1"] == [("f1", 1)]
-    assert back.getGateSeedProfile() == {"1": {("f1", "t0"): 2.0}, 1: {"t1": 0.5}}
+    assert set(back.getNodeTerms()) == {"a", "b", "c"}
+    assert back.getNodeTerms()["b"] == [("f1", 1)]
+    assert back.getGateSeedProfile() == {"b": {("f1", "t0"): 2.0}, "a": {"t1": 0.5}}
     for p in est.params:
         assert back.isSet(p.name) == est.isSet(p), p.name
         if est.isDefined(p):
@@ -114,28 +116,6 @@ def test_model_round_trip_multi_domain(spark, tmp_path):
     a = model.describeNodes(3).orderBy("topic").collect()
     b = back.describeNodes(3).orderBy("topic").collect()
     assert a == b and a[-1].terms is not None
-    np.testing.assert_array_equal(_theta(back.transform(df)), _theta(model.transform(df)))
-
-
-def test_model_round_trip_mixed_int_ids(spark, tmp_path):
-    from pyspark.ml.linalg import VectorUDT
-    from pyspark.sql.types import ArrayType, IntegerType, StructField, StructType
-
-    from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAModel
-    rng = np.random.default_rng(0)
-    rows = []
-    for i in range(30):
-        idx = sorted(rng.choice(10, size=3, replace=False).tolist())
-        rows.append((Vectors.sparse(10, idx, [1.0] * 3), [[3], [2], [1], []][i % 4]))
-    df = spark.createDataFrame(rows, StructType([
-        StructField("features", VectorUDT()),
-        StructField("labels", ArrayType(IntegerType()))]))
-    model = _est(dag=MIXED, maxIter=2).fit(df)
-    model.save(_uri(tmp_path, "m"))
-    back = DagGatedLDAModel.load(_uri(tmp_path, "m"))
-    assert back.dag() == model.dag() and 1 in back.dag() and "1" not in back.dag()
-    assert back.getDag() == model.getDag()
-    assert back.nodeTopics(1) == model.nodeTopics(1)
     np.testing.assert_array_equal(_theta(back.transform(df)), _theta(model.transform(df)))
 
 
@@ -280,9 +260,9 @@ def _docs(spark):
         leaf = [3, 4, 5, 6][i % 4]
         w = list(rng.choice(words[leaf], size=4)) + list(rng.choice(list("xyz"), size=2))
         codes = [int(c) for c in rng.choice([10, 11, 12], size=2)]
-        rows.append((i, [str(t) for t in w], codes, [leaf]))
+        rows.append((i, [str(t) for t in w], codes, [str(leaf)]))
     return spark.createDataFrame(
-        rows, "doc_id long, words array<string>, codes array<int>, labels array<int>")
+        rows, "doc_id long, words array<string>, codes array<int>, labels array<string>")
 
 
 def _pipeline():
@@ -325,7 +305,7 @@ def test_pipeline_and_pipeline_model_round_trip(spark, tmp_path):
     assert PipelineModel.load(uri).stages[2].uid == pm.stages[2].uid
 
 
-PARENT_AS_GIVEN = {1: [], 2: [], 3: [1], 4: [1], 5: [2], 6: [2]}
+PARENT_AS_GIVEN = {"1": [], "2": [], "3": ["1"], "4": ["1"], "5": ["2"], "6": ["2"]}
 
 
 # --------------------------------------------------------------------------- #
@@ -358,8 +338,8 @@ def test_local_save_and_load_run_no_spark_job(spark, tmp_path):
     model = est.fit(df)
     fz = (DagGatedFeaturizer(docIdCol="id")
           .addArrayDomain("a", "terms").setLabelsInputCol("labs"))
-    fdf = spark.createDataFrame([(1, ["x", "y"], [1]), (2, ["y"], [])],
-                                "id int, terms array<string>, labs array<int>")
+    fdf = spark.createDataFrame([(1, ["x", "y"], ["1"]), (2, ["y"], [])],
+                                "id int, terms array<string>, labs array<string>")
     fmodel = fz.fit(fdf)
     for name, stage, cls in [("est", est, DagGatedLDAEstimator),
                              ("model", model, DagGatedLDAModel),

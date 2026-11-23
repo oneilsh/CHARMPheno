@@ -21,8 +21,8 @@ Inputs, per domain, are either
 
 Labels come from an array column on the documents (``setLabelsInputCol``) or a long
 table ``(doc_id, node)`` (``setLabelsTable``), collected per document. Node ids are
-kept exactly as given (their Spark type is preserved: ``1`` and ``"1"`` are never
-conflated by a cast). A document with no labels gets an EMPTY array (a background
+strings (ADR 0053): a label source of any other type is refused with a hint to cast
+it. A document with no labels gets an EMPTY array (a background
 document); a document absent from a domain gets an all-zero vector of that domain's
 width.
 
@@ -281,9 +281,12 @@ class _DagGatedFeaturizerParams(Params):
         if labels["kind"] == "array":
             col = F.col(labels["inputCol"])
             elem = docs.schema[labels["inputCol"]].dataType
-            if not isinstance(elem, ArrayType):
+            if not (isinstance(elem, ArrayType)
+                    and isinstance(elem.elementType, StringType)):
                 raise TypeError(f"labels column {labels['inputCol']!r} must be an "
-                                f"array column, got {elem.simpleString()}")
+                                f"array<string> column of node ids, got "
+                                f"{elem.simpleString()}; node ids are strings: cast "
+                                f"integer labels (.cast('array<string>'))")
             filtered = F.filter(col, lambda x: x.isNotNull())
             return out.withColumn(
                 lab_out, F.coalesce(filtered, F.array().cast(elem)))
@@ -297,6 +300,10 @@ class _DagGatedFeaturizerParams(Params):
                              f"(docIdCol), needed to join the labels table")
         tdoc = labels["docIdCol"] or doc_id
         node_type = table.schema[labels["nodeCol"]].dataType
+        if not isinstance(node_type, StringType):
+            raise TypeError(f"labels table column {labels['nodeCol']!r} must be a "
+                            f"string column of node ids, got {node_type.simpleString()}"
+                            f"; node ids are strings: cast it (.cast('string'))")
         agg = (table
                .where(F.col(labels["nodeCol"]).isNotNull())
                .groupBy(F.col(tdoc).alias(doc_id))

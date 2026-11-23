@@ -158,14 +158,18 @@ def test_multidomain_bundle_fits_through_the_gated_shim_and_round_trips(spark, t
     lambda over 3 domains, and the saved VIResult round-trips."""
     from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
     from spark_vi.io.export import save_result, load_result
+    from pyspark.sql import functions as F
     bundle = _three_domain_bundle(spark)
+    # this bundle carries int concept ids; the estimator's node ids are strings
+    # (ADR 0053), so the caller casts the DAG and the labels column
+    sdag = {str(n): [str(p) for p in ps] for n, ps in bundle.dag.items()}
+    train = bundle.train_df.withColumn("labels", F.col("labels").cast("array<string>"))
     est = DagGatedLDAEstimator(
-        dag=bundle.dag, labelsCol="labels",
+        dag=sdag, labelsCol="labels",
         featuresCols=["features_0", "features_1", "features_2"],
         gateNBg=2, gateTpn=1, maxIter=2, seed=0, subsamplingRate=1.0)
-    model = est.fit(bundle.train_df)
-    # the bundle's DAG and labels are the estimator's inputs as they are
-    assert set(model.dag()) <= set(bundle.dag)
+    model = est.fit(train)
+    assert set(model.dag()) <= set(sdag)
     lam = model.result.global_params["lambda"]
     assert isinstance(lam, dict) and set(lam) == {0, 1, 2}
     assert model.result.metadata["domains"] == [len(vm) for vm in bundle.vocab_maps]

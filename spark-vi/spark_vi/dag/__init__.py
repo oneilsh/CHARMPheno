@@ -4,7 +4,7 @@ the fit-time node-set learning.
 
 `ops` holds closure, descendants, depth, transitive reduction and the closure matrix
 over `{child: [parents]}` maps (exported here). `nodeset` turns a user's DAG (dict,
-pandas or Spark `(child, parent)`, ids kept as given) and labelled documents into the
+pandas or Spark `(child, parent)`, string ids: ADR 0053) and labelled documents into the
 learned node set: validation, support, prune, land, reduce, splice, engine ids and the
 per-document frontier (spec 2026-10-30, R1/R3/R4); it is the estimator's internal
 helper, imported from `spark_vi.dag.nodeset`. `layout.DagLayout` lays a DAG over dense

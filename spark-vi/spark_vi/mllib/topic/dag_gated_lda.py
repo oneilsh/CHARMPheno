@@ -7,12 +7,12 @@ logic lives in the engine; this shim learns the node set, marshals DataFrame col
 into ``GatedBOWDocument`` rows, builds the gate seeds, and wraps the trained
 ``VIResult`` as an MLlib-shaped Model.
 
-What the user supplies, in their OWN node ids (``str`` or ``int``, kept as given: ``1``
-and ``"1"`` are different nodes):
+What the user supplies, in their OWN node ids, which are strings (ADR 0053; integer
+ids are cast by the caller, ``str(id)``):
 
 - the DAG (``setDag``): a dict ``{child: parent | [parents]}``, a pandas or a Spark
   DataFrame ``(child, parent)``; parentless nodes hang from a synthetic root;
-- ``labelsCol``: an ``array<string>`` / ``array<int>`` column of the nodes each
+- ``labelsCol``: an ``array<string>`` column of the nodes each
   document attests (any nodes; ancestors and duplicates allowed; empty or null =
   a background document);
 - the features: ``featuresCol`` (one vector column) or ``featuresCols`` (one vector
@@ -107,9 +107,8 @@ def _row_to_gated_document(row, features_cols, domain_sizes, frontier_fn,
 
 
 # --------------------------------------------------------------------------------
-# JSON codecs for the structured Params. JSON keeps a number and a string apart, so
-# user ids round-trip with their type (1 stays 1, "1" stays "1"); every structure is
-# a list of pairs because JSON object keys are always strings.
+# JSON codecs for the structured Params. Every structure is a list of pairs (not an
+# object) so TERM ids, which may be str or int, round-trip with their type.
 # --------------------------------------------------------------------------------
 
 def _encode_dag(dag) -> str:
@@ -132,6 +131,27 @@ def _decode_dag(raw: str):
     return parse_dag(out)
 
 
+def _coerce_term(x, *, what="term"):
+    """A term id as given: `str` or `int` (terms are matched exactly against the
+    vocabularies, so `10` and `"10"` differ; node ids, by contrast, are strings
+    only). Numpy scalars are unwrapped; `bool` is refused (`True == 1`)."""
+    if isinstance(x, bool):
+        raise TypeError(f"{what} {x!r}: bool is not a valid term id (True == 1)")
+    if isinstance(x, (str, int)):
+        return x if type(x) in (str, int) else (str(x) if isinstance(x, str) else int(x))
+    if type(x).__module__ == "numpy":
+        import numpy as _np
+        if isinstance(x, _np.integer) and not isinstance(x, _np.bool_):
+            return int(x)
+    raise TypeError(f"{what} {x!r} has type {type(x).__name__}; term ids must be str "
+                    f"or int")
+
+
+def _term_sort_key(t):
+    """A total order over mixed str / int term ids: ints (numerically) before strs."""
+    return (0, t, "") if isinstance(t, int) else (1, 0, t)
+
+
 def _term_ref(t):
     """A term reference: a bare term id (`str` / `int`) or a qualified
     `(featureColumn, term)` pair (list or tuple), returned as a tuple."""
@@ -139,8 +159,8 @@ def _term_ref(t):
         if len(t) != 2 or not isinstance(t[0], str):
             raise TypeError(f"a qualified term must be a (featureColumn, term) pair; "
                             f"got {t!r}")
-        return (t[0], _coerce_id(t[1], what="term"))
-    return _coerce_id(t, what="term")
+        return (t[0], _coerce_term(t[1]))
+    return _coerce_term(t)
 
 
 def _ref_json(r):
@@ -148,56 +168,25 @@ def _ref_json(r):
 
 
 def _sort_refs(refs):
-    return sorted(refs, key=lambda r: ((1,) + (r[0],) + node_sort_key(r[1])
+    return sorted(refs, key=lambda r: ((1,) + (r[0],) + _term_sort_key(r[1])
                                        if isinstance(r, tuple)
-                                       else (0, "") + node_sort_key(r)))
+                                       else (0, "") + _term_sort_key(r)))
 
 
-def check_labels_column(dataset, labels_col, node_ids):
-    """Up front, before any Spark job: `labelsCol` exists, is an array of
-    strings or integers, and its element type is one the DAG's ids (`node_ids`) have
-    (ids are matched exactly, so an array<string> column against an all-int DAG
-    would match nothing). Shared with the readout heads (`DagHeadsEstimator`)."""
-    from pyspark.sql.types import (ArrayType, ByteType, IntegerType, LongType,
-                                   ShortType, StringType)
+def check_labels_column(dataset, labels_col):
+    """Up front, before any Spark job: `labelsCol` exists and is an
+    `array<string>` column (node ids are strings, ADR 0053). Shared with the readout
+    heads (`DagHeadsEstimator`)."""
+    from pyspark.sql.types import ArrayType, StringType
     if labels_col not in dataset.columns:
         raise ValueError(f"labelsCol={labels_col!r} is not a column of the input "
                          f"(columns: {dataset.columns})")
     dt = dataset.schema[labels_col].dataType
-    if not isinstance(dt, ArrayType):
-        raise ValueError(f"labelsCol={labels_col!r} must be an array<string> or "
-                         f"array<int> column of node ids; it is {dt.simpleString()}")
-    et = dt.elementType
-    has_int = any(isinstance(n, int) for n in node_ids)
-    has_str = any(isinstance(n, str) for n in node_ids)
-    if isinstance(et, StringType):
-        if not has_str:
-            raise ValueError(
-                f"labelsCol={labels_col!r} is array<string> but every DAG node id "
-                f"is an int; ids are matched exactly (1 and '1' are different "
-                f"nodes): cast the labels or give the DAG string ids")
-    elif isinstance(et, (IntegerType, LongType, ShortType, ByteType)):
-        if not has_int:
-            raise ValueError(
-                f"labelsCol={labels_col!r} is {dt.simpleString()} but every DAG "
-                f"node id is a str; ids are matched exactly (1 and '1' are "
-                f"different nodes): cast the labels or give the DAG int ids")
-    else:
-        raise ValueError(f"labelsCol={labels_col!r} must be array<string> or "
-                         f"array<int>; it is {dt.simpleString()}")
-
-
-def _node_column(ids):
-    """`(Spark type, cell)` for a column of user node ids (``describeNodes``,
-    ``nodeStatistics``): LONG when every id is an int, STRING when every one is a str,
-    and STRING with the ints written in decimal when they are mixed (there ``1`` and
-    ``"1"`` render alike; ``nodeTopics`` tells them apart)."""
-    from pyspark.sql.types import LongType, StringType
-    all_int = bool(ids) and all(isinstance(n, int) for n in ids)
-    all_str = all(isinstance(n, str) for n in ids)
-    if all_int or all_str:
-        return (LongType() if all_int else StringType()), (lambda n: n)
-    return StringType(), str
+    if not (isinstance(dt, ArrayType) and isinstance(dt.elementType, StringType)):
+        raise ValueError(
+            f"labelsCol={labels_col!r} must be an array<string> column of node ids; "
+            f"it is {dt.simpleString()}. Node ids are strings: cast integer labels, "
+            f"e.g. F.col({labels_col!r}).cast('array<string>')")
 
 
 class _DagGatedLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams):
@@ -315,9 +304,9 @@ class _DagGatedLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
     )
     labelsCol = Param(
         Params._dummy(), "labelsCol",
-        "array<string> or array<int> column of the DAG nodes each document attests "
-        "(any nodes: ancestors and duplicates allowed; empty or null = a background "
-        "document). The element type must match the DAG's ids. Default 'labels'.",
+        "array<string> column of the DAG nodes each document attests (any nodes: "
+        "ancestors and duplicates allowed; empty or null = a background document). "
+        "Default 'labels'.",
         typeConverter=TypeConverters.toString,
     )
     minDocsPerNode = Param(
@@ -441,7 +430,7 @@ class _DagGatedLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         """Set the label DAG: a dict ``{child: parent | [parents] | None}``, a pandas
         or Spark DataFrame with columns ``(child, parent)`` (a Spark frame is
         collected once: a label DAG is small), or the JSON this Param stores. It is
-        validated now (acyclic, ids ``str`` / ``int``)."""
+        validated now (acyclic, ids ``str``: cast integer ids with ``str()``)."""
         if isinstance(dag, str):
             return self._set(dagEdges=_encode_dag(_decode_dag(dag)))
         return self._set(dagEdges=_encode_dag(dag))
@@ -471,9 +460,9 @@ class _DagGatedLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
             vocabularies = json.loads(vocabularies)
         out = []
         for m, vocab in enumerate(vocabularies):
-            ids = [_coerce_id(t, what=f"term of vocabulary {m}") for t in vocab]
+            ids = [_coerce_term(t, what=f"term of vocabulary {m}") for t in vocab]
             if len(set(ids)) != len(ids):
-                dup = sorted({t for t in ids if ids.count(t) > 1}, key=node_sort_key)
+                dup = sorted({t for t in ids if ids.count(t) > 1}, key=_term_sort_key)
                 raise ValueError(f"vocabulary {m} repeats term(s) {dup[:10]}")
             out.append(ids)
         return self._set(vocabularies=json.dumps(out))
@@ -659,7 +648,7 @@ class _TermIndex:
     counted by the caller); a pair naming a column that is not a feature column
     raises.
 
-    Terms are matched EXACTLY as given, as node ids are (`10` and `"10"` differ).
+    Terms are matched EXACTLY as given (`10` and `"10"` differ).
     Vocabularies from a vectorizer (`CountVectorizer`, `DagGatedFeaturizer`) are
     STRINGS, so int term ids are passed as their strings there. To keep that from
     failing silently, a term that misses but whose other-typed twin (`str(t)` for an
@@ -750,7 +739,7 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator, DriverParamsWritable):
     Persistence: ``save`` / ``load`` (MLlib's Params metadata, written and read on
     the driver: ``spark_vi.mllib._common.DriverParamsWritable``) keep every Param, the structured ones (the DAG,
     vocabularies, nodeTerms, gateSeedProfile) as the JSON they are stored as, so
-    str / int ids survive; the ``setOnIteration`` callback is not persisted."""
+    str / int term ids survive; the ``setOnIteration`` callback is not persisted."""
 
     @classmethod
     def recommended(cls, **overrides) -> "DagGatedLDAEstimator":
@@ -1068,7 +1057,7 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator, DriverParamsWritable):
             raise ValueError(f"unknownLabels must be one of {UNKNOWN_LABEL_POLICIES}; "
                              f"got {policy!r}")
         labels_col = str(self.getOrDefault("labelsCol"))
-        check_labels_column(dataset, labels_col, parsed.nodes)
+        check_labels_column(dataset, labels_col)
         fcols, multi = self._feature_columns()
         sizes = self._domain_sizes(dataset, fcols)
         vocabs = self._checked_vocabularies(fcols, sizes)
@@ -1307,10 +1296,7 @@ class DagGatedLDAModel(_DagGatedLDAParams, _StagePersistence, Model):
         topic (background topics have a null node), top terms as in
         ``describeTopics``.
 
-        ``node`` is a LONG column when every kept node id is an int, a STRING column
-        when every one is a str, and a STRING column (ints written in decimal) when
-        the ids are mixed; there ``1`` and ``"1"`` render alike, so use ``nodeTopics``
-        to tell them apart.
+        ``node`` is a STRING column (node ids are strings).
 
         ``terms`` (``array<string>``, aligned with ``termIndices``) names each term
         from ``vocabularies``: the term id as a string with one feature column, and
@@ -1322,17 +1308,16 @@ class DagGatedLDAModel(_DagGatedLDAParams, _StagePersistence, Model):
         from pyspark.sql.types import (ArrayType, DoubleType, IntegerType, StringType,
                                        StructField, StructType)
         ns = self._ns()
-        node_type, as_cell = _node_column(ns.nodes)
         owner = {}
         for n in ns.nodes:
             for k in self.nodeTopics(n):
-                owner[k] = as_cell(n)
+                owner[k] = n
         names = self._term_names()
         rows = [(owner.get(k),) + r
                 + ((None,) if names is None else ([names[i] for i in r[1]],))
                 for k, r in enumerate(self._top_terms(maxTermsPerTopic))]
         schema = StructType([
-            StructField("node", node_type, True),
+            StructField("node", StringType(), True),
             StructField("topic", IntegerType(), False),
             StructField("termIndices", ArrayType(IntegerType(), False), False),
             StructField("termWeights", ArrayType(DoubleType(), False), False),
@@ -1385,12 +1370,10 @@ class DagGatedLDAModel(_DagGatedLDAParams, _StagePersistence, Model):
         decays to the prior, whatever it was seeded with."""
         from pyspark.sql import SparkSession
         from pyspark.sql.types import (BooleanType, DoubleType, IntegerType,
-                                       LongType, StructField, StructType)
-        ns = self._ns()
-        node_type, as_cell = _node_column(ns.nodes)
-        rows = [(as_cell(r[0]),) + r[1:] for r in self._node_stat_rows(flatThreshold)]
+                                       LongType, StringType, StructField, StructType)
+        rows = list(self._node_stat_rows(flatThreshold))
         schema = StructType([
-            StructField("node", node_type, False),
+            StructField("node", StringType(), False),
             StructField("depth", IntegerType(), False),
             StructField("support", LongType(), False),
             StructField("supportFraction", DoubleType(), True),

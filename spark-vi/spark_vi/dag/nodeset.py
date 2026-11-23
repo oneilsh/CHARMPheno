@@ -22,8 +22,8 @@ the estimator so it is testable without Spark and reusable by the heads:
    sustain (spec R14.2): the same landing and re-reduction as pruning, without
    assuming the kept set stays closed upward; recorded in `NodeSet.unsupported`.
 
-Node ids are `str` or `int`, kept exactly as given: `1` and `"1"` are different nodes
-(spec decision 2). Nothing here knows what a node means.
+Node ids are strings (ADR 0053): anything else is refused with a hint to cast it
+(`str(id)`). Nothing here knows what a node means.
 
 Engine-side structures (`DagLayout`, `frontier_from_coded`) stay private to the
 engine (decision 5); this module produces the `{engine child: [engine parents]}` map
@@ -50,8 +50,8 @@ from spark_vi.dag.ops import (ancestor_closure, nearest_kept_ancestors,
 class _Root:
     """The synthetic root every parentless node hangs from.
 
-    A private singleton, not a `str` or `int`, so it can never equal a user node id
-    (user ids are restricted to `str` / `int`). It pickles BY NAME (`__reduce__`
+    A private singleton, not a `str`, so it can never equal a user node id (user ids
+    are restricted to `str`). It pickles BY NAME (`__reduce__`
     returns the module-level name), so a `ParsedDag` or `NodeSet` shipped to an
     executor and back still holds the very same object and `is ROOT` keeps working.
     In engine ids it is always 0."""
@@ -77,41 +77,20 @@ ROOT = _Root()
 # --------------------------------------------------------------------------------
 
 def _coerce_id(x, *, what="node id"):
-    """A user node id as given, after unwrapping numpy scalars (np.int64(1) -> 1,
-    np.str_("a") -> "a": same value and hash, so this is NOT a normalization between
-    1 and "1"). `bool` is refused because `True == 1` would silently merge two
-    nodes in every dict; anything that is not `str` / `int` is refused by repr."""
-    if isinstance(x, bool):
-        raise TypeError(f"{what} {x!r}: bool is not a valid node id (True == 1)")
-    if isinstance(x, (str, int)):
-        return x
-    # numpy scalars without importing numpy at module scope.
-    t = type(x).__module__
-    if t == "numpy":
-        try:
-            import numpy as np
-        except ImportError:  # pragma: no cover
-            np = None
-        if np is not None:
-            if isinstance(x, np.bool_):
-                raise TypeError(f"{what} {x!r}: bool is not a valid node id")
-            if isinstance(x, np.integer):
-                return int(x)
-            if isinstance(x, np.str_):
-                return str(x)
-    raise TypeError(f"{what} {x!r} has type {type(x).__name__}; node ids must be "
-                    f"str or int")
+    """A user node id: a `str` (a numpy `str_` is unwrapped to a plain `str`, same
+    value and hash). Anything else is refused: node ids are strings (ADR 0053), so an
+    integer id must be cast by the caller (`str(id)`)."""
+    if isinstance(x, str):
+        return x if type(x) is str else str(x)
+    raise TypeError(f"{what} {x!r} has type {type(x).__name__}; node ids must be str "
+                    f"(cast integer ids with str())")
 
 
 def node_sort_key(x):
-    """A total, deterministic order over mixed `str` / `int` ids that never compares
-    a `str` with an `int`: every int before every str, ints numerically, strs
-    lexicographically. (`ROOT` sorts first.)"""
+    """The deterministic order of node ids: `ROOT` first, then the ids as strings."""
     if x is ROOT:
-        return (0, 0, "")
-    if isinstance(x, int):
-        return (1, x, "")
-    return (2, 0, x)
+        return (0, "")
+    return (1, x)
 
 
 def _sorted_ids(xs):
@@ -166,17 +145,9 @@ def _missing(v) -> bool:
 
 
 def _pandas_cell(v, *, what):
-    """A pandas cell as a node id. An int column with a missing value is upcast to
-    float64 by pandas (`[None, 1]` -> `[nan, 1.0]`), so an INTEGRAL float is read
-    back as the int pandas turned it from; a non-integral float is refused."""
+    """A pandas cell as a node id (a missing value -> None)."""
     if _missing(v):
         return None
-    if isinstance(v, float) or type(v).__name__.startswith("float"):
-        fv = float(v)
-        if fv.is_integer():
-            return int(fv)
-        raise TypeError(f"{what} {v!r} is a non-integral float; node ids must be "
-                        f"str or int")
     return _coerce_id(v, what=what)
 
 
@@ -277,14 +248,13 @@ def parse_dag(dag) -> ParsedDag:
     Accepts a `dict` `{child: parent | [parents] | None}`, a pandas DataFrame or a
     Spark DataFrame with columns `(child, parent)` (one row per edge; a missing
     parent marks a parentless node; the Spark frame is collected once on the
-    driver), or an already-parsed `ParsedDag`. Ids are `str` / `int` kept as given
-    (1 and "1" are different nodes). Self-loops and duplicate edges are dropped and
+    driver), or an already-parsed `ParsedDag`. Ids are strings (ADR 0053); any other
+    type is refused with a hint to cast it. Self-loops and duplicate edges are dropped and
     counted; a node that appears only as a parent is a node; every parentless node
     hangs from `ROOT`. A cycle is refused with a `ValueError` naming its nodes."""
     if isinstance(dag, ParsedDag):
         return dag
     edges, isolated = _edges_from_input(dag)
-    # `==` never equates a str with an int, so 1 -> "1" is an edge, not a loop.
     n_self = sum(1 for c, p in edges if c == p)
     raw = [(c, p) for c, p in edges if c != p]
     uniq = set(raw)
@@ -330,18 +300,16 @@ def _iter_labels(labels):
 
 
 def _msg_key(u):
-    if isinstance(u, (str, int)) and not isinstance(u, bool):
-        return node_sort_key(u)
-    return (3, 0, repr(u))
+    """Order for naming unknown labels, which may be of any type."""
+    return (0, u) if isinstance(u, str) else (1, repr(u))
 
 
 def _unknown_error(unknown, n_unknown):
     shown = ", ".join(repr(u) for u in sorted(unknown, key=_msg_key))
     more = "" if n_unknown <= len(unknown) else f" (and {n_unknown - len(unknown)} more)"
     return ValueError(
-        f"{n_unknown} label(s) are not nodes of the DAG: {shown}{more}. Ids are "
-        f"matched exactly (1 and '1' are different nodes); set "
-        f"unknown_labels='ignore' to drop them.")
+        f"{n_unknown} label(s) are not nodes of the DAG: {shown}{more}. Node ids "
+        f"are strings matched exactly; set unknown_labels='ignore' to drop them.")
 
 
 @dataclass(frozen=True)
@@ -582,8 +550,7 @@ class NodeSet:
         return tuple(self.user_ids[e] for e in sorted(eng))
 
     def to_dict(self) -> dict:
-        """A JSON-ready form (lists only, user ids as JSON numbers / strings, so `1`
-        and `"1"` survive a round trip). `ROOT` never appears: a top-level node's
+        """A JSON-ready form (lists only, user ids as JSON strings). `ROOT` never appears: a top-level node's
         parents are `[]`. `from_dict` inverts it exactly."""
         def pairs(d):
             return [[n, list(v)] for n, v in d.items()]
@@ -728,10 +695,9 @@ def learn_node_set(dag, support, *, n_docs=None, min_docs_per_node=1,
     if min_docs < 0:
         raise ValueError(f"min_docs_per_node must be >= 0; got {min_docs_per_node!r}")
     sup = {n: int(support.get(n, 0)) for n in dag.nodes}
-    # The graph work runs on POSITIONS in `dag.nodes` (ints), not on user ids: the
-    # `ops` helpers sort node lists, and a mixed str/int id set cannot be sorted
-    # natively. Positions follow `node_sort_key`, so sorting them IS the type-aware
-    # order. The root is implicit there (a top-level node has no parents).
+    # The graph work runs on POSITIONS in `dag.nodes` (ints), not on user ids, with
+    # the root implicit (a top-level node has no parents). Positions follow
+    # `node_sort_key`, so sorting them is the id order.
     nodes = dag.nodes
     pos = {n: i for i, n in enumerate(nodes)}
     P = {pos[c]: [pos[p] for p in ps if p is not ROOT] for c, ps in dag.parents.items()}
@@ -822,8 +788,7 @@ def drop_nodes(ns: NodeSet, nodes) -> NodeSet:
     the two blocks were trained on different data and both are kept.
 
     Graph work runs on the OLD ENGINE IDS (ints), as `learn_node_set` runs on
-    positions: the `ops` helpers sort node lists, and mixed str / int ids cannot be
-    sorted natively. A `nodes` entry that is not a kept node raises `KeyError`; an
+    positions. A `nodes` entry that is not a kept node raises `KeyError`; an
     empty `nodes` returns `ns` itself."""
     drop = set()
     for n in nodes:

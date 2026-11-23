@@ -1,3 +1,5 @@
+import pytest
+
 from charmpheno.omop.condition_dag import build_condition_dag
 
 DIAMOND_EDGES = [(100, 101), (100, 102), (101, 103), (102, 103), (103, 104)]
@@ -22,16 +24,24 @@ def test_build_orphan_attaches_to_anchor():
     assert 201 not in dag.orphans                        # a genuine edge child is not an orphan
 
 
+def _str_dag(ud):
+    """The int-concept-id DAG with its ids cast to str, as the estimator takes it."""
+    return {str(n): [str(p) for p in ps] for n, ps in ud.items()}
+
+
 def test_user_dag_is_the_estimators_contract():
     """`{node: [parents]}` over every node, int concept ids, the real anchor a
-    top-level node; it parses as the estimator's DAG (spec 2026-10-30 R1)."""
+    top-level node; with its ids cast to str (the estimator's node ids are strings,
+    ADR 0053) it parses as the estimator's DAG (spec 2026-10-30 R1)."""
     from spark_vi.dag.nodeset import ROOT, parse_dag
     dag = build_condition_dag(DIAMOND_EDGES, ANCHOR, DIAMOND_NODES)
     ud = dag.user_dag()
     assert ud == {100: [], 101: [100], 102: [100], 103: [101, 102], 104: [103]}
-    parsed = parse_dag(ud)
-    assert parsed.parents[100] == (ROOT,)
-    assert parsed.parents[103] == (101, 102)
+    with pytest.raises(TypeError, match="cast integer ids"):
+        parse_dag(ud)
+    parsed = parse_dag(_str_dag(ud))
+    assert parsed.parents["100"] == (ROOT,)
+    assert parsed.parents["103"] == ("101", "102")
 
 
 def test_user_dag_drops_a_synthetic_forest_root():
@@ -58,6 +68,6 @@ def test_real_diabetes_subtree_structure():
     assert multiparent == 12                             # real type x status cross-axes
     # the estimator's node-set learning takes it as is: one document per node
     # keeps every node (minDocsPerNode=1), the anchor included (a top-level node)
-    ud = dag.user_dag()
+    ud = _str_dag(dag.user_dag())
     ns = fit_node_set(ud, [[n] for n in ud], min_docs_per_node=1)
     assert len(ns.nodes) + len(ns.spliced) == 127

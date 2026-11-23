@@ -42,6 +42,8 @@ chains lived in `charmpheno.mondo` although it is generic DAG work. Spec
 
 ## Consequences
 
+- Superseded in part by ADR 0053 (2026-11-23): node ids are strings only, no longer
+  "str or int, kept as given" (decision 1).
 - Supersedes the Param surface named in ADR 0050 §3 (`gateParent`, `frontierCol`,
   `domainBounds`, `gateSeedOwnCodes`, `gateSeedDomain`) and ADR 0049's
   `gateSeedOwnCodes` (now `nodeTerms`); their designs otherwise stand.
