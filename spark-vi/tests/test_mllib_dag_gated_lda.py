@@ -404,6 +404,27 @@ def test_topic_concentration(spark):
     np.testing.assert_allclose(float(m.result.global_params["eta"]), 0.3)
     with pytest.raises(ValueError, match="topicConcentration"):
         _est(maxIter=1, topicConcentration=0.0).fit(df)
+    m = _est(maxIter=1, topicConcentration=[0.3]).fit(df)     # a 1-list = scalar
+    assert np.ndim(m.result.global_params["eta"]) == 0
+    with pytest.raises(ValueError, match="one per feature column"):
+        _est(maxIter=1, topicConcentration=[0.3, 0.2]).fit(df)  # one domain only
+
+
+def test_per_domain_topic_concentration(spark):
+    """One eta per feature column: carried as a (domains,) global param, each
+    domain's lambda intercept and ELBO prior its own; recorded in the metadata."""
+    df = _str_dag_df(spark)
+    m = _str_est(maxIter=2, topicConcentration=[0.05, 0.4]).fit(df)
+    gp = m.result.global_params
+    np.testing.assert_allclose(gp["eta"], [0.05, 0.4])
+    assert m.result.metadata["topic_concentration"] == [0.05, 0.4]
+    assert np.isfinite(m.result.elbo_trace).all()
+    one = _str_est(maxIter=2, topicConcentration=0.05).fit(df)
+    assert one.result.metadata["topic_concentration"] == [0.05]
+    assert not np.allclose(one.result.global_params["lambda"][1],
+                           m.result.global_params["lambda"][1])
+    with pytest.raises(ValueError, match="one per feature column"):
+        _str_est(maxIter=1, topicConcentration=[0.1, 0.2, 0.3]).fit(df)
 
 
 def test_pipeline_fit(spark):
@@ -678,6 +699,9 @@ def test_resume_refuses_a_different_node_set(tmp_path, spark):
     # Same node set, other layout.
     with pytest.raises(ValueError, match="layout is gateNBg=2, gateTpn=1"):
         _est(maxIter=1, seed=1, resumeFrom=ck).setGateNBg(3).fit(df)
+    # Same node set and layout, another eta (the checkpoint's was the unset 1/K).
+    with pytest.raises(ValueError, match="fitted with topicConcentration"):
+        resume(topicConcentration=0.3)
     # The matching node set resumes.
     assert resume().result.n_iterations == 2
 

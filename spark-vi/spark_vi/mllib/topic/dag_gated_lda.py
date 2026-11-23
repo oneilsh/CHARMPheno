@@ -93,6 +93,7 @@ _LOG = "[dag-gated-lda]"
 # Where the fit's E-step runs (the `engine` Param).
 FIT_ENGINES = ("spark", "local")
 _NODE_SET_KEY = "dag_node_set"
+_ETA_KEY = "topic_concentration"    # the fit's resolved eta (one value, or per domain)
 
 
 def _row_to_gated_document(row, features_cols, domain_sizes, frontier_fn,
@@ -111,6 +112,13 @@ def _row_to_gated_document(row, features_cols, domain_sizes, frontier_fn,
 # object), sorted, so the stored JSON is deterministic. Node and term ids are
 # strings (ADR 0053).
 # --------------------------------------------------------------------------------
+
+def _to_float_list(v):
+    """A scalar or a list of numbers -> a list of floats (topicConcentration)."""
+    if isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, bool):
+        return [float(v)]
+    return TypeConverters.toListFloat(v)
+
 
 def _encode_dag(dag) -> str:
     """Any accepted DAG input (R1) -> validated -> a JSON edge list
@@ -254,8 +262,13 @@ class _DagGatedLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
     topicConcentration = Param(
         Params._dummy(), "topicConcentration",
         "Dirichlet concentration eta on each topic's term distribution (the prior on "
-        "lambda; one scalar for every domain), > 0. Default unset = 1/K (MLlib LDA).",
-        typeConverter=TypeConverters.toFloat,
+        "lambda), > 0: a scalar (or a 1-list) for every domain, or a list with one "
+        "value per feature column (featuresCols) for a per-domain eta (e.g. 1/V_m). "
+        "Default unset = 1/K (MLlib LDA). Note the coupling: K is derived from the "
+        "kept node set, so the unset eta moves whenever the node set does "
+        "(minDocsPerNode, more data), and one value serves domains of different "
+        "vocabulary sizes; set it explicitly to decouple.",
+        typeConverter=_to_float_list,
     )
     optimizeDocConcentration = Param(
         Params._dummy(), "optimizeDocConcentration",
@@ -746,7 +759,7 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator, DriverParamsWritable):
         learningDecay: float = 0.51,
         subsamplingRate: float = 0.05,
         docConcentration: list[float] | None = None,
-        topicConcentration: float | None = None,
+        topicConcentration: float | list[float] | None = None,
         optimizeDocConcentration: bool = False,
         gammaShape: float = 100.0,
         caviMaxIter: int = 100,
@@ -975,7 +988,24 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator, DriverParamsWritable):
 
     # ---- resume -------------------------------------------------------------------
 
-    def _check_resume_node_set(self, ns: NodeSet, n_bg: int, tpn: int) -> None:
+    def _resolve_eta(self, K: int, n_domains: int):
+        """topicConcentration -> the engine's eta: unset -> 1/K (a float); one value
+        -> that float; one value per domain (n_domains > 1) -> a list."""
+        if not self.isSet("topicConcentration"):
+            return 1.0 / K
+        vals = [float(x) for x in self.getOrDefault("topicConcentration")]
+        if not vals or any(not v > 0 for v in vals):
+            raise ValueError(f"topicConcentration must be > 0; got {vals}")
+        if len(vals) == 1:
+            return vals[0]
+        if len(vals) != n_domains or n_domains < 2:
+            raise ValueError(
+                f"topicConcentration has {len(vals)} values; give one, or one per "
+                f"feature column ({n_domains} here)")
+        return vals
+
+    def _check_resume_node_set(self, ns: NodeSet, n_bg: int, tpn: int,
+                               eta=None) -> None:
         """With ``resumeFrom`` set: refuse, before any training, a checkpoint whose
         node set is not the one just learned from the data.
 
@@ -1025,6 +1055,16 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator, DriverParamsWritable):
                 f"{where}: the checkpoint's layout is gateNBg={lay_old[0]}, "
                 f"gateTpn={lay_old[1]}; this estimator has gateNBg={n_bg}, "
                 f"gateTpn={tpn}. Set them to the checkpoint's to resume.")
+        saved_eta = md.get(_ETA_KEY)
+        if saved_eta is not None and eta is not None:
+            new_eta = list(eta) if isinstance(eta, list) else [float(eta)]
+            if len(saved_eta) != len(new_eta) \
+                    or not np.allclose(saved_eta, new_eta, rtol=1e-12, atol=0.0):
+                raise ValueError(
+                    f"{where}: the checkpoint was fitted with topicConcentration "
+                    f"(eta) {saved_eta}; this estimator resolves it to {new_eta}. "
+                    f"A resumed fit keeps the checkpoint's eta: set "
+                    f"topicConcentration to it to resume.")
 
     # ---- fit --------------------------------------------------------------------
 
@@ -1080,16 +1120,11 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator, DriverParamsWritable):
               f"(minDocsPerNode={ns.min_docs_per_node})", flush=True)
 
         n_bg, tpn = int(self.getOrDefault("gateNBg")), int(self.getOrDefault("gateTpn"))
-        self._check_resume_node_set(ns, n_bg, tpn)
         lay = DagLayout(ns.engine_parents, n_bg=n_bg, tpn=tpn)
         doc_conc = (self.getOrDefault("docConcentration")
                     if self.isSet("docConcentration") else None)
-        if self.isSet("topicConcentration"):
-            eta = float(self.getOrDefault("topicConcentration"))
-            if not eta > 0:
-                raise ValueError(f"topicConcentration must be > 0; got {eta}")
-        else:
-            eta = 1.0 / lay.K
+        eta = self._resolve_eta(lay.K, len(fcols) if multi else 1)
+        self._check_resume_node_set(ns, n_bg, tpn, eta=eta)
         seed = self.getOrDefault("seed") if self.isSet("seed") else None
         engine = DagGatedOnlineLDA(
             lay, vocab_size,
@@ -1099,7 +1134,9 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator, DriverParamsWritable):
             cavi_max_iter=self.getOrDefault("caviMaxIter"),
             cavi_tol=self.getOrDefault("caviTol"), random_seed=seed)
         engine.extra_metadata = {_NODE_SET_KEY: {**ns.to_dict(), "n_bg": n_bg,
-                                                 "tpn": tpn}}
+                                                 "tpn": tpn},
+                                 _ETA_KEY: (list(eta) if isinstance(eta, list)
+                                            else [float(eta)])}
         mbf = float(self.getOrDefault("subsamplingRate"))
         config = VIConfig(
             max_iterations=self.getOrDefault("maxIter"),

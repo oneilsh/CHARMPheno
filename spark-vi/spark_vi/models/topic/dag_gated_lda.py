@@ -23,7 +23,9 @@ WHAT THIS CLASS CHANGES in OnlineLDA:
 Multi-domain (MixEHR-style; Li, Nair, Lu et al. 2020, Nat. Commun.), keyed on the `domains`
 constructor arg (a sequence of per-domain vocab sizes summing to vocab_size): global_params
 ["lambda"] becomes a per-domain dict {m: (K, V_m)} instead of one (K, V) array, each block
-row-normalized on its own under the one scalar eta prior. The gated CAVI never changes —
+row-normalized on its own under the eta prior: one scalar for every domain, or one value
+per domain (`eta=[eta_0, eta_1, ...]`, e.g. 1/V_m, since eta is a per-term pseudo-count
+whose natural scale is the domain's vocabulary). The gated CAVI never changes —
 it sees one concatenated (K, V) expElogbeta and per-doc concatenated indices — so the
 sufficient statistic stays one concatenated (K, V) matrix.
 
@@ -89,7 +91,27 @@ class DagGatedOnlineLDA(OnlineLDA):
         # Materialize `domains` once, up front: len() below must not consume a
         # one-shot iterable that `self.domains = list(domains)` then re-reads.
         domains = None if domains is None else list(domains)
-        super().__init__(K=lay.K, vocab_size=vocab_size, optimize_alpha=False, **kw)
+        # eta: a scalar (one prior for every domain; OnlineLDA's contract) or, with
+        # `domains`, one value per domain (eta_m on domain m's Dirichlet). The
+        # parent validates a scalar; a per-domain eta is validated here and the
+        # parent is handed its first entry so `self.eta` stays a float.
+        eta_in = kw.pop("eta", None)
+        eta_arr = None if eta_in is None else np.asarray(eta_in, dtype=np.float64)
+        self.eta_domains = None
+        if eta_arr is not None and eta_arr.ndim == 1:
+            if domains is None or eta_arr.shape[0] != len(domains):
+                raise ValueError(
+                    f"a per-domain eta needs one value per domain: got "
+                    f"{eta_arr.shape[0]} for "
+                    f"{'no domains' if domains is None else len(domains)}")
+            if (eta_arr <= 0).any():
+                raise ValueError(f"every eta must be > 0, got {eta_arr.tolist()}")
+            self.eta_domains = eta_arr.copy()
+            eta_in = float(eta_arr[0])
+        elif eta_arr is not None:
+            eta_in = float(eta_arr)
+        super().__init__(K=lay.K, vocab_size=vocab_size, optimize_alpha=False,
+                         eta=eta_in, **kw)
         self.lay = lay
         # Multi-domain (MixEHR-style, Li, Nair, Lu et al. 2020, Nat. Commun.) storage:
         # `domains` is a sequence of per-domain vocab sizes [V_0, V_1, ...] that MUST
@@ -97,7 +119,8 @@ class DagGatedOnlineLDA(OnlineLDA):
         # array path. When set, global_params["lambda"] becomes a literal per-domain
         # dict {m: (K, V_m)}; `_domain_bounds` are the cumulative offsets
         # [0, V_0, V_0+V_1, ...] used to assemble/split a concatenated (K, V) view for
-        # the shared gated CAVI. One scalar eta is the prior on every domain's block.
+        # the shared gated CAVI. eta is one scalar for every domain's block, or one
+        # value per domain (`eta_domains`, see above).
         if domains is not None:
             if sum(domains) != vocab_size:
                 raise ValueError(
@@ -247,12 +270,23 @@ class DagGatedOnlineLDA(OnlineLDA):
             lam_m[idx[has]] = new[has]
             return lam_m
 
-        eta = float(self.eta)
         if self.domains is None:
-            return one(lam, seed, eta)
+            return one(lam, seed, float(self.eta))
         b = self._domain_bounds
-        return {m: one(lam[m], None if seed is None else seed[:, b[m]:b[m + 1]], eta)
+        return {m: one(lam[m], None if seed is None else seed[:, b[m]:b[m + 1]],
+                       self._eta_of(m))
                 for m in range(len(self.domains))}
+
+    def _eta_of(self, m: int) -> float:
+        """Domain m's eta: its own with a per-domain eta, else the one scalar."""
+        return (float(self.eta) if self.eta_domains is None
+                else float(self.eta_domains[m]))
+
+    def _eta_global(self) -> np.ndarray:
+        """The `eta` global param: a 0-d array (one scalar; combine_stats type
+        uniformity, OnlineLDA's form) or a (domains,) array (per-domain)."""
+        return (np.array(self.eta) if self.eta_domains is None
+                else self.eta_domains.copy())
 
     def _initialize_global_base(self, data_summary: Any | None) -> dict[str, np.ndarray]:
         """Random Gamma lambda: the inherited OnlineLDA draw, or one block per domain.
@@ -268,7 +302,7 @@ class DagGatedOnlineLDA(OnlineLDA):
         return {
             "lambda": self._random_domain_lambda(),
             "alpha": self.alpha.copy(),         # defensive copy — runner mutates
-            "eta": np.array(self.eta),          # 0-d ndarray for combine_stats type-uniformity
+            "eta": self._eta_global(),          # 0-d (scalar) or (domains,) ndarray
         }
 
     def _random_domain_lambda(self) -> dict[int, np.ndarray]:
@@ -498,7 +532,11 @@ class DagGatedOnlineLDA(OnlineLDA):
             new_lam = (1.0 - learning_rate) * lam + learning_rate * target_lam
         else:
             expElogbeta = self._assemble_expElogbeta(lam)
-            target = eta + expElogbeta * stats
+            eta_arr = np.asarray(eta, dtype=np.float64)
+            if eta_arr.ndim == 1:
+                # Per-domain eta: each domain's columns get their own intercept.
+                eta_arr = np.repeat(eta_arr, self.domains)[None, :]
+            target = eta_arr + expElogbeta * stats
             target_dict = self._split_to_domains(target)
             new_lam = {
                 m: (1.0 - learning_rate) * lam[m] + learning_rate * target_dict[m]
@@ -614,7 +652,7 @@ class DagGatedOnlineLDA(OnlineLDA):
         lam = global_params["lambda"]
         global_kl = 0.0
         for m, v_m in enumerate(self.domains):
-            prior = np.full(int(v_m), float(self.eta), dtype=np.float64)
+            prior = np.full(int(v_m), self._eta_of(m), dtype=np.float64)
             for k in range(self.K):
                 global_kl += _dirichlet_kl(lam[m][k], prior)
         return float(
@@ -665,9 +703,18 @@ class DagGatedOnlineLDA(OnlineLDA):
             lam_parts.append(f"Σλ_k[m{m}: min={rs.min():.3g} max={rs.max():.3g}]")
         return (
             f"α[min={alpha.min():.4g} max={alpha.max():.4g} mean={alpha.mean():.4g}], "
-            f"η={float(self.eta):.4g}, "
+            + (f"η={float(self.eta):.4g}, " if self.eta_domains is None else
+               "η=[" + ", ".join(f"{e:.4g}" for e in self.eta_domains) + "], ")
             + " ".join(lam_parts)
         )
+
+    def iteration_diagnostics(self, global_params):
+        """OnlineLDA's (alpha, eta) trace; eta is a list with a per-domain eta."""
+        out = super().iteration_diagnostics(global_params) \
+            if np.ndim(global_params["eta"]) == 0 else {
+                "alpha": np.asarray(global_params["alpha"]),
+                "eta": np.asarray(global_params["eta"], dtype=np.float64)}
+        return out
 
     def get_metadata(self) -> dict[str, Any]:
         """Shape constants plus, in multi-domain mode, `domains`: the per-domain

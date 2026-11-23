@@ -679,7 +679,9 @@ def build_dag_gated_args(
     sets is passed as a flag and overrides it, and an optional knob the front
     matter does not set (gate_warm, gate_seed_mode, gate_seed_leaves, gate_open_seed,
     doc_concentration, optimize_doc_concentration, gamma_shape) is left to the
-    preset. The node-set threshold is `min_docs_per_node` (counted on training
+    preset. `topic_concentration` (a number, a list with one per domain, or
+    `inv_vocab` for eta_m = 1 / V_m) is emitted only when set; unset keeps the
+    estimator's 1/K. The node-set threshold is `min_docs_per_node` (counted on training
     documents by the estimator); a front matter that predates it gives
     `min_positives`, the Mondo build's old powering threshold, whose number is
     passed on (spec 2026-10-30: the threshold moved into the estimator).
@@ -739,6 +741,12 @@ def build_dag_gated_args(
         args.extend(["--gamma-shape", str(effective["gamma_shape"])])
     if effective.get("doc_concentration") is not None:
         args.extend(["--doc-concentration", str(effective["doc_concentration"])])
+    tc = effective.get("topic_concentration")
+    if tc is not None:
+        # A number, a list (one per domain), or "inv_vocab" (eta_m = 1 / V_m).
+        args.extend(["--topic-concentration",
+                     ",".join(str(x) for x in tc) if isinstance(tc, (list, tuple))
+                     else str(tc)])
     if effective.get("dag_source"):
         args.extend(["--dag-source", str(effective["dag_source"])])
     if effective.get("mondo_branch"):

@@ -40,8 +40,9 @@ def test_driver_flags_reach_the_estimator():
         optimize_doc_concentration=None, doc_concentration=None, seed=3,
         min_docs_per_node=None,
         _dag=dag, _labels_col="gate_labels", _domain_cols=["features_0"],
-        _vocabularies=[[101, 102, 103]],
-        _node_terms={"MONDO:0000002": [("features_0", 103)]})
+        _vocabularies=[["101", "102", "103"]],
+        _node_terms={"MONDO:0000002": [("features_0", "103")]},
+        _topic_concentration=[0.25])
     est = gpc._build_estimator(args)
     g = est.getOrDefault
     assert type(est).__name__ == "DagGatedLDAEstimator"
@@ -59,13 +60,38 @@ def test_driver_flags_reach_the_estimator():
     assert g("labelsCol") == "gate_labels"
     assert g("featuresCols") == ["features_0"]
     assert est.getDag() == dag
-    assert est.getVocabularies() == [[101, 102, 103]]
-    assert est.getNodeTerms() == {"MONDO:0000002": [("features_0", 103)]}
+    assert est.getVocabularies() == [["101", "102", "103"]]
+    assert est.getNodeTerms() == {"MONDO:0000002": [("features_0", "103")]}
+    assert g("topicConcentration") == [0.25]
 
 
 def test_the_corpus_helpers_build_vocabularies_and_node_terms():
     import dag_gated_fit as gpc
-    assert gpc.vocabularies_of([{101: 1, 100: 0}, {7: 0}]) == [[100, 101], [7]]
+    assert gpc.vocabularies_of([{101: 1, 100: 0}, {7: 0}]) == [["100", "101"], ["7"]]
     nt = gpc.node_terms_of([(101, "M:1"), (102, "M:1"), (999, "M:2")],
                            {101: 0, 102: 1})
-    assert nt == {"M:1": [("features_0", 101), ("features_0", 102)]}
+    assert nt == {"M:1": [("features_0", "101"), ("features_0", "102")]}
+
+
+def test_topic_concentration_resolution():
+    """--topic-concentration: unset, one value, one per domain, or inv_vocab."""
+    import pytest
+    import dag_gated_fit as gpc
+    assert gpc.topic_concentration_of(None, [4, 5]) is None
+    assert gpc.topic_concentration_of("0.01", [4, 5]) == [0.01]
+    assert gpc.topic_concentration_of("0.01,0.2", [4, 5]) == [0.01, 0.2]
+    assert gpc.topic_concentration_of("inv_vocab", [4, 5]) == [0.25, 0.2]
+    for bad in ("0", "0.1,0.2,0.3", "-1"):
+        with pytest.raises(ValueError):
+            gpc.topic_concentration_of(bad, [4, 5])
+
+
+def test_topic_concentration_front_matter_is_emitted_only_when_set(monkeypatch):
+    monkeypatch.setenv("WORKSPACE_CDR", "cdr")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
+    plain = rex.build_dag_gated_args(dict(BASE), "/tmp/out")
+    assert "--topic-concentration" not in plain
+    for fm, want in (("inv_vocab", "inv_vocab"), (0.01, "0.01"),
+                     ([0.01, 0.2], "0.01,0.2")):
+        a = rex.build_dag_gated_args(dict(BASE, topic_concentration=fm), "/tmp/out")
+        assert a[a.index("--topic-concentration") + 1] == want

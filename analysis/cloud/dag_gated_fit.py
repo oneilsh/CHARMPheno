@@ -1014,6 +1014,35 @@ _FLAG_TO_PARAM = (
 DEFAULT_MIN_DOCS_PER_NODE = 100
 
 
+TOPIC_CONCENTRATION_INV_VOCAB = "inv_vocab"
+
+
+def topic_concentration_of(spec, domain_sizes):
+    """`--topic-concentration` -> the estimator's `topicConcentration` list, or None
+    (unset: the estimator's 1/K default).
+
+    `spec` is None, a number, a comma list (one value, or one per domain), or
+    `inv_vocab`: eta_m = 1 / V_m, each domain's own vocabulary size. Why 1/V_m: eta
+    is a pseudo-count per (topic, term), so its scale is set by the vocabulary, not
+    by K (which moves with the kept node set), and the domains differ in size."""
+    if spec is None or str(spec).strip() == "":
+        return None
+    sizes = [int(v) for v in domain_sizes]
+    if str(spec).strip().lower() == TOPIC_CONCENTRATION_INV_VOCAB:
+        if not sizes or any(v < 1 for v in sizes):
+            raise ValueError(f"--topic-concentration inv_vocab needs the domain "
+                             f"vocabulary sizes; got {sizes}")
+        return [1.0 / v for v in sizes]
+    vals = [float(x) for x in str(spec).split(",") if x.strip()]
+    if not vals or any(not v > 0 for v in vals):
+        raise ValueError(f"--topic-concentration must be > 0; got {spec!r}")
+    if len(vals) not in (1, len(sizes)):
+        raise ValueError(f"--topic-concentration has {len(vals)} values; give one, "
+                         f"one per domain ({len(sizes)}), or "
+                         f"{TOPIC_CONCENTRATION_INV_VOCAB}")
+    return vals
+
+
 def _build_estimator(args):
     """The DagGatedLDAEstimator for the fit: the recommended preset
     (`DagGatedLDAEstimator.recommended`) with the driver's flags on top, the label DAG
@@ -1023,8 +1052,8 @@ def _build_estimator(args):
 
     Reads, from `args`: the CLI flags (`_FLAG_TO_PARAM`, `doc_concentration`,
     `min_docs_per_node`, `seed`) and the corpus-derived `_dag`, `_labels_col`,
-    `_domain_cols`, `_vocabularies`, `_node_terms`, `_gate_seed_profile` (each
-    optional)."""
+    `_domain_cols`, `_vocabularies`, `_node_terms`, `_gate_seed_profile`,
+    `_topic_concentration` (the resolved `--topic-concentration`; each optional)."""
     from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator
 
     over = {}
@@ -1037,6 +1066,9 @@ def _build_estimator(args):
         if not dc > 0:
             raise ValueError(f"--doc-concentration must be > 0; got {dc}")
         over["docConcentration"] = [float(dc)]
+    tc = getattr(args, "_topic_concentration", None)
+    if tc:
+        over["topicConcentration"] = [float(x) for x in tc]
     if getattr(args, "seed", None) is not None:
         over["seed"] = int(args.seed)
     mdn = getattr(args, "min_docs_per_node", None)
@@ -1063,12 +1095,13 @@ def _build_estimator(args):
 
 def vocabularies_of(vocab_maps) -> list:
     """The per-domain vocab maps `{term: index}` as the estimator's `vocabularies`:
-    one list of term ids per feature column, in index order."""
+    one list of term ids per feature column, in index order. Term ids are strings
+    (ADR 0053 addendum), so the concept ids are cast here, at the seam."""
     out = []
     for vm in vocab_maps:
         terms = [None] * len(vm)
         for t, i in vm.items():
-            terms[int(i)] = t
+            terms[int(i)] = str(t)
         out.append(terms)
     return out
 
@@ -1079,11 +1112,11 @@ def node_terms_of(code_map, vocab_map0, column="features_0") -> dict:
     Keyed by the most-specific term each code resolves to; the estimator drops the
     entries of nodes it does not keep. Terms are qualified with the feature column,
     so a condition concept id that is also a token of another domain stays
-    unambiguous."""
+    unambiguous. Term ids are the concept ids as strings (ADR 0053 addendum)."""
     out: dict = {}
     for std, node in code_map:
         if int(std) in vocab_map0:
-            out.setdefault(node, set()).add((column, int(std)))
+            out.setdefault(node, set()).add((column, str(int(std))))
     return {n: sorted(ts) for n, ts in out.items()}
 
 
@@ -1549,6 +1582,10 @@ def parse_args(argv=None):
     p.add_argument("--cavi-tol", type=float, default=None, help="caviTol (preset 1e-3).")
     p.add_argument("--doc-concentration", type=float, default=None,
                    help="docConcentration, a scalar Dirichlet alpha (preset 0.5).")
+    p.add_argument("--topic-concentration", type=str, default=None,
+                   help="topicConcentration, the Dirichlet eta on each topic's terms: "
+                        "a number, a comma list (one per domain), or 'inv_vocab' "
+                        "(eta_m = 1 / V_m per domain). Unset: the estimator's 1/K.")
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--fit-save-interval", type=int, default=0,
                    help="checkpoint the fit every N SVI iters (0 = off) to "
@@ -1574,7 +1611,7 @@ def parse_args(argv=None):
 def _profile_seed(path, dag, vocab_map0, column="features_0"):
     """`--gate-seed-profile` -> the estimator's `gateSeedProfile` `{node: {(column,
     concept_id): weight}}` (`profile_eta.build_profile_seed`, keyed by Mondo curie and
-    condition concept id; nodes outside the label subgraph are not seeded; the
+    condition concept id, the id as a string term; nodes outside the label subgraph are not seeded; the
     estimator drops the unkept ones). Returns `(profile, stats)`; stats are counts."""
     import pandas as pd
     from profile_eta import build_profile_seed
@@ -1584,7 +1621,7 @@ def _profile_seed(path, dag, vocab_map0, column="features_0"):
     seed, stats = build_profile_seed(
         gs_df, eid_by_mondo=by_node,
         vocab_index_by_concept={int(c): int(c) for c in vocab_map0})
-    return ({n: {(column, int(c)): w for c, w in tw.items()}
+    return ({n: {(column, str(int(c))): w for c, w in tw.items()}
              for n, tw in seed.items()}, stats)
 
 
@@ -1637,6 +1674,13 @@ def main() -> int:
             raise ValueError(f"the bundle's train split has no {args._labels_col!r} "
                              f"column (columns: {bundle.train_df.columns})")
         args._vocabularies = vocabularies_of(vocab_maps)
+        args._topic_concentration = topic_concentration_of(
+            getattr(args, "topic_concentration", None), [len(vm) for vm in vocab_maps])
+        if args._topic_concentration:
+            _cprint(f"[driver]   topicConcentration (eta): "
+                    f"{args.topic_concentration} -> "
+                    f"[{', '.join(f'{e:.4g}' for e in args._topic_concentration)}]",
+                    flush=True)
         code_map = getattr(bundle, "native_code_map", None) or []
         args._node_terms = node_terms_of(code_map, vocab_maps[0])
         _cprint(f"[driver]   label DAG: {len(bundle.dag)} node(s) given; gate labels "
@@ -1785,6 +1829,12 @@ def main() -> int:
                 "subsampling_rate": float(g("subsamplingRate")),
                 "tau0": float(g("learningOffset")),
                 "kappa": float(g("learningDecay")), "max_iter": max_iter,
+                # The eta the fit used, per domain (one scalar repeated per domain is
+                # shown once), and how it was asked for (None = the 1/K default).
+                "topic_concentration": {
+                    "spec": getattr(args, "topic_concentration", None),
+                    "eta": [float(x) for x in np.atleast_1d(
+                        pc_model.result.global_params["eta"])]},
                 "estimator_params": recorded_estimator_params(pc_est, max_iter),
                 "labels_col": args._labels_col,
                 "node_set": counts,
