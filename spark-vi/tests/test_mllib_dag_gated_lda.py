@@ -702,6 +702,12 @@ def test_resume_refuses_a_different_node_set(tmp_path, spark):
     # Same node set and layout, another eta (the checkpoint's was the unset 1/K).
     with pytest.raises(ValueError, match="fitted with topicConcentration"):
         resume(topicConcentration=0.3)
+    # Same node set, layout and eta, another schedule / alpha: refused, naming each.
+    with pytest.raises(ValueError, match=r"gateWarm: checkpoint 0, this estimator 2"):
+        resume(gateWarm=2)
+    with pytest.raises(ValueError, match=r"docConcentration: checkpoint None, this "
+                                         r"estimator \[0\.5\]"):
+        resume(docConcentration=[0.5])
     # The matching node set resumes.
     assert resume().result.n_iterations == 2
 

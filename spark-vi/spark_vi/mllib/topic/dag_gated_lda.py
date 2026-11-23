@@ -94,6 +94,13 @@ _LOG = "[dag-gated-lda]"
 FIT_ENGINES = ("spark", "local")
 _NODE_SET_KEY = "dag_node_set"
 _ETA_KEY = "topic_concentration"    # the fit's resolved eta (one value, or per domain)
+# The Params that decide what "continue this fit" means beyond the node set and eta:
+# a resume with any of them changed would continue a different model. Recorded in the
+# checkpoint's metadata and compared by `_check_resume_node_set`.
+_FIT_KEY = "fit_identity"
+_FIT_IDENTITY_PARAMS = ("docConcentration", "optimizeDocConcentration", "gateWarm",
+                        "gateOpenSeed", "gateSeedMode", "gateSeedLeaves", "nodeTerms",
+                        "gateSeedProfile")
 
 
 def _row_to_gated_document(row, features_cols, domain_sizes, frontier_fn,
@@ -1004,6 +1011,16 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator, DriverParamsWritable):
                 f"feature column ({n_domains} here)")
         return vals
 
+    def _fit_identity(self) -> dict:
+        """The `_FIT_IDENTITY_PARAMS` as JSON-ready values (an unset Param is None;
+        the seed extras as the canonical JSON they are stored as)."""
+        out = {}
+        for name in _FIT_IDENTITY_PARAMS:
+            p = self.getParam(name)
+            v = self.getOrDefault(p) if (self.isSet(p) or self.hasDefault(p)) else None
+            out[name] = list(v) if isinstance(v, (list, tuple)) else v
+        return out
+
     def _check_resume_node_set(self, ns: NodeSet, n_bg: int, tpn: int,
                                eta=None) -> None:
         """With ``resumeFrom`` set: refuse, before any training, a checkpoint whose
@@ -1065,6 +1082,16 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator, DriverParamsWritable):
                     f"(eta) {saved_eta}; this estimator resolves it to {new_eta}. "
                     f"A resumed fit keeps the checkpoint's eta: set "
                     f"topicConcentration to it to resume.")
+        saved_fit = md.get(_FIT_KEY)
+        if saved_fit is not None:
+            now = self._fit_identity()
+            diff = [f"{k}: checkpoint {saved_fit.get(k)!r}, this estimator {now[k]!r}"
+                    for k in _FIT_IDENTITY_PARAMS if saved_fit.get(k) != now[k]]
+            if diff:
+                raise ValueError(
+                    f"{where}: the checkpoint was fitted with other settings, so "
+                    f"continuing it would continue a different model ("
+                    + "; ".join(diff) + "). Set them to the checkpoint's to resume.")
 
     # ---- fit --------------------------------------------------------------------
 
@@ -1136,7 +1163,8 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator, DriverParamsWritable):
         engine.extra_metadata = {_NODE_SET_KEY: {**ns.to_dict(), "n_bg": n_bg,
                                                  "tpn": tpn},
                                  _ETA_KEY: (list(eta) if isinstance(eta, list)
-                                            else [float(eta)])}
+                                            else [float(eta)]),
+                                 _FIT_KEY: self._fit_identity()}
         mbf = float(self.getOrDefault("subsamplingRate"))
         config = VIConfig(
             max_iterations=self.getOrDefault("maxIter"),
@@ -1191,7 +1219,7 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator, DriverParamsWritable):
                     rdd, resume_from=resume_path, on_iteration=self._on_iteration)
         finally:
             rdd.unpersist(blocking=False)
-            frontier_bc.unpersist(blocking=False)
+            frontier_bc.destroy()
 
         out_model = DagGatedLDAModel(result)
         for param in self.params:
