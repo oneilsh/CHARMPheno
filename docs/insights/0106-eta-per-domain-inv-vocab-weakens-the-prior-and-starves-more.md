@@ -16,8 +16,13 @@ falls on the marginal blocks. The form η ∝ 1/V_m is the principled part (no c
 to K, which moves with the kept node set; per-domain scale); the strength c in
 η_m = c / V_m is a hyperparameter with no derivation, like α.
 
+Where 1/K comes from: Hoffman, Blei & Bach (NIPS 2010, §4) fixed "α and η ... at 0.01
+and the number of topics K = 100", with no justification; their reference demo
+(`onlinewikipedia.py`) writes it as `1./K`, and MLlib's online optimizer inherited that
+form. The paper's own principled option is to learn η (its eq. 9).
+
 Tentative: the flat count's run-to-run spread is unmeasured, so the +19 may be noise.
-A sweep over c (0.5-4) or a seed replicate would settle it.
+A sweep over c (0.5-4) or a seed replicate would settle it (exp 0176 is the replicate).
 
 **Setting context:** exp 0175 vs 0174, v9 CDR, population_mondo_all, native Mondo
 (minDocsPerNode 100, 3,229 kept nodes), three domains (conditions, drugs,
