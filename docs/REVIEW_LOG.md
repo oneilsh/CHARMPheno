@@ -17,6 +17,82 @@ elsewhere.
 
 ---
 
+## 2026-11-24 — spark-vi core and the DAG-gated user-API redesign (two walkthroughs)
+
+Maintainer-led, in two parts recorded together as agreed: the generic spark-vi code
+(2026-10-29 .. 11-02), then the redesign it led to (spec 2026-10-30, plan WP1-16, spec
+R14; 2026-11-23 .. 24), preceded by the three-reviewer code review of
+`docs/reports/2026-11-13-redesign-code-review.md`, whose fixes are recorded there.
+
+**Part 1, areas reviewed:** spark_vi.core (model, loop, config, result, runner,
+local_runner, retry, broadcast), dag (layout, ops), models/topic/dag_gated_lda, the
+DAG-gated MLlib shim, readout (solver, kernels, heads, spark, local, stacked, evaluate),
+eval.metrics, mllib/readout (DagHeads). **Shipped in passing** (`fb6d0fcb` ..
+`57f9c9f5`): resume continues the seed stream and diagnostics; empty minibatch records
+NaN; E-step retry; atomic checkpoints; DAG-gated resume (`fit_ckpt`, identity file,
+`--fresh-fit`); ancestor-walk frontier; E-step submatrix slice (~4x per doc); sparse
+closure operator (3.7x, 58 MB -> 0.4 MB broadcast); top-m as a plain width (default
+100); distributed unit-pooled detection; domain-neutral wording across spark_vi.
+**Pre-existing bugs caught:** gated α step used full sub-simplices during leaves-first
+rounds (`e8ad2516`); `infer_local` drew from the global RNG (`74bf66bf`); readout packed
+projection built outside retry (`9800a844`); unbounded per-unit collect in detection
+(`f1b171a8`); O(P n log n) tally merges (`57f9c9f5`); `save_result` not atomic
+(`22034230`).
+
+**Part 2, areas reviewed:** the estimator's contract and Params (`mllib/topic/
+dag_gated_lda.py`: inputs, defaults vs the recommended preset, the order of `fit`),
+node-set learning (`dag/nodeset.py`: parse, support, prune / land / reduce / splice,
+frontier, `drop_nodes`), `dag/ops.py` (read-only, source-hashed), the fitted model
+(user-id accessors, `nodeStatistics`, `dropUnsupportedNodes`, ungated `transform`),
+persistence (`mllib/_common.py`: driver-side Params metadata, the overwrite guard,
+Pipeline's shared-filesystem requirement), `LocalRunner` (forked E-step, seeding),
+`core/row_sparse.py`, `io/fs.py` and `io/export.py` (any-URI I/O, crash-safe
+checkpoints), the fit driver's structure and corpus-spec / cache-key path, and the
+dashboard exporter (built and egress-reviewed in the same session).
+
+**Shipped as detours:** DAG node ids are strings only, then term ids too (ADR 0053 and
+addenda; `1fc12b0`, `755d29c`); preset `gateWarm` 2 -> 4 and warnings for seed extras
+that would be ignored (`755d29c`); per-domain η (`topicConcentration` list, driver
+`--topic-concentration inv_vocab`; `3fad3f7`); resume refuses a checkpoint fitted with
+another α, schedule or seed extras (`fit_identity`), frontier broadcast destroyed
+(`ff2cb87`); a non-str label is a `TypeError` under either `unknownLabels` policy and
+`learn_node_set` requires `n_docs` (`496950e`); `dropUnsupportedNodes` keeps a
+per-domain η (`9204fb6`); flatness is the block's sharpest row, flat only when every
+domain of every topic is flat, with `supportFractionByDomain` / `dataMassByDomain`,
+and the driver keeps `model_asfitted/` when it drops (`c607182`; spec R14 amendment 3);
+D4: corpus-shaping code moved from the fit driver to the hashed
+`charmpheno/mondo/bundle_assembly.py` (`97592a6`, announced cache drop); D5:
+`run_experiment` refuses a gated run that would take plain-LDA knobs from `_base.yaml`
+(`0ccbaaa`); help texts and docstrings (`ee772df`, `ef41531`, `b41cee5`).
+
+**Pre-existing issues caught:** `unknownLabels="ignore"` silently dropped mistyped
+labels (documents became background); `learn_node_set` recorded a missing `n_docs` as
+0 (the root's support); a resume could continue under a changed schedule or α;
+`supportFraction` judged a topic on its dominant domain only (one domain decided, and
+the choice flipped between domains of similar mass); bundle-shaping driver code outside
+every cache key (D4); `_base.yaml`'s LDA defaults could reach a gated fit (D5); η =
+1/K couples the word prior to the kept node set (its provenance: Hoffman et al. 2010
+fixed η = 0.01 at K = 100; the 1/K form is their demo script's). Exp 0175 (η = 1/V_m)
+was adopted as the model of record on principle although it starved ~10% more blocks
+(insight 0106); exp 0176 measures the seed spread.
+
+**Docs and ADRs changed:** ADR 0053 (new, two addenda), ADR 0052 (superseded in part);
+spec 2026-10-30 R1 and R14 amendments; experiments 0175, 0176; insight 0106; AGENTS.md
+hashed-module list.
+
+**Threads parked:** splitting spark-vi out (JSS) with the readout moved out of it
+(scoping report to come); one persistence style for every model (LDA / HDP onto
+`_StagePersistence`), no private MLlib metadata API, a pyspark lower bound with CI on
+two versions; `transform` broadcasts a dense K x V E[log β] (~400 MB at K ≈ 3,250) and
+`closure_matrix` is dense; the local checkpoint's rename window and a torn HDFS
+manifest; BLAS threads in forked workers; a Spark-free open-time seed pass; whether a
+nearly empty sharp row should be barred from rescuing a block (read `dataMassByDomain`
+on the next model of record first); a sweep over c in η_m = c / V_m or
+empirical-Bayes η; 0174's ribbon readout crashed after printing its results (not
+investigated); the non-blocking cleanups listed in the 2026-11-13 review report.
+
+---
+
 ## 2026-08-27 — Mondo bundle-cache wiring + recovery-tool completion
 
 *Agent-recorded build note, not a maintainer walkthrough (annotated 2026-10-23): the code it describes has not been signed off. Last walkthrough: 2026-08-12.*
