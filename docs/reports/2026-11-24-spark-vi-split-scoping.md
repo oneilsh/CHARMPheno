@@ -50,6 +50,25 @@ no other model has one, and it is not variational inference. With it go
    artifact (its own issues, CI, releases); CHARMPheno then pins a released version
    or a git tag. The monorepo is cheaper to keep in sync while both move fast.
 
+## Decisions (maintainer, 2026-11-24)
+
+1. `eval.metrics` moves out with the readout.
+2. The simulator-study helpers move to charmpheno. (The held-out predictive
+   log-likelihood that STM and `predictive_gain` import from
+   `eval/topic/concentration_recovery.py` is generic and stays in spark-vi; only the
+   recovery-experiment parts move.)
+3. The readout (with `DagHeads` and `eval.metrics`) becomes part of charmpheno.
+4. A separate public repository, but not yet as the development home. spark-vi keeps
+   being developed at `CHARMPheno/spark-vi/` (one commit for a change spanning both
+   packages; the cluster, `make zip`, `--py-files` and the cache keys unchanged), and a
+   publish script copies it into the public repository as clean, tagged release
+   commits (no rewrite or review of the monorepo's commit history; an outside
+   contribution comes back as a patch). When spark-vi stops moving with CHARMPheno, the
+   public repository becomes canonical and CHARMPheno depends on a released version.
+   Rejected for now: a git submodule (every cluster command needs a submodule update,
+   cross-package changes become two ordered commits, a missed bump runs stale code
+   silently) and `git subtree` push (publishes every commit message).
+
 ## Work packages
 
 Ordered so the package is usable at every step.
