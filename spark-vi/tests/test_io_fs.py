@@ -120,11 +120,3 @@ def test_save_and_load_result_through_the_hadoop_branch(spark, tmp_path, hadoop_
     assert back.n_iterations == 2
 
 
-def test_heads_file_through_the_hadoop_branch(spark, tmp_path, hadoop_branch):
-    from spark_vi.readout.heads import read_heads, write_heads
-    C, K = 3, 4
-    V = np.arange(C * K, dtype=float).reshape(C, K)
-    uri = "file://" + str(tmp_path / "run")
-    assert write_heads(uri, "arm", V, np.zeros(C), np.zeros(C), np.zeros(C, bool), C, K, 0)
-    got = read_heads(uri, "arm", C=C, K=K, theta_topm=0)
-    np.testing.assert_array_equal(got[0], V)

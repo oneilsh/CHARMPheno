@@ -389,7 +389,7 @@ exp: zip cluster-overlay $(WORKSPACE_ENV)
 # driver) needs neither. If the key still misses, pass DGR_ARGS="--bundle-path
 # <cache_uri>/<key>".
 #
-# The readout kernels ship in the spark-vi zip (spark_vi.readout, ADR 0051).
+# The readout kernels ship in the charmpheno zip (charmpheno.readout, ADR 0054).
 # DGR_ARGS="--readout-engine local" runs the heads' passes in driver memory
 # (each split collected once, top-m truncated): size DGR_DRIVER_MEMORY for the
 # packed train split.

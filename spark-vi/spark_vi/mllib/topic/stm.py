@@ -913,7 +913,7 @@ def corpus_heldout_scale_sweep_gated(
 
     This is the gated, distributed-ready counterpart of the LOCAL, non-gated
     diagnostic validated in simulation
-    (``spark_vi.eval.topic.concentration_recovery``): held-out within-document
+    (``spark_vi.eval.topic.heldout``): held-out within-document
     token prediction, swept over a concentration knob, recovers the true
     generative concentration. Here the knob is the scalar scale c in
     Sigma_gen = c*R (R the fit's diagonal-normalized correlation, ADR 0034/0036
@@ -951,7 +951,7 @@ def corpus_heldout_scale_sweep_gated(
     """
     from scipy.special import digamma
 
-    from spark_vi.eval.topic.concentration_recovery import (
+    from spark_vi.eval.topic.heldout import (
         _predictive_loglik, heldout_split,
     )
     from spark_vi.models.topic._linalg import safe_inverse
@@ -1049,7 +1049,7 @@ def corpus_heldout_scale_sweep_gated_rdd(
     def _local(rows, _gp=gp_bcast, _p=p_bcast, _cg=c_bcast):
         from scipy.special import digamma
 
-        from spark_vi.eval.topic.concentration_recovery import (
+        from spark_vi.eval.topic.heldout import (
             _predictive_loglik, heldout_split,
         )
         from spark_vi.models.topic._linalg import safe_inverse

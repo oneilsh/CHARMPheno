@@ -1,11 +1,11 @@
-"""`spark_vi.readout.evaluate`: the readout's metrics from score blocks (ADR 0051 step
+"""`charmpheno.readout.evaluate`: the readout's metrics from score blocks (ADR 0051 step
 4). In memory against per-column metrics on the dense arrays; one slow test checks
 the Spark score blocks give the same readout as the local backend's."""
 import numpy as np
 import pytest
 
-from spark_vi.eval.metrics import core
-from spark_vi.readout import evaluate as ev
+from charmpheno.evaluate.metrics import core
+from charmpheno.readout import evaluate as ev
 
 C, D = 6, 400
 RT, FQ = (0.5, 0.9), (0.1, 0.5)
@@ -55,7 +55,7 @@ def test_detection_pools_rows_onto_units_by_max():
 
 
 def test_stacked_and_calibration_groups():
-    from spark_vi.readout.stacked import stacked_proba
+    from charmpheno.readout.stacked import stacked_proba
 
     p, y, m = _arrays(2)
     M = np.eye(C)
@@ -77,7 +77,7 @@ def test_stacked_and_calibration_groups():
 @pytest.mark.slow
 def test_spark_score_blocks_give_the_local_readout(spark):
     from pyspark.ml.linalg import Vectors
-    from spark_vi.readout import LocalReadoutData, SparkReadoutData
+    from charmpheno.readout import LocalReadoutData, SparkReadoutData
 
     rng = np.random.default_rng(3)
     K = 5

@@ -5,7 +5,7 @@ The scored test split is a set of SCORE BLOCKS, one per partition (Spark) or one
 chunk (local): dicts with `ids` (n,) int64, `proba` (n, C) float32, `y` and `mask`
 (n, C) uint8, plus any extra per-row arrays a caller attaches (the closure product
 under "stacked", a prior-evidence matrix, ...). `Blocks` wraps either an RDD of them
-or a list, and every function here runs on both through `spark_vi.eval.metrics`: the
+or a list, and every function here runs on both through `charmpheno.evaluate.metrics`: the
 blocks emit per-column pieces, the pieces are tallied and merged by key, and only
 per-column results reach the driver. Nothing (D, C)-shaped ever does.
 
@@ -19,8 +19,8 @@ import itertools
 
 import numpy as np
 
-from spark_vi.eval.metrics import local as mlocal
-from spark_vi.eval.metrics import report
+from charmpheno.evaluate.metrics import local as mlocal
+from charmpheno.evaluate.metrics import report
 
 
 class Blocks:
@@ -63,14 +63,14 @@ class Blocks:
     def metrics(self, piece_fn, **kw):
         """`{key: metrics}` over the pieces `piece_fn(block)` yields."""
         if self.is_rdd:
-            from spark_vi.eval.metrics import spark as mspark
+            from charmpheno.evaluate.metrics import spark as mspark
             return mspark.per_key_metrics(self.blocks.flatMap(piece_fn), **kw)
         return mlocal.per_key_metrics(
             itertools.chain.from_iterable(piece_fn(b) for b in self.blocks), **kw)
 
     def calibration(self, piece_fn, *, n_bins=10):
         if self.is_rdd:
-            from spark_vi.eval.metrics import spark as mspark
+            from charmpheno.evaluate.metrics import spark as mspark
             return mspark.per_key_calibration(self.blocks.flatMap(piece_fn),
                                               n_bins=n_bins)
         return mlocal.per_key_calibration(
@@ -93,7 +93,7 @@ class Blocks:
         def _mx(a, b):
             return (max(a[0], b[0]), max(a[1], b[1]))
         if self.is_rdd:
-            from spark_vi.eval.metrics import spark as mspark
+            from charmpheno.evaluate.metrics import spark as mspark
 
             def _piece(it, _k=key):
                 sy = [v for _u, v in it]
@@ -125,7 +125,7 @@ def _destroy(v):
 def with_stacked(blocks, M, *, src="proba", dst="stacked"):
     """Blocks with `dst` = the closure product of `src` (`readout.stacked`), computed
     where each block lives. `M` is the (C, C) closure matrix."""
-    from spark_vi.readout.stacked import closure_operator, stacked_proba
+    from charmpheno.readout.stacked import closure_operator, stacked_proba
 
     bM = blocks.broadcast(closure_operator(M))
 

@@ -3,7 +3,7 @@
 
 The heads read any vector column (theta from a topic model, raw-code presence, any
 representation) and fit one L2 logistic head per node of a label DAG with the batched
-solver (`spark_vi.readout.fit_heads`). The inputs are the DAG-gated estimator's, in
+solver (`charmpheno.readout.fit_heads`). The inputs are the DAG-gated estimator's, in
 the user's own node ids:
 
 - ``labelsCol``: an ``array<string>`` column of the nodes each
@@ -14,7 +14,7 @@ the user's own node ids:
   ``DagGatedLDAModel`` (``setTopicModel``), whose node set (kept DAG, id map, label
   landing) is reused so head i and the model's engine node i are the same node.
 
-The per-node targets are built here (`spark_vi.readout.labels.NodeLabeler`): a
+The per-node targets are built here (`charmpheno.readout.labels.NodeLabeler`): a
 document is positive for every kept node in the closure of its landed labels, and
 ``labelMaskMode`` picks which nodes it is evidence for ('full' or 'closure'). Gate
 labels and readout labels may differ (R8): each estimator has its own ``labelsCol``.
@@ -55,8 +55,8 @@ from spark_vi.mllib._common import (_PersistenceParams, _StagePersistence,
                                     save_stage_in_place)
 from spark_vi.mllib.topic.dag_gated_lda import (_decode_dag, _encode_dag,
                                                 check_labels_column)
-from spark_vi.readout.heads import READOUT_GTOL, READOUT_MAX_ITER
-from spark_vi.readout.labels import LABEL_MASK_MODES, NodeLabeler
+from charmpheno.readout.heads import READOUT_GTOL, READOUT_MAX_ITER
+from charmpheno.readout.labels import LABEL_MASK_MODES, NodeLabeler
 
 _LOG = "[dag-heads]"
 _CKPT_NAME = "heads_ckpt.npz"          # the mid-solve checkpoint inside saveDir
@@ -351,7 +351,7 @@ class DagHeadsEstimator(_DagHeadsParams, _StagePersistence, Estimator):
     def _fit(self, dataset):
         from pyspark.sql import functions as F
 
-        from spark_vi.readout import LocalReadoutData, SparkReadoutData, fit_heads
+        from charmpheno.readout import LocalReadoutData, SparkReadoutData, fit_heads
 
         g = self.getOrDefault
         labels_col, fc = str(g("labelsCol")), str(g("featuresCol"))
@@ -486,7 +486,7 @@ class DagHeadsModel(_DagHeadsParams, _StagePersistence, Model):
     def attachLabels(self, dataset, labelCol="label", labelMaskCol="labelMask"):
         """Append the per-node target vectors the heads were fit against, built from
         ``labelsCol`` with this model's node set and ``labelMaskMode`` (for scoring a
-        held-out split with `spark_vi.readout.evaluate`)."""
+        held-out split with `charmpheno.readout.evaluate`)."""
         return _with_targets(dataset, self._labeler(),
                              str(self.getOrDefault("labelsCol")), labelCol,
                              labelMaskCol)
@@ -495,7 +495,7 @@ class DagHeadsModel(_DagHeadsParams, _StagePersistence, Model):
         from pyspark.ml.linalg import DenseVector, VectorUDT
         from pyspark.sql import functions as F
 
-        from spark_vi.readout.kernels import _SCORE_CLIP, to_array, topm_sparse
+        from charmpheno.readout.kernels import _SCORE_CLIP, to_array, topm_sparse
 
         g = self.getOrDefault
         sc = dataset.sparkSession.sparkContext
@@ -503,7 +503,7 @@ class DagHeadsModel(_DagHeadsParams, _StagePersistence, Model):
         M = None
         if stacked_col:
             from spark_vi.dag.ops import closure_matrix
-            from spark_vi.readout.stacked import closure_operator
+            from charmpheno.readout.stacked import closure_operator
             M = closure_operator(closure_matrix(self._node_set.engine_parents,
                                                 self.V.shape[0]))
         # Nothing array-shaped rides a closure (ADR 0047): one broadcast, whose
@@ -530,7 +530,7 @@ class DagHeadsModel(_DagHeadsParams, _StagePersistence, Model):
             F.udf(lambda v: DenseVector(_score(v).astype(np.float64)), VectorUDT())(
                 F.col(g("featuresCol"))))
         if stacked_col:
-            from spark_vi.readout.stacked import stacked_proba
+            from charmpheno.readout.stacked import stacked_proba
 
             def _stack(v):
                 return DenseVector(stacked_proba(
@@ -543,7 +543,7 @@ class DagHeadsModel(_DagHeadsParams, _StagePersistence, Model):
 
     def _save_data(self, path: str) -> None:
         from spark_vi.io import fs
-        from spark_vi.readout.heads import write_heads
+        from charmpheno.readout.heads import write_heads
 
         C, K = self.V.shape
         if not write_heads(path, _HEADS_LABEL, self.V, self.b_raw, self.const,
@@ -556,7 +556,7 @@ class DagHeadsModel(_DagHeadsParams, _StagePersistence, Model):
     @classmethod
     def _load_data(cls, path: str, metadata: dict) -> "DagHeadsModel":
         from spark_vi.io import fs
-        from spark_vi.readout.heads import read_heads
+        from charmpheno.readout.heads import read_heads
 
         got = read_heads(path, _HEADS_LABEL)
         if got is None:

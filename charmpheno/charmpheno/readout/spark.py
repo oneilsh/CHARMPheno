@@ -22,7 +22,7 @@ import numpy as np
 
 from spark_vi.core.broadcast import destroy_broadcast
 from spark_vi.core.retry import _error_first_line, retry_spark_action
-from spark_vi.readout.kernels import (
+from charmpheno.readout.kernels import (
     dense_triples, densify_lean_blocks, lean_eval_kernel, moments_kernel,
     moments_to_mu_sd, pack_rows, row_quads, row_sparse, row_triples,
     sparse_moments_kernel, sparse_stats_kernel, stats_kernel,
@@ -395,7 +395,7 @@ class SparkReadoutData:
     def score_blocks(self, V, b_raw, *, degenerate=None, const=None, extra_cols=()):
         """The split scored by the heads as persisted `readout.evaluate.Blocks`, left
         on the executors; `unpersist()` releases them and the heads broadcast."""
-        from spark_vi.readout.evaluate import Blocks
+        from charmpheno.readout.evaluate import Blocks
 
         rdd, bcast = score_blocks(
             self.df, self.C, V, b_raw, degenerate=degenerate, const=const,

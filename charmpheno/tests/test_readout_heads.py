@@ -1,4 +1,4 @@
-"""Resumable checkpoints and heads persistence of `spark_vi.readout.heads`.
+"""Resumable checkpoints and heads persistence of `charmpheno.readout.heads`.
 
 `fit_heads` is driven for real (the solver, the degenerate masking, the progress
 hook, the fold) over a fake data backend whose stats come from the solver's
@@ -12,13 +12,13 @@ from contextlib import nullcontext
 import numpy as np
 import pytest
 
-from spark_vi.readout import heads
-from spark_vi.readout import solver as heads_solver
+from charmpheno.readout import heads
+from charmpheno.readout import solver as heads_solver
 
 
 @pytest.fixture(autouse=True)
 def _info_logs(caplog):
-    caplog.set_level(logging.INFO, logger="spark_vi.readout")
+    caplog.set_level(logging.INFO, logger="charmpheno.readout")
 
 
 class _FakeData:
@@ -34,12 +34,12 @@ class _FakeData:
         self.n_calls = 0
 
     def moments(self):
-        from spark_vi.readout.solver import standardization_moments
+        from charmpheno.readout.solver import standardization_moments
         mu, sd, n_obs = standardization_moments(self.Pi, self.obs.astype(bool))
         return mu, sd, n_obs, (self.y * self.obs).sum(axis=0)
 
     def stats_fn(self, mu, sd, **kw):
-        from spark_vi.readout.solver import make_inmemory_stats_fn
+        from charmpheno.readout.solver import make_inmemory_stats_fn
         inner = make_inmemory_stats_fn(self.Pi, self.y, self.obs.astype(bool), mu, sd)
 
         def _stats(W_std, b_std, node_mask=None):
@@ -197,7 +197,7 @@ def test_fit_heads_checkpoint_survives_a_mid_solve_death(tmp_path, caplog,
         recorded_fp = str(z["fingerprint"].item())
 
     # The stored fingerprint is the one THIS problem's counts produce.
-    from spark_vi.readout.solver import standardization_moments
+    from charmpheno.readout.solver import standardization_moments
     _mu, _sd, n_obs = standardization_moments(Pi, obs.astype(bool))
     assert recorded_fp == heads.ckpt_fingerprint(
         C, K, n_obs, (y * obs).sum(axis=0), 0)

@@ -22,7 +22,7 @@ What is pinned here, and why each failure would otherwise be silent:
   3. **The single-doc path is unchanged** (`@slow`): the doc keys are exactly the
      person ids times RADIX, and the collected proba/labels are what the kernel
      always produced — the seam is a rename of the id, not a change of behavior.
-  4. **The uniqueness tripwire** (`spark_vi.readout.kernels.assert_unique_ids`)
+  4. **The uniqueness tripwire** (`charmpheno.readout.kernels.assert_unique_ids`)
      the lean collect runs on the keys.
 
 Groups 2-4's Spark cases are `@slow` + the `spark` fixture from conftest; group 1
@@ -47,7 +47,7 @@ os.environ["PYTHONPATH"] = os.pathsep.join(
     if p)
 
 import doc_key as dr  # noqa: E402
-from spark_vi.readout.kernels import assert_unique_ids  # noqa: E402
+from charmpheno.readout.kernels import assert_unique_ids  # noqa: E402
 import dag_gated_fit as g  # noqa: E402
 
 RADIX = dr.DOC_KEY_RADIX

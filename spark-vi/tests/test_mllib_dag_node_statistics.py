@@ -263,19 +263,3 @@ def test_cleaned_model_save_load_round_trip(fitted, tmp_path):
     assert [r[0] for r in a] == [r[0] for r in b]
 
 
-def test_heads_from_the_cleaned_model_have_no_head_for_the_dropped_node(fitted):
-    from spark_vi.mllib import DagHeadsEstimator
-    model, df = fitted
-    clean = _flatten(model, "3").dropUnsupportedNodes()
-    scored = clean.transform(df).cache()
-    heads = DagHeadsEstimator(maxIter=50).setTopicModel(clean).fit(scored)
-    assert heads.nodes() == list(clean._ns().nodes)
-    assert "3" not in heads.nodes()
-    assert heads.unsupportedNodes() == {"3": ["1"]}
-    with pytest.raises(KeyError, match="dropped as unsupported"):
-        heads.nodeIndex("3")
-    # a document labelled 3 is a positive of 3's landing (1) and its ancestors only
-    lab = heads.attachLabels(scored.limit(1).select("labels").selectExpr(
-        "array('3') as labels")).head()
-    assert lab["label"][heads.nodeIndex("1")] == 1.0
-    assert sum(lab["label"]) == 2.0                        # root + 1

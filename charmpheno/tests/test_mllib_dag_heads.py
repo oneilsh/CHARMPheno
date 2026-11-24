@@ -89,12 +89,12 @@ def _df(spark, rows, mode="full"):
 
 
 def _reference(df, C=C, K=K, **kw):
-    from spark_vi.readout import SparkReadoutData, fit_heads
+    from charmpheno.readout import SparkReadoutData, fit_heads
     return fit_heads(SparkReadoutData(df, C, K), **kw)
 
 
 def test_defaults_and_dag_param():
-    from spark_vi.mllib import DagHeadsEstimator
+    from charmpheno.readout.mllib import DagHeadsEstimator
     est = DagHeadsEstimator()
     assert est.getOrDefault("featuresCol") == "topicDistribution"
     assert est.getOrDefault("labelsCol") == "labels"
@@ -108,7 +108,7 @@ def test_defaults_and_dag_param():
 
 
 def test_set_topic_model_refuses_other_objects():
-    from spark_vi.mllib import DagHeadsEstimator
+    from charmpheno.readout.mllib import DagHeadsEstimator
     with pytest.raises(TypeError, match="DagGatedLDAModel"):
         DagHeadsEstimator().setTopicModel(object())
 
@@ -117,8 +117,8 @@ def test_set_topic_model_refuses_other_objects():
 @pytest.mark.parametrize("engine", ["spark", "local"])
 def test_from_dag_equals_the_readout_on_dense_labels(spark, engine):
     from spark_vi.dag.ops import closure_matrix
-    from spark_vi.mllib import DagHeadsEstimator
-    from spark_vi.readout.stacked import stacked_proba
+    from charmpheno.readout.mllib import DagHeadsEstimator
+    from charmpheno.readout.stacked import stacked_proba
 
     df = _df(spark, _rows()).cache()
     model = DagHeadsEstimator(maxIter=200, engine=engine, dag=PARENT,
@@ -143,7 +143,7 @@ def test_from_dag_equals_the_readout_on_dense_labels(spark, engine):
 
 @pytest.mark.slow
 def test_closure_mask_mode_equals_the_readout(spark):
-    from spark_vi.mllib import DagHeadsEstimator
+    from charmpheno.readout.mllib import DagHeadsEstimator
 
     df = _df(spark, _rows(seed=1), mode="closure").cache()
     model = DagHeadsEstimator(maxIter=200, dag=PARENT, labelMaskMode="closure").fit(df)
@@ -159,7 +159,7 @@ def test_closure_mask_mode_equals_the_readout(spark):
 
 @pytest.mark.slow
 def test_degenerate_nodes_reported_and_logged(spark, capsys):
-    from spark_vi.mllib import DagHeadsEstimator
+    from charmpheno.readout.mllib import DagHeadsEstimator
 
     df = _df(spark, _rows(n=120, background=0.0))      # root: every row positive
     model = DagHeadsEstimator(maxIter=30, dag=PARENT).fit(df)
@@ -171,7 +171,7 @@ def test_degenerate_nodes_reported_and_logged(spark, capsys):
 
 @pytest.mark.slow
 def test_node_set_learning_prunes_and_lands(spark):
-    from spark_vi.mllib import DagHeadsEstimator
+    from charmpheno.readout.mllib import DagHeadsEstimator
 
     rows = [r for r in _rows(n=200, seed=2) if r[1] != [6] and r[1] != [6, 2]]
     rows.append((np.full(K, 1.0 / K), [6]))           # node 6: support 1
@@ -200,7 +200,7 @@ def test_node_set_learning_prunes_and_lands(spark):
 
 @pytest.mark.slow
 def test_unknown_labels_error_or_ignore(spark):
-    from spark_vi.mllib import DagHeadsEstimator
+    from charmpheno.readout.mllib import DagHeadsEstimator
 
     rows = _rows(n=80, seed=3) + [(np.full(K, 1.0 / K), [3, 99])]
     df = spark.createDataFrame([(Vectors.dense(t), _s(l)) for t, l in rows],
@@ -236,7 +236,8 @@ def _topic_df(spark, n=80, seed=0):
 def test_from_topic_model_reuses_its_node_set(spark):
     from pyspark.sql import functions as F
 
-    from spark_vi.mllib import DagGatedLDAEstimator, DagHeadsEstimator
+    from spark_vi.mllib import DagGatedLDAEstimator
+    from charmpheno.readout.mllib import DagHeadsEstimator
 
     dag = {**PARENT, "7": "6"}
     df = _topic_df(spark)
@@ -294,7 +295,7 @@ def test_from_topic_model_reuses_its_node_set(spark):
 
 @pytest.mark.slow
 def test_save_load_round_trip_keeps_the_node_mapping(spark, tmp_path):
-    from spark_vi.mllib import DagHeadsEstimator, DagHeadsModel
+    from charmpheno.readout.mllib import DagHeadsEstimator, DagHeadsModel
 
     df = _df(spark, _rows(n=120, background=0.0))
     model = DagHeadsEstimator(maxIter=50, thetaTopM=3, dag=PARENT).fit(df)
@@ -312,9 +313,9 @@ def test_save_load_round_trip_keeps_the_node_mapping(spark, tmp_path):
 
 @pytest.mark.slow
 def test_save_dir_checkpoint_and_resume(spark, tmp_path, monkeypatch, caplog):
-    import spark_vi.readout.heads as heads_mod
+    import charmpheno.readout.heads as heads_mod
     from spark_vi.io import fs
-    from spark_vi.mllib import DagHeadsEstimator, DagHeadsModel
+    from charmpheno.readout.mllib import DagHeadsEstimator, DagHeadsModel
 
     df = _df(spark, _rows(n=200, seed=4)).cache()
     base = f"file://{tmp_path}"
@@ -330,7 +331,7 @@ def test_save_dir_checkpoint_and_resume(spark, tmp_path, monkeypatch, caplog):
                       saveInterval=1).fit(df)
     monkeypatch.undo()
     assert fs.exists(f"{base}/crash/heads_ckpt.npz")
-    with caplog.at_level(logging.INFO, logger="spark_vi.readout.heads"):
+    with caplog.at_level(logging.INFO, logger="charmpheno.readout.heads"):
         resumed = DagHeadsEstimator(maxIter=200, dag=PARENT,
                                     resumeFrom=f"{base}/crash").fit(df)
     assert "resuming batched solve from checkpoint" in caplog.text
@@ -348,7 +349,7 @@ def test_save_dir_checkpoint_and_resume(spark, tmp_path, monkeypatch, caplog):
                       saveInterval=1).fit(df)
     monkeypatch.undo()
     caplog.clear()
-    with caplog.at_level(logging.INFO, logger="spark_vi.readout.heads"):
+    with caplog.at_level(logging.INFO, logger="charmpheno.readout.heads"):
         DagHeadsEstimator(maxIter=2, dag=PARENT, saveDir=f"{base}/crash2",
                           saveInterval=1).fit(df)
     assert "resuming" not in caplog.text
@@ -369,8 +370,8 @@ def test_save_dir_checkpoint_and_resume(spark, tmp_path, monkeypatch, caplog):
 
 @pytest.mark.slow
 def test_local_from_labels_equals_the_estimator(spark):
-    from spark_vi.mllib import DagHeadsEstimator
-    from spark_vi.readout import LocalReadoutData, fit_heads
+    from charmpheno.readout.mllib import DagHeadsEstimator
+    from charmpheno.readout import LocalReadoutData, fit_heads
 
     rows = _rows(n=150, seed=5)
     df = _df(spark, rows)
@@ -386,7 +387,8 @@ def test_local_from_labels_equals_the_estimator(spark):
 def test_pipeline_gated_lda_then_heads(spark):
     from pyspark.ml import Pipeline
 
-    from spark_vi.mllib import DagGatedLDAEstimator, DagHeadsEstimator
+    from spark_vi.mllib import DagGatedLDAEstimator
+    from charmpheno.readout.mllib import DagHeadsEstimator
 
     df = _topic_df(spark).drop("readout").where("NOT array_contains(labels, '7')")
     lda = DagGatedLDAEstimator(gateNBg=2, gateTpn=1, maxIter=3, seed=0,

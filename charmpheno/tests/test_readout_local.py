@@ -1,4 +1,4 @@
-"""The readout's local backend (`spark_vi.readout.local`) and the backend-agnostic
+"""The readout's local backend (`charmpheno.readout.local`) and the backend-agnostic
 `fit_heads` (ADR 0051 §2).
 
 The local backend calls the same kernels as the Spark one over rows held in memory,
@@ -8,9 +8,9 @@ against the Spark backend on a local-Spark frame.
 import numpy as np
 import pytest
 
-from spark_vi.readout import LocalReadoutData, fit_heads, read_heads, write_heads
-from spark_vi.readout import kernels as kern
-from spark_vi.readout.solver import fold_standardization, standardized_grad_from_raw
+from charmpheno.readout import LocalReadoutData, fit_heads, read_heads, write_heads
+from charmpheno.readout import kernels as kern
+from charmpheno.readout.solver import fold_standardization, standardized_grad_from_raw
 
 C, K, D = 6, 10, 300
 
@@ -106,7 +106,7 @@ def _frame(spark, theta, y, mask):
 @pytest.mark.slow
 @pytest.mark.parametrize("topm", [0, 4])
 def test_local_and_spark_backends_fit_the_same_heads(spark, topm):
-    from spark_vi.readout import SparkReadoutData
+    from charmpheno.readout import SparkReadoutData
 
     theta, y, mask = _data(6, all_pos_node=2)
     df = _frame(spark, theta, y, mask)

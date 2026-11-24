@@ -49,7 +49,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.special import digamma
 
-from spark_vi.eval.topic.concentration_recovery import _predictive_loglik, heldout_split
+from spark_vi.eval.topic.heldout import _predictive_loglik, heldout_split
 from spark_vi.mllib.topic.stm import _gated_mode_theta
 from spark_vi.models.topic._linalg import safe_inverse
 from spark_vi.models.topic.stm import _stm_doc_inference, _stm_doc_newton_polish

@@ -180,8 +180,8 @@ def _sort_refs(refs):
 
 def check_labels_column(dataset, labels_col):
     """Up front, before any Spark job: `labelsCol` exists and is an
-    `array<string>` column (node ids are strings, ADR 0053). Shared with the readout
-    heads (`DagHeadsEstimator`)."""
+    `array<string>` column (node ids are strings, ADR 0053). Public so a readout built on
+    this model's node set can apply the same check."""
     from pyspark.sql.types import ArrayType, StringType
     if labels_col not in dataset.columns:
         raise ValueError(f"labelsCol={labels_col!r} is not a column of the input "
@@ -1307,7 +1307,7 @@ class DagGatedLDAModel(_DagGatedLDAParams, _StagePersistence, Model):
 
     def _frontier_fn(self):
         """The fit's labels -> engine-frontier policy (landing of pruned / spliced
-        labels, frontier reduction, unknownLabels): internal, for the readout heads."""
+        labels, frontier reduction, unknownLabels): for a readout built on this model's node set."""
         return self._ns().frontier
 
     def _layout(self) -> DagLayout:
@@ -1491,8 +1491,8 @@ class DagGatedLDAModel(_DagGatedLDAParams, _StagePersistence, Model):
         cleaned model scores documents with the surviving topics' λ unchanged.
 
         Reported by ``unsupportedNodes()`` and persisted with the node set; a dropped
-        node gets no topic block, no gate and no readout head (``DagHeadsEstimator.
-        setTopicModel`` reads this model's node set). With nothing flat, an
+        node gets no topic block and no gate (and a readout built on this model's
+        node set gives it no head). With nothing flat, an
         equivalent copy."""
         flat = [r[0] for r in self._node_stat_rows(maxSupportFraction) if r[-1]]
         return self._without_nodes(flat)

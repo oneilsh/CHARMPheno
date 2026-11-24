@@ -1,7 +1,7 @@
 # ADR 0051 — spark-vi layout, two engines (Spark and local), and a model-agnostic readout
 
 **Date:** 2026-10-28
-**Status:** Accepted (2026-10-28); §5 amended 2026-10-29
+**Status:** Accepted (2026-10-28); §5 amended 2026-10-29; §1's placement of `readout/`, `eval/metrics/` and `mllib/readout.py` superseded by ADR 0054 (2026-11-24: moved to charmpheno)
 
 ## Context
 

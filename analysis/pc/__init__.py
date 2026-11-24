@@ -7,7 +7,7 @@ from git (commit fff7bf4067). One module remains:
   * :mod:`analysis.pc.evaluate` — per-label metric primitives (`_score_label`,
     `_macro`, the per-label logistic baselines, `_bundle_masked`) the readout
     drivers import. The metric definitions themselves live in
-    `spark_vi.eval.metrics` (ADR 0051 step 4); these are thin wrappers.
+    `charmpheno.evaluate.metrics` (ADR 0051 step 4); these are thin wrappers.
 
-The batched multi-head L-BFGS solver is `spark_vi.readout.solver` (ADR 0051).
+The batched multi-head L-BFGS solver is `charmpheno.readout.solver` (ADR 0051).
 """

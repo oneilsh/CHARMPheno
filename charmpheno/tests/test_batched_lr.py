@@ -66,7 +66,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 from sklearn.preprocessing import StandardScaler
 
-from spark_vi.readout.solver import (
+from charmpheno.readout.solver import (
     fold_standardization,
     make_inmemory_stats_fn,
     solve_batched_lr,

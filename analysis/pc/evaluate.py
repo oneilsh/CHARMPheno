@@ -2,10 +2,10 @@
 
 What survives of the in-memory PC evaluation harness (ADR 0038, removed by ADR
 0050): the per-label scorer (`_score_label`), the macro (`_macro`) and the masked
-bundle scorer (`_bundle_masked`), now thin wrappers over `spark_vi.eval.metrics`
+bundle scorer (`_bundle_masked`), now thin wrappers over `charmpheno.evaluate.metrics`
 (ADR 0051 step 4: one exact definition shared with the Spark readout), and the
 per-label masked logistic baseline (`_lr_proba_per_label[_masked]`, the oracle
-`spark_vi.readout.solver` reproduces). This layer is allowed scikit-learn for the
+`charmpheno.readout.solver` reproduces). This layer is allowed scikit-learn for the
 baselines: it is measurement, not a model.
 
 A test-set label column that is constant (all-0 or all-1) makes AUC undefined;
@@ -20,11 +20,11 @@ import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
-from spark_vi.eval.metrics import core as _mcore
-from spark_vi.eval.metrics import report as _mreport
+from charmpheno.evaluate.metrics import core as _mcore
+from charmpheno.evaluate.metrics import report as _mreport
 
 # The three — and only three — reasons a label column is dropped from the macro
-# (`spark_vi.eval.metrics.report`); counted separately, never summed.
+# (`charmpheno.evaluate.metrics.report`); counted separately, never summed.
 SKIP_DEGENERATE = _mreport.SKIP_DEGENERATE
 SKIP_SMALL = _mreport.SKIP_SMALL
 SKIP_CONSTANT = _mreport.SKIP_CONSTANT
@@ -40,7 +40,7 @@ def _score_label(
     topk_frac: float = 0.01,
 ) -> dict[str, Any]:
     """ROC AUC, AP and top-k screening for one label column, or a skip record
-    (`spark_vi.eval.metrics.report.score_record`): degenerate (one class), small
+    (`charmpheno.evaluate.metrics.report.score_record`): degenerate (one class), small
     (either class under ``min_count``; not disclosable on All of Us under 20) or,
     with ``skip_constant``, a constant prediction (AUC exactly 0.5 by
     construction). Top-k: k = ceil(topk_frac n), lift = precision@k / prevalence,
@@ -51,7 +51,7 @@ def _score_label(
 
 def _macro(per_label: dict[int, dict[str, Any]]) -> dict[str, Any]:
     """Macro AUC / AP / top-k over the scored labels, with the skip counts by reason
-    (`spark_vi.eval.metrics.report.macro`)."""
+    (`charmpheno.evaluate.metrics.report.macro`)."""
     return _mreport.macro(per_label)
 
 

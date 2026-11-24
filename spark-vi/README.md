@@ -10,6 +10,12 @@ See the [framework design](../docs/architecture/SPARK_VI_FRAMEWORK.md) for the
 architectural context and [CHARMPheno](../README.md) for the project this
 framework was extracted from.
 
+It ships the engines (`spark_vi.core`: `VIRunner` on Spark, `LocalRunner` in memory),
+topic models with MLlib shims (LDA, online HDP, STM, DAG-gated LDA), label-DAG node-set
+learning (`spark_vi.dag`) and topic evaluation (`spark_vi.eval.topic`). Supervised
+readouts over a fitted model are the application's (CHARMPheno keeps its per-node
+heads in `charmpheno.readout`, ADR 0054).
+
 ## Install
 
 ```bash

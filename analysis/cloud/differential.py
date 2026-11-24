@@ -36,7 +36,7 @@ from scipy.optimize import minimize
 from scipy.special import logsumexp
 
 from charmpheno.egress import EGRESS_FLOOR
-from spark_vi.eval.metrics import ece
+from charmpheno.evaluate.metrics import ece
 
 __all__ = ["filter_record", "MulticlassHead", "CodeHead", "label_matrix", "metrics",
            "pool_reasons", "e3_reasons", "EGRESS_FLOOR"]

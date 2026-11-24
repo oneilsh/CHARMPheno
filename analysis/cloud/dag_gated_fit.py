@@ -39,15 +39,15 @@ import numpy as np
 from _driver_common import _phase, configure_logging, make_spark_session
 from disk_telemetry import start_disk_telemetry
 # The readout's generic machinery (kernels, both backends, the solver, the closure
-# product) lives in spark_vi.readout (ADR 0051) and ships in the spark-vi zip; this
+# product) lives in charmpheno.readout (ADR 0051) and ships in the spark-vi zip; this
 # driver keeps the clinical seams: the doc key (`doc_key.py`, driver-side only),
 # the metrics and their formatting.
 import doc_key as _dk
 from spark_vi.dag import children_and_min_depth
-from spark_vi.readout import (LocalReadoutData, SparkReadoutData, closure_matrix,
+from charmpheno.readout import (LocalReadoutData, SparkReadoutData, closure_matrix,
                               collect_lean_proba, fit_heads, write_heads)
-from spark_vi.readout import evaluate as _ev
-from spark_vi.readout.heads import READOUT_GTOL, READOUT_MAX_ITER
+from charmpheno.readout import evaluate as _ev
+from charmpheno.readout.heads import READOUT_GTOL, READOUT_MAX_ITER
 
 
 def _cprint(msg, **kw) -> None:
@@ -571,7 +571,7 @@ def _save_fit(out, gp, C, manifest_fields, *, results=None, domain_mass=None,
 # `doc_key.py`; this file imports them (`_dk.synthesize_doc_key`, `_dk.person_of`,
 # radix/guard constants) so there is exactly one definition of the map.
 # `_doc_key_column` builds the key as a Spark Column at the collect's own select;
-# `spark_vi.readout.kernels.assert_unique_ids` is the uniqueness tripwire the
+# `charmpheno.readout.kernels.assert_unique_ids` is the uniqueness tripwire the
 # collect runs once the keys reach the driver.
 def _doc_key_column(df, person_col="person_id"):
     """`doc_key = person_id * RADIX + episode_no` as a guarded Spark Column.
@@ -690,7 +690,7 @@ def node_bridge(model, names=None) -> dict:
 
     Engine id 0 is the synthetic root (cid `BRIDGE_ROOT_CID`), 1..N the kept nodes in
     the model's engine order (the order of their topic blocks and of the readout's
-    heads, `spark_vi.readout.labels`). `parent_int` is `{engine child: [engine
+    heads, `charmpheno.readout.labels`). `parent_int` is `{engine child: [engine
     parents]}`, the root omitted as a key (the `DagLayout` map). `names` is the
     bundle's `{node id: name}`."""
     ns = model._ns()
@@ -826,7 +826,7 @@ def attach_heads_targets(df, model, labels_col, *, mask_mode="full",
     """Append the readout heads' dense targets, built from a labels column on the
     FITTED model's node set (spec 2026-10-30 R6, R8): `label_col` / `mask_col`,
     `array<double>` of length C = kept nodes + 1, index 0 the root and index e the
-    model's engine node e (`spark_vi.readout.labels.NodeLabeler`: label = closure of
+    model's engine node e (`charmpheno.readout.labels.NodeLabeler`: label = closure of
     the landed labels; `mask_mode` 'full' or 'closure'). Labels the node set does not
     know are ignored (the label year may attest a node the training documents never
     reached; it lands on its kept ancestors like any pruned one, and a node outside
@@ -837,7 +837,7 @@ def attach_heads_targets(df, model, labels_col, *, mask_mode="full",
     zip."""
     from pyspark.sql import functions as F
     from pyspark.sql.types import ArrayType, DoubleType, StructField, StructType
-    from spark_vi.readout.labels import NodeLabeler
+    from charmpheno.readout.labels import NodeLabeler
 
     lab = NodeLabeler.from_node_set(model._ns(), mask_mode=mask_mode,
                                     unknown_labels="ignore")

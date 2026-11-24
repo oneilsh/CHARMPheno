@@ -1,15 +1,13 @@
 """MLlib Estimator/Transformer shims for spark_vi models.
 
-Topic-model shims live under spark_vi.mllib.topic; the readout heads
-(DagHeadsEstimator, ADR 0051) in spark_vi.mllib.readout. This file re-exports
-their public surface for the convenience top-level
+Topic-model shims live under spark_vi.mllib.topic. This file re-exports their
+public surface for the convenience top-level
 `from spark_vi.mllib import OnlineLDAEstimator` style imports.
 
 Opt-in import path — `import spark_vi` does not transitively load this
 subpackage, so users who don't need MLlib integration don't pay the
 pyspark.ml import cost. Per ADR 0009.
 """
-from spark_vi.mllib.readout import DagHeadsEstimator, DagHeadsModel
 from spark_vi.mllib.topic import (
     DagGatedFeaturizer,
     DagGatedFeaturizerModel,
@@ -24,8 +22,6 @@ from spark_vi.mllib.topic import (
 __all__ = [
     "DagGatedFeaturizer",
     "DagGatedFeaturizerModel",
-    "DagHeadsEstimator",
-    "DagHeadsModel",
     "DagGatedLDAEstimator",
     "DagGatedLDAModel",
     "OnlineHDPEstimator",

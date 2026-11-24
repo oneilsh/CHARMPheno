@@ -456,7 +456,7 @@ def run_differential(test_df, train_df, run_dir, pattern, *, adhoc=False,
     import differential as dfm
     from model_engine import ModelEngine
     import voi_tables as vt
-    from spark_vi.readout import closure_matrix
+    from charmpheno.readout import closure_matrix
     run_dir = Path(run_dir)
     if results_name is None:
         results_name = f"results_readout_{heads_tag}.json"
@@ -867,10 +867,10 @@ def run_prevalence_check(test_scored, run_dir, *, C, parent_int,
     import prevalence_check as pv
     import voi_tables as vt
     from dag_gated_fit import _doc_key_column
-    from spark_vi.eval.metrics import local as ml
-    from spark_vi.readout import closure_matrix
-    from spark_vi.readout import evaluate as ev
-    from spark_vi.readout.spark import score_blocks
+    from charmpheno.evaluate.metrics import local as ml
+    from charmpheno.readout import closure_matrix
+    from charmpheno.readout import evaluate as ev
+    from charmpheno.readout.spark import score_blocks
     run_dir = Path(run_dir)
     bm, cm = run_dir / "bundle_meta.json", run_dir / "code_map.tsv"
     if not cm.exists():

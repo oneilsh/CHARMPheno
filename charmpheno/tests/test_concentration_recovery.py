@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from spark_vi.eval.topic.concentration import doc_concentration
-from spark_vi.eval.topic.concentration_recovery import (
+from charmpheno.evaluate.concentration_recovery import (
     _predictive_loglik,
     corpus_concentration_summary,
     heldout_split,
@@ -242,7 +242,7 @@ class TestPredictiveLoglik:
 class TestSweepHeldout:
     @pytest.mark.slow
     def test_sweep_uses_same_split_across_knobs(self, monkeypatch):
-        import spark_vi.eval.topic.concentration_recovery as cr
+        import charmpheno.evaluate.concentration_recovery as cr
 
         beta = make_shared_beta(K=4, V=100, seed=0)
         docs, _ = plant_corpus(
@@ -374,7 +374,7 @@ class TestLDAHeldoutLLSmoke:
 # ---------------------------------------------------------------------------
 # CO-FIT-beta extension (CR-4): learn beta rather than freeze it at truth.
 # ---------------------------------------------------------------------------
-from spark_vi.eval.topic.concentration_recovery import (  # noqa: E402
+from charmpheno.evaluate.concentration_recovery import (  # noqa: E402
     beta_recovery_error,
     beta_sharpness,
     lda_cofit_beta,

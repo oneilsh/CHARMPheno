@@ -95,7 +95,7 @@ reproduces the corpus counts in the previous run's `bundle_meta.json`.
   `mapPartitions`) must be on `--py-files` in **every** submit path that can
   trigger it, or executors hit `ModuleNotFoundError`.
 - **ADR 0047 closure doctrine:** nothing array-shaped rides a task closure;
-  `treeAggregate` zeros are None-sentinel. Study `spark_vi/readout/spark.py`'s
+  `treeAggregate` zeros are None-sentinel. Study `charmpheno/charmpheno/readout/spark.py`'s
   `SparkStatsFn` before touching the distributed paths.
 
 ### Egress floor (All of Us)
@@ -217,10 +217,15 @@ viewed in a Markdown previewer.)
   - Public API: `spark_vi.core.{VIModel, VIRunner, LocalRunner, VIConfig, VIResult}`
     (two engines, one model contract: ADR 0051).
   - Ships generic topic models (`spark_vi.models.topic`: LDA, HDP, STM,
-    DAG-gated LDA) and the model-agnostic per-node readout (`spark_vi.readout`:
-    heads over any feature column, Spark and local backends).
+    DAG-gated LDA), their MLlib shims, label-DAG node-set learning
+    (`spark_vi.dag`) and topic evaluation (`spark_vi.eval.topic`). The per-node
+    readout moved to charmpheno (ADR 0054), ahead of publishing spark-vi on its own
+    (`docs/reports/2026-11-24-spark-vi-split-scoping.md`).
   - **Must never import `charmpheno`** or clinical / OMOP / BigQuery code.
 - `charmpheno/` is the clinical specialization.
+  - Owns the per-node readout (`charmpheno.readout`: heads over any feature column,
+    Spark and local backends, the `DagHeads` MLlib stages in `readout.mllib`) and
+    the exact ranking metrics (`charmpheno.evaluate.metrics`), ADR 0054.
   - Wraps `spark_vi.models.OnlineHDP` with OMOP semantics, concept vocab,
     downstream export, recovery-vs-ground-truth metrics.
   - May depend on `spark-vi`; the reverse is forbidden.
@@ -310,12 +315,15 @@ if it grows past that, find the new slow test (`--durations=20`) and mark it.
 - **Every edit loop:** `make test`, or the one unit file you are changing. Cheap
   enough to run constantly.
 - **Before every commit:** `make test`, plus the slow tests of the files the change
-  touches (`pytest <file> -m ""`). A change to `spark_vi.core`, `spark_vi.readout`
+  touches (`pytest <file> -m ""`). A change to `spark_vi.core`
   or a model's `local_update`/`update_global` also runs that package's slow tier
   (`make -C spark-vi test-all` equivalent: `pytest spark-vi/tests -m "not cluster"`),
   because the Spark-vs-local agreement tests and the full-batch gate
   (`test_vi_runner_full_batch_matches_local_variational_em`) live there. Run it in the
-  background with a long timeout; it outlives a 30-minute tool limit.
+  background with a long timeout; it outlives a 30-minute tool limit. A change to
+  `charmpheno.readout` / `charmpheno.evaluate.metrics` runs charmpheno's slow tier
+  (`pytest charmpheno/tests -m "not cluster"`), where the readout's Spark-vs-local
+  agreement tests now live.
 - **Before handing a cluster command to the user, and at the end of a multi-commit
   piece of work:** `make test-all`. A cluster run costs hours; a local Spark
   failure caught first costs minutes.

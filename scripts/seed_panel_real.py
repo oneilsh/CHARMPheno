@@ -36,7 +36,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "spark-vi"))
 
-from spark_vi.eval.topic.seed_panel import (          # noqa: E402
+from charmpheno.evaluate.seed_panel import (          # noqa: E402
     conditioned_theta, seed_panel_sweep, signature_seeds,
 )
 from spark_vi.models.topic.partition import TopicBlockPartition  # noqa: E402

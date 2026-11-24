@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from spark_vi.dag.nodeset import fit_node_set
-from spark_vi.readout.labels import NodeLabeler
+from charmpheno.readout.labels import NodeLabeler
 
 # Two top-level nodes, two leaves under each. Engine order = (depth, id), so the
 # output index of node n is n here (index 0 = root).
@@ -99,7 +99,7 @@ def test_bad_policies_refused():
 
 
 def test_local_from_labels_matches_from_arrays():
-    from spark_vi.readout import LocalReadoutData
+    from charmpheno.readout import LocalReadoutData
     lab = _labeler(mask_mode="closure")
     theta = np.random.default_rng(0).dirichlet(np.ones(4), size=len(DOCS))
     a = LocalReadoutData.from_labels(theta, DOCS, lab)

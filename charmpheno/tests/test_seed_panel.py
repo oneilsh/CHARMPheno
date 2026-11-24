@@ -1,10 +1,10 @@
-"""Tests for spark_vi.eval.topic.seed_panel (seed-panel acceptance test for
+"""Tests for charmpheno.evaluate.seed_panel (seed-panel acceptance test for
 the STM generative concentration scale c). Pure numpy, no Spark."""
 from __future__ import annotations
 
 import numpy as np
 
-from spark_vi.eval.topic.seed_panel import (
+from charmpheno.evaluate.seed_panel import (
     conditioned_theta, seed_panel_sweep, signature_seeds,
 )
 from spark_vi.models.topic.partition import TopicBlockPartition

@@ -26,7 +26,7 @@ import time
 import numpy as np
 
 from spark_vi.io import fs
-from spark_vi.readout.solver import (fold_standardization, solve_batched_lr,
+from charmpheno.readout.solver import (fold_standardization, solve_batched_lr,
                                      standardized_grad_from_raw,
                                      unfold_standardization)
 

@@ -1,6 +1,6 @@
 """Tests for the gated_pc cloud driver: the pure pc_topics_lr scorer, the metrics
 and their formatting, and the arg surface. The readout's solver checkpoint and heads
-persistence moved to spark_vi.readout with ADR 0051 (spark-vi/tests/
+persistence moved to charmpheno.readout with ADR 0051 (spark-vi/tests/
 test_readout_heads.py). The end-to-end BQ+fit run is the cluster smoke (main()
 reads the CDR via the spark-bigquery connector)."""
 
@@ -19,10 +19,10 @@ def test_dag_children_and_min_depth():
 
 
 def test_precision_at_recall_and_recall_at_fdr():
-    """The per-node PR block the readout reports (`spark_vi.eval.metrics`, whose own
+    """The per-node PR block the readout reports (`charmpheno.evaluate.metrics`, whose own
     tests hold scikit-learn as the oracle)."""
     import math
-    from spark_vi.eval.metrics import core
+    from charmpheno.evaluate.metrics import core
 
     def _m(y, p, rt=(), fq=()):
         return core.node_metrics(core.tally(p, y), recall_targets=rt, fdr_targets=fq)

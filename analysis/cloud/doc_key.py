@@ -5,12 +5,12 @@ person (`doc_id == person_id`, an int64). A multi-document corpus makes a person
 carry several documents, so the readout keys rows by one synthesized int64 that is
 unique per document, recovers the person by arithmetic, and leaves single-document
 corpora on their existing ids (scaled order-preservingly). The generic readout
-(`spark_vi.readout`) only needs an int64 row id; this module is the clinical
+(`charmpheno.readout`) only needs an int64 row id; this module is the clinical
 definition of it, used driver-side (`dag_gated_fit._doc_key_column` builds the
 same map as a Spark Column).
 
 Until ADR 0051 this file was `distributed_readout.py` and also held the readout's
-partition kernels and Spark passes; those moved to `spark_vi.readout`.
+partition kernels and Spark passes; those moved to `charmpheno.readout`.
 """
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ import numpy as np
 # corpus, must hand this seam that bounded index (or, equivalently, a dense
 # per-person `row_number()-1` over the kept documents), never D1's raw ordinal.
 # `synthesize_doc_key` enforces the bound (episode_no < RADIX raises), and the
-# uniqueness assertion at densify time (`spark_vi.readout.kernels.
+# uniqueness assertion at densify time (`charmpheno.readout.kernels.
 # assert_unique_ids`) is the second tripwire: a person carrying more than
 # RADIX documents, or D1's raw ordinal leaking through, shows up as a collision
 # there rather than as a silently mis-attributed row. EpisodeDocSpec itself keys

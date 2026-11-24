@@ -57,8 +57,8 @@ os.environ["PYTHONPATH"] = os.pathsep.join(
     p for p in (str(REPO_ROOT), str(CLOUD), os.environ.get("PYTHONPATH", "")) if p)
 
 import dag_gated_fit as gpc  # noqa: E402
-from spark_vi.readout import SparkReadoutData, fit_heads  # noqa: E402
-from spark_vi.readout import kernels as readout_kernels  # noqa: E402
+from charmpheno.readout import SparkReadoutData, fit_heads  # noqa: E402
+from charmpheno.readout import kernels as readout_kernels  # noqa: E402
 import dag_gated_readout as gpr  # noqa: E402
 import run_experiment as rex  # noqa: E402
 
@@ -261,7 +261,7 @@ def test_warm_started_calibration_fit_matches_the_cold_one(spark, caplog):
     """
     from pyspark.sql import functions as F
 
-    caplog.set_level("INFO", logger="spark_vi.readout")
+    caplog.set_level("INFO", logger="charmpheno.readout")
     Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te = _make_arrays(seed=4)
     train_df = _make_df(spark, Pi_tr, y_tr, m_tr).cache()
     test_df = _make_df(spark, Pi_te, y_te, m_te, offset=10_000).cache()
@@ -352,7 +352,7 @@ def test_theta_topm_on_concentrated_theta_keeps_the_readout(spark, caplog):
     given corpus is a property of that corpus. Assert tightly here and the test would
     be asserting on a Dirichlet draw.
     """
-    caplog.set_level("INFO", logger="spark_vi.readout")
+    caplog.set_level("INFO", logger="charmpheno.readout")
     rng = np.random.default_rng(21)
     K_wide, topm = 40, 6
     Pi_tr = rng.dirichlet(np.full(K_wide, 0.05), size=D_TR)

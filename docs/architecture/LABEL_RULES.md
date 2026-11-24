@@ -24,7 +24,7 @@ disagree, and a change to a rule updates this page in the same commit.
    A node is positive when the person is attested at it, or below it (the is-a
    closure of the landed labels), on the FITTED model's node set: the readout
    builds the per-node targets from `labels` and the model
-   (`dag_gated_fit.attach_heads_targets`, `spark_vi.readout.labels`; spec
+   (`dag_gated_fit.attach_heads_targets`, `charmpheno.readout.labels`; spec
    2026-10-30 R6). `label_mask_mode="full"`: every node is observed for every row.
 4. **The split is by person, first.** One salted hash of `person_id` splits every
    domain and the labels, so a person is on one side only; vocabularies are fit on
@@ -48,7 +48,7 @@ disagree, and a change to a rule updates this page in the same commit.
    with `gate_attestation: ever`, exp 0146; the estimator's `labelsCol`). The test
    transform is the deployment fold-in: ungated, full-K CAVI over every block
    (`DagGatedLDAModel._transform`), because at deployment the label is unknown.
-7. **Heads train on all positives.** The per-node readout heads (`spark_vi.readout`)
+7. **Heads train on all positives.** The per-node readout heads (`charmpheno.readout`)
    fit on every training row with its full label vector; nothing is held out by
    history.
 

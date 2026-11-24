@@ -13,7 +13,7 @@
   - [Data Contract: User-Facing vs. Internal](#data-contract-user-facing-vs-internal)
   - [The VIRunner](#the-virunner)
   - [The LocalRunner (in-memory engine)](#the-localrunner-in-memory-engine)
-  - [The readout (`spark_vi.readout`)](#the-readout-spark_vireadout)
+  - [The readout (`charmpheno.readout`, formerly `spark_vi.readout`)](#the-readout-charmphenoreadout-formerly-spark_vireadout)
   - [VIConfig](#viconfig)
   - [VIResult and Model Export](#viresult-and-model-export)
 - [Notebook Diagnostics and Output](#notebook-diagnostics-and-output)
@@ -411,7 +411,12 @@ merging). `DagGatedLDAEstimator(engine="local", localProcesses=N)` uses it: the 
 and the seed passes run on Spark, the documents are collected to the driver once, and the
 SVI loop runs here (exp 0170).
 
-### The readout (`spark_vi.readout`)
+### The readout (`charmpheno.readout`, formerly `spark_vi.readout`)
+
+*Moved out of spark-vi into charmpheno by ADR 0054 (2026-11-24), with the `DagHeads`
+stages (`charmpheno.readout.mllib`) and the metrics (`charmpheno.evaluate.metrics`). It
+still builds on spark-vi (the node set, the persistence helpers, broadcast and retry);
+described here because it is the framework's main consumer.*
 
 After a fit, case-finding reads each label-DAG node off a frozen per-row feature
 vector (topic proportions θ, raw-code presence, any representation) with an
@@ -440,7 +445,7 @@ such as the closure product or a prior-evidence matrix). `readout/evaluate.py` t
 blocks into the readout's results: ranking, per-node precision@recall /
 recall@FDR, pooled detection (rows pooled onto units such as persons by max),
 the marginal (unmasked) ranking, calibration by node group, and ROC/PR curves for a
-node sample. The metrics are exact and come from `spark_vi.eval.metrics`: a column's
+node sample. The metrics are exact and come from `charmpheno.evaluate.metrics`: a column's
 tally (distinct scores with positive and negative counts) determines AUC (ties at
 half credit), AP, precision@recall, recall@FDR, top-k screening and the curves,
 and tallies merge, so each partition tallies its column pieces, the shuffle merges
@@ -578,7 +583,7 @@ path is qualified once, MLlib's rule, so a bare path lands on `fs.defaultFS` for
 |---|---|
 | `DagGatedLDAEstimator`, `DagGatedFeaturizer` | none (Params only; the DAG and the other structured Params are JSON strings, so str / int ids survive) |
 | `DagGatedLDAModel` | `result/`: the VIResult in the format above (the fit checkpoints' format; the node set rides its metadata) |
-| `DagHeadsModel` | `readout_heads_model.npz` (the heads), `node_set.json` |
+| `DagHeadsModel` (charmpheno, ADR 0054) | `readout_heads_model.npz` (the heads), `node_set.json` |
 | `DagHeadsEstimator` | `topicModel/` (a `DagGatedLDAModel` directory) when one is held via `setTopicModel` |
 | `DagGatedFeaturizerModel` | `data/vocabularies.json`: the vocabularies |
 
@@ -823,7 +828,22 @@ spark_vi/
 │   └── ops.py              # closure, descendants, depth, transitive reduction, closure matrix
 ├── models/topic/           # LDA, HDP, STM, DAG-gated LDA; flat spectral init (STM);
 │                           #   gate seeds
-├── readout/                # per-node heads over ANY feature column (ADR 0051)
+├── eval/topic/             # coherence, gated NPMI (gated_npmi.py), concentration,
+│                           #   topic sharpness (sharpness.py: support fraction),
+│                           #   held-out predictive likelihood (heldout.py)
+├── mllib/topic/            # Estimator/Model shims: LDA, HDP, STM, DagGatedLDA, and the
+│                           #   DagGatedFeaturizer prep stage (featurizer.py)
+├── inference/              # concentration (α/η) optimization
+├── io/fs.py                # any-URI file I/O (local paths plain Python, else Hadoop FS)
+├── io/export.py            # save_result / load_result
+└── diagnostics/persist.py  # the cached-input precondition
+```
+
+The readout and the metrics live in charmpheno since ADR 0054:
+
+```
+charmpheno/charmpheno/
+├── readout/                # per-node heads over ANY feature column
 │   ├── kernels.py          # pure-numpy moments / stats / lean-eval kernels
 │   ├── solver.py           # batched multi-head L-BFGS (solve_batched_lr)
 │   ├── heads.py            # fit_heads: the backend-agnostic fit, checkpoints, heads npz
@@ -831,21 +851,13 @@ spark_vi/
 │   ├── local.py            # LocalReadoutData: a pass = numpy over rows held once
 │   ├── labels.py           # NodeLabeler: per-node targets / masks from user labels
 │   ├── stacked.py          # closure product over a label DAG
-│   └── evaluate.py         # the readout's metrics from score blocks (no collect)
-├── eval/topic/             # coherence, gated NPMI (gated_npmi.py), concentration,
-│                           #   topic sharpness (sharpness.py: support fraction)
-├── eval/metrics/           # exact AUC / AP / P@R / R@FDR / top-k / curves / ECE
-│   ├── core.py             #   from mergeable score tallies (pure numpy)
-│   ├── spark.py, local.py  #   per-key metrics: merged in the shuffle / in memory
-│   └── report.py           #   skip rules and macros
-├── mllib/topic/            # Estimator/Model shims: LDA, HDP, STM, DagGatedLDA, and the
-│                           #   DagGatedFeaturizer prep stage (featurizer.py)
-├── mllib/readout.py        # DagHeadsEstimator/Model: the per-node heads as a stage, so
+│   ├── evaluate.py         # the readout's metrics from score blocks (no collect)
+│   └── mllib.py            # DagHeadsEstimator/Model: the heads as a stage, so
 │                           #   Pipeline([DagGatedLDA, DagHeads]) is the case-finding model
-├── inference/              # concentration (α/η) optimization
-├── io/fs.py                # any-URI file I/O (local paths plain Python, else Hadoop FS)
-├── io/export.py            # save_result / load_result
-└── diagnostics/persist.py  # the cached-input precondition
+└── evaluate/
+    ├── metrics/            # exact AUC / AP / P@R / R@FDR / top-k / curves / ECE from
+    │                       #   mergeable score tallies (core; spark / local; report)
+    ├── concentration_recovery.py, seed_panel.py   # simulator studies (STM / LDA)
 ```
 
 ---

@@ -54,7 +54,7 @@ from pathlib import Path
 
 import numpy as np
 
-from spark_vi.eval.topic.concentration_recovery import (
+from charmpheno.evaluate.concentration_recovery import (
     beta_recovery_error,
     beta_sharpness,
     corpus_concentration_summary,

@@ -14,11 +14,11 @@ over, and the closure product's DAG); never imports `spark_vi.models` (the featu
 an input, not a model). Metrics over the scored probabilities live with the
 evaluation code, not here.
 """
-from spark_vi.readout.heads import fit_heads, read_heads, write_heads
-from spark_vi.readout.labels import NodeLabeler
-from spark_vi.readout.local import LocalReadoutData
-from spark_vi.readout.spark import SparkReadoutData, collect_lean_proba
-from spark_vi.readout.stacked import closure_matrix, stacked_proba
+from charmpheno.readout.heads import fit_heads, read_heads, write_heads
+from charmpheno.readout.labels import NodeLabeler
+from charmpheno.readout.local import LocalReadoutData
+from charmpheno.readout.spark import SparkReadoutData, collect_lean_proba
+from charmpheno.readout.stacked import closure_matrix, stacked_proba
 
 __all__ = ["LocalReadoutData", "NodeLabeler", "SparkReadoutData", "closure_matrix",
            "collect_lean_proba", "fit_heads", "read_heads", "stacked_proba",

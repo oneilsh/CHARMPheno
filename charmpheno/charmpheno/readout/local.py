@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from spark_vi.readout.kernels import (
+from charmpheno.readout.kernels import (
     dense_triples, densify_lean_blocks, lean_eval_kernel, moments_kernel,
     moments_to_mu_sd, sparse_moments_kernel, sparse_stats_kernel, stats_kernel,
     to_array, topm_sparse,
@@ -162,7 +162,7 @@ class LocalReadoutData:
         the block, as `SparkReadoutData.score_blocks(extra_cols=)` carries Spark
         columns: the held rows keep only the readout's own fields, so the values
         come from the caller."""
-        from spark_vi.readout.evaluate import Blocks
+        from charmpheno.readout.evaluate import Blocks
 
         proba, y, mask, ids = self.lean_proba(V, b_raw, degenerate=degenerate,
                                               const=const)

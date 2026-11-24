@@ -1,7 +1,7 @@
 """Synthetic method-validation for the seed-panel acceptance test (LOCAL, no
 Spark; known ground truth).
 
-Purpose: the seed-panel test (spark_vi.eval.topic.seed_panel) asks whether a
+Purpose: the seed-panel test (charmpheno.evaluate.seed_panel) asks whether a
 generative concentration scale c over-commits on a tiny 1-2 token seed
 prefix -- lands on the right topic but with implausibly total mass, secondary
 interests erased. Before trusting that test's verdict on a real, ~5000-word,
@@ -22,7 +22,7 @@ generation. gated_ln_corpus's own doc-generation draws eta ~ N(0, Sigma_true)
 at implicit scale 1; the corpus's docs are unused here (see NOTE below).
 
 The discrimination property under test: conditioned_theta's prior precision is
-(1/c) * safe_inverse(R[allowed]) (spark_vi.eval.topic.seed_panel), so INCREASING
+(1/c) * safe_inverse(R[allowed]) (charmpheno.evaluate.seed_panel), so INCREASING
 c weakens the prior's pull toward the mean, letting a small amount of seed data
 dominate the posterior mode MORE -- i.e. higher c should make top_mass rise and
 eff_topics/second_mass fall (more concentrated, less secondary structure) as c
@@ -39,7 +39,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "spark-vi"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "spark-vi" / "tests"))
 
-from spark_vi.eval.topic.seed_panel import seed_panel_sweep          # noqa: E402
+from charmpheno.evaluate.seed_panel import seed_panel_sweep          # noqa: E402
 from _stm_synth import gated_ln_corpus                               # noqa: E402
 
 S_TRUE = 5   # reference point for interpretation only -- see module docstring.
@@ -143,7 +143,7 @@ def _write_results_md(summary, monotone_top_mass, monotone_eff_topics,
     lines.append("")
     lines.append(
         "Known-ground-truth check that the seed-panel acceptance test "
-        "(spark_vi.eval.topic.seed_panel) DETECTS generative-scale "
+        "(charmpheno.evaluate.seed_panel) DETECTS generative-scale "
         "over-commitment: a planted, disjoint-vocabulary beta and a planted "
         "unit-diagonal correlation R (tests/_stm_synth.py:gated_ln_corpus; "
         "groups=('A','B'), fg_per_group=4, bg_k=3, V=400, doc_len=40) are fed "

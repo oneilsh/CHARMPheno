@@ -1,4 +1,4 @@
-"""Exact metrics from score tallies (`spark_vi.eval.metrics`, ADR 0051 §3).
+"""Exact metrics from score tallies (`charmpheno.evaluate.metrics`, ADR 0051 §3).
 
 scikit-learn is the oracle for AUC, AP and the PR curve; the tallies must give the
 same numbers on any column (ties included) and merge to the same answer in any split,
@@ -9,7 +9,7 @@ import math
 import numpy as np
 import pytest
 
-from spark_vi.eval.metrics import core, local, report
+from charmpheno.evaluate.metrics import core, local, report
 
 RT, FQ = (0.25, 0.5, 0.9, 1.0), (0.0, 0.1, 0.5)
 
@@ -146,7 +146,7 @@ def test_local_pieces_match_whole_columns():
 
 @pytest.mark.slow
 def test_spark_matches_local(spark):
-    from spark_vi.eval.metrics import spark as sm
+    from charmpheno.evaluate.metrics import spark as sm
 
     s, y, keep, parts = _pieces(D=3000, C=8)
     blocks = [(s[r], y[r], keep[r]) for r in parts]

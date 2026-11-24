@@ -6,7 +6,7 @@ Public API:
 
 Two engines run one model contract: VIRunner on Spark, LocalRunner in memory
 (ADR 0051). Pre-built models live in spark_vi.models.topic (LDA, HDP, STM, the
-DAG-gated LDA) with MLlib shims in spark_vi.mllib; the per-node readout over any
-frozen feature column is spark_vi.readout.
+DAG-gated LDA) with MLlib shims in spark_vi.mllib. Supervised readouts over a fitted
+model's output (heads, classification metrics) are left to the consuming application.
 """
 __version__ = "0.1.0"

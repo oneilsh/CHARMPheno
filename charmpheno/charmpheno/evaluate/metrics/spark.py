@@ -15,7 +15,7 @@ targets, `topk_frac`, `max_points` and the (small) set of curve keys.
 """
 from __future__ import annotations
 
-from spark_vi.eval.metrics import core
+from charmpheno.evaluate.metrics import core
 
 
 def per_key_metrics(pieces, *, recall_targets=(), fdr_targets=(), topk_frac=0.01,

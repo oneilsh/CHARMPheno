@@ -253,7 +253,7 @@ def test_daglayout_subtree_and_depth_are_diamond_safe():
 
 
 def _diamond_labeler(mode):
-    from spark_vi.readout.labels import NodeLabeler
+    from charmpheno.readout.labels import NodeLabeler
     ns = fit_node_set(mn.subgraph_parents([_D, _E], _diamond_parents()),
                       [[_D], [_E], [_B], [_A]], min_docs_per_node=1)
     return ns, NodeLabeler.from_node_set(ns, mask_mode=mode)

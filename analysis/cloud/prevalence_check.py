@@ -176,7 +176,7 @@ def rows_from_node_lists(node_lists, C):
 
 def node_aucs_from_metrics(m_all, m_inc, nodes, *, floor=EGRESS_FLOOR):
     """Per node, from its column metrics over all patients (`m_all[c]`) and with the
-    prior-evidence patients set aside (`m_inc[c]`; `spark_vi.eval.metrics`): both
+    prior-evidence patients set aside (`m_inc[c]`; `charmpheno.evaluate.metrics`): both
     AUCs, the positives in each, and the prior share of positives / negatives (the
     rows the second set drops). Nodes under `floor` positives in either setting, or
     under `floor` incident negatives, are skipped."""
@@ -199,7 +199,7 @@ def node_aucs_from_metrics(m_all, m_inc, nodes, *, floor=EGRESS_FLOOR):
 
 def node_aucs(score, y, prior, nodes, *, floor=EGRESS_FLOOR):
     """`node_aucs_from_metrics` on dense (D, C) arrays (the in-memory backend)."""
-    from spark_vi.eval.metrics import local as ml
+    from charmpheno.evaluate.metrics import local as ml
     cols = [int(c) for c in nodes]
     m_all = ml.per_key_metrics(ml.column_pieces(score, y, columns=cols))
     m_inc = ml.per_key_metrics(ml.column_pieces(score, y, ~np.asarray(prior, bool),

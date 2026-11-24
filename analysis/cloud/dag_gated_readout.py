@@ -5,7 +5,7 @@ DagGatedLDAModel: its λ / α and the node set the fit learned) + manifest.json,
 reloads the cached bundle the run was fit against, re-transforms train+test, builds
 the heads' per-node targets from the bundle's label-year `labels` on the MODEL's
 node set (spec 2026-10-30 R6, R8: `dag_gated_fit.attach_heads_targets`, the
-`spark_vi.readout.labels` labeler DagHeads uses), and prints the FULL
+`charmpheno.readout.labels` labeler DagHeads uses), and prints the FULL
 case-finding readout for the gated_pc arm:
 
   - pc_topics_lr:   ranking AUC/AP + per-node precision@recall / recall@FDR +
@@ -33,7 +33,7 @@ sizes against the saved λ's own V dimensions, and the rebuilt label DAG against
 one the model was fit with. A mismatch aborts with the drift named,
 rather than reporting numbers for a model scored on a corpus it was not fit on.
 
-The heads are fit by `spark_vi.readout` (ADR 0051) on either engine:
+The heads are fit by `charmpheno.readout` (ADR 0051) on either engine:
 `--readout-engine spark` (default) runs every L-BFGS pass as a treeAggregate over
 the scored frame; `--readout-engine local` collects each split once in compact
 (top-m truncated) form and runs the passes in driver memory with the same kernels.
@@ -58,7 +58,7 @@ import numpy as np
 from _driver_common import (_phase, configure_logging, hard_exit,
                             install_stdout_tee, make_spark_session)
 from disk_telemetry import start_disk_telemetry
-from spark_vi.readout import read_heads
+from charmpheno.readout import read_heads
 from dag_gated_fit import (
     _MONDO_DAG_SOURCES, _dump_partial_results, attach_engine_frontier,
     attach_heads_targets, format_arm_readout, landed_code_map, load_fitted_model,

@@ -1,7 +1,7 @@
 """Factorial driver for the local (pure numpy) concentration-recovery
 diagnostic (CR-3).
 
-CR-1 (spark_vi.eval.topic.concentration_recovery: make_shared_beta,
+CR-1 (charmpheno.evaluate.concentration_recovery: make_shared_beta,
 plant_corpus, stm_recover_theta, lda_recover_theta, lda_optimize_alpha,
 corpus_concentration_summary) and CR-2 (sweep_heldout / the held-out
 predictive-LL gold standard) built and unit-validated the planting/recovery
@@ -36,7 +36,7 @@ from pathlib import Path
 
 import numpy as np
 
-from spark_vi.eval.topic.concentration_recovery import (
+from charmpheno.evaluate.concentration_recovery import (
     corpus_concentration_summary,
     lda_optimize_alpha,
     lda_recover_theta,

@@ -56,7 +56,7 @@ import numpy as np
 from scipy.special import digamma
 
 from spark_vi.eval.topic.concentration import doc_concentration
-from spark_vi.eval.topic.concentration_recovery import make_shared_beta
+from charmpheno.evaluate.concentration_recovery import make_shared_beta
 from spark_vi.mllib.topic.stm import _gated_mode_theta, corpus_heldout_scale_sweep_gated
 from spark_vi.models.topic._linalg import safe_inverse
 from spark_vi.models.topic.partition import TopicBlockPartition
@@ -91,7 +91,7 @@ def build_structure(*, groups, fg_per_group, bg_k, V, doc_len, seed, beta_mode="
       expected to matter little for concentration recovery.
 
     beta_mode == "shared": beta from make_shared_beta -- topics SHARE a common
-      term pool (spark_vi.eval.topic.concentration_recovery), so a non-allowed
+      term pool (charmpheno.evaluate.concentration_recovery), so a non-allowed
       topic CAN steal shared-term mass during non-gated inference. The
       TopicBlockPartition is built separately (same K topics, same background +
       per-group foreground layout) so the ONLY thing that changes vs disjoint

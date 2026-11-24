@@ -8,9 +8,9 @@ turns per-column metrics into the readout's records (the skip rules) and macros.
 
 Depends on NumPy only (no scikit-learn, no pyspark import at module load).
 """
-from spark_vi.eval.metrics.core import (calibration_bins, curve, ece, ece_from_bins,
+from charmpheno.evaluate.metrics.core import (calibration_bins, curve, ece, ece_from_bins,
                                         merge, merge_all, node_metrics, tally)
-from spark_vi.eval.metrics.report import (SKIP_CODES, SKIP_CONSTANT, SKIP_DEGENERATE,
+from charmpheno.evaluate.metrics.report import (SKIP_CODES, SKIP_CONSTANT, SKIP_DEGENERATE,
                                           SKIP_SMALL, macro, pr_macro, pr_record,
                                           score_record)
 

@@ -24,7 +24,7 @@ os.environ["PYTHONPATH"] = os.pathsep.join(
 
 import dag_gated_fit as gpc  # noqa: E402
 from spark_vi.dag.ops import parents_over_range  # noqa: E402
-from spark_vi.readout import stacked as stk  # noqa: E402
+from charmpheno.readout import stacked as stk  # noqa: E402
 
 # Root 0; 1, 2, 6 under the root; 3 under 1; 4 is a DIAMOND child of 1 and 2;
 # 5 under 4 (closure(5) = {0, 1, 2, 4, 5}: the root counted once, not twice).

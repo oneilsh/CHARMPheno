@@ -1,5 +1,5 @@
-"""Tests for the readout kernels (`spark_vi.readout.kernels`), the Spark passes
-(`spark_vi.readout.spark`) and the Spark-action retry (`spark_vi.core.retry`).
+"""Tests for the readout kernels (`charmpheno.readout.kernels`), the Spark passes
+(`charmpheno.readout.spark`) and the Spark-action retry (`spark_vi.core.retry`).
 Moved from `tests/scripts/test_distributed_readout.py` with ADR 0051.
 
 Two layers:
@@ -21,15 +21,15 @@ masked-out rows are exactly zero. It is a COST lever, so any semantic difference
 would show up as a fit that silently disagrees with the sklearn oracle.
 
 The fold formulas (standardized <-> raw) are written out INLINE here rather than
-imported from `spark_vi.readout.solver`: the stats passes take the fold as an
+imported from `charmpheno.readout.solver`: the stats passes take the fold as an
 injected callable, so they are testable without the solver.
 """
 import numpy as np
 import pytest
 
 from spark_vi.core import retry
-from spark_vi.readout import kernels as kern
-from spark_vi.readout import spark as rspark
+from charmpheno.readout import kernels as kern
+from charmpheno.readout import spark as rspark
 
 C, K, D = 8, 12, 60
 
