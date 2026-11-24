@@ -229,7 +229,8 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
                 raise ValueError(
                     "compute_bundle_cache_key: mondo=True requires mondo_native=True "
                     "(the anchor-Mondo label space was removed with ADR 0051)")
-            from charmpheno.mondo import native_dag, omop_mapping, ontology
+            from charmpheno.mondo import (bundle_assembly, native_dag, omop_mapping,
+                                          ontology)
             from spark_vi.dag import ops as dag_ops
             payload["mondo"] = True
             payload["mondo_version"] = str(mondo_version)
@@ -240,6 +241,10 @@ def compute_bundle_cache_key(*, source_table=None, person_mod, vocab_size, min_d
             payload["mondo_omop_mapping_src"] = _module_source_hash(omop_mapping)
             payload["mondo_ontology_src"] = _module_source_hash(ontology)
             payload["dag_ops_src"] = _module_source_hash(dag_ops)
+            # What the bundle adds after the assembler on a MISS: the all-ever gate
+            # labels and the code ladder (review 2026-11-13 D4: they lived in the
+            # fit driver, which no key folds).
+            payload["mondo_bundle_src"] = _module_source_hash(bundle_assembly)
     s = json.dumps(payload, sort_keys=True)
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
 

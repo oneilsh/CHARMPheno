@@ -1,5 +1,5 @@
 """Label redesign R2 (spec 2026-10-13; R8 of spec 2026-10-30): the all-ever gate
-labels (`dag_gated_fit._attach_gate_ever`, `--gate-attestation ever`): a
+labels (`charmpheno.mondo.bundle_assembly.attach_gate_ever`, `--gate-attestation ever`): a
 `gate_labels` column on the TRAIN split beside the label-year `labels`."""
 import os
 import sys
@@ -20,6 +20,7 @@ os.environ["PYTHONPATH"] = os.pathsep.join(
     if p)
 
 import dag_gated_fit as gpc  # noqa: E402
+from charmpheno.mondo import bundle_assembly as ba  # noqa: E402
 
 
 class _StubBundle:
@@ -84,7 +85,7 @@ def test_ever_gate_adds_all_history_labels_and_leaves_labels_and_test(spark):
                                        .alias("labels")))
 
     b = _StubBundle(train, test)
-    out = gpc._attach_gate_ever(spark, b, provider=provider, cdr="x", billing="y",
+    out = ba.attach_gate_ever(spark, b, provider=provider, cdr="x", billing="y",
                                 person_mod=1, _events=events)
     assert dict(out.train_df.dtypes)["gate_labels"] == "array<string>"
     got = {r["person_id"]: r.asDict() for r in out.train_df.collect()}
@@ -105,11 +106,11 @@ def test_gate_column_join_refuses_a_missing_or_duplicate_gate(spark):
         [(1, "population:1", ["T3"]), (1, "population:1", ["T4"]),
          (2, "population:2", [])], "person_id long, doc_id string, g array<string>")
     with pytest.raises(ValueError, match="duplicate"):
-        gpc._attach_gate_column(df, dup, "g")
+        ba.attach_gate_column(df, dup, "g")
     missing = spark.createDataFrame(
         [(1, "population:1", ["T3"])], "person_id long, doc_id string, g array<string>")
     with pytest.raises(ValueError, match="received no"):
-        gpc._attach_gate_column(df, missing, "g")
+        ba.attach_gate_column(df, missing, "g")
 
 
 def test_re_readout_recovers_the_ever_gate_from_the_manifest():

@@ -147,7 +147,10 @@ _MD_BASE = dict(_SNOMED_BASE, multidomain=True, extra_domains=("drug",),
 # `spark_vi.dag.layout` import move in `case_finding_assembly` / `multi_domain`).
 # Re-pinned by WP11 (2026-11-02, the subgraph handover; see the SNOMED pins' note):
 # `collapse` and `spark_vi.dag.layout` no longer fold, `min_positives` left the key.
-_MONDO_NATIVE_KEY = "ae054f1ef347c379"
+# Re-pinned 2026-11-24 (CACHE DROP, review D4): `charmpheno.mondo.bundle_assembly`
+# (the all-ever gate labels and the code ladder, moved out of the fit driver) folds
+# as `mondo_bundle_src`. The SNOMED pins do not move (the fold is Mondo-only).
+_MONDO_NATIVE_KEY = "4cd02798310909cf"
 
 
 def test_the_native_mondo_key_is_byte_identical():

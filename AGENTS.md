@@ -64,7 +64,7 @@ the bundle/corpus/covariates but leaves the expensive sidecar a HIT.
 
 **Treat as source-hashed / do-not-edit-casually:**
 `charmpheno/charmpheno/omop/{cohorts,multi_domain,case_finding_assembly,condition_dag,bigquery,measurement_tokens,topic_prep}.py`;
-`charmpheno/charmpheno/mondo/{native_dag,omop_mapping,ontology}.py`;
+`charmpheno/charmpheno/mondo/{native_dag,omop_mapping,ontology,bundle_assembly}.py`;
 `spark-vi/spark_vi/dag/ops.py` (folds into the Mondo keys). Since spec 2026-10-30 the
 bundle carries the whole label DAG and per-document attested node ids, so the node
 set, the engine layout (`spark_vi/dag/layout.py`, no longer folded) and the dense
