@@ -148,8 +148,8 @@ def test_model_load_refuses_another_class_and_another_engine(spark, tmp_path):
 # --------------------------------------------------------------------------- #
 
 def _heads_frame(spark, n=120, seed=0):
-    from test_mllib_dag_heads import _df as heads_df
-    from test_mllib_dag_heads import _rows
+    from .test_mllib_dag_heads import _df as heads_df
+    from .test_mllib_dag_heads import _rows
     return heads_df(spark, _rows(n=n, seed=seed))
 
 
