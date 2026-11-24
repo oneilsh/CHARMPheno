@@ -44,6 +44,7 @@ these pieces, and the simulator-study helpers, into charmpheno.
 - Executor-side readout code now pickles under `charmpheno.readout`; every submit path
   that runs a readout already ships the charmpheno zip.
 - `charmpheno/omop/case_finding_assembly.py` (source-hashed) named
-  `spark_vi.readout.labels`; corrected in one announced cache-drop commit.
+  `spark_vi.readout.labels`; corrected in its own announced cache-drop commit, which
+  re-pinned all four tripwire hashes (docstring only; no corpus change).
 - charmpheno declares scipy, and scikit-learn as a test oracle; spark-vi drops the
   latter.

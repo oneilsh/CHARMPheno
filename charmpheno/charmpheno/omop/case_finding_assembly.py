@@ -9,7 +9,7 @@ estimator and the readout heads take (spec 2026-10-30 R1/R2/R6): no frontier, no
 dense label vectors, no engine ids, no threshold. Which nodes get a topic block
 (support, prune, landing, reduction, splice) is learned by the estimator from the
 TRAINING documents; the dense per-node targets are built from the fitted node set
-by the readout (`spark_vi.readout.labels`).
+by the readout (`charmpheno.readout.labels`).
 
 Composes the SNOMED DAG builder (condition_dag.py), the population+disease cohort
 machinery (cohorts.py) and `to_bow_dataframe`. Two id spaces:

@@ -107,9 +107,14 @@ _SNOMED_BASE = dict(
 # bundle). The second SNOMED pin was the `emit_labels` + closure-mask key; that
 # option is gone, so it now pins the all-ever gate fold (`gate_attestation="ever"`).
 # Announced full drop; these are the post-drop values.
-_SNOMED_KEY = "94e21c0c95f5e9d4"
-_SNOMED_EVER_KEY = "e872acd4ebe84669"              # gate_attestation=ever
-_SNOMED_LOOKBACK_KEY = "4637ca2477bc417b"      # lookback windowing + strip both
+#
+# RE-PINNED 2026-11-24 (CACHE DROP, ADR 0054): `case_finding_assembly.py`'s docstring
+# named `spark_vi.readout.labels`, which moved to `charmpheno.readout.labels`; the
+# one-line docstring fix moves `assembly_src`, so all four hashes moved at once.
+# Docstring only; no corpus change.
+_SNOMED_KEY = "8981166ca254f205"
+_SNOMED_EVER_KEY = "a11469b472bd451a"              # gate_attestation=ever
+_SNOMED_LOOKBACK_KEY = "b68ea974ac34e722"      # lookback windowing + strip both
 
 
 def test_existing_snomed_keys_are_byte_identical():
@@ -150,7 +155,9 @@ _MD_BASE = dict(_SNOMED_BASE, multidomain=True, extra_domains=("drug",),
 # Re-pinned 2026-11-24 (CACHE DROP, review D4): `charmpheno.mondo.bundle_assembly`
 # (the all-ever gate labels and the code ladder, moved out of the fit driver) folds
 # as `mondo_bundle_src`. The SNOMED pins do not move (the fold is Mondo-only).
-_MONDO_NATIVE_KEY = "4cd02798310909cf"
+# Re-pinned 2026-11-24 (CACHE DROP, ADR 0054): the `case_finding_assembly.py`
+# docstring fix (`spark_vi.readout.labels` -> `charmpheno.readout.labels`).
+_MONDO_NATIVE_KEY = "163ae51348cab77e"
 
 
 def test_the_native_mondo_key_is_byte_identical():
