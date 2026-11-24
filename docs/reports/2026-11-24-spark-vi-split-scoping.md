@@ -110,7 +110,9 @@ Ordered so the package is usable at every step.
    the synthetic DAG-gated simulator (`scripts/simulate_gated_omop.py`, made generic)
    with a public ontology for the gated model. Benchmarks against MLlib's online LDA and
    gensim for plain LDA (time, held-out perplexity), and engine agreement (Spark vs
-   local).
+   local). The MLlib parity test for plain LDA lives in charmpheno today
+   (`charmpheno/tests/test_lda_compare.py`) and is spark-vi's only recovery check; it
+   belongs in the released package's tests (two spark-vi test docstrings point at it).
 10. **Extract the history.** `git filter-repo --subdirectory-filter spark-vi` keeps
     spark-vi's history (85 commits since the 2026-11-02 history scrub). Review commit
     messages before publishing: they name experiments, run directories and CDR
