@@ -277,8 +277,8 @@ class _DagGatedLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         "(minDocsPerNode, more data), and one value serves domains of different "
         "vocabulary sizes; set it explicitly to decouple. eta_m * V_m is each "
         "topic row's total prior mass (tokens' worth of prior): 1/V_m gives every "
-        "row a mass of 1, the form the CHARMPheno model of record uses (exp 0175; "
-        "at its size a weaker prior than 1/K, with somewhat more starved blocks).",
+        "row a mass of 1, which can be a weaker prior than 1/K (when V_m > K), "
+        "leaving weakly fed blocks more prone to starve.",
         typeConverter=_to_float_list,
     )
     optimizeDocConcentration = Param(
