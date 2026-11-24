@@ -47,6 +47,29 @@ def merge_config(base: dict, override: dict) -> dict:
     return out
 
 
+# Review 2026-11-13 D5: `_base.yaml` holds plain-LDA values for knobs the DAG-gated
+# fit also reads, and the merge is base -> cohort -> front matter, so a gated run that
+# does not set one silently gets the LDA value instead of the estimator's recommended
+# preset. These are the knobs where the two differ (base value vs preset):
+# n_bg 20 vs 200, tpn 5 vs 1, max_iter 20 vs 60, subsampling_rate 0.2 vs 0.1,
+# kappa 0.7 vs 0.51, optimize_doc_concentration true vs false. A gated run must set
+# each in its cohort file or front matter; `base_gated_leaks` names any it does not.
+# `tests/scripts/test_run_experiment_gated_leaks.py` keeps this list equal to the
+# actual differences between `_base.yaml` and `RECOMMENDED_PARAMS`.
+GATED_BASE_GUARDED = ("n_bg", "tpn", "max_iter", "subsampling_rate", "kappa",
+                      "optimize_doc_concentration")
+
+
+def base_gated_leaks(cohort: str, fm: dict, defaults_dir: Path) -> dict:
+    """`{knob: _base.yaml value}` for each `GATED_BASE_GUARDED` knob a DAG-gated run
+    would take from `_base.yaml` (set neither by the cohort file nor the front
+    matter). Empty = no leak."""
+    base = yaml.safe_load((defaults_dir / "_base.yaml").read_text()) or {}
+    cohort_cfg = yaml.safe_load((defaults_dir / f"{cohort}.yaml").read_text()) or {}
+    return {k: base[k] for k in GATED_BASE_GUARDED
+            if k in base and k not in cohort_cfg and k not in fm}
+
+
 def load_defaults(cohort: str, defaults_dir: Path) -> dict:
     """Load _base.yaml then <cohort>.yaml and merge.
 
@@ -676,10 +699,13 @@ def build_dag_gated_args(
     The DAG-gated LDA fit on the cached case-finding bundle; K is emergent
     (n_bg + kept nodes*tpn). The driver starts from the estimator's recommended
     preset (`DagGatedLDAEstimator.recommended`); every fit knob the front matter
-    sets is passed as a flag and overrides it, and an optional knob the front
-    matter does not set (gate_warm, gate_seed_mode, gate_seed_leaves, gate_open_seed,
-    doc_concentration, optimize_doc_concentration, gamma_shape) is left to the
-    preset. `topic_concentration` (a number, a list with one per domain, or
+    sets is passed as a flag and overrides it. An optional knob that neither the
+    front matter nor the cohort file sets (gate_warm, gate_seed_mode,
+    gate_seed_leaves, gate_open_seed, doc_concentration, gamma_shape) is left to the
+    preset; BUT `effective` also carries `_base.yaml`'s plain-LDA values, so the knobs
+    where those differ from the preset (`GATED_BASE_GUARDED`) must be set by the
+    cohort or front matter: `main` refuses a gated run that would take one from
+    `_base.yaml` (review 2026-11-13 D5). `topic_concentration` (a number, a list with one per domain, or
     `inv_vocab` for eta_m = 1 / V_m) is emitted only when set; unset keeps the
     estimator's 1/K. The node-set threshold is `min_docs_per_node` (counted on training
     documents by the estimator); a front matter that predates it gives
@@ -1415,6 +1441,16 @@ def main(argv: list[str] | None = None) -> int:
     except FileNotFoundError as e:
         print(f"[run-exp] ERROR: {e}", flush=True)
         return 2
+    if fm.get("model_class") == "gated_pc":
+        leaks = base_gated_leaks(fm["cohort"], fm, args.defaults_dir)
+        if leaks:
+            print("[run-exp] ERROR: this DAG-gated run would take "
+                  + ", ".join(f"{k}={v!r}" for k, v in leaks.items())
+                  + " from _base.yaml, whose values are plain LDA's; set each in the "
+                  "front matter or the cohort file (the recommended preset: n_bg 200, "
+                  "tpn 1, max_iter 60, subsampling_rate 0.1, kappa 0.51, "
+                  "optimize_doc_concentration false)", flush=True)
+            return 2
     effective = merge_config(defaults, fm)
     effective = _apply_dev_profile(effective)
     effective = _apply_max_iter_override(effective, args.max_iter)
