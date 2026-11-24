@@ -75,8 +75,7 @@ class ConcentrationAcc:
     """Scalable, combinable per-document concentration accumulator.
 
     Holds fixed-bin histograms (so percentiles scale to any corpus size
-    without collecting per-doc scalars to the driver -- mirrors the
-    histogram approach in charmpheno.charmpheno.export.theta_aggregates)
+    without collecting per-doc scalars to the driver)
     plus streaming sums for mean/std, over both top_mass (support [0, 1])
     and eff_topics (support [1, eff_max]). All state is plain numpy/float,
     so an instance is picklable and safe to move across Spark partitions

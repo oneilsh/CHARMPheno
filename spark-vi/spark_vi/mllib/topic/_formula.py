@@ -92,8 +92,8 @@ def fit_model_spec(
     """Build a formulaic ModelSpec from a covariate DataFrame.
 
     Used directly when the caller has a small pandas DataFrame in hand
-    (Path B with covariate_df pre-collected, or for sidecar building in
-    charmpheno). For large Spark DataFrames, use fit_model_spec_from_spark
+    (Path B with covariate_df pre-collected, or for building a covariate
+    sidecar). For large Spark DataFrames, use fit_model_spec_from_spark
     which builds the schema-frame from per-column distinct() queries.
     """
     formulaic = _formulaic()

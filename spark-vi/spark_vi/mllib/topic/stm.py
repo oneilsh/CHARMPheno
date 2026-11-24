@@ -533,10 +533,8 @@ def corpus_theta_gated_rdd(
     Runs the SAME per-doc gated Laplace E-step as ``corpus_concentration_stm_rdd``
     (``_stm_doc_inference`` -> gated mode ``_gated_mode_theta``) but instead of
     folding each theta into a ``ConcentrationAcc`` it COLLECTS the raw K-vectors
-    so the caller can build the dashboard's per-doc theta ("topic mass
-    distribution") histogram via ``charmpheno.export.compute_theta_aggregates``.
-    This is the STM analog of LDA's per-doc gamma the dashboard already
-    histograms.
+    so the caller can build a per-doc theta ("topic mass distribution")
+    histogram of its own. This is the STM analog of LDA's per-doc gamma.
 
     Inference is under the E-step prior eta ~ N(mu, Sigma_prior) with
     ``Sigma_prior = scale * Sigma_fitted`` (``Sigma_fitted =
