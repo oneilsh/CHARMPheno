@@ -274,7 +274,10 @@ class _DagGatedLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         "Default unset = 1/K (MLlib LDA). Note the coupling: K is derived from the "
         "kept node set, so the unset eta moves whenever the node set does "
         "(minDocsPerNode, more data), and one value serves domains of different "
-        "vocabulary sizes; set it explicitly to decouple.",
+        "vocabulary sizes; set it explicitly to decouple. eta_m * V_m is each "
+        "topic row's total prior mass (tokens' worth of prior): 1/V_m gives every "
+        "row a mass of 1, the form the CHARMPheno model of record uses (exp 0175; "
+        "at its size a weaker prior than 1/K, with somewhat more starved blocks).",
         typeConverter=_to_float_list,
     )
     optimizeDocConcentration = Param(

@@ -19,8 +19,8 @@ from pyspark.ml.util import (DefaultParamsReader, DefaultParamsWriter, MLReadabl
 class _PersistenceParams(Params):
     """Shared MLlib Params for shim persistence (saveInterval, saveDir, resumeFrom).
 
-    Both OnlineLDA and OnlineHDP shims inherit this so the Param surface is
-    declared once. Defaults are seeded via :meth:`_set_persistence_defaults`
+    Every shim estimator and model (OnlineLDA, OnlineHDP, DAG-gated LDA, ...)
+    inherits this so the Param surface is declared once. Defaults are seeded via :meth:`_set_persistence_defaults`
     which the concrete Estimator/Model ``__init__`` must call (Spark's
     ``_setDefault`` is per-instance, not per-class).
 
