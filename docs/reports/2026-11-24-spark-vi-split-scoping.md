@@ -73,7 +73,9 @@ no other model has one, and it is not variational inference. With it go
 
 Ordered so the package is usable at every step.
 
-1. **Move the readout out** (ADR superseding ADR 0051 §3's placement). `spark_vi/
+1. **Move the readout out** — **done 2026-11-24** (ADR 0054; `668d43b`, plus the
+   announced cache drop `b44064f` for a hashed docstring). Originally: an ADR
+   superseding ADR 0051 §3's placement. `spark_vi/
    __init__.py` and `mllib/__init__.py` re-export it today; `closure_matrix` and the
    readout's uses of `spark_vi.core` helpers (broadcast, retry) become imports from the
    package. No cache keys are involved (the readout is not a bundle input).
