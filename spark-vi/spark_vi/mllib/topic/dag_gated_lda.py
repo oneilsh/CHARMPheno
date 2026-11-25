@@ -79,7 +79,7 @@ from spark_vi.dag.nodeset import (
 from spark_vi.mllib._common import (
     DriverParamsWritable,
     _PersistenceParams,
-    _StagePersistence,
+    _ResultStagePersistence,
     apply_persistence_params,
 )
 from spark_vi.mllib.topic._common import _concat_domain_features, _vector_to_bow_document
@@ -1234,7 +1234,7 @@ class DagGatedLDAEstimator(_DagGatedLDAParams, Estimator, DriverParamsWritable):
         return out_model
 
 
-class DagGatedLDAModel(_DagGatedLDAParams, _StagePersistence, Model):
+class DagGatedLDAModel(_DagGatedLDAParams, _ResultStagePersistence, Model):
     """MLlib-shaped Model wrapping a trained DagGatedOnlineLDA VIResult.
 
     ``transform`` appends ``topicDistributionCol`` (theta) by folding each
@@ -1251,7 +1251,7 @@ class DagGatedLDAModel(_DagGatedLDAParams, _StagePersistence, Model):
     ``Pipeline`` / ``PipelineModel`` save uses MLlib's executor-side metadata I/O and
     needs a shared filesystem (HDFS, GCS) on a multi-node cluster. Layout::
 
-        <path>/metadata/   Params (DefaultParamsWriter), written last
+        <path>/metadata/   Params (MLlib's metadata layout), written last
         <path>/result/     the VIResult, in the fit checkpoints' format
                            (spark_vi.io.export.save_result: manifest.json,
                            params/*.npy, traces/*.npy); the node set rides its
@@ -1277,24 +1277,6 @@ class DagGatedLDAModel(_DagGatedLDAParams, _StagePersistence, Model):
     def result(self):
         """The trained VIResult (global_params, elbo_trace, n_iterations, ...)."""
         return self._result
-
-    # ---- persistence (_StagePersistence hooks) ----------------------------------
-
-    def _save_data(self, path: str) -> None:
-        from spark_vi.io import fs
-        from spark_vi.io.export import save_result
-        save_result(self._result, fs.join(path, "result"))
-
-    @classmethod
-    def _load_data(cls, path: str, metadata: dict) -> "DagGatedLDAModel":
-        from spark_vi.io import fs
-        from spark_vi.io.export import load_result
-        result = load_result(fs.join(path, "result"))
-        saved = (result.metadata or {}).get("model_class")
-        if saved != cls._expected_model_class:
-            raise ValueError(f"{path}: the saved result is a {saved!r}, not a "
-                             f"{cls._expected_model_class!r}")
-        return cls(result)
 
     # ---- node-keyed outputs (R5), user ids throughout ---------------------------
 

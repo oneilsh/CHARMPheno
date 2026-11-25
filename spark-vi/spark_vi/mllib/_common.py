@@ -1,9 +1,9 @@
 """Shared generic helpers for the MLlib shims.
 
-Persistence Params, the apply_persistence_params splice, the
-_PersistableModel mixin (the custom VIResult save/load OnlineLDA / OnlineHDP still
-use) and _StagePersistence (MLlib persistence: Params metadata + our data files, spec
-R13 Level 2) live here because they apply to any shim (topic-model or otherwise). Topic-specific helpers like the
+Persistence Params, the apply_persistence_params splice and the MLlib persistence
+every shim stage uses (_StagePersistence: Params metadata + our data files, spec R13
+Level 2; _ResultStagePersistence for the topic models, whose data is one VIResult;
+our own reader and writer of MLlib's metadata JSON, ADR 0055) live here because they apply to any shim (topic-model or otherwise). Topic-specific helpers like the
 SparseVector → BOWDocument converter live under
 spark_vi.mllib.topic._common so this module stays free of topic content.
 """
@@ -144,61 +144,6 @@ def apply_persistence_params(estimator, base_config):
 
     resume_path = str(resume_from) if resume_from else None
     return config, resume_path
-
-
-class _PersistableModel:
-    """Mixin providing ``save(path)`` / ``load(path)`` to shim Models.
-
-    Subclass MUST define the class attribute ``_expected_model_class: str``
-    matching the class name the runner stamps into
-    ``VIResult.metadata["model_class"]`` (e.g. ``"OnlineLDA"``,
-    ``"OnlineHDP"``). :meth:`load` validates this and raises on mismatch
-    so a user can't silently load an HDP checkpoint into an
-    ``OnlineLDAModel``.
-
-    Subclass ``__init__`` must accept a single ``result: VIResult``
-    positional arg (per-shim shape constants like T/K/V come from
-    ``result.metadata`` via the model's ``get_metadata`` contribution).
-    """
-
-    _expected_model_class: str  # subclass sets this
-
-    def save(self, path: str) -> None:
-        """Persist this trained model to ``path``.
-
-        Wraps :func:`spark_vi.io.export.save_result`. The directory contents
-        round-trip through this class's ``load(path)``.
-        """
-        from spark_vi.io.export import save_result
-        save_result(self._result, path)
-
-    @classmethod
-    def load(cls, path: str):
-        """Load a previously-saved model from ``path``.
-
-        Validates that the saved metadata identifies the expected model
-        class; raises ``ValueError`` on type mismatch (e.g. trying to
-        load an OnlineHDP checkpoint into an OnlineLDAModel).
-        """
-        from spark_vi.io.export import load_result
-        result = load_result(path)
-        saved_class = result.metadata.get("model_class")
-        if saved_class is None:
-            raise ValueError(
-                f"Checkpoint at {path} has no 'model_class' in its metadata; "
-                f"cannot determine model type. Was this saved by a recent "
-                f"version of spark_vi?"
-            )
-        if saved_class != cls._expected_model_class:
-            raise ValueError(
-                f"Expected '{cls._expected_model_class}' checkpoint at "
-                f"{path}, got {saved_class!r}. Did you mean a different "
-                f"Model class (e.g. OnlineHDPModel.load)?"
-            )
-        # Reconstruct from VIResult; shape info comes from metadata.
-        # (No Param round-trip — Pipeline.save persistence is deferred per
-        # ADRs 0009 / 0012.)
-        return cls(result)
 
 
 # --------------------------------------------------------------------------- #
@@ -388,6 +333,12 @@ class _StagePersistence(MLWritable, MLReadable):
     def _load_data(cls, path: str, metadata: dict):
         raise NotImplementedError
 
+    @classmethod
+    def _load_without_metadata(cls, path: str):
+        """A directory with no ``metadata/``: a subclass that can read an older layout
+        returns the instance; ``None`` (the default) lets the load fail as usual."""
+        return None
+
     def write(self):
         return _StageWriter(self)
 
@@ -404,6 +355,55 @@ class _StagePersistence(MLWritable, MLReadable):
     def load(cls, path: str):
         """Load a stage saved by ``save`` / ``write().save`` (``read().load(path)``)."""
         return cls.read().load(path)
+
+
+class _ResultStagePersistence(_StagePersistence):
+    """``_StagePersistence`` for a Model whose data is one ``VIResult``: the topic
+    models' (OnlineLDA, OnlineHDP, DAG-gated LDA). Layout::
+
+        <path>/metadata/   Params metadata (MLlib's layout), written last
+        <path>/result/     the VIResult in the fit checkpoints' format
+                           (spark_vi.io.export.save_result)
+
+    A subclass sets ``_expected_model_class`` (the ``model_class`` the runner stamps
+    into the result's metadata) and takes the result as its one ``__init__``
+    argument; ``load`` refuses a result of another model class.
+
+    ``_legacy_result_dir = True`` also loads a bare VIResult directory (``manifest.json``
+    at the top, no ``metadata/``): the layout ``OnlineLDAModel`` / ``OnlineHDPModel``
+    saved before ADR 0055, and the one every fit checkpoint (``saveDir``) and the
+    drivers' ``save_result`` output still use. Such a model comes back with its Params
+    at their defaults, as the old ``load`` returned it."""
+
+    _expected_model_class: str = ""
+    _legacy_result_dir: bool = False
+
+    def _save_data(self, path: str) -> None:
+        from spark_vi.io import fs
+        from spark_vi.io.export import save_result
+        save_result(self._result, fs.join(path, "result"))
+
+    @classmethod
+    def _result_instance(cls, result, where: str):
+        saved = (result.metadata or {}).get("model_class")
+        if saved != cls._expected_model_class:
+            raise ValueError(f"{where}: the saved result is a {saved!r}, not a "
+                             f"{cls._expected_model_class!r}")
+        return cls(result)
+
+    @classmethod
+    def _load_data(cls, path: str, metadata: dict):
+        from spark_vi.io import fs
+        from spark_vi.io.export import load_result
+        return cls._result_instance(load_result(fs.join(path, "result")), path)
+
+    @classmethod
+    def _load_without_metadata(cls, path: str):
+        from spark_vi.io import fs
+        from spark_vi.io.export import load_result
+        if not (cls._legacy_result_dir and fs.exists(fs.join(path, "manifest.json"))):
+            return None
+        return cls._result_instance(load_result(path), path)
 
 
 def _class_name(cls) -> str:
@@ -449,6 +449,10 @@ class _StageReader(MLReader):
     def load(self, path: str):
         from spark_vi.io import fs
         uri = fs.qualify(path)
+        if not fs.exists(fs.join(uri, "metadata")):
+            legacy = self.cls._load_without_metadata(uri)
+            if legacy is not None:
+                return legacy
         metadata = read_params_metadata(uri)
         if metadata["class"] != _class_name(self.cls):
             raise ValueError(f"{path} holds a {metadata['class']}, not a "

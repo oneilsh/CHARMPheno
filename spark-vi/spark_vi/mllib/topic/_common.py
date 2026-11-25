@@ -1,6 +1,6 @@
 """Topic-shim-specific helpers (shared between the LDA and HDP shims).
 
-Generic shim infrastructure (persistence Params, _PersistableModel) lives
+Generic shim infrastructure (persistence Params, stage persistence) lives
 in spark_vi.mllib._common. This module holds the helpers that depend on
 the topic row type (BOWDocument) and so don't generalize to non-topic
 shims.

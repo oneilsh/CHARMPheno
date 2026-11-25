@@ -17,7 +17,7 @@ from pyspark.ml.param.shared import HasFeaturesCol, HasMaxIter, HasSeed
 
 from spark_vi.core.config import VIConfig
 from spark_vi.mllib._common import (
-    _PersistableModel,
+    _ResultStagePersistence,
     _PersistenceParams,
     apply_persistence_params,
 )
@@ -232,7 +232,7 @@ class OnlineLDAEstimator(_OnlineLDAParams, Estimator):
         self._set_persistence_defaults()
         # Diagnostic-only iteration callback. Stored as an instance attribute
         # rather than a Param because callables aren't MLlib-serializable
-        # (Pipeline.save persistence is deferred per ADR 0009 anyway).
+        # (the Estimator is not persisted; the fitted Model is, ADR 0055).
         self._on_iteration = None
         kwargs = self._input_kwargs
         self.setParams(**kwargs)
@@ -252,7 +252,7 @@ class OnlineLDAEstimator(_OnlineLDAParams, Estimator):
         in the fit's hot path; throttle with a modulo if non-trivial. The
         callback must not mutate global_params — the same dict feeds the next
         iteration's broadcast. Not persisted by Pipeline.save (callables
-        aren't MLlib-serializable; persistence deferred per ADR 0009).
+        aren't MLlib-serializable).
         """
         self._on_iteration = fn
         return self
@@ -308,18 +308,27 @@ class OnlineLDAEstimator(_OnlineLDAParams, Estimator):
         return out_model
 
 
-class OnlineLDAModel(_OnlineLDAParams, _PersistableModel, Model):
+class OnlineLDAModel(_OnlineLDAParams, _ResultStagePersistence, Model):
     """MLlib-shaped Model wrapping a trained spark_vi VIResult.
 
     Carries the trained global parameters plus a copy of every Param from
     the Estimator that produced it, so post-fit getters (model.getK(), ...)
     return the configuration that was actually used.
+
+    Persistence is MLlib's (``save`` / ``write().overwrite().save`` / ``load``, and
+    inside a ``PipelineModel``): ``<path>/metadata/`` (Params) and ``<path>/result/``
+    (the VIResult), ``spark_vi.mllib._common._ResultStagePersistence``. ``load``
+    also reads a bare VIResult directory (the layout this model saved before ADR
+    0055, and every ``saveDir`` checkpoint), with the Params at their defaults.
     """
 
     # Stamped into result.metadata by VIRunner as `model_class` (the runner
     # uses type(model).__name__ on the underlying VIModel). Used by
-    # _PersistableModel.load to reject checkpoints from other model classes.
+    # load to reject checkpoints from other model classes (_ResultStagePersistence).
     _expected_model_class = "OnlineLDA"
+    # Also load a bare VIResult directory: this model's save layout before ADR 0055,
+    # and every fit checkpoint (saveDir) and driver save_result output.
+    _legacy_result_dir = True
 
     def __init__(self, result) -> None:  # result: VIResult
         super().__init__()
@@ -328,7 +337,8 @@ class OnlineLDAModel(_OnlineLDAParams, _PersistableModel, Model):
         # Model (e.g. via OnlineLDAModel.load) has the values _transform
         # reads. The Estimator's _fit also runs a param-copy loop after
         # construction; that overwrites these with the Estimator's actual
-        # configuration. Loaded Models keep these defaults.
+        # configuration. A model loaded from its saved stage gets its saved
+        # Params back; one loaded from a bare VIResult directory keeps these.
         self._setDefault(
             k=10, maxIter=20,
             featuresCol="features", topicDistributionCol="topicDistribution",
