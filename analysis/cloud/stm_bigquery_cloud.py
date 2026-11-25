@@ -1,9 +1,9 @@
 """STM (prevalence-only) fit driver — analogous to lda_bigquery_cloud.py.
 
 Loads corpus + covariates from caches (or rebuilds from BQ), broadcast-joins
-by person_id, constructs StreamingSTM (Path A), runs VIRunner.fit, and
-saves the augmented STMModel with corpus_manifest + covariate_manifest in
-metadata.
+by person_id, fits spark-vi's OnlineSTMEstimator on the pre-built covariate
+column, and saves the fitted VIResult (the run dir) with corpus_manifest +
+covariate_manifest in its metadata.
 
 Decision context: docs/superpowers/specs/2026-05-29-stm-prevalence-design.md
                   docs/decisions/0025-charmpheno-covariate-sidecar-parquet.md
@@ -254,9 +254,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--random-seed", type=int, default=None,
                    help="Optional random seed for reproducibility (best-effort).")
     p.add_argument("--out-dir", required=True,
-                   help="Output directory for the saved STMModel.")
+                   help="Output directory for the fitted STM (a VIResult checkpoint).")
     p.add_argument("--resume-from", default="",
-                   help="Path to a previously-saved STMModel dir; empty "
+                   help="Path to a previous STM run dir (its VIResult); empty "
                         "(default) = fresh fit. When set, the fit loads its "
                         "global_params + n_iterations and continues the SVI "
                         "schedule, so --max-iter is ADDITIONAL iterations on "
@@ -427,32 +427,40 @@ def main() -> int:
                 print(f"[driver]   joined docs = {n_joined} "
                       f"(all {n_bow} corpus docs matched)", flush=True)
 
-        # --- Construct StreamingSTM (Path A) and fit ---
-        from spark_vi.mllib.topic.stm import StreamingSTM
+        # --- Construct the STM Estimator (pre-built covariate column) and fit ---
+        from spark_vi.mllib.topic.stm import OnlineSTMEstimator
 
         with _phase("STM fit"):
-            est = StreamingSTM(
-                K=args.K,
-                features_col="features",
-                covariates_col="covariates",
-                covariate_names=covariate_names,
-                sigma_init=args.sigma_init,
-                sigma_ridge=args.sigma_ridge,
-                min_pair_support=args.min_pair_support,
-                lbfgs_max_iter=args.lbfgs_max_iter,
-                lbfgs_tol=args.lbfgs_tol,
-                random_seed=args.random_seed,
-                reference_topic=args.reference_topic,
-                estimate_sigma_diagonal=args.estimate_sigma_diagonal,
-                estimate_global_scale=args.estimate_global_scale,
-                global_scale_step_cap=args.global_scale_step_cap,
-                sigma_diagonal_pin=args.sigma_diagonal_pin,
-                spectral_init=args.spectral_init,
-                spectral_method=args.spectral_method,
-                spectral_d=args.spectral_d,
-                spectral_min_doc_freq=args.spectral_min_doc_freq,
-                topic_blocks=partition,
-                doc_group_col=(args.group_var if partition is not None else None),
+            # --save-interval is not wired to a checkpoint directory, as before the
+            # MLlib-stage move (the old fit took save_interval but no directory, so
+            # it never checkpointed); the run dir is written once, below.
+            est = OnlineSTMEstimator(
+                k=args.K,
+                featuresCol="features",
+                covariatesCol="covariates",
+                covariateNames=covariate_names,
+                maxIter=args.max_iter,
+                subsamplingRate=args.subsampling_rate,
+                learningOffset=args.tau0,
+                learningDecay=args.kappa,
+                sigmaInit=args.sigma_init,
+                sigmaRidge=args.sigma_ridge,
+                minPairSupport=args.min_pair_support,
+                lbfgsMaxIter=args.lbfgs_max_iter,
+                lbfgsTol=args.lbfgs_tol,
+                seed=args.random_seed,
+                referenceTopic=args.reference_topic,
+                estimateSigmaDiagonal=args.estimate_sigma_diagonal,
+                estimateGlobalScale=args.estimate_global_scale,
+                globalScaleStepCap=args.global_scale_step_cap,
+                sigmaDiagonalPin=args.sigma_diagonal_pin,
+                spectralInit=args.spectral_init,
+                spectralMethod=args.spectral_method,
+                spectralD=args.spectral_d,
+                spectralMinDocFreq=args.spectral_min_doc_freq,
+                topicBlocks=partition,
+                docGroupCol=(args.group_var if partition is not None else ""),
+                resumeFrom=(args.resume_from or ""),
             )
             # Periodic top-terms logger (additive to the engine's per-iter
             # Γ/Σ diagnostics). Gated runs get per-topic block labels.
@@ -466,28 +474,21 @@ def main() -> int:
                     idx_to_cid=idx_to_cid, name_by_id=name_by_id,
                     topic_labels=topic_labels,
                 )
-            # StreamingSTM.fit returns an STMModel.
-            # The fit method builds a VIConfig internally from the supplied
-            # max_iter, subsampling_rate, tau0, kappa parameters.
-            stm_model = est.fit(
-                joined,
-                max_iter=args.max_iter,
-                subsampling_rate=args.subsampling_rate,
-                tau0=args.tau0,
-                kappa=args.kappa,
-                save_interval=args.save_interval,
-                resume_from=(args.resume_from or None),
-                on_iteration=on_iter,
-            )
+            est.setOnIteration(on_iter)
+            stm_model = est.fit(joined)
+        # The run dir's metadata lives in the fitted VIResult (written below as
+        # <out>/manifest.json, the layout build_dashboard_cloud and --resume-from
+        # read).
+        result_md = stm_model.result.metadata
 
-        # --- Augment STMModel metadata with corpus_manifest + covariate_manifest ---
+        # --- Augment the result metadata with corpus_manifest + covariate_manifest ---
         with _phase("augment metadata"):
             # Build an index-ordered vocab list (matching LDA's layout so that
             # build_dashboard_cloud.py can read result.metadata["vocab"] uniformly).
             vocab_list: list = [None] * len(vocab_map)
             for cid, idx in vocab_map.items():
                 vocab_list[idx] = cid
-            stm_model.metadata.setdefault("corpus_manifest", {
+            result_md.setdefault("corpus_manifest", {
                 "cdr": args.cdr,
                 "source_table": args.source_table,
                 "cohort": args.cohort,
@@ -504,24 +505,23 @@ def main() -> int:
             # Top-level vocab + name_by_id mirror LDA's VIResult metadata layout
             # so build_dashboard_cloud.py can read them uniformly via
             # result.metadata.get("vocab") without knowing the model class.
-            stm_model.metadata["vocab"] = vocab_list
-            stm_model.metadata["name_by_id"] = name_by_id
-            stm_model.metadata["covariate_manifest"] = {
+            result_md["vocab"] = vocab_list
+            result_md["name_by_id"] = name_by_id
+            result_md["covariate_manifest"] = {
                 "covariate_formula": args.covariate_formula,
                 "categorical_cols": cat_cols,
                 "continuous_cols": cont_cols,
                 "covariate_names": covariate_names,
-                # The fitted ModelSpec is saved alongside as model_spec.pkl.
                 # Bundle consumers prefer covariate_names for display labels.
-                # categorical_levels enables build_dashboard_cloud to write
-                # accurate reference levels in covariate_schema.json without
-                # relying on formulaic model_spec introspection (which is
-                # unreliable after deserialization). Mirrors the local fitter.
+                # categorical_levels lets build_dashboard_cloud write accurate
+                # reference levels in covariate_schema.json without the ModelSpec
+                # (the run dir holds none: the covariate cache keeps its own).
+                # Mirrors the local fitter.
                 "categorical_levels": _extract_categorical_levels(
                     model_spec, cat_cols,
                 ),
             }
-            stm_model.metadata["model_class"] = "stm"
+            result_md["model_class"] = "stm"
 
         with _phase("concentration readout"):
             if partition is not None:
@@ -533,8 +533,8 @@ def main() -> int:
                         group_col=args.group_var))
                     reference_id = 0 if args.reference_topic else None
                     conc = corpus_concentration_stm_rdd(
-                        doc_rdd, stm_model.global_params, partition, reference=reference_id)
-                    stm_model.metadata["concentration_readout"] = conc
+                        doc_rdd, stm_model.result.global_params, partition, reference=reference_id)
+                    result_md["concentration_readout"] = conc
                     print(f"[driver]   concentration readout: top_mass p50={conc['top_mass']['p50']:.3f} "
                           f"eff_topics p50={conc['eff_topics']['p50']:.1f} (n={conc['n_docs']})", flush=True)
                 except Exception as exc:
@@ -544,10 +544,23 @@ def main() -> int:
 
         # --- Save ---
         with _phase("save"):
+            # The run dir is the fitted VIResult (manifest.json, params/, traces/:
+            # what build_dashboard_cloud, --resume-from and run_experiment read), plus
+            # params/correlation.npy (R from Sigma, for consumers that want it without
+            # re-deriving) and covariate_names.json. The MLlib stage layout
+            # (OnlineSTMModel.save: metadata/ + result/) is the package's own format;
+            # this driver keeps the checkpoint layout, as the LDA driver does.
+            import json as _json
+
+            from spark_vi.io import save_result
+            from spark_vi.models.topic._linalg import topic_correlation
             out = Path(args.out_dir)
             out.mkdir(parents=True, exist_ok=True)
-            stm_model.save(out)
-            print(f"[driver]   saved STMModel to {out}", flush=True)
+            save_result(stm_model.result, out)
+            np.save(out / "params" / "correlation.npy",
+                    topic_correlation(stm_model.result.global_params["Sigma"]))
+            (out / "covariate_names.json").write_text(_json.dumps(covariate_names))
+            print(f"[driver]   saved the STM fit to {out}", flush=True)
 
     return 0
 

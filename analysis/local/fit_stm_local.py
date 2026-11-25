@@ -3,9 +3,9 @@
 Sibling of fit_lda_local.py for gated STM. Builds a local SparkSession, loads
 the gated OMOP + person parquets, builds the patient_cohort BOW (doc_id =
 "source_cohort:person_id") and the covariate DataFrame (~ C(sex) + age, keyed
-per person), and fits StreamingSTM with a TopicBlockPartition + doc_group_col.
-Saves the STMModel checkpoint with full metadata + a covariates.parquet so the
-local dashboard can compute masked prevalence offline.
+per person), and fits OnlineSTMEstimator with a TopicBlockPartition + docGroupCol.
+Saves the fitted VIResult checkpoint with full metadata + a covariates.parquet so
+the local dashboard can compute masked prevalence offline.
 
 source_cohort is the gating group label, NOT a covariate (it must not be in the
 formula); it is materialized from doc_id, exactly as the cloud driver does.
@@ -23,7 +23,7 @@ from pyspark.sql import SparkSession, functions as F
 from charmpheno.omop import doc_spec_from_cli, load_omop_parquet, to_bow_dataframe
 from charmpheno.omop.covariates import build_patient_covariate_df
 from spark_vi.models.topic.partition import TopicBlockPartition
-from spark_vi.mllib.topic.stm import StreamingSTM
+from spark_vi.mllib.topic.stm import OnlineSTMEstimator
 
 log = logging.getLogger(__name__)
 
@@ -199,23 +199,25 @@ def main(argv=None) -> int:
             key_cols=("person_id",))
         joined = bow_df.join(F.broadcast(cov_df), on="person_id", how="inner")
 
-        est = StreamingSTM(
-            K=args.K, features_col="features", covariates_col="covariates",
-            covariate_names=covariate_names, topic_blocks=partition,
-            doc_group_col="source_cohort", random_seed=args.seed,
-            min_pair_support=args.min_pair_support,
-            reference_topic=args.reference_topic,
-            estimate_sigma_diagonal=args.estimate_sigma_diagonal,
-            estimate_global_scale=args.estimate_global_scale,
-            global_scale_step_cap=args.global_scale_step_cap,
-            sigma_diagonal_pin=args.sigma_diagonal_pin,
-            spectral_init=args.spectral_init,
-            spectral_method=args.spectral_method,
-            spectral_d=args.spectral_d,
-            spectral_min_doc_freq=args.spectral_min_doc_freq)
-        model = est.fit(joined, max_iter=args.max_iter,
-                        subsampling_rate=args.subsampling_rate,
-                        tau0=args.tau0, kappa=args.kappa)
+        est = OnlineSTMEstimator(
+            k=args.K, featuresCol="features", covariatesCol="covariates",
+            covariateNames=covariate_names, topicBlocks=partition,
+            docGroupCol="source_cohort", seed=args.seed,
+            maxIter=args.max_iter, subsamplingRate=args.subsampling_rate,
+            learningOffset=args.tau0, learningDecay=args.kappa,
+            minPairSupport=args.min_pair_support,
+            referenceTopic=args.reference_topic,
+            estimateSigmaDiagonal=args.estimate_sigma_diagonal,
+            estimateGlobalScale=args.estimate_global_scale,
+            globalScaleStepCap=args.global_scale_step_cap,
+            sigmaDiagonalPin=args.sigma_diagonal_pin,
+            spectralInit=args.spectral_init,
+            spectralMethod=args.spectral_method,
+            spectralD=args.spectral_d,
+            spectralMinDocFreq=args.spectral_min_doc_freq)
+        stm_model = est.fit(joined)
+        # The checkpoint's metadata lives in the fitted VIResult (written below).
+        model = stm_model.result
 
         # Concept names from the simulator's concept_name column.
         name_rows = (omop.select("concept_id", "concept_name")
@@ -265,8 +267,18 @@ def main(argv=None) -> int:
         except Exception as exc:  # never fatal
             log.warning("concentration readout failed (%s); metadata omits it.", exc)
 
+        # The checkpoint is the fitted VIResult (manifest.json, params/, traces/: what
+        # build_dashboard.py reads) plus params/correlation.npy (R from Sigma) and
+        # covariate_names.json, as the cloud driver writes.
+        import numpy as np
+
+        from spark_vi.io import save_result
+        from spark_vi.models.topic._linalg import topic_correlation
         args.out_dir.mkdir(parents=True, exist_ok=True)
-        model.save(args.out_dir)
+        save_result(model, args.out_dir)
+        np.save(args.out_dir / "params" / "correlation.npy",
+                topic_correlation(model.global_params["Sigma"]))
+        (args.out_dir / "covariate_names.json").write_text(json.dumps(covariate_names))
 
         # Persist per-doc covariate vectors + group label for offline masked
         # prevalence (one row per joined doc).

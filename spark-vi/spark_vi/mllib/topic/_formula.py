@@ -1,4 +1,4 @@
-"""Formula-handling plumbing for the StreamingSTM MLlib shim (Path B).
+"""Formula-handling plumbing for the STM MLlib shim's formula path.
 
 Uses `formulaic` to parse R-style formula strings and produce a ModelSpec
 that maps doc covariates to design matrix rows. Rejects "stateful transforms"
@@ -9,6 +9,13 @@ Categorical level discovery uses the schema-frame trick (ADR 0024):
 Spark-native distinct + cardinality bound, build a tiny pandas
 schema-frame, hand to formulaic for level capture. The fitted ModelSpec
 is data-independent at application time.
+
+Persistence (ADR 0056): a ModelSpec is never pickled into a saved model. The spec
+is fitted on the schema-frame alone (every categorical level, placeholders for the
+continuous columns), so the formula plus that frame IS its whole learned state:
+``covariate_spec_state`` writes both as JSON and ``model_spec_from_state`` refits
+the formula on the stored frame, which reproduces the spec, and its encoding of any
+row, exactly.
 """
 from __future__ import annotations
 
@@ -92,7 +99,7 @@ def fit_model_spec(
     """Build a formulaic ModelSpec from a covariate DataFrame.
 
     Used directly when the caller has a small pandas DataFrame in hand
-    (Path B with covariate_df pre-collected, or for building a covariate
+    (a schema-frame, or a pre-collected covariate frame for building a covariate
     sidecar). For large Spark DataFrames, use fit_model_spec_from_spark
     which builds the schema-frame from per-column distinct() queries.
     """
@@ -190,6 +197,21 @@ def fit_model_spec_from_spark(
       4. Validate transform_state contains *only* the categorical level
          mappings (no spline knots, no scale/center stats).
     """
+    schema_pdf = build_schema_frame(spark_df, categorical_cols, continuous_cols,
+                                    max_levels)
+    return fit_model_spec_on_schema_frame(formula, schema_pdf, categorical_cols)
+
+
+def build_schema_frame(
+    spark_df: Any,
+    categorical_cols: list[str],
+    continuous_cols: list[str],
+    max_levels: int = 10_000,
+) -> pd.DataFrame:
+    """The schema-frame (ADR 0024): a tiny pandas frame holding every level of each
+    categorical column at least once (levels discovered by Spark distinct() under the
+    cardinality bound) and a 0.0 placeholder for each continuous column. Fitting a
+    formula on it captures the level sets without materializing the data."""
     levels = discover_categorical_levels_spark(spark_df, categorical_cols, max_levels)
     max_n_levels = max((len(v) for v in levels.values()), default=1)
     rows = []
@@ -201,10 +223,16 @@ def fit_model_spec_from_spark(
         for col in continuous_cols:
             row[col] = 0.0
         rows.append(row)
-    schema_pdf = pd.DataFrame(rows)
+    return pd.DataFrame(rows)
+
+
+def fit_model_spec_on_schema_frame(
+    formula: str, schema_pdf: pd.DataFrame, categorical_cols: list[str],
+) -> tuple[Any, list[str]]:
+    """Fit the formula's ModelSpec on a schema-frame and check that it learned
+    nothing but the categorical level mappings (no spline knots, no scale / centre
+    statistics, which would have been learned from the placeholder values)."""
     spec, names = fit_model_spec(formula, schema_pdf)
-    # Post-fit guard: transform_state must only contain the categorical
-    # mappings we intentionally captured.
     extras = _unexpected_transform_state(spec, categorical_cols)
     if extras:
         raise ValueError(
@@ -212,6 +240,88 @@ def fit_model_spec_from_spark(
             f"This should have been caught by validate_formula; please file a bug."
         )
     return spec, names
+
+
+# --------------------------------------------------------------------------- #
+# Which formula variables are categorical, and the spec as JSON (ADR 0056).   #
+# --------------------------------------------------------------------------- #
+# The first argument of a C(...) call: `C(sex)`, `C(site, contr.treatment(...))`
+# and `C(age > 50)` each name a variable whose raw values the schema-frame must hold.
+_C_FIRST_ARG = re.compile(r"\bC\(\s*([A-Za-z_]\w*)")
+
+
+def formula_variables(formula: str) -> list[str]:
+    """The data columns the formula reads, sorted."""
+    formulaic = _formulaic()
+    return sorted(str(v) for v in formulaic.Formula(formula).required_variables)
+
+
+def split_formula_variables(
+    formula: str, spark_types: dict[str, str],
+) -> tuple[list[str], list[str]]:
+    """``(categorical, continuous)`` formula variables (ADR 0024 step 1): a variable
+    is categorical when it is the first argument of a ``C(...)`` in the formula or
+    its Spark type is string or boolean; every other variable is continuous.
+    ``spark_types`` maps a column name to its Spark ``simpleString`` type."""
+    variables = formula_variables(formula)
+    missing = [v for v in variables if v not in spark_types]
+    if missing:
+        raise ValueError(f"The covariate formula reads column(s) {missing} that the "
+                         f"DataFrame does not have.")
+    in_c = set(_C_FIRST_ARG.findall(formula))
+    categorical = [v for v in variables
+                   if v in in_c or spark_types[v] in ("string", "boolean")]
+    continuous = [v for v in variables if v not in categorical]
+    return categorical, continuous
+
+
+_JSON_DTYPES = {"object", "bool", "int8", "int16", "int32", "int64",
+                "float32", "float64"}
+
+
+def covariate_spec_state(
+    formula: str, schema_pdf: pd.DataFrame, covariate_names: list[str],
+    categorical_cols: list[str],
+) -> dict:
+    """The JSON-able learned state of a schema-frame-fitted ModelSpec: the formula,
+    the schema-frame (column order, dtypes, values) and the design-column names it
+    produced. ``model_spec_from_state`` rebuilds the spec from it.
+
+    Why JSON and not the ModelSpec: a pickle is not a portable file format and must
+    never be loaded from an untrusted source, so a published package does not
+    unpickle saved models. formulaic offers no other serialization of a spec (its
+    encoder state holds contrast objects), and none is needed: the spec was fitted
+    on the schema-frame alone, so refitting the formula on the same frame
+    reproduces it exactly."""
+    columns = []
+    for col in schema_pdf.columns:
+        dtype = str(schema_pdf[col].dtype)
+        values = schema_pdf[col].tolist()
+        if dtype not in _JSON_DTYPES or (dtype == "object" and not all(
+                isinstance(v, str) for v in values)):
+            raise ValueError(
+                f"Covariate column '{col}' has dtype {dtype} (value types "
+                f"{sorted({type(v).__name__ for v in values})}); a saved covariate "
+                f"spec supports string, boolean, integer and floating columns.")
+        columns.append({"name": str(col), "dtype": dtype, "values": values})
+    return {"formula": formula, "categorical_cols": list(categorical_cols),
+            "schema_frame": columns, "covariate_names": list(covariate_names)}
+
+
+def model_spec_from_state(state: dict) -> Any:
+    """Rebuild the ModelSpec that ``covariate_spec_state`` describes, and check it
+    produces the design columns it did at fit."""
+    schema_pdf = pd.DataFrame({
+        c["name"]: pd.Series(c["values"], dtype=c["dtype"])
+        for c in state["schema_frame"]})
+    spec, names = fit_model_spec_on_schema_frame(
+        state["formula"], schema_pdf, list(state.get("categorical_cols", [])))
+    if list(names) != list(state["covariate_names"]):
+        raise ValueError(
+            f"The covariate formula rebuilt with columns {names}, not the "
+            f"{state['covariate_names']} it was fitted with (another formulaic "
+            f"version?).")
+    return spec
 
 
 def _unexpected_transform_state(spec: Any, categorical_cols: list[str]) -> list[str]:

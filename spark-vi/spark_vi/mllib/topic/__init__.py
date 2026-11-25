@@ -2,6 +2,8 @@
 
 OnlineLDAEstimator / OnlineLDAModel: streaming variational Bayes for LDA.
 OnlineHDPEstimator / OnlineHDPModel: streaming variational Bayes for HDP.
+OnlineSTMEstimator / OnlineSTMModel: the structural topic model (prevalence
+  covariates, optional topic gating; ADR 0056).
 DagGatedLDAEstimator / DagGatedLDAModel: LDA gated by a label DAG (ADR 0050).
 DagGatedFeaturizer / DagGatedFeaturizerModel: the prep stage building the
   per-domain vectors, vocabularies and labels column those take (spec R12).
@@ -15,6 +17,7 @@ from spark_vi.mllib.topic.dag_gated_lda import DagGatedLDAEstimator, DagGatedLDA
 from spark_vi.mllib.topic.featurizer import DagGatedFeaturizer, DagGatedFeaturizerModel
 from spark_vi.mllib.topic.hdp import OnlineHDPEstimator, OnlineHDPModel
 from spark_vi.mllib.topic.lda import OnlineLDAEstimator, OnlineLDAModel
+from spark_vi.mllib.topic.stm import OnlineSTMEstimator, OnlineSTMModel
 
 __all__ = [
     "DagGatedFeaturizer",
@@ -25,4 +28,6 @@ __all__ = [
     "OnlineHDPModel",
     "OnlineLDAEstimator",
     "OnlineLDAModel",
+    "OnlineSTMEstimator",
+    "OnlineSTMModel",
 ]

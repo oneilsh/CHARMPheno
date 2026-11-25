@@ -1,4 +1,4 @@
-"""Tests for the MLlib-shim StreamingSTM estimator and STMModel."""
+"""Tests for the STM MLlib stages (OnlineSTMEstimator / OnlineSTMModel)."""
 from __future__ import annotations
 
 import numpy as np
@@ -37,35 +37,42 @@ class TestVectorToSTMDocument:
         np.testing.assert_array_equal(doc.x, [1.0, 0.5, -1.2])
 
 
-class TestStreamingSTMPathA:
+class TestOnlineSTMEstimatorCovariateColumn:
     def test_constructs_with_covariates_col(self):
-        from spark_vi.mllib.topic.stm import StreamingSTM
-        est = StreamingSTM(
-            K=5, features_col="features",
-            covariates_col="covariates",
-            covariate_names=["age", "sex", "cohort"],
+        from spark_vi.mllib.topic.stm import OnlineSTMEstimator
+        est = OnlineSTMEstimator(
+            k=5, featuresCol="features",
+            covariatesCol="covariates",
+            covariateNames=["age", "sex", "cohort"],
         )
-        assert est.K == 5
-        assert est.P == 3
-        assert est.covariate_names == ["age", "sex", "cohort"]
+        assert est.getOrDefault("k") == 5
+        assert est.getOrDefault("covariateNames") == ["age", "sex", "cohort"]
 
     def test_rejects_zero_covariates(self):
-        from spark_vi.mllib.topic.stm import StreamingSTM
-        with pytest.raises(ValueError, match="covariate_names"):
-            StreamingSTM(K=5, features_col="features",
-                         covariates_col="covariates", covariate_names=[])
+        from spark_vi.mllib.topic.stm import OnlineSTMEstimator
+        with pytest.raises(ValueError, match="covariateNames"):
+            OnlineSTMEstimator(k=5, featuresCol="features",
+                               covariatesCol="covariates", covariateNames=[])
 
-    def test_rejects_path_b_args_without_formula_extra(self):
-        """If user passes formula args without installing the formula extra,
-        the estimator should error at construct time, not at fit time."""
-        from spark_vi.mllib.topic.stm import StreamingSTM
-        with pytest.raises(ValueError, match="covariate_formula|covariate_names"):
-            StreamingSTM(K=5, features_col="features")
+    def test_rejects_both_covariate_sources(self):
+        from spark_vi.mllib.topic.stm import OnlineSTMEstimator
+        with pytest.raises(ValueError, match="not both"):
+            OnlineSTMEstimator(k=5, covariateNames=["a"], covariateFormula="~ a")
 
-    def test_fit_returns_STMModel_on_small_joined_df(self, spark):
-        """Smoke: StreamingSTM.fit consumes a (features, covariates) DataFrame and
-        returns a fitted STMModel with the right metadata."""
-        from spark_vi.mllib.topic.stm import STMModel, StreamingSTM
+    def test_fit_without_covariates_raises(self, spark):
+        """No covariate source configured: the fit refuses (a bare Estimator may be
+        configured after construction, so the check is at fit)."""
+        from spark_vi.mllib.topic.stm import OnlineSTMEstimator
+        df = spark.createDataFrame(
+            [(SparseVector(4, [0], [1.0]), DenseVector([1.0]))],
+            ["features", "covariates"])
+        with pytest.raises(ValueError, match="covariateFormula|covariateNames"):
+            OnlineSTMEstimator(k=5, featuresCol="features").fit(df)
+
+    def test_fit_returns_model_on_small_joined_df(self, spark):
+        """Smoke: fit consumes a (features, covariates) DataFrame and returns a
+        fitted OnlineSTMModel with the right metadata."""
+        from spark_vi.mllib.topic.stm import OnlineSTMEstimator, OnlineSTMModel
 
         # Toy corpus: 6 docs, V=8, P=2.
         rows = [
@@ -77,25 +84,23 @@ class TestStreamingSTMPathA:
             (SparseVector(8, [3, 4], [1.0, 3.0]), DenseVector([0.5, 0.5])),
         ]
         df = spark.createDataFrame(rows, ["features", "covariates"])
-        est = StreamingSTM(
-            K=2,
-            features_col="features",
-            covariates_col="covariates",
-            covariate_names=["x1", "x2"],
-            random_seed=0,
+        est = OnlineSTMEstimator(
+            k=2, featuresCol="features", covariatesCol="covariates",
+            covariateNames=["x1", "x2"], seed=0,
+            maxIter=2, subsamplingRate=1.0, learningOffset=1.0, learningDecay=0.5,
         )
-        model = est.fit(df, max_iter=2, subsampling_rate=1.0, tau0=1.0, kappa=0.5)
-        assert isinstance(model, STMModel)
-        assert model.metadata["K"] == 2
-        assert model.metadata["V"] == 8
-        assert model.metadata["P"] == 2
-        assert model.covariate_names == ["x1", "x2"]
+        model = est.fit(df)
+        assert isinstance(model, OnlineSTMModel)
+        assert model.result.metadata["K"] == 2
+        assert model.result.metadata["V"] == 8
+        assert model.result.metadata["P"] == 2
+        assert model.getOrDefault("covariateNames") == ["x1", "x2"]
 
     def test_fit_resume_accumulates_iterations(self, spark, tmp_path):
-        """fit -> save -> fit(resume_from): the iteration counter continues, so a
+        """fit -> save -> fit(resumeFrom): the iteration counter continues, so a
         3-iter fit then a 2-iter resume yields n_iterations == 5. This is what
         keeps rho_t = (tau0 + t + 1)^-kappa shrinking instead of resetting."""
-        from spark_vi.mllib.topic.stm import StreamingSTM
+        from spark_vi.mllib.topic.stm import OnlineSTMEstimator
 
         rows = [
             (SparseVector(8, [0, 2], [3.0, 1.0]), DenseVector([1.0, 0.0])),
@@ -104,19 +109,20 @@ class TestStreamingSTMPathA:
             (SparseVector(8, [5, 6], [1.0, 1.0]), DenseVector([0.0, 1.0])),
         ]
         df = spark.createDataFrame(rows, ["features", "covariates"])
-        est = StreamingSTM(
-            K=2, features_col="features", covariates_col="covariates",
-            covariate_names=["x1", "x2"], random_seed=0,
+        est = OnlineSTMEstimator(
+            k=2, featuresCol="features", covariatesCol="covariates",
+            covariateNames=["x1", "x2"], seed=0,
+            maxIter=3, subsamplingRate=1.0, learningOffset=1.0, learningDecay=0.5,
         )
-        m1 = est.fit(df, max_iter=3, subsampling_rate=1.0, tau0=1.0, kappa=0.5)
-        assert m1.n_iterations == 3
+        m1 = est.fit(df)
+        assert m1.result.n_iterations == 3
 
         save_dir = tmp_path / "ckpt"
-        m1.save(save_dir)
+        m1.save(str(save_dir))
 
-        m2 = est.fit(df, max_iter=2, subsampling_rate=1.0, tau0=1.0, kappa=0.5,
-                     resume_from=str(save_dir))
-        assert m2.n_iterations == 5  # 3 loaded + 2 additional
+        est.setParams(maxIter=2, resumeFrom=str(save_dir / "result"))
+        m2 = est.fit(df)
+        assert m2.result.n_iterations == 5  # 3 loaded + 2 additional
 
 
 class TestCorpusMeanProportionsRDD:
@@ -202,31 +208,50 @@ class TestCorpusMeanProportionsRDD:
             corpus_mean_topic_proportions_gated_rdd(empty, np.zeros((2, 3)), part)
 
 
-def test_streaming_stm_rejects_group_var_in_formula():
-    import pytest
-    from spark_vi.mllib.topic.stm import StreamingSTM
+def test_estimator_rejects_group_var_in_covariates():
+    from spark_vi.mllib.topic.stm import OnlineSTMEstimator
     from spark_vi.models.topic.partition import TopicBlockPartition
     part = TopicBlockPartition("source_cohort", background_k=2, foreground=(("cancer", 1),))
     with pytest.raises(ValueError, match="group_var"):
-        StreamingSTM(
-            K=3, covariates_col="covariates",
-            covariate_names=["Intercept", "C(source_cohort)[T.cancer]"],
-            topic_blocks=part, doc_group_col="source_cohort")
+        OnlineSTMEstimator(
+            k=3, covariatesCol="covariates",
+            covariateNames=["Intercept", "C(source_cohort)[T.cancer]"],
+            topicBlocks=part, docGroupCol="source_cohort")
 
 
-def test_streaming_stm_requires_group_col_with_partition():
-    import pytest
-    from spark_vi.mllib.topic.stm import StreamingSTM
+def test_estimator_rejects_group_var_in_formula():
+    from spark_vi.mllib.topic.stm import OnlineSTMEstimator
     from spark_vi.models.topic.partition import TopicBlockPartition
     part = TopicBlockPartition("source_cohort", background_k=2, foreground=(("cancer", 1),))
-    with pytest.raises(ValueError, match="doc_group_col"):
-        StreamingSTM(K=3, covariates_col="covariates",
-                     covariate_names=["Intercept", "age"], topic_blocks=part)
+    with pytest.raises(ValueError, match="group_var"):
+        OnlineSTMEstimator(k=3, covariateFormula="~ age + C(source_cohort)",
+                           topicBlocks=part, docGroupCol="source_cohort")
 
 
-def test_streaming_stm_gated_fit_smoke(spark):
-    from pyspark.ml.linalg import Vectors
-    from spark_vi.mllib.topic.stm import StreamingSTM
+def test_estimator_requires_group_col_with_partition():
+    from spark_vi.mllib.topic.stm import OnlineSTMEstimator
+    from spark_vi.models.topic.partition import TopicBlockPartition
+    part = TopicBlockPartition("source_cohort", background_k=2, foreground=(("cancer", 1),))
+    with pytest.raises(ValueError, match="docGroupCol"):
+        OnlineSTMEstimator(k=3, covariatesCol="covariates",
+                           covariateNames=["Intercept", "age"], topicBlocks=part)
+
+
+def test_topic_blocks_param_round_trips_as_json():
+    from spark_vi.mllib.topic.stm import OnlineSTMEstimator
+    from spark_vi.models.topic.partition import TopicBlockPartition
+    part = TopicBlockPartition("grp", background_k=2, foreground=(("rare", 1),))
+    est = OnlineSTMEstimator(k=3, covariateNames=["a"], topicBlocks=part,
+                             docGroupCol="grp")
+    assert isinstance(est.getOrDefault("topicBlocks"), str)
+    assert est._topic_block_partition() == part
+    est2 = OnlineSTMEstimator(k=3, covariateNames=["a"], topicBlocks=part.to_dict(),
+                              docGroupCol="grp")
+    assert est2.getOrDefault("topicBlocks") == est.getOrDefault("topicBlocks")
+
+
+def test_estimator_gated_fit_smoke(spark):
+    from spark_vi.mllib.topic.stm import OnlineSTMEstimator
     from spark_vi.models.topic.partition import TopicBlockPartition
     part = TopicBlockPartition("grp", background_k=2, foreground=(("rare", 1),))
     rows = []
@@ -236,15 +261,17 @@ def test_streaming_stm_gated_fit_smoke(spark):
                      Vectors.dense([1.0, float(i % 2)]),
                      "rare" if rare else "common"))
     df = spark.createDataFrame(rows, ["features", "covariates", "grp"])
-    est = StreamingSTM(K=3, covariates_col="covariates",
-                       covariate_names=["Intercept", "age"],
-                       topic_blocks=part, doc_group_col="grp")
-    model = est.fit(df, max_iter=3, subsampling_rate=1.0)
-    assert model.global_params["lambda"].shape == (3, 5)
-    assert model.metadata  # fit produced a model
+    est = OnlineSTMEstimator(k=3, covariatesCol="covariates",
+                             covariateNames=["Intercept", "age"],
+                             topicBlocks=part, docGroupCol="grp",
+                             maxIter=3, subsamplingRate=1.0)
+    model = est.fit(df)
+    assert model.result.global_params["lambda"].shape == (3, 5)
+    assert model.result.metadata  # fit produced a model
+    assert model.topicBlockPartition() == part
 
 
-class TestStreamingSTMHardeningThreading:
+class TestEstimatorHardeningThreading:
     """The opt-in OnlineSTM hardening knobs reach the engine and the metadata."""
 
     def _toy_df(self, spark):
@@ -261,23 +288,24 @@ class TestStreamingSTMHardeningThreading:
 
     def test_reference_topic_reaches_engine(self, spark):
         """A reference fit drives the reference topic's Gamma column to 0 — the
-        end-to-end signature that reference_topic took effect through the shim."""
-        from spark_vi.mllib.topic.stm import StreamingSTM
-        est = StreamingSTM(
-            K=4, features_col="features", covariates_col="covariates",
-            covariate_names=["a", "b"], random_seed=0, reference_topic=True)
-        model = est.fit(self._toy_df(spark), max_iter=3, subsampling_rate=1.0)
-        assert np.allclose(model.global_params["Gamma"][:, 0], 0.0)
+        end-to-end signature that referenceTopic took effect through the shim."""
+        from spark_vi.mllib.topic.stm import OnlineSTMEstimator
+        est = OnlineSTMEstimator(
+            k=4, featuresCol="features", covariatesCol="covariates",
+            covariateNames=["a", "b"], seed=0, referenceTopic=True,
+            maxIter=3, subsamplingRate=1.0)
+        model = est.fit(self._toy_df(spark))
+        assert np.allclose(model.result.global_params["Gamma"][:, 0], 0.0)
 
     def test_hardening_knobs_persisted_in_metadata(self, spark):
-        from spark_vi.mllib.topic.stm import StreamingSTM
-        est = StreamingSTM(
-            K=4, features_col="features", covariates_col="covariates",
-            covariate_names=["a", "b"], random_seed=0,
-            reference_topic=True, min_pair_support=3,
-            spectral_init=False)
-        model = est.fit(self._toy_df(spark), max_iter=2, subsampling_rate=1.0)
-        assert model.metadata["stm_hardening"] == {
+        from spark_vi.mllib.topic.stm import OnlineSTMEstimator
+        est = OnlineSTMEstimator(
+            k=4, featuresCol="features", covariatesCol="covariates",
+            covariateNames=["a", "b"], seed=0,
+            referenceTopic=True, minPairSupport=3,
+            spectralInit=False, maxIter=2, subsamplingRate=1.0)
+        model = est.fit(self._toy_df(spark))
+        assert model.result.metadata["stm_hardening"] == {
             "reference_topic": True,
             "min_pair_support": 3,
             "spectral_init": False,
@@ -292,18 +320,18 @@ class TestStreamingSTMHardeningThreading:
     def test_defaults_on_and_recorded(self, spark, monkeypatch):
         import numpy as np
         import spark_vi.models.topic.spectral_init as si_mod
-        from spark_vi.mllib.topic.stm import StreamingSTM
+        from spark_vi.mllib.topic.stm import OnlineSTMEstimator
         # toy_df is too small for the real anchor-word init; uniform seed keeps the
-        # default-on fit robust while still exercising the spectral_init=True path.
+        # default-on fit robust while still exercising the spectralInit=True path.
         monkeypatch.setattr(si_mod, "spectral_init_beta",
                             lambda docs, partition, V: np.full((partition.K, V), 1.0 / V))
-        est = StreamingSTM(
-            K=4, features_col="features", covariates_col="covariates",
-            covariate_names=["a", "b"], random_seed=0)
-        assert est.reference_topic is True
-        assert est.spectral_init is True
-        model = est.fit(self._toy_df(spark), max_iter=2, subsampling_rate=1.0)
-        assert model.metadata["stm_hardening"] == {
+        est = OnlineSTMEstimator(
+            k=4, featuresCol="features", covariatesCol="covariates",
+            covariateNames=["a", "b"], seed=0, maxIter=2, subsamplingRate=1.0)
+        assert est.getOrDefault("referenceTopic") is True
+        assert est.getOrDefault("spectralInit") is True
+        model = est.fit(self._toy_df(spark))
+        assert model.result.metadata["stm_hardening"] == {
             "reference_topic": True,
             "min_pair_support": 1,
             "spectral_init": True,
@@ -315,10 +343,10 @@ class TestStreamingSTMHardeningThreading:
             "sigma_diagonal_pin": 1.0,
         }
         # Default fit now pins the reference column to zero.
-        assert np.allclose(model.global_params["Gamma"][:, 0], 0.0)
+        assert np.allclose(model.result.global_params["Gamma"][:, 0], 0.0)
 
     def test_spectral_init_seed_reaches_initialize_global(self, spark, monkeypatch):
-        """spectral_init=True computes a spectral_beta seed from the collected
+        """spectralInit=True computes a spectral_beta seed from the collected
         docs and passes it to the engine as data_summary={'spectral_beta': ...}.
 
         We spy on spectral_init_beta (uniform seed, so no zero-rows can trip the
@@ -326,7 +354,7 @@ class TestStreamingSTMHardeningThreading:
         the data_summary the runner forwards — the end-to-end wiring seam."""
         import spark_vi.models.topic.spectral_init as si_mod
         from spark_vi.models.topic.stm import OnlineSTM
-        from spark_vi.mllib.topic.stm import StreamingSTM
+        from spark_vi.mllib.topic.stm import OnlineSTMEstimator
 
         K, V = 4, 8
         sentinel = np.full((K, V), 1.0 / V)
@@ -349,10 +377,11 @@ class TestStreamingSTMHardeningThreading:
 
         monkeypatch.setattr(OnlineSTM, "initialize_global", spy_init)
 
-        est = StreamingSTM(
-            K=K, features_col="features", covariates_col="covariates",
-            covariate_names=["a", "b"], random_seed=0, spectral_init=True)
-        model = est.fit(self._toy_df(spark), max_iter=1, subsampling_rate=1.0)
+        est = OnlineSTMEstimator(
+            k=K, featuresCol="features", covariatesCol="covariates",
+            covariateNames=["a", "b"], seed=0, spectralInit=True,
+            maxIter=1, subsamplingRate=1.0)
+        model = est.fit(self._toy_df(spark))
 
         assert seen["vocab_size"] == V
         assert seen["partition_K"] == K
@@ -360,13 +389,13 @@ class TestStreamingSTMHardeningThreading:
         ds = captured["data_summary"]
         assert ds is not None and "spectral_beta" in ds
         assert np.allclose(ds["spectral_beta"], sentinel)
-        assert model.metadata["stm_hardening"]["spectral_init"] is True
+        assert model.result.metadata["stm_hardening"]["spectral_init"] is True
 
     def test_spectral_init_off_forwards_no_seed(self, spark, monkeypatch):
-        """Default (spectral_init off): initialize_global receives data_summary
-        None (random-gamma init path), and the metadata records it off."""
+        """spectralInit off: initialize_global receives data_summary None
+        (random-gamma init path), and the metadata records it off."""
         from spark_vi.models.topic.stm import OnlineSTM
-        from spark_vi.mllib.topic.stm import StreamingSTM
+        from spark_vi.mllib.topic.stm import OnlineSTMEstimator
 
         captured = {}
         orig_init = OnlineSTM.initialize_global
@@ -377,30 +406,31 @@ class TestStreamingSTMHardeningThreading:
 
         monkeypatch.setattr(OnlineSTM, "initialize_global", spy_init)
 
-        est = StreamingSTM(
-            K=4, features_col="features", covariates_col="covariates",
-            covariate_names=["a", "b"], random_seed=0, spectral_init=False)
-        assert est.spectral_init is False
-        model = est.fit(self._toy_df(spark), max_iter=1, subsampling_rate=1.0)
+        est = OnlineSTMEstimator(
+            k=4, featuresCol="features", covariatesCol="covariates",
+            covariateNames=["a", "b"], seed=0, spectralInit=False,
+            maxIter=1, subsamplingRate=1.0)
+        assert est.getOrDefault("spectralInit") is False
+        model = est.fit(self._toy_df(spark))
         assert captured["data_summary"] is None
-        assert model.metadata["stm_hardening"]["spectral_init"] is False
+        assert model.result.metadata["stm_hardening"]["spectral_init"] is False
 
     def test_spectral_method_invalid_rejected(self):
-        """spectral_method values outside {"dense", "scalable", "auto"} raise."""
-        from spark_vi.mllib.topic.stm import StreamingSTM
-        with pytest.raises(ValueError, match="spectral_method"):
-            StreamingSTM(
-                K=4, features_col="features", covariates_col="covariates",
-                covariate_names=["a", "b"], spectral_method="bogus")
+        """spectralMethod values outside {"dense", "scalable", "auto"} raise."""
+        from spark_vi.mllib.topic.stm import OnlineSTMEstimator
+        with pytest.raises(Exception, match="spectralMethod"):
+            OnlineSTMEstimator(
+                k=4, featuresCol="features", covariatesCol="covariates",
+                covariateNames=["a", "b"], spectralMethod="bogus")
 
     def test_spectral_method_default_is_auto(self):
-        """A default-constructed StreamingSTM stores spectral_method == 'auto'
+        """A default-constructed estimator holds spectralMethod == 'auto'
         (ADR 0037: auto-route dense/scalable by vocab size)."""
-        from spark_vi.mllib.topic.stm import StreamingSTM
-        est = StreamingSTM(
-            K=4, features_col="features", covariates_col="covariates",
-            covariate_names=["a", "b"])
-        assert est.spectral_method == "auto"
+        from spark_vi.mllib.topic.stm import OnlineSTMEstimator
+        est = OnlineSTMEstimator(
+            k=4, featuresCol="features", covariatesCol="covariates",
+            covariateNames=["a", "b"])
+        assert est.getOrDefault("spectralMethod") == "auto"
 
     def test_resolve_spectral_method_auto_below_threshold_is_dense(self):
         """'auto' resolves to dense below the vocab threshold (ADR 0037)."""
@@ -430,12 +460,12 @@ class TestStreamingSTMHardeningThreading:
 
     def test_spectral_method_scalable_routes_to_scalable_init(
             self, spark, monkeypatch):
-        """spectral_method='scalable' calls scalable_spectral_init_beta (not the
+        """spectralMethod='scalable' calls scalable_spectral_init_beta (not the
         dense path): the stub receives the rdd (not a collected list), and the
         metadata records stm_hardening['spectral_method'] == 'scalable'."""
         import spark_vi.models.topic.spectral_init_scalable as ss_mod
         from spark_vi.models.topic.stm import OnlineSTM
-        from spark_vi.mllib.topic.stm import StreamingSTM
+        from spark_vi.mllib.topic.stm import OnlineSTMEstimator
 
         K, V = 4, 8
         sentinel = np.full((K, V), 1.0 / V)
@@ -462,12 +492,12 @@ class TestStreamingSTMHardeningThreading:
 
         monkeypatch.setattr(OnlineSTM, "initialize_global", spy_init)
 
-        est = StreamingSTM(
-            K=K, features_col="features", covariates_col="covariates",
-            covariate_names=["a", "b"], random_seed=7,
-            spectral_init=True, spectral_method="scalable",
-            spectral_d=256, spectral_min_doc_freq=3)
-        model = est.fit(self._toy_df(spark), max_iter=1, subsampling_rate=1.0)
+        est = OnlineSTMEstimator(
+            k=K, featuresCol="features", covariatesCol="covariates",
+            covariateNames=["a", "b"], seed=7,
+            spectralInit=True, spectralMethod="scalable",
+            spectralD=256, spectralMinDocFreq=3, maxIter=1, subsamplingRate=1.0)
+        model = est.fit(self._toy_df(spark))
 
         # The stub received the rdd (not a Python list).
         import pyspark
@@ -475,7 +505,7 @@ class TestStreamingSTMHardeningThreading:
             "scalable path must pass the rdd, not rdd.collect()")
         assert seen["vocab_size"] == V
         assert seen["d"] == 256
-        assert seen["seed"] == 7          # self.random_seed or 0
+        assert seen["seed"] == 7          # seed or 0
         assert seen["min_doc_freq"] == 3
 
         # The sentinel reached the engine unchanged.
@@ -484,29 +514,29 @@ class TestStreamingSTMHardeningThreading:
         assert np.allclose(ds["spectral_beta"], sentinel)
 
         # Metadata records the method.
-        assert model.metadata["stm_hardening"]["spectral_method"] == "scalable"
+        assert model.result.metadata["stm_hardening"]["spectral_method"] == "scalable"
 
     def test_defaults_on_and_recorded_includes_spectral_method(
             self, spark, monkeypatch):
         """Default path records spectral_method == 'dense' in stm_hardening."""
         import spark_vi.models.topic.spectral_init as si_mod
-        from spark_vi.mllib.topic.stm import StreamingSTM
+        from spark_vi.mllib.topic.stm import OnlineSTMEstimator
         monkeypatch.setattr(si_mod, "spectral_init_beta",
                             lambda docs, partition, V: np.full((partition.K, V), 1.0 / V))
-        est = StreamingSTM(
-            K=4, features_col="features", covariates_col="covariates",
-            covariate_names=["a", "b"], random_seed=0)
-        model = est.fit(self._toy_df(spark), max_iter=2, subsampling_rate=1.0)
-        assert model.metadata["stm_hardening"]["spectral_method"] == "dense"
+        est = OnlineSTMEstimator(
+            k=4, featuresCol="features", covariatesCol="covariates",
+            covariateNames=["a", "b"], seed=0, maxIter=2, subsamplingRate=1.0)
+        model = est.fit(self._toy_df(spark))
+        assert model.result.metadata["stm_hardening"]["spectral_method"] == "dense"
 
 
 # ---------------------------------------------------------------------------
-# Fixture: tiny dataset for full-Sigma / correlation tests (Path B, formula)
+# Fixture: tiny dataset for full-Sigma / correlation tests
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="module")
 def tiny_stm_dataset(spark):
-    """Six-document, 8-vocab corpus with a single binary covariate 'x'."""
+    """Six-document, 8-vocab corpus with two covariates."""
     from pyspark.ml.linalg import SparseVector, DenseVector
     rows = [
         (SparseVector(8, [0, 2], [3.0, 1.0]), DenseVector([1.0, 0.0])),
@@ -519,12 +549,13 @@ def tiny_stm_dataset(spark):
     return spark.createDataFrame(rows, ["features", "covariates"])
 
 
-def test_streaming_stm_full_sigma_metadata_and_shapes(spark, tiny_stm_dataset):
-    from spark_vi.mllib.topic.stm import StreamingSTM
-    est = StreamingSTM(K=4, features_col="features", covariates_col="covariates",
-                       covariate_names=["a", "b"],
-                       min_pair_support=3,
-                       reference_topic=False, spectral_init=False)
-    model = est.fit(tiny_stm_dataset, max_iter=2, subsampling_rate=1.0)
-    assert model.global_params["Sigma"].shape == (4, 4)
-    assert model.metadata["stm_hardening"]["min_pair_support"] == 3
+def test_estimator_full_sigma_metadata_and_shapes(spark, tiny_stm_dataset):
+    from spark_vi.mllib.topic.stm import OnlineSTMEstimator
+    est = OnlineSTMEstimator(k=4, featuresCol="features", covariatesCol="covariates",
+                             covariateNames=["a", "b"],
+                             minPairSupport=3,
+                             referenceTopic=False, spectralInit=False,
+                             maxIter=2, subsamplingRate=1.0)
+    model = est.fit(tiny_stm_dataset)
+    assert model.result.global_params["Sigma"].shape == (4, 4)
+    assert model.result.metadata["stm_hardening"]["min_pair_support"] == 3

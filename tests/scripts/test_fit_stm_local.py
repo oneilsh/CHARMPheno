@@ -161,7 +161,7 @@ def test_fit_stm_local_full_sigma_end_to_end(tmp_path):
 
     Runs fit_main on the existing gated sim (K=5, 8 iters) with the
     min-pair-support guard engaged. Asserts rc==0, params/Sigma.npy is (K,K),
-    and params/correlation.npy exists (written by STMModel.save). Uses
+    and params/correlation.npy exists (written beside the checkpoint). Uses
     --no-spectral-init and --no-reference-topic to keep the path cheap and
     isolated to the full-covariance M-step arc."""
     import numpy as np

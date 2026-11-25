@@ -120,13 +120,15 @@ class TestShimForwardsGlobalScale:
         return spark.createDataFrame(rows, ["features", "covariates"])
 
     def test_shim_metadata_and_forward(self, spark):
-        from spark_vi.mllib.topic.stm import StreamingSTM
-        est = StreamingSTM(
-            K=4, features_col="features", covariates_col="covariates",
-            covariate_names=["a", "b"], random_seed=0,
-            estimate_global_scale=True, global_scale_step_cap=1.5)
-        assert est.estimate_global_scale is True
-        assert est.global_scale_step_cap == 1.5
-        model = est.fit(self._toy_df(spark), max_iter=2, subsampling_rate=1.0)
-        assert model.metadata["stm_hardening"]["estimate_global_scale"] is True
-        assert model.metadata["stm_hardening"]["global_scale_step_cap"] == 1.5
+        from spark_vi.mllib.topic.stm import OnlineSTMEstimator
+        est = OnlineSTMEstimator(
+            k=4, featuresCol="features", covariatesCol="covariates",
+            covariateNames=["a", "b"], seed=0,
+            estimateGlobalScale=True, globalScaleStepCap=1.5,
+            maxIter=2, subsamplingRate=1.0)
+        assert est.getOrDefault("estimateGlobalScale") is True
+        assert est.getOrDefault("globalScaleStepCap") == 1.5
+        model = est.fit(self._toy_df(spark))
+        hardening = model.result.metadata["stm_hardening"]
+        assert hardening["estimate_global_scale"] is True
+        assert hardening["global_scale_step_cap"] == 1.5
