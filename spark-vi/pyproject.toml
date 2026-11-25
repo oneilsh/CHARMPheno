@@ -2,7 +2,7 @@
 name = "spark-vi"
 version = "0.1.0"
 description = "PySpark-native framework for distributed variational inference"
-authors = ["CHARMPheno contributors"]
+authors = ["Shawn T. O'Neil"]
 license = "MIT"
 readme = "README.md"
 packages = [{include = "spark_vi"}]

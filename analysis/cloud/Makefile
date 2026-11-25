@@ -1,4 +1,4 @@
-.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect inspect-topics export-dag-gated profile-marks smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates
+.PHONY: help zip blas-probe cluster-overlaysmoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect inspect-topics export-dag-gated profile-marks smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates
 
 REPO_ROOT       := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP    := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
@@ -1012,3 +1012,26 @@ smoke-dataproc: zip
 	    --cluster=$(CLUSTER) \
 	    --region=$(REGION) \
 	    --py-files=gs://$(BUCKET)/smoke/spark_vi.zip
+
+# BLAS thread probe (scoping report WP6): times the DAG-gated per-document CAVI on
+# every executor core at once under three thread settings (Spark's, 1, the library
+# default) on SYNTHETIC data, with 0175/0176's executor geometry. About a minute.
+# Writes <RUNS_DIR>/blas_probe_<timestamp>.md.
+#   make blas-probe
+BLAS_PROBE_ARGS ?=
+blas-probe: zip $(WORKSPACE_ENV)
+	. ./$(WORKSPACE_ENV) && \
+	spark-submit \
+	    --master yarn \
+	    --deploy-mode client \
+	    --driver-memory 4g \
+	    --conf spark.executor.cores=2 \
+	    --conf spark.executor.memory=8g \
+	    --conf spark.executor.memoryOverhead=3g \
+	    --conf spark.dynamicAllocation.enabled=false \
+	    --conf spark.executor.instances=20 \
+	    --conf spark.dataproc.listeners= \
+	    --py-files $(SPARK_VI_ZIP) \
+	    $(REPO_ROOT)/analysis/cloud/blas_probe.py \
+	    --out "$(RUNS_DIR)/blas_probe_$$(date +%Y%m%d_%H%M).md" \
+	    $(BLAS_PROBE_ARGS)
