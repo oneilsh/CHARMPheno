@@ -1,6 +1,6 @@
 # 0055 — One MLlib persistence for the topic models, and our own Params metadata writer
 
-**Status:** Accepted
+**Status:** Accepted; the STM exclusion (Alternatives) superseded by ADR 0056
 **Date:** 2026-11-25
 
 ## Context

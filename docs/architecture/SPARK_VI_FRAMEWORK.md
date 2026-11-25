@@ -585,16 +585,20 @@ path is qualified once, MLlib's rule, so a bare path lands on `fs.defaultFS` for
 |---|---|
 | `DagGatedLDAEstimator`, `DagGatedFeaturizer` | none (Params only; the DAG and the other structured Params are JSON strings, so str / int ids survive) |
 | `OnlineLDAModel`, `OnlineHDPModel`, `DagGatedLDAModel` | `result/`: the VIResult in the format above (the fit checkpoints' format; the DAG-gated node set rides its metadata); shared writer `_ResultStagePersistence` |
+| `OnlineSTMModel` (ADR 0056) | `result/` as above; for a formula model also `covariate_spec.json`: the formula and the schema-frame it was fitted on, from which `load` rebuilds the formulaic ModelSpec (no pickle) |
 | `DagHeadsModel` (charmpheno, ADR 0054) | `readout_heads_model.npz` (the heads), `node_set.json` |
 | `DagHeadsEstimator` | `topicModel/` (a `DagGatedLDAModel` directory) when one is held via `setTopicModel` |
 | `DagGatedFeaturizerModel` | `data/vocabularies.json`: the vocabularies |
 
 `save` refuses an existing path; `write().overwrite().save` replaces it. A fit checkpoint
 (`saveDir`) is a bare VIResult, not a saved stage: `load` refuses it, and
-`DagGatedLDAModel(load_result(dir))` (likewise `OnlineLDAModel` / `OnlineHDPModel`)
-wraps it, Params at their defaults. No backward compatibility for saved model layouts
-(ADR 0055): an LDA / HDP model saved before ADR 0055 is such a bare VIResult too. `STMModel` keeps its
-own format (it is not an MLlib `Model`; see the split scoping report).
+`DagGatedLDAModel(load_result(dir))` (likewise `OnlineLDAModel` / `OnlineHDPModel` /
+`OnlineSTMModel`) wraps it, Params at their defaults. No backward compatibility for
+saved model layouts (ADR 0055, 0056): an LDA / HDP model saved before ADR 0055 is such
+a bare VIResult too, and the pre-ADR 0056 `STMModel` layout does not load. The STM
+stages take their covariates from DataFrame columns (a pre-built vector column with
+its names, or a formula over the columns) and `OnlineSTMModel.transform` appends each
+document's gated mode θ (ADR 0056).
 
 ---
 

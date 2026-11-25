@@ -82,16 +82,15 @@ Ordered so the package is usable at every step.
    package. No cache keys are involved (the readout is not a bundle input).
 2. **One persistence style.** *Done 2026-11-25 for LDA / HDP (ADR 0055):* both models
    are `_ResultStagePersistence` stages (Params, `PipelineModel`); no backward
-   compatibility for the old layout (maintainer); `_PersistableModel` is gone. *STM not done:* `STMModel` is a plain class
-   (no Params, no `transform`, its own `save` / `load` over a local `Path`, a pickled
-   formulaic `ModelSpec` sidecar) and `StreamingSTM` is not an `Estimator`. Making them
-   stages means: an STM Params surface (K, the formula, the prior and optimizer
-   settings) on an `Estimator` whose `fit` takes a DataFrame with covariate columns; a
-   `Model.transform` (per-document θ by the gated Laplace E-step); a data layout that
-   replaces the pickle with something portable (the formula string plus the levels the
-   spec learned, or formulaic's own serialization); and a reader for today's
-   directories (`stm_bigquery_cloud.py` and `fit_stm_local.py` write them). A redesign
-   of its own, best done with the STM tutorial (WP8). Original scope: OnlineLDA / OnlineHDP still use the older
+   compatibility for the old layout (maintainer); `_PersistableModel` is gone. *STM done
+   2026-11-25 (ADR 0056):* `OnlineSTMEstimator` / `OnlineSTMModel` replace
+   `StreamingSTM` / `STMModel` as MLlib stages on the same persistence (camelCase Params,
+   `transform` = each document's gated mode θ, `PipelineModel`); covariates are
+   DataFrame columns, a pre-built vector or a formula over the columns (the separate
+   covariate frame is gone); the formula's spec persists as JSON (the formula plus the
+   schema-frame it was fitted on, rebuilt on load), no pickle; no backward
+   compatibility. The CHARMPheno drivers fit through the Estimator and keep writing
+   their run dir as a VIResult checkpoint. Original scope: OnlineLDA / OnlineHDP still use the older
    `_PersistableModel` (bare VIResult, no Params, not Pipeline-capable), and STM's
    model is not an MLlib `Model` at all (its own `save` / `load` over a local `Path`);
    move all three to `_StagePersistence` as the DAG-gated stages and the featurizer

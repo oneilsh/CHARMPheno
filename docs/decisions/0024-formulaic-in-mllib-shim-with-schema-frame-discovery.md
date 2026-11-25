@@ -1,6 +1,6 @@
 # 0024 — STM covariate API: formulaic in the MLlib shim layer, Spark-native categorical discovery via schema-frame
 
-**Status:** Accepted
+**Status:** Accepted; §4 (the pickled ModelSpec) and the "formula + covariate DataFrame" input path superseded by ADR 0056
 **Date:** 2026-05-29
 **Related:** ADR 0022 (STM-prevalence as covariate path); ADR 0019 (MLlib shim and BOWDocument namespace); design spec [2026-05-29 STM prevalence-only design](../superpowers/specs/2026-05-29-stm-prevalence-design.md)
 
