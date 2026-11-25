@@ -129,12 +129,24 @@ Ordered so the package is usable at every step.
    matrix operations, where BLAS threads only contend. The test suite now sets one
    thread in `spark-vi/tests/conftest.py`; the library should cap threads inside its
    own E-steps (a `threadpool_limits` context around `local_update`, both engines)
-   rather than rely on users setting `OMP_NUM_THREADS`. Spark's Python workers may be
-   exposed too: as far as we know (SPARK-28843; not checked on our clusters) Spark
-   sets an unset `OMP_NUM_THREADS` to the executor's core count, so with one task per
-   core an n2-standard-4 executor would run four workers of four BLAS threads each.
-   Worth one timing comparison on the cluster (`spark.executorEnv.OMP_NUM_THREADS=1`)
-   before assuming the DAG-gated fits' iteration times are compute-bound.
+   rather than rely on users setting `OMP_NUM_THREADS`.
+   *Cluster probe, 2026-11-25* (`make blas-probe`, `analysis/cloud/blas_probe.py`: the
+   DAG-gated per-document CAVI on synthetic documents, all 40 executor cores busy,
+   0175/0176's geometry of 20 executors x 2 cores on 4-vCPU workers, OpenBLAS 0.3.25).
+   Our Dataproc workers already run one thread: the Python workers see
+   `OMP_NUM_THREADS=1` and `OPENBLAS_NUM_THREADS=1` (set by the cluster, not by us), so
+   the cluster fits are not oversubscribed and setting it changes nothing (median ms
+   per document, Spark's setting vs 1: 1.45 vs 1.43, 4.36 vs 4.41, 0.44 vs 0.43, 5.03
+   vs 4.79 over K_open x n_unique = 200x40, 200x150, 400x40, 400x150). With the
+   variables removed, OpenBLAS takes all 4 cores per process and the same work is
+   1.1x, 4.3x, 4.8x and 4.1x slower (1.64, 18.75, 2.10, 20.41 ms). On the dev box
+   (OpenBLAS 0.3.29, 4 cores, 2 tasks) the gated CAVI showed no such effect, so the
+   cost depends on the BLAS build and the load; STM's E-step is exposed on both.
+   What it means for the package: a user fitting outside a cluster that sets these
+   variables (LocalRunner, a laptop, a plain Spark install) can lose a factor of 4 or
+   more, so the cap belongs in the library. Open question: whether exp 0170's local
+   engine on the master (240 s per iteration against 54 s on the executors) ran with
+   the variables set; the driver's environment is not the YARN containers'.
 7. **Packaging hygiene.** *Done 2026-11-25:* `spark-vi/LICENSE` (MIT; the
    dependencies are Apache-2.0 (pyspark), BSD-3 (numpy, scipy) and MIT (formulaic),
    all compatible, and no third-party code is vendored), `spark-vi/CHANGELOG.md`,

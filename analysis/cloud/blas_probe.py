@@ -142,9 +142,15 @@ def main(argv=None) -> int:
     report = "\n".join(lines) + "\n"
     print(report)
     if a.out:
-        with open(a.out, "w") as f:
-            f.write(report)
-        print(f"wrote {a.out}")
+        # The report is already printed: a missing directory (the Makefile's RUNS_DIR
+        # default can be stale for a workspace) must not lose it to a traceback.
+        try:
+            with open(a.out, "w") as f:
+                f.write(report)
+            print(f"wrote {a.out}")
+        except OSError as e:
+            print(f"WARN: could not write {a.out} ({e}); the report is above. "
+                  "Pass RUNS_DIR=<the workspace runs dir> to make.")
     spark.stop()
     return 0
 
