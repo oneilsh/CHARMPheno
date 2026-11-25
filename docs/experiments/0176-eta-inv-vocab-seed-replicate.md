@@ -98,6 +98,11 @@ nohup bash scripts/jobs/exp_0176.sh > "$L" 2>&1 &
 sleep 5; ls -la "$L"; tail -f "$L"
 ```
 
+Ran on a cluster with 2 executors instead of the usual 8 (about 220 s per iteration
+against 0175's 80 s). The fit is the same except for wall time; the partition count
+follows the cluster's parallelism, so the minibatch draws differ from an 8-executor
+run with seed 43, which a seed replicate does not care about.
+
 ## Results
 
 (pending)
