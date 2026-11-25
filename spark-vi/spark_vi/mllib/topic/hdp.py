@@ -373,18 +373,15 @@ class OnlineHDPModel(_OnlineHDPParams, _ResultStagePersistence, Model):
 
     Persistence is MLlib's (``save`` / ``write().overwrite().save`` / ``load``, and
     inside a ``PipelineModel``): ``<path>/metadata/`` (Params) and ``<path>/result/``
-    (the VIResult), ``spark_vi.mllib._common._ResultStagePersistence``. ``load``
-    also reads a bare VIResult directory (the layout this model saved before ADR
-    0055, and every ``saveDir`` checkpoint), with the Params at their defaults.
+    (the VIResult), ``spark_vi.mllib._common._ResultStagePersistence``. A bare
+    VIResult directory (a ``saveDir`` checkpoint, or this model's save before ADR
+    0055) does not ``load``: wrap it, ``OnlineHDPModel(load_result(dir))``.
     """
 
     # Stamped into result.metadata by VIRunner as `model_class` (the runner
     # uses type(model).__name__ on the underlying VIModel). Used by
     # load to reject checkpoints from other model classes (_ResultStagePersistence).
     _expected_model_class = "OnlineHDP"
-    # Also load a bare VIResult directory: this model's save layout before ADR 0055,
-    # and every fit checkpoint (saveDir) and driver save_result output.
-    _legacy_result_dir = True
 
     def __init__(self, result) -> None:  # result: VIResult
         super().__init__()
@@ -399,7 +396,7 @@ class OnlineHDPModel(_OnlineHDPParams, _ResultStagePersistence, Model):
         # reads. The Estimator's _fit also runs a param-copy loop after
         # construction; that overwrites these with the Estimator's actual
         # configuration. A model loaded from its saved stage gets its saved
-        # Params back; one loaded from a bare VIResult directory keeps these.
+        # Params back; one wrapped around a bare VIResult keeps these.
         self._setDefault(
             k=150, docTruncation=15, maxIter=20,
             featuresCol="features", topicDistributionCol="topicDistribution",

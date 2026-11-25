@@ -22,16 +22,19 @@ obstacle to declaring pyspark as a lower bound only (the maintainer's choice).
    `paramMap`, `defaultParamMap`, extra keys; same key order, compact separators) from
    the public `Params` API, in MLlib's file layout (`metadata/part-00000` plus
    `_SUCCESS`). A fixture written by the private writer (`spark-vi/tests/data/
-   metadata_v0`) pins byte compatibility and keeps loading. pyspark is declared
+   metadata_v0`) pins the document byte for byte. pyspark is declared
    `>=3.5`, no upper bound.
 2. `_ResultStagePersistence` (`metadata/` + `result/`, the VIResult in ADR 0006's
    format) backs `OnlineLDAModel`, `OnlineHDPModel` and `DagGatedLDAModel`: Params
    round-trip, `PipelineModel` save / load, MLlib's refuse-unless-overwrite rule.
    `_PersistableModel` is removed. Supersedes the persistence deferral of ADR 0009 and
    ADR 0012 (the Estimators of LDA / HDP stay unpersisted: nobody has asked).
-3. Backward compatibility: LDA / HDP `load` also reads a bare VIResult directory (the
-   old `save` layout, every `saveDir` checkpoint, the drivers' `save_result` output),
-   with the Params at their defaults, as before.
+3. No backward compatibility for saved model layouts (maintainer, 2026-11-25): `load`
+   reads only the new layout. A bare VIResult directory (the old LDA / HDP `save`
+   layout, every `saveDir` checkpoint, the drivers' `save_result` output) is not a
+   saved stage; `OnlineLDAModel(load_result(dir))` wraps one, Params at their
+   defaults. The metadata fixture stays: it pins our writer to MLlib's document, which
+   is what keeps a saved stage readable by MLlib, not an old spark-vi format.
 
 ## Alternatives considered
 
@@ -42,8 +45,8 @@ obstacle to declaring pyspark as a lower bound only (the maintainer's choice).
 
 ## Consequences
 
-- A model saved by the new LDA / HDP `save` is NOT readable by older spark-vi (it
-  expects `manifest.json` at the top); old directories stay readable by new code.
+- Breaking, both ways: an LDA / HDP model saved before this ADR does not `load` (wrap
+  it with `load_result`), and one saved now does not load in older spark-vi.
 - `save` now refuses an existing path (`write().overwrite().save` replaces it); the old
   `save` wrote into it.
 - Remaining underscore pyspark API, all deliberate: `Params._dummy`, `_set`,

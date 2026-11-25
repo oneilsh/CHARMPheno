@@ -2,8 +2,8 @@
 
 Both moved from the bare-VIResult `save` / `load` to `_ResultStagePersistence`:
 `<path>/metadata/` (Params) + `<path>/result/` (the VIResult), Pipeline-capable,
-MLlib's refuse-unless-overwrite rule. A bare VIResult directory (the old layout, and
-every saveDir checkpoint) still loads, with Params at their defaults."""
+MLlib's refuse-unless-overwrite rule. A bare VIResult directory (the old layout, a
+saveDir checkpoint) is not loadable as a stage; no backward compatibility."""
 from __future__ import annotations
 
 import numpy as np
@@ -70,15 +70,20 @@ def test_save_refuses_an_existing_path_unless_overwrite(fitted, tmp_path):
     assert cls.load(str(path)).uid == model.uid
 
 
-def test_old_bare_result_layout_still_loads_with_default_params(fitted, tmp_path):
-    from spark_vi.io.export import save_result
+def test_a_bare_result_directory_is_not_a_saved_stage(fitted, tmp_path):
+    """No backward compatibility (maintainer, ADR 0055): the pre-0055 `save` layout and a
+    saveDir checkpoint are bare VIResult directories; `load` refuses them, and a model
+    is wrapped around one instead."""
+    from spark_vi.io.export import load_result, save_result
     model, cls = fitted
-    path = tmp_path / "old"
-    save_result(model.result, str(path))          # the pre-ADR-0055 Model.save layout
-    loaded = cls.load(str(path))
-    assert loaded.getOrDefault("topicDistributionCol") == "topicDistribution"
+    path = tmp_path / "bare"
+    save_result(model.result, str(path))
+    with pytest.raises(FileNotFoundError, match="metadata"):
+        cls.load(str(path))
+    wrapped = cls(load_result(str(path)))
+    assert wrapped.getOrDefault("topicDistributionCol") == "topicDistribution"
     for name, arr in model.result.global_params.items():
-        np.testing.assert_array_equal(loaded.result.global_params[name], arr)
+        np.testing.assert_array_equal(wrapped.result.global_params[name], arr)
 
 
 def test_pipeline_model_round_trip(fitted, corpus, tmp_path):

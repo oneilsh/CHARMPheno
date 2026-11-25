@@ -6,6 +6,13 @@ change is listed here.
 
 ## [Unreleased]
 
+### Breaking
+- No backward compatibility for saved models. `OnlineLDAModel.load` /
+  `OnlineHDPModel.load` read only the new layout (`metadata/` + `result/`); a model
+  saved by an earlier version, and a `saveDir` checkpoint, are bare VIResult
+  directories: wrap one with `OnlineLDAModel(load_result(dir))` (Params at their
+  defaults). A model saved now does not load in earlier versions.
+
 ### Removed
 - `spark_vi.mllib._common._PersistableModel` (internal; replaced by
   `_ResultStagePersistence`).
@@ -20,9 +27,7 @@ change is listed here.
 - `OnlineLDAModel` and `OnlineHDPModel` use MLlib persistence (ADR 0055): `save(path)`
   writes `metadata/` (Params) and `result/` (the VIResult), refuses an existing path
   (`write().overwrite().save(path)` replaces it), and the models work inside a saved
-  `PipelineModel`. `load` still reads the old layout (a bare VIResult directory, also
-  every `saveDir` checkpoint), with the Params at their defaults. A model saved this
-  way does not load in earlier versions.
+  `PipelineModel`.
 - Params metadata is written and read by spark-vi's own code in MLlib's format
   (`params_metadata_json`), no longer through pyspark private API; pyspark is declared
   `>=3.5` with no upper bound.

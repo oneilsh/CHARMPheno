@@ -1,7 +1,7 @@
 """Regenerates `metadata_v0/`: Params metadata exactly as spark-vi wrote it through
 pyspark's private `DefaultParamsWriter._get_metadata_to_save` (pyspark 3.5), before
-spark-vi's own writer replaced it (ADR 0055). Kept as a read-compatibility fixture: the
-reader must keep loading what that writer wrote. Run once, with pyspark 3.5, from the
+spark-vi's own writer replaced it (ADR 0055). Kept as the reference for MLlib's
+metadata document, which our writer must reproduce byte for byte. Run once, with pyspark 3.5, from the
 repo root: `python spark-vi/tests/data/make_metadata_v0.py`. The timestamp is pinned."""
 import json
 import os

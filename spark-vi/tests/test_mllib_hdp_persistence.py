@@ -148,11 +148,13 @@ def test_model_save_then_load_round_trips_global_params(
 
 
 def test_model_load_rejects_wrong_model_class(tmp_path):
-    """Loading an LDA-stamped manifest with OnlineHDPModel.load must raise."""
+    """An LDA-stamped result inside a stage directory is refused by OnlineHDPModel."""
     from spark_vi.mllib.topic.hdp import OnlineHDPModel
 
-    save_dir = tmp_path / "lda_marked"
-    save_dir.mkdir()
+    # the result directory inside a saved stage (the class check _load_data makes)
+    stage = tmp_path / "lda_marked"
+    save_dir = stage / "result"
+    save_dir.mkdir(parents=True)
     (save_dir / "params").mkdir()
     np.save(save_dir / "params" / "lambda.npy", np.zeros((2, 3)))
     manifest = {
@@ -167,7 +169,7 @@ def test_model_load_rejects_wrong_model_class(tmp_path):
     (save_dir / "manifest.json").write_text(json.dumps(manifest))
 
     with pytest.raises(ValueError, match="OnlineHDP"):
-        OnlineHDPModel.load(str(save_dir))
+        OnlineHDPModel._load_data(str(stage), {})
 
 
 def test_model_save_load_then_transform_works(
@@ -234,6 +236,8 @@ def test_estimator_fit_with_savedir_only_writes_final(
     model = estimator.fit(_persistence_hdp_corpus_df)
 
     assert (save_dir / "manifest.json").exists()
-    loaded = OnlineHDPModel.load(str(save_dir))
+    # a saveDir checkpoint is a bare VIResult, not a saved stage: wrap it
+    from spark_vi.io.export import load_result
+    loaded = OnlineHDPModel(load_result(str(save_dir)))
     for name, arr in model.result.global_params.items():
         np.testing.assert_array_equal(loaded.result.global_params[name], arr)

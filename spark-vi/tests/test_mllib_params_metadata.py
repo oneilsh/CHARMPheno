@@ -1,9 +1,12 @@
 """spark-vi's own MLlib Params metadata writer/reader (ADR 0055).
 
 Replaces pyspark's private `DefaultParamsWriter._get_metadata_to_save` /
-`DefaultParamsReader._parseMetaData`. Pinned two ways: against a fixture written by
-the private writer (`data/metadata_v0`, made by `data/make_metadata_v0.py`), which must
-keep loading, and, while pyspark still has it, against the private writer itself."""
+`DefaultParamsReader._parseMetaData`. Pinned to MLlib's document two ways: against a
+fixture written by MLlib's (private) writer (`data/metadata_v0`, made by
+`data/make_metadata_v0.py`), which our writer reproduces and our reader reads, and,
+while pyspark still has it, against that writer itself. The pin is for MLlib format
+compatibility (a saved stage MLlib can read), not an old spark-vi layout: saved models
+have no backward compatibility (ADR 0055)."""
 import json
 from pathlib import Path
 
@@ -36,7 +39,7 @@ def test_writer_reproduces_the_private_writers_fixture_byte_for_byte():
     assert text == json.dumps(fixture, separators=(",", ":"))
 
 
-def test_fixture_written_by_the_private_writer_still_loads():
+def test_reader_reads_mllibs_own_metadata():
     meta = read_params_metadata(str(FIXTURE),
                                 "spark_vi.mllib.topic.dag_gated_lda.DagGatedLDAEstimator")
     assert meta["extraKey"] == {"a": [1, 2]}

@@ -590,9 +590,10 @@ path is qualified once, MLlib's rule, so a bare path lands on `fs.defaultFS` for
 | `DagGatedFeaturizerModel` | `data/vocabularies.json`: the vocabularies |
 
 `save` refuses an existing path; `write().overwrite().save` replaces it. A fit checkpoint
-(`saveDir`) is a bare VIResult: `DagGatedLDAModel(load_result(dir))` wraps it, and
-`OnlineLDAModel.load` / `OnlineHDPModel.load` read it directly (as they read their own
-saves from before ADR 0055), with the Params at their defaults. `STMModel` keeps its
+(`saveDir`) is a bare VIResult, not a saved stage: `load` refuses it, and
+`DagGatedLDAModel(load_result(dir))` (likewise `OnlineLDAModel` / `OnlineHDPModel`)
+wraps it, Params at their defaults. No backward compatibility for saved model layouts
+(ADR 0055): an LDA / HDP model saved before ADR 0055 is such a bare VIResult too. `STMModel` keeps its
 own format (it is not an MLlib `Model`; see the split scoping report).
 
 ---

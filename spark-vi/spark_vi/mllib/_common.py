@@ -333,12 +333,6 @@ class _StagePersistence(MLWritable, MLReadable):
     def _load_data(cls, path: str, metadata: dict):
         raise NotImplementedError
 
-    @classmethod
-    def _load_without_metadata(cls, path: str):
-        """A directory with no ``metadata/``: a subclass that can read an older layout
-        returns the instance; ``None`` (the default) lets the load fail as usual."""
-        return None
-
     def write(self):
         return _StageWriter(self)
 
@@ -369,14 +363,13 @@ class _ResultStagePersistence(_StagePersistence):
     into the result's metadata) and takes the result as its one ``__init__``
     argument; ``load`` refuses a result of another model class.
 
-    ``_legacy_result_dir = True`` also loads a bare VIResult directory (``manifest.json``
-    at the top, no ``metadata/``): the layout ``OnlineLDAModel`` / ``OnlineHDPModel``
-    saved before ADR 0055, and the one every fit checkpoint (``saveDir``) and the
-    drivers' ``save_result`` output still use. Such a model comes back with its Params
-    at their defaults, as the old ``load`` returned it."""
+    A bare VIResult directory (a fit checkpoint, ``saveDir``; ``save_result`` output;
+    the layout ``OnlineLDAModel`` / ``OnlineHDPModel.save`` wrote before ADR 0055) is
+    not a saved stage and ``load`` refuses it (no ``metadata/``); wrap one with
+    ``Model(load_result(dir))`` (Params at their defaults). No backward compatibility
+    for the old model layout, by the maintainer's decision (ADR 0055)."""
 
     _expected_model_class: str = ""
-    _legacy_result_dir: bool = False
 
     def _save_data(self, path: str) -> None:
         from spark_vi.io import fs
@@ -397,13 +390,6 @@ class _ResultStagePersistence(_StagePersistence):
         from spark_vi.io.export import load_result
         return cls._result_instance(load_result(fs.join(path, "result")), path)
 
-    @classmethod
-    def _load_without_metadata(cls, path: str):
-        from spark_vi.io import fs
-        from spark_vi.io.export import load_result
-        if not (cls._legacy_result_dir and fs.exists(fs.join(path, "manifest.json"))):
-            return None
-        return cls._result_instance(load_result(path), path)
 
 
 def _class_name(cls) -> str:
@@ -449,10 +435,6 @@ class _StageReader(MLReader):
     def load(self, path: str):
         from spark_vi.io import fs
         uri = fs.qualify(path)
-        if not fs.exists(fs.join(uri, "metadata")):
-            legacy = self.cls._load_without_metadata(uri)
-            if legacy is not None:
-                return legacy
         metadata = read_params_metadata(uri)
         if metadata["class"] != _class_name(self.cls):
             raise ValueError(f"{path} holds a {metadata['class']}, not a "

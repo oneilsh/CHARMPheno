@@ -80,8 +80,8 @@ Ordered so the package is usable at every step.
    readout's uses of `spark_vi.core` helpers (broadcast, retry) become imports from the
    package. No cache keys are involved (the readout is not a bundle input).
 2. **One persistence style.** *Done 2026-11-25 for LDA / HDP (ADR 0055):* both models
-   are `_ResultStagePersistence` stages (Params, `PipelineModel`, old layout still
-   loads); `_PersistableModel` is gone. *STM not done:* `STMModel` is a plain class
+   are `_ResultStagePersistence` stages (Params, `PipelineModel`); no backward
+   compatibility for the old layout (maintainer); `_PersistableModel` is gone. *STM not done:* `STMModel` is a plain class
    (no Params, no `transform`, its own `save` / `load` over a local `Path`, a pickled
    formulaic `ModelSpec` sidecar) and `StreamingSTM` is not an `Estimator`. Making them
    stages means: an STM Params surface (K, the formula, the prior and optimizer
@@ -96,7 +96,7 @@ Ordered so the package is usable at every step.
    move all three to `_StagePersistence` as the DAG-gated stages and the featurizer
    are.
 3. **No private MLlib API.** *Done 2026-11-25 (ADR 0055):* our own writer / reader of
-   the metadata JSON, pinned byte-compatible by a fixture from the private writer;
+   the metadata JSON, pinned to MLlib's document by a fixture from the private writer;
    pyspark `>=3.5`, no upper pin. The remaining underscore pyspark uses are listed in
    the ADR (the Params subclassing pattern, and the py4j Hadoop-filesystem access that
    PySpark has no public API for). Still to do: CI on the lower bound and the latest

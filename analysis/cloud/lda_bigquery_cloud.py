@@ -109,7 +109,8 @@ def main(argv: list[str] | None = None) -> int:
         "--save-dir", default="",
         help=("directory for auto-saves and final result; empty (default) = "
               "no save (the directory becomes the authoritative post-fit "
-              "artifact, loadable via OnlineLDAModel.load)"),
+              "artifact: a VIResult, read with load_result; "
+              "OnlineLDAModel(load_result(dir)) wraps it as a model)"),
     )
     parser.add_argument(
         "--save-interval", type=int, default=-1,
