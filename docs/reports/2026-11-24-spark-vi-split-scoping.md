@@ -79,12 +79,28 @@ Ordered so the package is usable at every step.
    __init__.py` and `mllib/__init__.py` re-export it today; `closure_matrix` and the
    readout's uses of `spark_vi.core` helpers (broadcast, retry) become imports from the
    package. No cache keys are involved (the readout is not a bundle input).
-2. **One persistence style.** OnlineLDA / OnlineHDP still use the older
+2. **One persistence style.** *Done 2026-11-25 for LDA / HDP (ADR 0055):* both models
+   are `_ResultStagePersistence` stages (Params, `PipelineModel`, old layout still
+   loads); `_PersistableModel` is gone. *STM not done:* `STMModel` is a plain class
+   (no Params, no `transform`, its own `save` / `load` over a local `Path`, a pickled
+   formulaic `ModelSpec` sidecar) and `StreamingSTM` is not an `Estimator`. Making them
+   stages means: an STM Params surface (K, the formula, the prior and optimizer
+   settings) on an `Estimator` whose `fit` takes a DataFrame with covariate columns; a
+   `Model.transform` (per-document θ by the gated Laplace E-step); a data layout that
+   replaces the pickle with something portable (the formula string plus the levels the
+   spec learned, or formulaic's own serialization); and a reader for today's
+   directories (`stm_bigquery_cloud.py` and `fit_stm_local.py` write them). A redesign
+   of its own, best done with the STM tutorial (WP8). Original scope: OnlineLDA / OnlineHDP still use the older
    `_PersistableModel` (bare VIResult, no Params, not Pipeline-capable), and STM's
    model is not an MLlib `Model` at all (its own `save` / `load` over a local `Path`);
    move all three to `_StagePersistence` as the DAG-gated stages and the featurizer
    are.
-3. **No private MLlib API.** Write the Params metadata (class, uid, timestamp, Spark
+3. **No private MLlib API.** *Done 2026-11-25 (ADR 0055):* our own writer / reader of
+   the metadata JSON, pinned byte-compatible by a fixture from the private writer;
+   pyspark `>=3.5`, no upper pin. The remaining underscore pyspark uses are listed in
+   the ADR (the Params subclassing pattern, and the py4j Hadoop-filesystem access that
+   PySpark has no public API for). Still to do: CI on the lower bound and the latest
+   pyspark. Original scope: Write the Params metadata (class, uid, timestamp, Spark
    version, `paramMap`, `defaultParamMap`) ourselves in MLlib's file layout, replacing
    `DefaultParamsWriter._get_metadata_to_save` and `DefaultParamsReader._parseMetaData`.
    Then declare a pyspark lower bound only and run CI on the bound and the latest

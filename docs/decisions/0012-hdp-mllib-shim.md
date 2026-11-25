@@ -1,6 +1,6 @@
 # ADR 0012 — MLlib Estimator/Transformer shim for OnlineHDP
 
-**Status:** Accepted
+**Status:** Accepted (its persistence deferral is superseded by ADR 0055)
 **Date:** 2026-05-07
 **Related:** ADR 0009 (LDA MLlib shim), ADR 0011 (Online HDP v1 design).
 

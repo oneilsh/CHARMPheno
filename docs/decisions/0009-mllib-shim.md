@@ -1,6 +1,6 @@
 # ADR 0009 — MLlib Estimator/Transformer shim for VanillaLDA
 
-**Status:** Accepted
+**Status:** Accepted (its persistence deferral is superseded by ADR 0055)
 **Date:** 2026-05-04
 
 ## Context
