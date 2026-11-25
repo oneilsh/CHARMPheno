@@ -110,9 +110,15 @@ Ordered so the package is usable at every step.
    already uses (closes the rename window, and leaves one strategy). HDFS: write the
    manifest without truncate-then-write (a temp file plus HDFS rename, which is atomic
    within one filesystem).
-5. **Memory at scoring.** `DagGatedLDAModel.transform` broadcasts the dense K x V
-   E[log β] (~400 MB at K ≈ 3,250 over three domains): float32 or per-domain shipping;
-   the readout's dense `closure_matrix` leaves with the readout.
+5. **Memory at scoring.** *Done 2026-11-25 (`b0461f2`):* the dense K x V E[log β]
+   (~400 MB at K ≈ 3,250 over three domains) is shipped once per executor as a
+   memory-mapped file (`ship_array` / `load_shipped`), not broadcast once per Python
+   worker; no pickled object near the 2 GB cap. Maintainer's choice among: float32
+   (rejected: precision), per-domain broadcasts (only splits the object; total memory
+   unchanged), shipping only each document's gated-open rows (exact and the most
+   scalable, but a redesign; parked for DAGs that outgrow this), top-terms truncation
+   (rejected: changes results). The readout's dense `closure_matrix` left with the
+   readout.
 6. **Forked workers.** Cap BLAS threads in LocalRunner's workers (`threadpoolctl`, a
    small optional dependency) to avoid oversubscription; give the open-time seed pass
    an in-memory path so a leaves-first DAG-gated fit can run without Spark.
