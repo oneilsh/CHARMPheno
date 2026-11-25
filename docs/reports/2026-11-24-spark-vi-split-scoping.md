@@ -122,6 +122,20 @@ Ordered so the package is usable at every step.
 6. **Forked workers.** Cap BLAS threads in LocalRunner's workers (`threadpoolctl`, a
    small optional dependency) to avoid oversubscription; give the open-time seed pass
    an in-memory path so a leaves-first DAG-gated fit can run without Spark.
+   *Measured 2026-11-25:* oversubscription is not only a forked-worker problem. One
+   in-process STM `local_update` over 1,500 synthetic documents (K = 40, V = 300) took
+   ~80 s with OpenBLAS's default threads and ~3 s with one thread, on a 4-core machine
+   with another test process running: a ~30x slowdown, enough that
+   `test_stm_hardening.py` ran for hours. The E-steps are many small per-document
+   matrix operations, where BLAS threads only contend. The test suite now sets one
+   thread in `spark-vi/tests/conftest.py`; the library should cap threads inside its
+   own E-steps (a `threadpool_limits` context around `local_update`, both engines)
+   rather than rely on users setting `OMP_NUM_THREADS`. Spark's Python workers may be
+   exposed too: as far as we know (SPARK-28843; not checked on our clusters) Spark
+   sets an unset `OMP_NUM_THREADS` to the executor's core count, so with one task per
+   core an n2-standard-4 executor would run four workers of four BLAS threads each.
+   Worth one timing comparison on the cluster (`spark.executorEnv.OMP_NUM_THREADS=1`)
+   before assuming the DAG-gated fits' iteration times are compute-bound.
 7. **Packaging hygiene.** *Done 2026-11-25:* `spark-vi/LICENSE` (MIT; the
    dependencies are Apache-2.0 (pyspark), BSD-3 (numpy, scipy) and MIT (formulaic),
    all compatible, and no third-party code is vendored), `spark-vi/CHANGELOG.md`,

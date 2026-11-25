@@ -7,6 +7,17 @@ import pathlib
 import sys
 import warnings
 
+# One BLAS thread per process, set before numpy loads (OpenBLAS reads these at
+# load). The models' E-steps are many small per-document matrix operations, where
+# a multithreaded BLAS only contends: measured 2026-11-25 on a 4-core box under
+# load, one STM local_update over 1,500 documents took ~80 s with default threads
+# and ~3 s with one, so the STM suite ran for hours. Inherited by local Spark's
+# Python workers and LocalRunner's forked workers. setdefault: an explicit
+# setting in the environment wins. The library-side cap is WP6 of
+# docs/reports/2026-11-24-spark-vi-split-scoping.md.
+for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_var, "1")
+
 # Put the tests/ directory on sys.path so that helper modules starting with _
 # (e.g. _stm_synth) can be imported with a plain `from _stm_synth import ...`
 # alongside regular `from spark_vi...` imports.
