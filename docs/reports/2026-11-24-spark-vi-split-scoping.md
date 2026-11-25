@@ -164,10 +164,17 @@ What this changes in the work packages: WP8 (documentation) and the community fi
 (CONTRIBUTING, issue templates) are review requirements; WP9 shrinks from full
 replication materials to runnable examples on public data plus the evidence for any
 claim the paper makes (e.g. Spark vs local agreement, parity with MLlib's LDA), and
-benchmarks only if the paper claims performance. The storyline stays: an SVI framework
-on Spark with an in-memory engine under the same model contract, illustrated by LDA,
-HDP and STM, with the DAG-gated LDA (node-set learning from a user's DAG and labelled
-documents) as the distinctive model.
+benchmarks only if the paper claims performance. The storyline: an SVI framework on Spark
+with an in-memory engine under the same model contract, illustrated by LDA, HDP and
+STM, with the DAG-gated LDA as one of the shipped models.
+
+Two papers (maintainer, 2026-11-25): the JOSS paper is about the framework; the
+DAG-gated model's method (node-set learning from a user's DAG and labelled documents,
+the gate schedule) is detailed in CHARMPheno's own paper, a methods-and-application
+paper on rare-disease characterization, even though the code lives in spark-vi. So the
+JOSS paper describes the DAG-gated model in a sentence or two and cites the methods
+paper rather than deriving it, and spark-vi's documentation of that model points there
+for the method. charmpheno's own dependency pins are not part of this release.
 
 ## Suggested order
 
