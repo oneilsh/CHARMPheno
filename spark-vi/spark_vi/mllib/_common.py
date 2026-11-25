@@ -12,8 +12,8 @@ from __future__ import annotations
 import dataclasses
 
 from pyspark.ml.param import Param, Params, TypeConverters
-from pyspark.ml.util import (DefaultParamsReader, DefaultParamsWriter, MLReadable,
-                             MLReader, MLWritable, MLWriter)
+from pyspark.ml.util import (DefaultParamsReader, MLReadable, MLReader, MLWritable,
+                             MLWriter)
 
 
 class _PersistenceParams(Params):
@@ -204,6 +204,64 @@ class _PersistableModel:
 # --------------------------------------------------------------------------- #
 # MLlib persistence (spec R13 Level 2): Params metadata + our own data files.  #
 # --------------------------------------------------------------------------- #
+def params_metadata_json(instance, spark_version: str, extra_metadata=None,
+                         timestamp_ms=None) -> str:
+    """MLlib's Params metadata for ``instance`` as one JSON line: ``class``,
+    ``timestamp`` (ms), ``sparkVersion``, ``uid``, ``paramMap`` (explicitly set
+    values), ``defaultParamMap`` (default values), then ``extra_metadata``'s keys.
+
+    The same document, keys in the same order, that MLlib's
+    ``DefaultParamsWriter.saveMetadata`` writes, so MLlib's readers (and ours) load
+    it. Built here from the public ``Params`` API rather than through pyspark's
+    private ``DefaultParamsWriter._get_metadata_to_save`` (ADR 0055): private API can
+    change in any pyspark release, and spark-vi declares no pyspark upper bound.
+
+    ``Params`` exposes a set value (``isSet`` / ``getOrDefault``) but no getter for
+    the default of a Param that is ALSO set; that one is read by clearing the Param
+    and restoring it (``clear`` / ``set``), which leaves the instance as it was."""
+    import json
+    import time
+    param_map, default_map = {}, {}
+    for p in instance.params:
+        if instance.isSet(p):
+            value = instance.getOrDefault(p)
+            param_map[p.name] = value
+            if instance.hasDefault(p):
+                instance.clear(p)
+                try:
+                    default_map[p.name] = instance.getOrDefault(p)
+                finally:
+                    instance.set(p, value)
+        elif instance.hasDefault(p):
+            default_map[p.name] = instance.getOrDefault(p)
+    meta = {
+        "class": _class_name(type(instance)),
+        "timestamp": (int(round(time.time() * 1000)) if timestamp_ms is None
+                      else int(timestamp_ms)),
+        "sparkVersion": str(spark_version),
+        "uid": instance.uid,
+        "paramMap": param_map,
+        "defaultParamMap": default_map,
+    }
+    if extra_metadata is not None:
+        meta.update(extra_metadata)
+    return json.dumps(meta, separators=(",", ":"))
+
+
+def parse_params_metadata(line: str, expected_class: str = "") -> dict:
+    """Parse one metadata JSON line (``params_metadata_json``'s, or MLlib's own);
+    with ``expected_class`` non-empty, refuse a different saved class."""
+    import json
+    meta = json.loads(line)
+    for key in ("class", "uid", "sparkVersion", "paramMap"):
+        if key not in meta:
+            raise ValueError(f"Params metadata has no {key!r}: {line[:200]}")
+    if expected_class and meta["class"] != expected_class:
+        raise ValueError(f"Error loading metadata: expected class name "
+                         f"{expected_class} but found class name {meta['class']}")
+    return meta
+
+
 def write_params_metadata(instance, uri: str, sc, extra_metadata=None) -> None:
     """Write MLlib's standard Params metadata for ``instance`` under ``<uri>/metadata``
     FROM THE DRIVER (``spark_vi.io.fs``), in the file layout
@@ -218,7 +276,7 @@ def write_params_metadata(instance, uri: str, sc, extra_metadata=None) -> None:
     any Hadoop URI alike, and runs no job."""
     from spark_vi.io import fs
     md = fs.join(uri, "metadata")
-    text = DefaultParamsWriter._get_metadata_to_save(instance, sc, extra_metadata)
+    text = params_metadata_json(instance, sc.version, extra_metadata)
     fs.write_text(fs.join(md, "part-00000"), text + "\n")
     fs.write_bytes(fs.join(md, "_SUCCESS"), b"")
 
@@ -230,14 +288,14 @@ def read_params_metadata(uri: str, expected_class: str = "") -> dict:
     Reads either writer's files (the first non-empty line of the first ``part-*``)."""
     from spark_vi.io import fs
     md = fs.join(uri, "metadata")
-    parts = [n for n in fs.listdir(md) if n.startswith("part-")]
+    parts = sorted(n for n in fs.listdir(md) if n.startswith("part-"))
     if not parts:
         raise FileNotFoundError(f"{uri}: no saved stage here (no metadata/part-*)")
     line = next((ln for ln in fs.read_text(fs.join(md, parts[0])).splitlines()
                  if ln.strip()), None)
     if line is None:
         raise ValueError(f"{fs.join(md, parts[0])} is empty")
-    return DefaultParamsReader._parseMetaData(line, expected_class)
+    return parse_params_metadata(line, expected_class)
 
 
 def refuse_existing_path(path: str, uri: str) -> None:
@@ -250,10 +308,14 @@ def refuse_existing_path(path: str, uri: str) -> None:
                               f"write().overwrite().save(path)")
 
 
-class DriverParamsWriter(DefaultParamsWriter):
-    """``DefaultParamsWriter`` whose metadata is written from the driver
-    (``write_params_metadata``), for stages whose whole state is their Params.
+class DriverParamsWriter(MLWriter):
+    """MLlib's ``DefaultParamsWriter`` behaviour with the metadata written from the
+    driver (``write_params_metadata``), for stages whose whole state is their Params.
     Refuses an existing path unless ``write().overwrite()`` (MLlib's rule)."""
+
+    def __init__(self, instance):
+        super().__init__()
+        self.instance = instance
 
     def saveImpl(self, path: str) -> None:
         from spark_vi.io import fs

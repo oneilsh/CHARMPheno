@@ -759,4 +759,4 @@ formula = ["formulaic"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.13"
-content-hash = "a0420b84c1070f327bc637018f49baa10dddc495bde7a6c149631c7a2bf9190c"
+content-hash = "d4a34ad8d1101ad6fdbe266d60c4301cbbe95a8a510b5a33400bb2d44479edd2"
