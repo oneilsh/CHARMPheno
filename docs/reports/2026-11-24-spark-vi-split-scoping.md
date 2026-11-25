@@ -1,8 +1,9 @@
-# Scoping: splitting spark-vi into its own package (and a JSS paper)
+# Scoping: splitting spark-vi into its own package (and a JOSS paper)
 
 **Date:** 2026-11-24. **Context:** the end of the spark-vi and DAG-gated walkthroughs
 (REVIEW_LOG 2026-11-24), where the maintainer raised publishing spark-vi on its own,
-possibly in the Journal of Statistical Software. This report sizes the work and lists
+possibly in the Journal of Open Source Software (JOSS; first written here
+as the Journal of Statistical Software, corrected by the maintainer 2026-11-25). This report sizes the work and lists
 the decisions; it is not a plan of record (that would be a spec and a plan under
 `docs/superpowers/`).
 
@@ -124,19 +125,31 @@ Ordered so the package is usable at every step.
     identifiers. No patient-level data is in the tree, but the messages are worth a
     read; squashing to a clean initial commit is the alternative.
 
-## What JSS will look at
+## What JOSS will look at
 
-A paper describing the software, the software under a free license, documentation,
-and replication code whose results the reviewers can reproduce. Version pinning is
-not a requirement; a stated, tested dependency range is the norm. The likely
-storyline is one package: an SVI framework on Spark with an in-memory engine under the
-same model contract, illustrated by LDA, HDP and STM, with the DAG-gated LDA (node-set
-learning from a user's DAG and labelled documents) as the distinctive model. Check the
-current author guidelines before writing.
+JOSS reviews the software more than the paper. The paper is short (roughly 250-1,000
+words: a summary, a statement of need, the state of the field, references), and the
+review is a checklist run against the public repository: an OSI license, a public
+repository with an issue tracker, installation instructions that work, example usage,
+API documentation, automated tests, community guidelines (how to contribute, report
+issues, get support), and any performance or functionality claims the paper makes being
+verifiable. The software must show substantial scholarly effort and a research use.
+A stated, tested dependency range is the norm; pinning is not required. Check the
+current author and review guidelines (and any policy on generative-AI assistance)
+before submitting.
+
+What this changes in the work packages: WP8 (documentation) and the community files
+(CONTRIBUTING, issue templates) are review requirements; WP9 shrinks from full
+replication materials to runnable examples on public data plus the evidence for any
+claim the paper makes (e.g. Spark vs local agreement, parity with MLlib's LDA), and
+benchmarks only if the paper claims performance. The storyline stays: an SVI framework
+on Spark with an in-memory engine under the same model contract, illustrated by LDA,
+HDP and STM, with the DAG-gated LDA (node-set learning from a user's DAG and labelled
+documents) as the distinctive model.
 
 ## Suggested order
 
 WP1 (the readout move) first: it decides the package boundary and is the only change
 that touches CHARMPheno's own code paths. Then WP7 (license, cleanup) and WP2-3
 (persistence, no private API), which are what a first public release needs. WP4-6 can
-follow as 0.x releases; WP8-10 accompany the paper.
+follow as 0.x releases; WP8-10 accompany the JOSS submission.
