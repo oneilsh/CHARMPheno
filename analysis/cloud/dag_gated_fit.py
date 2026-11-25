@@ -731,20 +731,28 @@ def keep_model_asfitted(out, ckpt):
     """Keep the finished fit's checkpoint `ckpt` as `<out>/model_asfitted`; return
     the directory it ends up in.
 
-    Housekeeping after every result is saved, so it must not fail the run. A rename
-    can fail on the workspace disk (exp 0176: `OSError: [Errno 24] Too many open
-    files` renaming the checkpoint directory after an 11-hour fit); the checkpoint
-    then stays where it is, still the model as fitted, and the manifest's
-    `node_statistics.model_asfitted` is rewritten to name it."""
+    Housekeeping after every result is saved, so it must not fail the run. The
+    workspace disk refuses to RENAME a directory (exp 0176: `OSError: [Errno 24] Too
+    many open files`, from the driver and from a plain `mv` alike, while writing and
+    deleting files works), so a failed rename falls back to copy-then-delete. If that
+    fails too, the checkpoint stays where it is, still the model as fitted, and the
+    manifest's `node_statistics.model_asfitted` is rewritten to name it."""
     import shutil
     out, ckpt = Path(out), Path(ckpt)
     keep = out / ASFITTED_DIR
+    shutil.rmtree(keep, ignore_errors=True)
     try:
-        shutil.rmtree(keep, ignore_errors=True)
         ckpt.rename(keep)
         return keep
+    except OSError:
+        pass
+    try:
+        shutil.copytree(ckpt, keep)
+        shutil.rmtree(ckpt, ignore_errors=True)
+        return keep
     except OSError as exc:
-        print(f"[driver]   WARNING: could not rename {ckpt.name} to {ASFITTED_DIR} "
+        shutil.rmtree(keep, ignore_errors=True)
+        print(f"[driver]   WARNING: could not move {ckpt.name} to {ASFITTED_DIR} "
               f"({exc}); the model as fitted stays in {ckpt}", flush=True)
     man = out / "manifest.json"
     try:

@@ -1631,8 +1631,14 @@ class DagGatedLDAModel(_DagGatedLDAParams, _ResultStagePersistence, Model):
         K = expElogbeta.shape[0]
 
         sc = dataset.sparkSession.sparkContext
+        # The (K, V) table goes as a memory-mapped file, one copy per executor rather
+        # than one per Python worker (spark_vi.core.broadcast.ship_array); the small
+        # parameters still broadcast.
+        from spark_vi.core.broadcast import load_shipped, ship_array
+        eb_token = ship_array(sc, expElogbeta, "expElogbeta")
+        del expElogbeta
         bcast = sc.broadcast({
-            "expElogbeta": expElogbeta, "alpha": self._result.global_params["alpha"],
+            "eb_token": eb_token, "alpha": self._result.global_params["alpha"],
             "gamma_shape": float(self.getOrDefault("gammaShape")),
             "cavi_max_iter": int(self.getOrDefault("caviMaxIter")),
             "cavi_tol": float(self.getOrDefault("caviTol")), "K": K,
@@ -1652,7 +1658,7 @@ class DagGatedLDAModel(_DagGatedLDAParams, _ResultStagePersistence, Model):
             gamma_init = _hashed_gamma_init(indices, counts, p["K"], p["gamma_shape"])
             gamma, _, _, _ = _cavi_doc_inference(
                 indices=indices, counts=counts,
-                expElogbeta=p["expElogbeta"], alpha=p["alpha"],
+                expElogbeta=load_shipped(p["eb_token"]), alpha=p["alpha"],
                 gamma_init=gamma_init,
                 max_iter=p["cavi_max_iter"], tol=p["cavi_tol"],
             )
@@ -1662,5 +1668,6 @@ class DagGatedLDAModel(_DagGatedLDAParams, _ResultStagePersistence, Model):
         out_col = self.getOrDefault("topicDistributionCol")
         fcols, _ = self._feature_columns()
         # Broadcast lifetime is the returned DataFrame's (its UDF closure holds
-        # bcast); ContextCleaner reclaims it on GC — do NOT eagerly unpersist.
+        # bcast); ContextCleaner reclaims it on GC — do NOT eagerly unpersist. The
+        # shipped file lives as long as the application (ship_array).
         return dataset.withColumn(out_col, infer_udf(*[F.col(c) for c in fcols]))
