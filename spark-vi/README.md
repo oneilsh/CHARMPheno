@@ -16,6 +16,13 @@ learning (`spark_vi.dag`) and topic evaluation (`spark_vi.eval.topic`). Supervis
 readouts over a fitted model are the application's (CHARMPheno keeps its per-node
 heads in `charmpheno.readout`, ADR 0054).
 
+## License and versions
+
+MIT ([LICENSE](LICENSE)). Versions follow semantic versioning; while at 0.x a minor
+release may change the API, and [CHANGELOG.md](CHANGELOG.md) lists every change.
+`probes/` holds development diagnostics referenced by the project's records; it is not
+part of the package (the wheel and sdist carry `spark_vi/` only).
+
 ## Install
 
 ```bash

@@ -99,7 +99,12 @@ Ordered so the package is usable at every step.
 6. **Forked workers.** Cap BLAS threads in LocalRunner's workers (`threadpoolctl`, a
    small optional dependency) to avoid oversubscription; give the open-time seed pass
    an in-memory path so a leaves-first DAG-gated fit can run without Spark.
-7. **Packaging hygiene.** Add a LICENSE file (pyproject says MIT; the repository has
+7. **Packaging hygiene.** *Done 2026-11-25:* `spark-vi/LICENSE` (MIT; the
+   dependencies are Apache-2.0 (pyspark), BSD-3 (numpy, scipy) and MIT (formulaic),
+   all compatible, and no third-party code is vendored), `spark-vi/CHANGELOG.md`,
+   versions documented as semver 0.x. `probes/` stays in the monorepo (the review log
+   cites it); the wheel and sdist never carried it or `dist/`, and the publish script
+   leaves both out. Original scope: Add a LICENSE file (pyproject says MIT; the repository has
    none); remove `spark-vi/probes/` (debug scripts) and `spark-vi/dist/` from the
    release; a CHANGELOG; version 0.x with semantic versioning.
 8. **Documentation.** A user guide (install, the two engines, each model, persistence,
