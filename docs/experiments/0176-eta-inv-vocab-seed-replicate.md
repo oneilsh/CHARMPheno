@@ -1,7 +1,7 @@
 ---
 id: 176
 slug: eta-inv-vocab-seed-replicate
-status: planned
+status: done
 model_class: dag_gated
 # 0175 (the model of record) with seed 43 instead of 42; everything else identical:
 # a seed replicate of the flat-block count (0174: 176, 0175: 195).
@@ -60,7 +60,7 @@ spark_conf:
 
 # 0176 — Seed replicate of 0175 (η = 1/V_m): is the +19 flat blocks noise?
 
-**Status:** planned. **Date:** 2026-11-24. **Follows:** [0175](0175-eta-inv-vocab-per-domain.md), insight 0106.
+**Status:** done (fit and flat counts; census and NPMI not run). **Date:** 2026-11-24, results 2026-11-25. **Follows:** [0175](0175-eta-inv-vocab-per-domain.md), insight 0106.
 
 ## Why
 
@@ -105,4 +105,35 @@ run with seed 43, which a seed replicate does not care about.
 
 ## Results
 
-(pending)
+The fit ran 150 iterations (41,590 s on 2 executors). Node set identical to 0175:
+6,699 given, 3,229 kept, 3,290 pruned, 180 spliced (minDocsPerNode 100, 296,311
+training documents). Every result was saved (`model/`, the npz, the manifest,
+`node_statistics.tsv`); the job then failed renaming the checkpoint to
+`model_asfitted/` (`OSError: [Errno 24] Too many open files`), so the model as fitted
+stays in `fit_ckpt/` and the census and NPMI steps never ran. The rename is now
+housekeeping that warns instead of failing the run (`keep_model_asfitted`).
+
+| run | η | seed | flat blocks before the drop, > 0.9 / > 0.5 (dominant-domain rule) |
+|---|---|---|---|
+| 0174 | 1/K | 42 | 176 / 177 |
+| 0175 | 1/V_m | 42 | 195 / 195 |
+| 0176 | 1/V_m | 43 | **204 / 204** |
+
+The every-domain rule (spec R14 amendment 3, the driver's now) gives the same 204 / 204:
+in this run a block that is flat in its dominant domain is flat in every domain. The
+driver dropped those 204, leaving 3,025 nodes (K = 3,225, 200 background).
+
+## Interpretation
+
+By the pre-registered reading, about 195 or higher: **the increase holds across seeds.**
+The two 1/V_m seeds differ by 9 (195, 204); both sit 19-28 above 0174's 176. Insight
+0106 (1/V_m is a weaker prior at this size and starves more marginal blocks) is
+supported. Caveats: one 1/K seed, so the 1/K side's spread is unmeasured (the
+gap is larger than the one 1/V_m spread observed, not established against a 1/K
+spread); and the flat count is a cliff (> 0.9 and > 0.5 give the same count), so it
+counts collapsed blocks, not a graded loss of sharpness.
+
+0175 stays the model of record (its Decision took the extra starved blocks as the
+cost of the principled form). The census and the NPMI pairing with 0175 were checks
+that the seed does not move coherence; not run, and not needed for the question asked.
+
