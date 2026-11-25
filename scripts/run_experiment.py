@@ -1270,7 +1270,7 @@ def write_build_section_header(summary_path: Path) -> None:
 
 # RUNS_DIR mirrors the existing Makefile constant. Override via --runs-dir CLI
 # for local testing. On the cluster, the GCS-mounted path is the canonical home.
-DEFAULT_RUNS_DIR = "/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs"
+DEFAULT_RUNS_DIR = "/home/dataproc/workspace/dataproc-staging-bayesian-phenotyping-for-rare-disease-v9/runs"
 
 
 def main(argv: list[str] | None = None) -> int:
