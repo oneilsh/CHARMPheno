@@ -727,6 +727,36 @@ ASFITTED_DIR = "model_asfitted"
 DEFAULT_DROP_MAX_SUPPORT_FRACTION = 0.5     # the census's "starved" (spec R14)
 
 
+def keep_model_asfitted(out, ckpt):
+    """Keep the finished fit's checkpoint `ckpt` as `<out>/model_asfitted`; return
+    the directory it ends up in.
+
+    Housekeeping after every result is saved, so it must not fail the run. A rename
+    can fail on the workspace disk (exp 0176: `OSError: [Errno 24] Too many open
+    files` renaming the checkpoint directory after an 11-hour fit); the checkpoint
+    then stays where it is, still the model as fitted, and the manifest's
+    `node_statistics.model_asfitted` is rewritten to name it."""
+    import shutil
+    out, ckpt = Path(out), Path(ckpt)
+    keep = out / ASFITTED_DIR
+    try:
+        shutil.rmtree(keep, ignore_errors=True)
+        ckpt.rename(keep)
+        return keep
+    except OSError as exc:
+        print(f"[driver]   WARNING: could not rename {ckpt.name} to {ASFITTED_DIR} "
+              f"({exc}); the model as fitted stays in {ckpt}", flush=True)
+    man = out / "manifest.json"
+    try:
+        m = json.loads(man.read_text())
+        m.setdefault("node_statistics", {})["model_asfitted"] = ckpt.name
+        man.write_text(json.dumps(m, indent=2))
+    except (OSError, ValueError) as exc:
+        print(f"[driver]   WARNING: manifest not updated ({exc}); the model as "
+              f"fitted is in {ckpt}", flush=True)
+    return ckpt
+
+
 def write_node_statistics(run_dir, rows, name=NODE_STATISTICS_FILE):
     """`<run>/node_statistics.tsv`: one row per kept node of the fitted model
     (`DagGatedLDAModel.nodeStatistics()` rows, or dicts with its columns): node id,
@@ -1777,9 +1807,7 @@ def main() -> int:
                 # deleted.
                 import shutil
                 if args.drop_unsupported:
-                    keep = out / ASFITTED_DIR
-                    shutil.rmtree(keep, ignore_errors=True)
-                    ckpt.rename(keep)
+                    keep = keep_model_asfitted(out, ckpt)
                     _cprint(f"[driver]   kept the model as fitted (before the drop) "
                             f"in {keep}", flush=True)
                 else:

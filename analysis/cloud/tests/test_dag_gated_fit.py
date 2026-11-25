@@ -306,3 +306,31 @@ def test_dropping_before_the_saves_reaches_the_run_dir(spark, tmp_path):
     tsv = (tmp_path / "node_statistics.tsv").read_text()
     assert tsv.count("\n") == 1 + len(ns.nodes)
 
+
+
+def test_keep_model_asfitted_renames_the_checkpoint(tmp_path):
+    import dag_gated_fit as dgf
+    ckpt = tmp_path / "fit_ckpt"; (ckpt / "result").mkdir(parents=True)
+    keep = dgf.keep_model_asfitted(tmp_path, ckpt)
+    assert keep == tmp_path / dgf.ASFITTED_DIR and (keep / "result").is_dir()
+    assert not ckpt.exists()
+
+
+def test_keep_model_asfitted_survives_a_failed_rename(tmp_path, monkeypatch, capsys):
+    """Exp 0176: the rename failed with EMFILE after every result was saved, and
+    failed the job. It now warns, leaves the checkpoint and names it in the manifest."""
+    import json
+    from pathlib import Path
+    import dag_gated_fit as dgf
+    ckpt = tmp_path / "fit_ckpt"; ckpt.mkdir()
+    (tmp_path / "manifest.json").write_text(json.dumps(
+        {"node_statistics": {"model_asfitted": dgf.ASFITTED_DIR}}))
+
+    def boom(self, target):
+        raise OSError(24, "Too many open files")
+    monkeypatch.setattr(Path, "rename", boom)
+    assert dgf.keep_model_asfitted(tmp_path, ckpt) == ckpt
+    assert ckpt.is_dir()
+    m = json.loads((tmp_path / "manifest.json").read_text())
+    assert m["node_statistics"]["model_asfitted"] == "fit_ckpt"
+    assert "WARNING" in capsys.readouterr().out
