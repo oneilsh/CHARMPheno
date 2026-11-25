@@ -26,7 +26,7 @@ def test_end_to_end_synthetic_stm(spark, tmp_path: Path):
     in-memory Spark DataFrames.
     """
     from charmpheno.omop.covariates import build_patient_covariate_df
-    from spark_vi.mllib.topic.stm import StreamingSTM
+    from spark_vi.mllib.topic.stm import OnlineSTMEstimator
 
     # Synthetic person table.
     person_pdf = pd.DataFrame({
@@ -64,13 +64,14 @@ def test_end_to_end_synthetic_stm(spark, tmp_path: Path):
 
     # Join + fit.
     joined = bow_df.join(cov_df, on="person_id")
-    est = StreamingSTM(
-        K=K, features_col="features",
-        covariates_col="covariates", covariate_names=names,
-        random_seed=42,
+    est = OnlineSTMEstimator(
+        k=K, featuresCol="features",
+        covariatesCol="covariates", covariateNames=names,
+        seed=42, maxIter=10, subsamplingRate=1.0,
+        learningOffset=64.0, learningDecay=0.7,
     )
-    model = est.fit(joined, max_iter=10, subsampling_rate=1.0,
-                    tau0=64.0, kappa=0.7, save_interval=5)
+    # The adapter reads a VIResult (global_params + metadata), the run dir's form.
+    model = est.fit(joined).result
 
     # Inspect bundle via write_covariate_effects.
     from charmpheno.export.dashboard import write_covariate_effects

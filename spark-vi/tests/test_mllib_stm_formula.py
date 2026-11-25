@@ -1,7 +1,8 @@
-"""Tests for the formula path of StreamingSTM (Path B).
+"""Tests for the STM shim's covariate-formula path.
 
 Covers: formula parsing, validation rejecting stateful transforms,
-schema-frame categorical discovery, ModelSpec construction.
+schema-frame categorical discovery, ModelSpec construction, and the spec's JSON
+persistence (ADR 0056).
 """
 from __future__ import annotations
 
@@ -96,21 +97,85 @@ class TestFitModelSpec:
                 f"For '{encoder_key}': expected '{expected_col}', got '{extracted_col}'"
 
 
-class TestStreamingSTMPathBConstruction:
-    def test_construct_with_formula_resolves_P_and_names(self):
-        from spark_vi.mllib.topic.stm import StreamingSTM
-        from spark_vi.mllib.topic._formula import fit_model_spec
-        pdf = pd.DataFrame({
-            "cohort": ["a", "b", "a", "b"],
-            "age":    [25.0, 40.0, 55.0, 30.0],
+class TestFormulaVariables:
+    def test_categorical_by_C_or_string_or_boolean_type(self):
+        from spark_vi.mllib.topic._formula import split_formula_variables
+        types = {"sex": "string", "age": "double", "site": "int", "flag": "boolean",
+                 "other": "string"}
+        cat, cont = split_formula_variables(
+            "~ sex + age + C(site) + flag + C(age > 50)", types)
+        # age is inside C(age > 50), so its raw levels must reach the schema-frame.
+        assert cat == ["age", "flag", "sex", "site"]
+        assert cont == []
+        cat, cont = split_formula_variables("~ sex + age", types)
+        assert (cat, cont) == (["sex"], ["age"])
+
+    def test_unknown_column_raises(self):
+        from spark_vi.mllib.topic._formula import split_formula_variables
+        with pytest.raises(ValueError, match="does not have"):
+            split_formula_variables("~ C(sex) + bmi", {"sex": "string"})
+
+
+class TestCovariateSpecState:
+    """The saved covariate spec is JSON (formula + schema-frame), never a pickle;
+    rebuilding the ModelSpec from it must encode any row exactly as the fitted spec
+    does (ADR 0056)."""
+
+    def _schema_frame(self):
+        return pd.DataFrame({
+            "sex": ["F", "M", "X", "F"],
+            "site": [1, 2, 3, 1],
+            "age": [0.0, 0.0, 0.0, 0.0],
         })
-        spec, names = fit_model_spec("~ C(cohort) + age", pdf)
-        est = StreamingSTM(
-            K=4,
-            covariate_formula="~ C(cohort) + age",
-            covariate_df=pdf,
+
+    def test_json_round_trip_encodes_bit_identically(self):
+        import json
+        from spark_vi.mllib.topic._formula import (
+            apply_model_spec, covariate_spec_state, fit_model_spec_on_schema_frame,
+            model_spec_from_state,
         )
-        # Inject ModelSpec resolution (real .fit() will do this with Spark).
-        est._resolve_model_spec_from_pandas(pdf)
-        assert est.P == len(names)
-        assert est.covariate_names == names
+        formula = "~ C(sex) + C(site) + age + C(sex):age"
+        schema = self._schema_frame()
+        spec, names = fit_model_spec_on_schema_frame(formula, schema, ["sex", "site"])
+        state = covariate_spec_state(formula, schema, names, ["sex", "site"])
+        state = json.loads(json.dumps(state))          # what is written to disk
+        rebuilt = model_spec_from_state(state)
+        rows = pd.DataFrame({"sex": ["M", "X", "F", "M"], "site": [3, 1, 2, 2],
+                             "age": [33.5, 71.0, 18.25, 50.0]})
+        a = apply_model_spec(spec, rows)
+        b = apply_model_spec(rebuilt, rows)
+        assert a.tobytes() == b.tobytes()
+        assert list(rebuilt.column_names) == names
+
+    def test_rebuilt_spec_rejects_unseen_level(self):
+        import json
+        from spark_vi.mllib.topic._formula import (
+            apply_model_spec, covariate_spec_state, fit_model_spec_on_schema_frame,
+            model_spec_from_state,
+        )
+        schema = self._schema_frame()
+        spec, names = fit_model_spec_on_schema_frame("~ C(sex) + age", schema, ["sex"])
+        rebuilt = model_spec_from_state(json.loads(json.dumps(
+            covariate_spec_state("~ C(sex) + age", schema, names, ["sex"]))))
+        unseen = pd.DataFrame({"sex": ["F", "Q"], "site": [1, 1], "age": [1.0, 2.0]})
+        for s in (spec, rebuilt):
+            with pytest.raises(ValueError, match="not seen"):
+                apply_model_spec(s, unseen)
+
+    def test_names_mismatch_is_refused(self):
+        from spark_vi.mllib.topic._formula import (
+            covariate_spec_state, fit_model_spec_on_schema_frame, model_spec_from_state,
+        )
+        schema = self._schema_frame()
+        spec, names = fit_model_spec_on_schema_frame("~ C(sex)", schema, ["sex"])
+        state = covariate_spec_state("~ C(sex)", schema, names, ["sex"])
+        state["covariate_names"] = ["Intercept", "something else"]
+        with pytest.raises(ValueError, match="rebuilt"):
+            model_spec_from_state(state)
+
+    def test_unsupported_column_type_is_refused(self):
+        from spark_vi.mllib.topic._formula import covariate_spec_state
+        import datetime
+        schema = pd.DataFrame({"d": [datetime.date(2020, 1, 1)]})
+        with pytest.raises(ValueError, match="supports"):
+            covariate_spec_state("~ C(d)", schema, ["Intercept"], ["d"])

@@ -1,29 +1,34 @@
-"""StreamingSTM: MLlib-shim estimator for OnlineSTM.
+"""MLlib Estimator / Model for OnlineSTM (the structural topic model), plus the
+distributed STM evaluation helpers (corpus prevalence, concentration, Sigma scale).
 
-Two input paths:
-  (A) Caller supplies a pre-built `covariates` DenseVector column and
-      a list of covariate names. No formulaic dependency required.
-  (B) Caller supplies a `covariate_formula` string + a covariate
-      DataFrame. Requires the `formula` extra: pip install spark-vi[formula].
-
-Path B is implemented via `covariate_formula`; see `_resolve_model_spec_from_pandas`
-and `_formula.fit_model_spec`.
+``OnlineSTMEstimator`` / ``OnlineSTMModel`` are MLlib stages like the LDA, HDP and
+DAG-gated shims (ADR 0056): Params, ``transform``, MLlib persistence. Covariates are
+columns of the input DataFrame, given either as a pre-built covariate vector column
+with its term names (no extra dependency) or as an R-style formula over the
+DataFrame's columns (the ``formula`` extra: pip install spark-vi[formula]; see
+``spark_vi.mllib.topic._formula``).
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
-import pickle
-from pathlib import Path
-from typing import Any
+import re
 
 import numpy as np
+from pyspark import keyword_only
+from pyspark.ml.base import Estimator, Model
+from pyspark.ml.param import Param, Params, TypeConverters
+from pyspark.ml.param.shared import HasFeaturesCol, HasMaxIter, HasSeed
 
 log = logging.getLogger(__name__)
 
 from spark_vi.eval.topic.concentration import ConcentrationAcc
 from spark_vi.models.topic.stm import _stm_doc_inference, prior_topic_proportions
 from spark_vi.core.broadcast import destroy_broadcast as _destroy_broadcast
+from spark_vi.mllib._common import (
+    _PersistenceParams, _ResultStagePersistence, apply_persistence_params,
+)
 
 
 # Vocabulary size at/above which spectral_method="auto" routes from the dense
@@ -1312,433 +1317,788 @@ def smooth_scale_log_quadratic(lls: dict, *, window_radius: int = 2) -> dict:
     }
 
 
-class StreamingSTM:
-    """Streaming-VI estimator for OnlineSTM with DataFrame input.
+def _topic_blocks_converter(value):
+    """``topicBlocks`` is held as canonical JSON (a TopicBlockPartition's
+    ``to_dict``), so it round-trips through MLlib's Params metadata; a
+    TopicBlockPartition, a dict or a JSON string are accepted."""
+    from spark_vi.models.topic.partition import TopicBlockPartition
+    if value is None:
+        return None
+    if isinstance(value, TopicBlockPartition):
+        d = value.to_dict()
+    elif isinstance(value, dict):
+        d = TopicBlockPartition.from_dict(value).to_dict()
+    elif isinstance(value, str):
+        d = TopicBlockPartition.from_dict(json.loads(value)).to_dict()
+    else:
+        raise TypeError(f"topicBlocks takes a TopicBlockPartition, a dict or a JSON "
+                        f"string, not {type(value).__name__}")
+    return json.dumps(d, sort_keys=True)
 
-    Constructor enforces that the caller supplies enough information
-    to determine P (covariate dimension) — either via covariate_names
-    (Path A) or covariate_formula (Path B).
-    """
 
+def _spectral_method_converter(value):
+    value = TypeConverters.toString(value)
+    if value not in {"auto", "dense", "scalable"}:
+        raise ValueError(
+            f"spectralMethod must be 'auto', 'dense', or 'scalable', got {value!r}")
+    return value
+
+
+# Param defaults, shared by the Estimator, the Model and their __init__ signatures.
+# The SVI schedule defaults (learningOffset 64, learningDecay 0.7, subsamplingRate
+# 0.2, maxIter 20) are the STM fit's own, not MLlib LDA's.
+_STM_DEFAULTS = dict(
+    k=10, maxIter=20, featuresCol="features",
+    topicDistributionCol="topicDistribution",
+    covariatesCol="covariates", covariateFormula="", maxLevels=10_000,
+    learningOffset=64.0, learningDecay=0.7, subsamplingRate=0.2,
+    sigmaInit=1.0, sigmaRidge=1e-6, minPairSupport=1,
+    lbfgsMaxIter=50, lbfgsTol=1e-4,
+    referenceTopic=True, estimateSigmaDiagonal=False, estimateGlobalScale=False,
+    globalScaleStepCap=1.2, sigmaDiagonalPin=1.0,
+    spectralInit=True, spectralMethod="auto", spectralMinDocFreq=5,
+    docGroupCol="",
+)
+
+
+class _OnlineSTMParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams):
+    """Shared Param surface for OnlineSTMEstimator and OnlineSTMModel (the
+    MLlib ``_LDAParams`` pattern, as the LDA / HDP / DAG-gated shims).
+
+    Covariates come from columns of the input DataFrame, one of two ways:
+
+    - a pre-built covariate vector column (``covariatesCol``, a DenseVector per
+      row) with its term names (``covariateNames``, length P);
+    - an R-style formula over the DataFrame's columns (``covariateFormula``, the
+      optional ``formula`` extra), whose categorical levels are discovered with
+      Spark (ADR 0024) and whose design matrix is built per partition.
+
+    Persistence Params (saveInterval, saveDir, resumeFrom) come from
+    ``_PersistenceParams``."""
+
+    k = Param(Params._dummy(), "k",
+              "number of topics (with topicBlocks: background_k plus the foreground "
+              "block sizes); must be >= 1 (>= 2 with referenceTopic)",
+              typeConverter=TypeConverters.toInt)
+    topicDistributionCol = Param(
+        Params._dummy(), "topicDistributionCol",
+        "output column of transform: each document's topic proportions theta, the "
+        "mode of its gated logistic-normal posterior (softmax of the MAP eta over "
+        "the document's allowed topics; exactly 0 on topics its gate excludes)",
+        typeConverter=TypeConverters.toString)
+    covariatesCol = Param(
+        Params._dummy(), "covariatesCol",
+        "pre-built covariate vector column (a DenseVector of length P per row); "
+        "used with covariateNames, ignored when covariateFormula is set",
+        typeConverter=TypeConverters.toString)
+    covariateNames = Param(
+        Params._dummy(), "covariateNames",
+        "the P covariate term names, in the order of covariatesCol's entries; on a "
+        "fitted model from a formula, the formula's design-column names",
+        typeConverter=TypeConverters.toListString)
+    covariateFormula = Param(
+        Params._dummy(), "covariateFormula",
+        "R-style prevalence formula over the DataFrame's columns (e.g. "
+        "'~ C(sex) + age'); empty (default) = use covariatesCol + covariateNames. "
+        "Needs the 'formula' extra; stateful transforms (splines, scale) are "
+        "rejected (ADR 0022). Rows with a null in any formula column are dropped "
+        "at fit and get a null topicDistribution at transform",
+        typeConverter=TypeConverters.toString)
+    categoricalCols = Param(
+        Params._dummy(), "categoricalCols",
+        "formula columns to treat as categorical; unset (default) = the first "
+        "argument of every C(...) plus every string or boolean column (ADR 0024)",
+        typeConverter=TypeConverters.toListString)
+    maxLevels = Param(
+        Params._dummy(), "maxLevels",
+        "largest number of distinct levels a categorical formula column may have "
+        "(fit fails above it; bin the column instead)",
+        typeConverter=TypeConverters.toInt)
+    learningOffset = Param(
+        Params._dummy(), "learningOffset",
+        "tau0 in the Robbins-Monro step rho_t = (tau0 + t)^-kappa",
+        typeConverter=TypeConverters.toFloat)
+    learningDecay = Param(
+        Params._dummy(), "learningDecay",
+        "kappa in the Robbins-Monro step rho_t = (tau0 + t)^-kappa",
+        typeConverter=TypeConverters.toFloat)
+    subsamplingRate = Param(
+        Params._dummy(), "subsamplingRate",
+        "fraction of the corpus sampled per mini-batch (>= 1.0 = full batch)",
+        typeConverter=TypeConverters.toFloat)
+    sigmaInit = Param(
+        Params._dummy(), "sigmaInit",
+        "initial diagonal of the topic covariance Sigma",
+        typeConverter=TypeConverters.toFloat)
+    sigmaRidge = Param(
+        Params._dummy(), "sigmaRidge",
+        "ridge added to Sigma's diagonal in the M-step, for a well-conditioned inverse",
+        typeConverter=TypeConverters.toFloat)
+    minPairSupport = Param(
+        Params._dummy(), "minPairSupport",
+        "documents that must share a topic pair before Sigma's off-diagonal entry "
+        "for the pair is estimated (below it the entry stays 0)",
+        typeConverter=TypeConverters.toInt)
+    lbfgsMaxIter = Param(
+        Params._dummy(), "lbfgsMaxIter",
+        "max L-BFGS iterations of the per-document Laplace E-step (fit and transform)",
+        typeConverter=TypeConverters.toInt)
+    lbfgsTol = Param(
+        Params._dummy(), "lbfgsTol",
+        "L-BFGS tolerance of the per-document Laplace E-step",
+        typeConverter=TypeConverters.toFloat)
+    referenceTopic = Param(
+        Params._dummy(), "referenceTopic",
+        "pin topic 0's eta at 0 (removes softmax's translation degeneracy; ADR 0031)",
+        typeConverter=TypeConverters.toBoolean)
+    estimateSigmaDiagonal = Param(
+        Params._dummy(), "estimateSigmaDiagonal",
+        "estimate Sigma's diagonal instead of pinning it (ADR 0034)",
+        typeConverter=TypeConverters.toBoolean)
+    estimateGlobalScale = Param(
+        Params._dummy(), "estimateGlobalScale",
+        "estimate one global scale c of Sigma = c * R (ADR 0036)",
+        typeConverter=TypeConverters.toBoolean)
+    globalScaleStepCap = Param(
+        Params._dummy(), "globalScaleStepCap",
+        "largest multiplicative change of the global scale per iteration",
+        typeConverter=TypeConverters.toFloat)
+    sigmaDiagonalPin = Param(
+        Params._dummy(), "sigmaDiagonalPin",
+        "constant generative scale c the diagonal is pinned to (Sigma = c * R); 1.0 = "
+        "the unit-diagonal pin. Exclusive with the two estimate* Params",
+        typeConverter=TypeConverters.toFloat)
+    spectralInit = Param(
+        Params._dummy(), "spectralInit",
+        "seed beta with the anchor-word spectral initialization (skipped on resume)",
+        typeConverter=TypeConverters.toBoolean)
+    spectralMethod = Param(
+        Params._dummy(), "spectralMethod",
+        "'auto' (dense below a vocabulary of 10,000 terms, scalable at or above it), "
+        "'dense' (exact V x V co-occurrence on the driver) or 'scalable' (random "
+        "projection; ADR 0037)",
+        typeConverter=_spectral_method_converter)
+    spectralD = Param(
+        Params._dummy(), "spectralD",
+        "projection dimension of the scalable spectral init; unset = about 1,000",
+        typeConverter=TypeConverters.toInt)
+    spectralMinDocFreq = Param(
+        Params._dummy(), "spectralMinDocFreq",
+        "document-frequency floor for anchor-word candidates (scalable init)",
+        typeConverter=TypeConverters.toInt)
+    topicBlocks = Param(
+        Params._dummy(), "topicBlocks",
+        "gated topic layout (a TopicBlockPartition, or its to_dict as a dict or JSON "
+        "string): background topics every document may use, plus one foreground "
+        "block per group, open only to documents in that group. Unset (default) = "
+        "no gating. Needs docGroupCol",
+        typeConverter=_topic_blocks_converter)
+    docGroupCol = Param(
+        Params._dummy(), "docGroupCol",
+        "column naming each document's gating group(s) (a value or an array of "
+        "values); required with topicBlocks. The group must not also appear in "
+        "the covariates",
+        typeConverter=TypeConverters.toString)
+
+    def _get_or_none(self, name):
+        p = self.getParam(name)
+        return self.getOrDefault(p) if self.isDefined(p) else None
+
+    def _topic_block_partition(self):
+        """The ``topicBlocks`` Param as a TopicBlockPartition, or None."""
+        from spark_vi.models.topic.partition import TopicBlockPartition
+        tb = self._get_or_none("topicBlocks")
+        return TopicBlockPartition.from_dict(json.loads(tb)) if tb else None
+
+    def _uses_formula(self) -> bool:
+        return bool(self.getOrDefault("covariateFormula"))
+
+    def _check_covariate_config(self) -> None:
+        """Raise on an inconsistent covariate / gating configuration (one of the two
+        covariate sources, a group column exactly when there are topic blocks, the
+        group not among the covariates). Called at construction when Params are given
+        and again at fit."""
+        names = self._get_or_none("covariateNames")
+        if self._uses_formula():
+            if names is not None:
+                raise ValueError("Use either covariateFormula, or covariatesCol + "
+                                 "covariateNames, not both.")
+        elif not names:
+            raise ValueError(
+                "OnlineSTMEstimator needs its covariates: either covariateFormula, "
+                "or covariatesCol + a non-empty covariateNames.")
+        part = self._topic_block_partition()
+        group_col = self.getOrDefault("docGroupCol")
+        if part is not None and not group_col:
+            raise ValueError("topicBlocks requires docGroupCol (the column naming "
+                             "each document's gating group).")
+        if part is None and group_col:
+            raise ValueError("docGroupCol set without topicBlocks.")
+        if part is not None and names is not None and \
+                _formula_mentions(part.group_var, names):
+            raise ValueError(
+                f"group_var {part.group_var!r} must not also appear in the "
+                f"prevalence formula (foreground regression would be rank-deficient); "
+                f"remove it from the covariates.")
+        if part is not None and self._uses_formula() and \
+                re.search(rf"\b{re.escape(part.group_var)}\b",
+                          self.getOrDefault("covariateFormula")):
+            raise ValueError(
+                f"group_var {part.group_var!r} must not also appear in the "
+                f"prevalence formula (foreground regression would be rank-deficient).")
+
+
+def _copy_params(src, dst) -> None:
+    """Copy every set and default Param value of ``src`` onto ``dst`` (both carry
+    ``_OnlineSTMParams``), so a fitted model reports the configuration that made it."""
+    for param in src.params:
+        if src.isSet(param):
+            dst._set(**{param.name: src.getOrDefault(param)})
+        elif src.hasDefault(param):
+            dst._setDefault(**{param.name: src.getOrDefault(param)})
+
+
+def _encode_formula_rows(spec, variables, rows):
+    """Design-matrix rows for a chunk of Rows: ``(X, ok)`` where ``ok[i]`` says row
+    i had every formula variable non-null and ``X`` holds the encoded rows of the
+    ok ones, in order. Nulls are screened here, not left to formulaic's NA-drop,
+    which would silently misalign the matrix with the rows."""
+    import pandas as pd
+    from spark_vi.mllib.topic._formula import apply_model_spec
+    ok = [all(r[v] is not None for v in variables) for r in rows]
+    kept = [r for r, good in zip(rows, ok) if good]
+    if not kept:
+        return np.zeros((0, 0)), ok
+    pdf = pd.DataFrame({v: [r[v] for r in kept] for v in variables})
+    return apply_model_spec(spec, pdf), ok
+
+
+# Rows per formulaic materialization on an executor: bounds a partition's pandas
+# frame while amortizing formulaic's per-call overhead (a few ms).
+_ENCODE_CHUNK = 2048
+
+
+def _chunks(it, n):
+    buf = []
+    for row in it:
+        buf.append(row)
+        if len(buf) >= n:
+            yield buf
+            buf = []
+    if buf:
+        yield buf
+
+
+def _groups_of(val):
+    """A row's gating group value as the frozenset an STMDocument holds (the same
+    rule as ``_vector_to_stm_document``)."""
+    if val is None:
+        return frozenset()
+    return (frozenset(str(v) for v in val) if isinstance(val, (list, tuple))
+            else frozenset({str(val)}))
+
+
+class OnlineSTMEstimator(_OnlineSTMParams, Estimator):
+    """MLlib Estimator for the structural topic model (OnlineSTM: prevalence
+    covariates through a logistic-normal prior, optional topic gating), fitted by
+    streaming variational inference on Spark.
+
+    The input DataFrame holds a bag-of-words vector column (``featuresCol``) and the
+    covariates (see ``_OnlineSTMParams``); with ``topicBlocks``, also a gating group
+    column (``docGroupCol``). ``fit`` returns an ``OnlineSTMModel``. The Estimator
+    itself is not persisted (as the LDA / HDP Estimators; ADR 0055)."""
+
+    @keyword_only
     def __init__(
         self,
-        K: int,
-        features_col: str = "features",
-        covariates_col: str | None = None,
-        covariate_names: list[str] | None = None,
-        covariate_formula: str | None = None,
-        covariate_df: Any | None = None,
-        join_key: str | None = None,
-        max_levels: int = 10_000,
-        sigma_init: float = 1.0,
-        sigma_ridge: float = 1e-6,
-        min_pair_support: int = 1,
-        lbfgs_max_iter: int = 50,
-        lbfgs_tol: float = 1e-4,
-        random_seed: int | None = None,
-        reference_topic: bool = True,
-        estimate_sigma_diagonal: bool = False,
-        estimate_global_scale: bool = False,
-        global_scale_step_cap: float = 1.2,
-        sigma_diagonal_pin: float = 1.0,
-        spectral_init: bool = True,
-        spectral_method: str = "auto",           # "auto" | "dense" | "scalable"
-        spectral_d: int | None = None,           # scalable projection dim; None => ~1000
-        spectral_min_doc_freq: int = 5,          # scalable absolute doc-frequency floor
-        topic_blocks=None,
-        doc_group_col: str | None = None,
-    ) -> None:
-        # Path A vs B validation.
-        path_a = covariates_col is not None and covariate_names is not None
-        path_b = covariate_formula is not None
-        if not (path_a or path_b):
-            raise ValueError(
-                "StreamingSTM requires either (covariates_col + covariate_names) "
-                "for Path A, or covariate_formula for Path B."
-            )
-        if path_a and path_b:
-            raise ValueError("Use either Path A or Path B, not both.")
-
-        self.K = int(K)
-        self.features_col = features_col
-
-        if path_a:
-            if not covariate_names:
-                raise ValueError("covariate_names must be non-empty for Path A.")
-            self.covariates_col = covariates_col
-            self.covariate_names = list(covariate_names)
-            self.P = len(self.covariate_names)
-            self.covariate_formula = None
-        else:
-            # Path B: uses formulaic ModelSpec for covariate resolution.
-            self.covariates_col = "covariates"
-            self.covariate_formula = covariate_formula
-            self.covariate_df = covariate_df
-            self.join_key = join_key
-            self.max_levels = max_levels
-            self.covariate_names = None       # set during fit
-            self.P = None                     # set during fit
-
-        self.sigma_init = sigma_init
-        self.sigma_ridge = sigma_ridge
-        self.min_pair_support = int(min_pair_support)
-        self.lbfgs_max_iter = lbfgs_max_iter
-        self.lbfgs_tol = lbfgs_tol
-        self.random_seed = random_seed
-        self.reference_topic = bool(reference_topic)
-        self.estimate_sigma_diagonal = bool(estimate_sigma_diagonal)
-        self.estimate_global_scale = bool(estimate_global_scale)
-        self.global_scale_step_cap = float(global_scale_step_cap)
-        # Pin Sigma_ii to a constant generative scale c (Sigma = c*R); default 1.0
-        # is the standard unit-diagonal pin. Validated (mutual exclusion with the
-        # estimate_* flags, c > 0) by OnlineSTM at fit() time. See OnlineSTM for
-        # the full ADR 0034 / ADR 0036 rationale.
-        self.sigma_diagonal_pin = float(sigma_diagonal_pin)
-        self.spectral_init = bool(spectral_init)
-        if spectral_method not in {"auto", "dense", "scalable"}:
-            raise ValueError(
-                "spectral_method must be 'auto', 'dense', or 'scalable', got "
-                f"{spectral_method!r}")
-        self.spectral_method = spectral_method
-        self.spectral_d = spectral_d
-        self.spectral_min_doc_freq = int(spectral_min_doc_freq)
-
-        self.topic_blocks = topic_blocks
-        self.doc_group_col = doc_group_col
-        if topic_blocks is not None:
-            if doc_group_col is None:
-                raise ValueError(
-                    "topic_blocks requires doc_group_col (the column naming each "
-                    "document's gating group).")
-            if self.covariate_names is not None and \
-                    _formula_mentions(topic_blocks.group_var, self.covariate_names):
-                raise ValueError(
-                    f"group_var {topic_blocks.group_var!r} must not also appear in "
-                    f"the prevalence formula (foreground regression would be "
-                    f"rank-deficient); remove it from the formula terms.")
-        elif doc_group_col is not None:
-            raise ValueError("doc_group_col set without topic_blocks.")
-
-    def fit(
-        self,
-        dataset,
         *,
-        max_iter: int = 20,
-        subsampling_rate: float = 0.2,
-        tau0: float = 64.0,
-        kappa: float = 0.7,
-        save_interval: int | None = None,
-        checkpoint_dir: str | None = None,
-        on_iteration=None,
-        resume_from: str | None = None,
-    ) -> "STMModel":
-        """Fit OnlineSTM via VIRunner on a DataFrame with features + covariates columns.
+        k: int = 10,
+        maxIter: int = 20,
+        seed: int | None = None,
+        featuresCol: str = "features",
+        topicDistributionCol: str = "topicDistribution",
+        covariatesCol: str = "covariates",
+        covariateNames: list[str] | None = None,
+        covariateFormula: str = "",
+        categoricalCols: list[str] | None = None,
+        maxLevels: int = 10_000,
+        learningOffset: float = 64.0,
+        learningDecay: float = 0.7,
+        subsamplingRate: float = 0.2,
+        sigmaInit: float = 1.0,
+        sigmaRidge: float = 1e-6,
+        minPairSupport: int = 1,
+        lbfgsMaxIter: int = 50,
+        lbfgsTol: float = 1e-4,
+        referenceTopic: bool = True,
+        estimateSigmaDiagonal: bool = False,
+        estimateGlobalScale: bool = False,
+        globalScaleStepCap: float = 1.2,
+        sigmaDiagonalPin: float = 1.0,
+        spectralInit: bool = True,
+        spectralMethod: str = "auto",
+        spectralD: int | None = None,
+        spectralMinDocFreq: int = 5,
+        topicBlocks=None,
+        docGroupCol: str = "",
+        # _PersistenceParams kwargs: they MUST appear here for kwarg construction
+        # (see that mixin's docstring).
+        saveInterval: int = -1,
+        saveDir: str = "",
+        resumeFrom: str = "",
+    ) -> None:
+        super().__init__()
+        self._setDefault(**_STM_DEFAULTS)
+        self._set_persistence_defaults()
+        # Diagnostic-only iteration callback (not a Param: callables are not
+        # MLlib-serializable).
+        self._on_iteration = None
+        kwargs = {k: v for k, v in self._input_kwargs.items() if v is not None}
+        self.setParams(**kwargs)
+        # Fail early on an inconsistent covariate / gating configuration given at
+        # construction; a bare Estimator configured later is checked at fit.
+        if any(n in kwargs for n in ("covariateNames", "covariateFormula",
+                                     "topicBlocks", "docGroupCol")):
+            self._check_covariate_config()
 
-        The input DataFrame must have the configured `features_col` (SparseVector)
-        and `covariates_col` (DenseVector). Vocab size is discovered from the
-        first features row.
+    @keyword_only
+    def setParams(self, **kwargs) -> "OnlineSTMEstimator":
+        """Standard MLlib pattern: set any subset of Params after construction."""
+        return self._set(**{k: v for k, v in kwargs.items() if v is not None})
 
-        Parameters:
-            dataset: Spark DataFrame with `features_col` and `covariates_col`.
-            max_iter: maximum number of SVI iterations.
-            subsampling_rate: fraction of documents per mini-batch (maps to
-                VIConfig.mini_batch_fraction).
-            tau0: Robbins-Monro delay parameter (maps to
-                VIConfig.learning_rate_tau0).
-            kappa: Robbins-Monro decay exponent (maps to
-                VIConfig.learning_rate_kappa).
-            save_interval: if set, checkpoint every N iterations
-                (requires checkpoint_dir).
-            checkpoint_dir: directory for periodic checkpoints.
-            on_iteration: optional per-iteration callback
-                fn(iter_num, global_params, elbo_trace).
-            resume_from: optional path to a previously-saved STMModel dir. When
-                set, VIRunner loads its global_params + n_iterations and
-                continues the Robbins-Monro schedule from there; max_iter is
-                then ADDITIONAL iterations on top of the loaded count. The
-                resumed corpus/covariate shapes (V, P) must match the loaded
-                params, so resume only with the same corpus + formula.
-        """
+    def setOnIteration(self, fn) -> "OnlineSTMEstimator":
+        """Register a per-iteration diagnostic callback for the next fit:
+        ``fn(iter_num, global_params, elbo_trace)``, on the driver, in the fit's hot
+        path; it must not mutate global_params. Not persisted."""
+        self._on_iteration = fn
+        return self
+
+    def _resolve_formula(self, dataset):
+        """Discover the formula's categorical levels with Spark and fit its ModelSpec
+        on the schema-frame (ADR 0024). Returns ``(spec, names, variables, state)``,
+        ``state`` the JSON-able spec that the fitted model persists (ADR 0056)."""
+        from spark_vi.mllib.topic._formula import (
+            build_schema_frame, covariate_spec_state, fit_model_spec_on_schema_frame,
+            formula_variables, split_formula_variables, validate_formula,
+        )
+        formula = self.getOrDefault("covariateFormula")
+        validate_formula(formula)
+        types = {f.name: f.dataType.simpleString() for f in dataset.schema.fields}
+        categorical, continuous = split_formula_variables(formula, types)
+        explicit = self._get_or_none("categoricalCols")
+        if explicit is not None:
+            variables = formula_variables(formula)
+            unknown = [c for c in explicit if c not in variables]
+            if unknown:
+                raise ValueError(f"categoricalCols {unknown} are not formula columns "
+                                 f"({variables}).")
+            categorical = list(explicit)
+            continuous = [v for v in variables if v not in categorical]
+        variables = sorted(categorical + continuous)
+        non_null = dataset.dropna(subset=variables) if variables else dataset
+        schema_pdf = build_schema_frame(non_null, categorical, continuous,
+                                        int(self.getOrDefault("maxLevels")))
+        spec, names = fit_model_spec_on_schema_frame(formula, schema_pdf, categorical)
+        state = covariate_spec_state(formula, schema_pdf, names, categorical)
+        return spec, list(names), variables, state
+
+    def _fit(self, dataset) -> "OnlineSTMModel":
         from pyspark import StorageLevel
 
         from spark_vi.core.config import VIConfig
         from spark_vi.core.runner import VIRunner
-        from spark_vi.mllib.topic._common import _vector_to_stm_document
+        from spark_vi.mllib.topic._common import (
+            _vector_to_bow_document, _vector_to_stm_document,
+        )
         from spark_vi.models.topic.stm import OnlineSTM
+        from spark_vi.models.topic.types import STMDocument
 
-        if self.covariate_names is None:
-            raise ValueError(
-                "StreamingSTM.fit requires covariate_names to be set. For Path A "
-                "supply covariate_names at construction; for Path B call "
-                "_resolve_model_spec_from_pandas first."
-            )
+        self._check_covariate_config()
+        g = self.getOrDefault
+        features_col = g("featuresCol")
+        partition = self._topic_block_partition()
+        group_col = g("docGroupCol") or None
+        seed = g("seed") if self.isSet("seed") else None
 
-        # Path B re-guard: covariate_names not known at construction time,
-        # so re-run the formula check now that they are resolved.
-        if self.topic_blocks is not None and \
-                _formula_mentions(self.topic_blocks.group_var, self.covariate_names):
-            raise ValueError(
-                f"group_var {self.topic_blocks.group_var!r} must not also appear "
-                f"in the prevalence formula.")
-
-        first = dataset.select(self.features_col).head(1)
+        first = dataset.select(features_col).head(1)
         if not first:
             raise ValueError("Cannot fit on an empty DataFrame.")
         vocab_size = first[0][0].size
 
+        spec_state = None
+        if self._uses_formula():
+            spec, names, variables, spec_state = self._resolve_formula(dataset)
+            if partition is not None and \
+                    _formula_mentions(partition.group_var, names):
+                raise ValueError(
+                    f"group_var {partition.group_var!r} must not also appear in "
+                    f"the prevalence formula.")
+        else:
+            names = list(g("covariateNames"))
+
         model = OnlineSTM(
-            K=self.K,
-            vocab_size=vocab_size,
-            P=self.P,
-            sigma_init=self.sigma_init,
-            sigma_ridge=self.sigma_ridge,
-            min_pair_support=self.min_pair_support,
-            lbfgs_max_iter=self.lbfgs_max_iter,
-            lbfgs_tol=self.lbfgs_tol,
-            random_seed=self.random_seed,
-            topic_blocks=self.topic_blocks,
-            reference_topic=self.reference_topic,
-            estimate_sigma_diagonal=self.estimate_sigma_diagonal,
-            estimate_global_scale=self.estimate_global_scale,
-            global_scale_step_cap=self.global_scale_step_cap,
-            sigma_diagonal_pin=self.sigma_diagonal_pin,
+            K=int(g("k")), vocab_size=vocab_size, P=len(names),
+            sigma_init=g("sigmaInit"), sigma_ridge=g("sigmaRidge"),
+            min_pair_support=int(g("minPairSupport")),
+            lbfgs_max_iter=g("lbfgsMaxIter"), lbfgs_tol=g("lbfgsTol"),
+            random_seed=seed, topic_blocks=partition,
+            reference_topic=bool(g("referenceTopic")),
+            estimate_sigma_diagonal=bool(g("estimateSigmaDiagonal")),
+            estimate_global_scale=bool(g("estimateGlobalScale")),
+            global_scale_step_cap=float(g("globalScaleStepCap")),
+            sigma_diagonal_pin=float(g("sigmaDiagonalPin")),
         )
-
-        # VIConfig uses learning_rate_tau0/kappa and mini_batch_fraction;
-        # checkpoint_interval + checkpoint_dir must be both set or both None.
-        checkpoint_kwargs: dict = {}
-        if save_interval is not None and checkpoint_dir is not None:
-            checkpoint_kwargs = {
-                "checkpoint_interval": save_interval,
-                "checkpoint_dir": checkpoint_dir,
-            }
-
+        rate = float(g("subsamplingRate"))
         config = VIConfig(
-            max_iterations=max_iter,
-            learning_rate_tau0=tau0,
-            learning_rate_kappa=kappa,
-            mini_batch_fraction=subsampling_rate if subsampling_rate < 1.0 else None,
-            **checkpoint_kwargs,
+            max_iterations=int(g("maxIter")),
+            learning_rate_tau0=float(g("learningOffset")),
+            learning_rate_kappa=float(g("learningDecay")),
+            mini_batch_fraction=rate if rate < 1.0 else None,
         )
+        config, resume_path = apply_persistence_params(self, config)
 
-        features_col = self.features_col
-        covariates_col = self.covariates_col
-        group_col = self.doc_group_col
-        select_cols = [features_col, covariates_col]
-        if group_col is not None:
-            select_cols.append(group_col)
-        rdd = (
-            dataset.select(*select_cols).rdd
-            .map(lambda row: _vector_to_stm_document(
-                {c: row[i] for i, c in enumerate(select_cols)},
-                features_col=features_col,
-                covariates_col=covariates_col,
-                group_col=group_col,
-            ))
-        )
+        if spec_state is None:
+            cov_col = g("covariatesCol")
+            select_cols = [features_col, cov_col] + ([group_col] if group_col else [])
+            rdd = dataset.select(*select_cols).rdd.map(
+                lambda row: _vector_to_stm_document(
+                    {c: row[i] for i, c in enumerate(select_cols)},
+                    features_col=features_col, covariates_col=cov_col,
+                    group_col=group_col))
+        else:
+            # Formula path: encode each partition's covariates with the broadcast
+            # spec (small; formulaic materializes a chunk at a time), dropping rows
+            # with a null formula column (logged below).
+            n_in = dataset.count()
+            select_cols = [features_col] + variables + ([group_col] if group_col
+                                                        else [])
+            spec_bcast = dataset.sparkSession.sparkContext.broadcast(spec)
+
+            def _docs(rows, _spec=spec_bcast, _vars=tuple(variables)):
+                for chunk in _chunks(rows, _ENCODE_CHUNK):
+                    X, ok = _encode_formula_rows(_spec.value, _vars, chunk)
+                    j = 0
+                    for row, good in zip(chunk, ok):
+                        if not good:
+                            continue
+                        bow = _vector_to_bow_document(row[features_col])
+                        yield STMDocument(
+                            indices=bow.indices, counts=bow.counts, length=bow.length,
+                            x=np.asarray(X[j], dtype=np.float64),
+                            groups=(_groups_of(row[group_col]) if group_col
+                                    else frozenset()))
+                        j += 1
+
+            rdd = dataset.select(*select_cols).rdd.mapPartitions(_docs)
         rdd = rdd.persist(StorageLevel.MEMORY_AND_DISK)
-        rdd.count()
+        n_docs = rdd.count()
+        if spec_state is not None and n_docs < n_in:
+            log.warning("OnlineSTMEstimator: dropped %d of %d rows with a null "
+                        "covariate-formula column.", n_in - n_docs, n_in)
 
-        # Optional spectral (anchor-word) β seed.
-        # spectral_method selects dense (exact V×V on the driver, the validated
-        # default) vs scalable (random-projection sketch for large vocabularies).
-        # Dense path: collect the (already-materialized) docs to the driver and
-        # run the anchor-word init, handing the engine a deterministic, data-
-        # driven β via data_summary={"spectral_beta": KxV}. `initialize_global`
-        # seeds λ = β·gamma_shape from it instead of random gamma, curing the
-        # sigma_init-dependent collapse/blow-up. Skipped when resuming, where the
-        # runner restores λ from the checkpoint and never calls initialize_global.
-        # Fine at V≈3,700 over ~11k docs (~18s/109MB); the large-V
-        # scalable rewrite (distributed co-occurrence + random projection) is a
-        # separate arc (ADR 0032).
-        # Resolve spectral_method="auto" to dense/scalable by vocab size (ADR 0037);
-        # explicit dense/scalable pass through. Resolved unconditionally so metadata
-        # records what would run even when spectral_init is off.
-        resolved_spectral_method = resolve_spectral_method(
-            self.spectral_method, vocab_size)
-        if self.spectral_method == "auto" and resolved_spectral_method == "scalable":
+        # Optional spectral (anchor-word) beta seed. spectralMethod selects dense
+        # (exact V x V on the driver, the validated default) vs scalable (random-
+        # projection sketch for large vocabularies). The seed reaches the engine as
+        # data_summary={"spectral_beta": KxV}: initialize_global seeds lambda from it
+        # instead of random gamma, curing the sigmaInit-dependent collapse /
+        # blow-up. Skipped when resuming (the runner restores lambda and never calls
+        # initialize_global). "auto" resolves by vocabulary size (ADR 0037),
+        # unconditionally, so the metadata records what would run even when
+        # spectralInit is off.
+        requested_method = g("spectralMethod")
+        resolved_spectral_method = resolve_spectral_method(requested_method, vocab_size)
+        if requested_method == "auto" and resolved_spectral_method == "scalable":
             log.warning(
-                "spectral_method='auto': vocab_size %d >= %d threshold; routing to "
+                "spectralMethod='auto': vocab_size %d >= %d threshold; routing to "
                 "the scalable random-projection init (dense V×V co-occurrence would "
-                "be ~%.1f GB on the driver). Pass spectral_method='dense' to force "
+                "be ~%.1f GB on the driver). Set spectralMethod='dense' to force "
                 "the exact path.",
                 vocab_size, SPECTRAL_AUTO_VOCAB_THRESHOLD,
                 8.0 * vocab_size * vocab_size / 1e9)
 
         data_summary = None
-        if self.spectral_init and resume_from is None:
-            partition = model._effective_partition()
+        if g("spectralInit") and resume_path is None:
+            eff_partition = model._effective_partition()
             if resolved_spectral_method == "scalable":
                 from spark_vi.models.topic.spectral_init_scalable import (
                     scalable_spectral_init_beta,
                 )
                 beta0 = scalable_spectral_init_beta(
-                    rdd, partition, vocab_size,
-                    d=self.spectral_d,
-                    seed=self.random_seed or 0,
-                    min_doc_freq=self.spectral_min_doc_freq,
+                    rdd, eff_partition, vocab_size,
+                    d=self._get_or_none("spectralD"),
+                    seed=seed or 0,
+                    min_doc_freq=int(g("spectralMinDocFreq")),
                 )
-            else:  # "dense" — current exact path, the default
+            else:
                 from spark_vi.models.topic.spectral_init import spectral_init_beta
-                docs = rdd.collect()
-                beta0 = spectral_init_beta(docs, partition, vocab_size)
+                beta0 = spectral_init_beta(rdd.collect(), eff_partition, vocab_size)
             data_summary = {"spectral_beta": beta0}
 
         runner = VIRunner(model, config=config)
         try:
             result = runner.fit(
                 rdd, data_summary=data_summary,
-                on_iteration=on_iteration, resume_from=resume_from,
+                on_iteration=self._on_iteration, resume_from=resume_path,
             )
         finally:
             rdd.unpersist(blocking=False)
+            # The formula spec's broadcast outlives the fit, not the first count:
+            # a persisted partition that is evicted (or lost with an executor) is
+            # recomputed from the lineage, which encodes with the spec again.
+            if spec_state is not None:
+                _destroy_broadcast(spec_bcast)
 
         metadata = dict(result.metadata)
-        if self.topic_blocks is not None:
-            metadata.setdefault("topic_block_spec", self.topic_blocks.to_dict())
-        # Provenance: record the opt-in hardening knobs that produced this fit.
-        # Not load-bearing for the current export path (the dashboard prevalence
-        # helpers use softmax(Gamma^T x), already correct under a reference fit
-        # because Gamma[:, 0] = 0); persisted so a reloaded model's provenance is
-        # complete and a future inference path can re-pin.
+        if partition is not None:
+            metadata.setdefault("topic_block_spec", partition.to_dict())
+        # Provenance: the hardening knobs that produced this fit (ADR 0031, 0034,
+        # 0036, 0037); spectral_method is what ran, spectral_method_requested what
+        # was asked for.
         metadata.setdefault("stm_hardening", {
-            "reference_topic": self.reference_topic,
-            "min_pair_support": self.min_pair_support,
-            "spectral_init": self.spectral_init,
-            # Resolved method = what actually ran (auto -> dense/scalable);
-            # requested = what the caller asked for (ADR 0037).
+            "reference_topic": bool(g("referenceTopic")),
+            "min_pair_support": int(g("minPairSupport")),
+            "spectral_init": bool(g("spectralInit")),
             "spectral_method": resolved_spectral_method,
-            "spectral_method_requested": self.spectral_method,
-            "estimate_sigma_diagonal": self.estimate_sigma_diagonal,
-            "estimate_global_scale": self.estimate_global_scale,
-            "global_scale_step_cap": self.global_scale_step_cap,
-            "sigma_diagonal_pin": self.sigma_diagonal_pin,
+            "spectral_method_requested": requested_method,
+            "estimate_sigma_diagonal": bool(g("estimateSigmaDiagonal")),
+            "estimate_global_scale": bool(g("estimateGlobalScale")),
+            "global_scale_step_cap": float(g("globalScaleStepCap")),
+            "sigma_diagonal_pin": float(g("sigmaDiagonalPin")),
         })
-        return STMModel(
-            global_params=result.global_params,
-            metadata=metadata,
-            model_spec=getattr(self, "model_spec", None),
-            covariate_names=list(self.covariate_names),
-            n_iterations=result.n_iterations,
-            elbo_trace=list(result.elbo_trace),
-            converged=result.converged,
-            diagnostic_traces=dict(result.diagnostic_traces),
-            topic_blocks=self.topic_blocks,
-        )
+        metadata["covariate_names"] = list(names)
+        result = dataclasses.replace(result, metadata=metadata)
 
-    def _resolve_model_spec_from_pandas(self, covariate_pdf):
-        """Resolve P and covariate_names from a pre-collected pandas covariate DataFrame.
-
-        Used by tests and by the in-memory Path-B construction. Production
-        .fit() invocations against Spark DataFrames will use the
-        schema-frame Spark discovery path instead (see _formula.fit_model_spec_from_spark and ADR 0024).
-        """
-        from spark_vi.mllib.topic._formula import fit_model_spec
-        spec, names = fit_model_spec(self.covariate_formula, covariate_pdf)
-        self.model_spec = spec
-        self.covariate_names = names
-        self.P = len(names)
+        out = OnlineSTMModel(result, covariate_spec=spec_state)
+        _copy_params(self, out)
+        out._set(covariateNames=list(names))
+        return out
 
 
-class STMModel:
-    """Fitted MLlib-shim STM model. Wraps OnlineSTM's global params + ModelSpec.
+class OnlineSTMModel(_OnlineSTMParams, _ResultStagePersistence, Model):
+    """A fitted structural topic model: the trained VIResult (lambda, Gamma, Sigma,
+    ...) plus every Param of the Estimator that produced it.
 
-    Persistence layout under <model_dir> (VIResult-compatible):
-        manifest.json           # metadata + elbo_trace (written by save_result)
-        params/<name>.npy       # one file per global_param key
-        model_spec.pkl          # formulaic ModelSpec (pickle sidecar)
-        covariate_names.json    # list of covariate name strings (sidecar)
-    """
+    ``transform`` appends each document's topic proportions (``topicDistributionCol``)
+    from its words and covariates, by the same per-document Laplace E-step the fit
+    uses, cold-started, at the fitted Sigma.
 
-    def __init__(
-        self,
-        global_params: dict[str, np.ndarray],
-        metadata: dict[str, Any],
-        model_spec: Any,
-        covariate_names: list[str],
-        n_iterations: int = 0,
-        elbo_trace: list[float] | None = None,
-        converged: bool = False,
-        diagnostic_traces: dict | None = None,
-        topic_blocks=None,
-    ) -> None:
-        self.global_params = global_params
-        self.metadata = metadata
-        self.model_spec = model_spec
-        self.covariate_names = covariate_names
-        # Resume state: n_iterations + elbo_trace are persisted so a later
-        # fit(resume_from=...) continues the Robbins-Monro counter (rho_t
-        # depends on the loaded iteration count) instead of restarting at t=0.
-        self.n_iterations = n_iterations
-        self.elbo_trace = list(elbo_trace) if elbo_trace is not None else []
-        self.converged = converged
-        self.diagnostic_traces = (
-            dict(diagnostic_traces) if diagnostic_traces is not None else {}
-        )
-        self.topic_blocks = topic_blocks
+    Persistence is MLlib's (``save`` / ``write().overwrite().save`` / ``load``, and
+    inside a ``PipelineModel``; ADR 0055, 0056)::
 
-    def save(self, out_dir: Path) -> None:
-        from spark_vi.core.result import VIResult
-        from spark_vi.io.export import save_result
+        <path>/metadata/        Params (MLlib's layout)
+        <path>/result/          the VIResult (spark_vi.io.export format)
+        <path>/covariate_spec.json   formula models only: the formula and its
+                                     schema-frame, from which the ModelSpec is rebuilt
+                                     on load (no pickle)
 
-        out_dir = Path(out_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        # Wrap state as a VIResult so the canonical saver handles the
-        # standard layout (manifest.json, params/*.npy, traces/).
-        # load_result in build_dashboard_cloud.py expects this layout.
-        result = VIResult(
-            global_params=self.global_params,
-            metadata=dict(self.metadata),
-            elbo_trace=list(self.elbo_trace),
-            n_iterations=self.n_iterations,
-            converged=self.converged,
-            # STM's per-iter diagnostics (2-D Gamma + 1-D Sigma + topic-block
-            # labels) now round-trip: save_result persists ndarrays of any rank
-            # as traces/<name>.npy of shape (n_iter, *dims). These are small
-            # aggregate params (P*K + K floats per iter), safe to carry.
-            diagnostic_traces=dict(self.diagnostic_traces),
-        )
-        save_result(result, out_dir)
-        # Derived sidecar: correlation matrix R_ij = Sigma_ij / sqrt(Sigma_ii Sigma_jj).
-        # Written to params/correlation.npy for downstream / dashboard consumers.
-        # NOTE: STMModel.load does NOT restore this file — R is re-derivable from
-        # the round-tripped Sigma via topic_correlation(). This sidecar is for
-        # consumers that want R without re-loading and re-deriving the model.
+    A bare VIResult directory (a ``saveDir`` checkpoint) does not ``load``; wrap it,
+    ``OnlineSTMModel(load_result(dir))`` (Params at their defaults; set
+    ``covariateNames`` before ``transform``)."""
+
+    _expected_model_class = "OnlineSTM"
+    _SPEC_FILE = "covariate_spec.json"
+
+    def __init__(self, result, covariate_spec: dict | None = None) -> None:
+        super().__init__()
+        self._result = result
+        self._covariate_spec = covariate_spec
+        self._model_spec = None
+        self._setDefault(**_STM_DEFAULTS)
+        self._set_persistence_defaults()
+        tb = (result.metadata or {}).get("topic_block_spec")
+        if tb:
+            self._setDefault(topicBlocks=_topic_blocks_converter(tb))
+        names = (result.metadata or {}).get("covariate_names")
+        if names:
+            self._setDefault(covariateNames=list(names))
+        if covariate_spec is not None:
+            self._setDefault(covariateFormula=covariate_spec["formula"])
+
+    @property
+    def result(self):
+        """The trained VIResult (global_params, metadata, elbo_trace, n_iterations, ...)."""
+        return self._result
+
+    @property
+    def covariateSpec(self) -> dict | None:
+        """The formula model's JSON-able covariate spec (formula, schema-frame,
+        design-column names), or None for a model fitted on a covariate column."""
+        return self._covariate_spec
+
+    def _formula_spec(self):
+        if self._model_spec is None and self._covariate_spec is not None:
+            from spark_vi.mllib.topic._formula import model_spec_from_state
+            self._model_spec = model_spec_from_state(self._covariate_spec)
+        return self._model_spec
+
+    def encodeCovariates(self, pdf) -> np.ndarray:
+        """The design matrix (rows, P) of a pandas frame under this model's formula
+        (raises on a categorical level the fit did not see). Formula models only."""
+        spec = self._formula_spec()
+        if spec is None:
+            raise ValueError("This model was fitted on a covariate column, not a "
+                             "formula.")
+        from spark_vi.mllib.topic._formula import apply_model_spec
+        return apply_model_spec(spec, pdf)
+
+    def topicBlockPartition(self):
+        """The gated topic layout as a TopicBlockPartition, or None. (Not named
+        ``topicBlocks``: that is the Param, ADR 0012 on accessor / Param name
+        collisions.)"""
+        return self._topic_block_partition()
+
+    def vocabSize(self) -> int:
+        return int(self._result.global_params["lambda"].shape[1])
+
+    def topicCorrelation(self) -> np.ndarray:
+        """(K, K) topic correlation R = Sigma_ij / sqrt(Sigma_ii Sigma_jj) (Blei &
+        Lafferty 2007); the reference topic's row is the inert identity row."""
         from spark_vi.models.topic._linalg import topic_correlation
-        np.save(
-            out_dir / "params" / "correlation.npy",
-            topic_correlation(self.global_params["Sigma"]),
+        return topic_correlation(self._result.global_params["Sigma"])
+
+    def describeTopics(self, maxTermsPerTopic: int = 10):
+        """DataFrame of (topic, termIndices, termWeights): each topic's top terms by
+        E[beta] (lambda row-normalized), as ``OnlineLDAModel.describeTopics``."""
+        from pyspark.sql import SparkSession
+        from pyspark.sql.types import (
+            ArrayType, DoubleType, IntegerType, StructField, StructType,
         )
-        # Sidecars: formulaic ModelSpec + covariate names list.
-        with (out_dir / "model_spec.pkl").open("wb") as f:
-            pickle.dump(self.model_spec, f)
-        (out_dir / "covariate_names.json").write_text(
-            json.dumps(self.covariate_names)
-        )
+        if maxTermsPerTopic < 1:
+            raise ValueError(f"maxTermsPerTopic must be >= 1, got {maxTermsPerTopic}")
+        lam = self._result.global_params["lambda"]
+        beta = lam / lam.sum(axis=1, keepdims=True)
+        m = min(maxTermsPerTopic, beta.shape[1])
+        rows = []
+        for k in range(beta.shape[0]):
+            order = np.argsort(beta[k])[::-1][:m]
+            rows.append((int(k), [int(i) for i in order],
+                         [float(beta[k, i]) for i in order]))
+        schema = StructType([
+            StructField("topic", IntegerType(), False),
+            StructField("termIndices", ArrayType(IntegerType(), False), False),
+            StructField("termWeights", ArrayType(DoubleType(), False), False),
+        ])
+        return SparkSession.builder.getOrCreate().createDataFrame(rows, schema=schema)
+
+    # --- persistence: the VIResult plus the formula's JSON spec ---------------
+    def _save_data(self, path: str) -> None:
+        from spark_vi.io import fs
+        super()._save_data(path)
+        if self._covariate_spec is not None:
+            fs.write_text(fs.join(path, self._SPEC_FILE),
+                          json.dumps(self._covariate_spec, indent=1))
 
     @classmethod
-    def load(cls, in_dir: Path) -> "STMModel":
-        from spark_vi.io.export import load_result
+    def _load_data(cls, path: str, metadata: dict):
+        from spark_vi.io import fs
+        model = super()._load_data(path, metadata)
+        spec_path = fs.join(path, cls._SPEC_FILE)
+        if fs.exists(spec_path):
+            model._covariate_spec = json.loads(fs.read_text(spec_path))
+        return model
+
+    # --- transform -------------------------------------------------------------
+    def _transform(self, dataset):
+        """Append ``topicDistributionCol``: per document, theta = softmax of the MAP
+        eta over its allowed topics (``_gated_mode_theta``), from the cold-started
+        Laplace E-step at the fitted Gamma and Sigma, with topic 0 pinned when the
+        model was fitted with ``referenceTopic``. A row with a null features vector
+        or a null covariate gets a null; a categorical level the fit never saw
+        fails the job (apply_model_spec), rather than encode silently as the
+        reference level.
+
+        The (K, V) E[log beta] table and the (K, K) Sigma go to the executors as
+        memory-mapped files (``ship_array``: one copy per executor, not one per
+        Python worker); Gamma (P, K) and the scalars are broadcast."""
+        from pyspark.ml.linalg import DenseVector, VectorUDT
+        from pyspark.sql.types import StructField, StructType
+        from scipy.special import digamma
+
+        from spark_vi.core.broadcast import load_shipped, ship_array
+        from spark_vi.mllib.topic._common import _vector_to_bow_document
         from spark_vi.models.topic.partition import TopicBlockPartition
 
-        in_dir = Path(in_dir)
-        result = load_result(in_dir)
-        with (in_dir / "model_spec.pkl").open("rb") as f:
-            spec = pickle.load(f)
-        covariate_names = json.loads(
-            (in_dir / "covariate_names.json").read_text()
-        )
-        spec_dict = result.metadata.get("topic_block_spec")
-        topic_blocks = (
-            TopicBlockPartition.from_dict(spec_dict) if spec_dict else None)
-        return cls(
-            global_params=result.global_params,
-            metadata=dict(result.metadata),
-            model_spec=spec,
-            covariate_names=covariate_names,
-            n_iterations=result.n_iterations,
-            elbo_trace=list(result.elbo_trace),
-            converged=result.converged,
-            diagnostic_traces=dict(result.diagnostic_traces),
-            topic_blocks=topic_blocks,
-        )
+        g = self.getOrDefault
+        gp = self._result.global_params
+        lam = np.asarray(gp["lambda"], dtype=np.float64)
+        K = lam.shape[0]
+        expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+        features_col = g("featuresCol")
+        out_col = g("topicDistributionCol")
+        part = self._topic_block_partition() or TopicBlockPartition(
+            group_var="", background_k=K, foreground=())
+        group_col = g("docGroupCol") or None
+        if self._topic_block_partition() is not None and not group_col:
+            raise ValueError("A gated model's transform needs docGroupCol.")
+        spec = self._formula_spec()
+        if spec is not None:
+            from spark_vi.mllib.topic._formula import formula_variables
+            variables = tuple(formula_variables(self._covariate_spec["formula"]))
+            cov_col = None
+        else:
+            variables = ()
+            cov_col = g("covariatesCol")
+        # The reference pin is a property of the fit: read it from the result's
+        # provenance when present (a wrapped bare VIResult has Params at defaults).
+        hardening = (self._result.metadata or {}).get("stm_hardening") or {}
+        reference_on = bool(hardening.get("reference_topic", g("referenceTopic")))
+
+        sc = dataset.sparkSession.sparkContext
+        eb_token = ship_array(sc, expElogbeta, "stm_expElogbeta")
+        sigma_token = ship_array(sc, np.asarray(gp["Sigma"], dtype=np.float64),
+                                 "stm_Sigma")
+        del expElogbeta
+        bcast = sc.broadcast({
+            "Gamma": np.asarray(gp["Gamma"], dtype=np.float64),
+            "part": part, "K": K, "spec": spec,
+            "reference": 0 if reference_on else None,
+            "lbfgs_max_iter": int(g("lbfgsMaxIter")), "lbfgs_tol": float(g("lbfgsTol")),
+        })
+
+        def _theta_rows(rows, _b=bcast, _eb=eb_token, _sg=sigma_token,
+                        _vars=variables, _cov=cov_col, _grp=group_col,
+                        _fc=features_col):
+            from spark_vi.models.topic._linalg import safe_inverse
+            p = _b.value
+            eb = load_shipped(_eb)
+            Sigma = load_shipped(_sg)
+            cache: dict = {}
+            for chunk in _chunks(rows, _ENCODE_CHUNK):
+                if p["spec"] is not None:
+                    X, ok = _encode_formula_rows(p["spec"], _vars, chunk)
+                    xs, j = [], 0
+                    for good in ok:
+                        xs.append(X[j] if good else None)
+                        j += good
+                else:
+                    xs = [None if r[_cov] is None else r[_cov] for r in chunk]
+                for row, x in zip(chunk, xs):
+                    feats = row[_fc]
+                    if x is None or feats is None:
+                        yield tuple(row) + (None,)
+                        continue
+                    bow = _vector_to_bow_document(feats)
+                    allowed = p["part"].allowed_indices(
+                        _groups_of(row[_grp]) if _grp else frozenset())
+                    key = tuple(allowed.tolist())
+                    prec = cache.get(key)
+                    if prec is None:
+                        prec = safe_inverse(np.asarray(Sigma[np.ix_(allowed, allowed)]))
+                        cache[key] = prec
+                    eta_hat, _, _ = _stm_doc_inference(
+                        indices=bow.indices, counts=bow.counts, expElogbeta=eb,
+                        Gamma=p["Gamma"], Sigma_inv_allowed=prec,
+                        x=np.asarray(x, dtype=np.float64),
+                        max_iter=p["lbfgs_max_iter"], tol=p["lbfgs_tol"],
+                        allowed=allowed, reference=p["reference"],
+                    )
+                    yield tuple(row) + (
+                        DenseVector(_gated_mode_theta(eta_hat, allowed, p["K"])),)
+
+        schema = StructType(list(dataset.schema.fields)
+                            + [StructField(out_col, VectorUDT(), True)])
+        # The broadcast and the shipped files live as long as the returned
+        # DataFrame's lineage (ContextCleaner reclaims the broadcast on GC; do NOT
+        # destroy it here, the DataFrame is lazy).
+        return dataset.sparkSession.createDataFrame(
+            dataset.rdd.mapPartitions(_theta_rows), schema=schema)

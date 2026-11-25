@@ -17,6 +17,8 @@ from spark_vi.mllib.topic import (
     OnlineHDPModel,
     OnlineLDAEstimator,
     OnlineLDAModel,
+    OnlineSTMEstimator,
+    OnlineSTMModel,
 )
 
 __all__ = [
@@ -28,4 +30,6 @@ __all__ = [
     "OnlineHDPModel",
     "OnlineLDAEstimator",
     "OnlineLDAModel",
+    "OnlineSTMEstimator",
+    "OnlineSTMModel",
 ]
